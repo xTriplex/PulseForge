@@ -8,7 +8,6 @@
 #include "Core/Log.h"
 #include "Core/PlatformServices.h"
 #include "Input/GameplayInputStore.h"
-#include "Core/ScopedProfileTimer.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
 #include "Events/KeyEvent.h"
@@ -1953,7 +1952,6 @@ namespace
 			m_LoggedFirstViewportRendered = false;
 			m_LoggedEnvironmentReady = false;
 			m_ViewportRenderView.ClearEnvironmentLightingPending();
-			PulseForge::Detail::ScopedProfileTimer OpenTimer("Editor project open + startup scene load");
 			auto Opened = PulseForgeEditor::PrepareEditorProjectOpen(
 				ProjectFile, PulseForge::Application::Get().GetDiagnosticsRecorder());
 			if (!Opened)

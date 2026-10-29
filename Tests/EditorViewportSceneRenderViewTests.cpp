@@ -5,6 +5,7 @@
 #include "Assets/AssetRegistry.h"
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Assets/MaterialAssetCache.h"
+#include "Core/Log.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorViewportSceneRenderView.h"
 #include "Renderer/AssetCache/TextureAssetCache.h"
@@ -147,6 +148,7 @@ namespace
 	class FakeRenderDevice final : public PulseForge::RenderDevice
 	{
 	public:
+		[[nodiscard]] PulseForge::DiagnosticRecorder* GetDiagnosticRecorder() noexcept override { return Diagnostics; }
 		[[nodiscard]] std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept override { return { 1280, 720 }; }
 		[[nodiscard]] PulseForge::OutputColorEncoding GetOutputColorEncoding() const noexcept override
 		{
@@ -284,6 +286,7 @@ namespace
 		bool FailNextClearEnd = false;
 		bool AllowBufferCreation = false;
 		bool AllowBindingCreation = false;
+		PulseForge::DiagnosticRecorder* Diagnostics = nullptr;
 		size_t TextureCreationFailuresRemaining = 0;
 		size_t RenderTargetCreations = 0;
 		size_t TextureCreations = 0;
@@ -489,11 +492,13 @@ namespace
 		StoreOptions.Enabled = false;
 		DerivedDataArtifactStore Store(StoreOptions);
 		AssetUploadBudget UploadBudget;
+		DiagnosticRecorder Diagnostics;
 		FakeRenderDevice Runtime;
+		Runtime.Diagnostics = &Diagnostics;
 		Runtime.AllowBufferCreation = true;
 		Runtime.AllowBindingCreation = true;
 		TextureAssetCache Textures(Runtime, Root, RegistrySnapshot, Preparation, &UploadBudget, Store, "bindings-1");
-		MaterialAssetCache Materials(Root, Registry);
+		MaterialAssetCache Materials(Root, Registry, Runtime.GetDiagnosticRecorder());
 		const auto WaitUntilCpuReady = [&]()
 		{
 			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -563,6 +568,7 @@ namespace
 		const auto EnvironmentID = UUID::Generate();
 		PF_CHECK(Tests, EnvironmentID.has_value());
 		if (!EnvironmentID) return;
+		Diagnostics.SetCaptureEnabled(true);
 		PF_CHECK(Tests, Bindings.EnsureEnvironmentBindings(*EnvironmentID, *OldEnvironment, true, 1).has_value());
 		const BindingSet* OldEnvironmentBinding = Bindings.FindEnvironmentBindings(*EnvironmentID, true, 1);
 		PF_CHECK(Tests, OldEnvironmentBinding != nullptr);
@@ -603,6 +609,35 @@ namespace
 		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
 		auto SecondBinding = Bindings.ResolveMaterialBinding(SecondInstance, *EnvironmentID, 1);
 		PF_CHECK(Tests, SecondBinding && *SecondBinding == *FirstBinding);
+		const size_t InitialBindingSetCount = Runtime.BindingLifetimes.size();
+		const DiagnosticSnapshot CapturedBindings = Diagnostics.CaptureSnapshot();
+		size_t MaterialCreationScopes = 0;
+		size_t EnvironmentCreationScopes = 0;
+		for (const DiagnosticEvent& Event : CapturedBindings.Events)
+		{
+			if (Event.Owner == "SceneRendererMaterialBindingCache" && Event.Name == "Material binding creation")
+				++MaterialCreationScopes;
+			if (Event.Owner == "SceneRendererMaterialBindingCache" && Event.Name == "Environment binding creation")
+				++EnvironmentCreationScopes;
+		}
+		PF_CHECK(Tests, MaterialCreationScopes == 1 && EnvironmentCreationScopes == 1);
+		Diagnostics.SetCaptureEnabled(false);
+		const size_t EventsBeforeWarmResolution = Diagnostics.CaptureSnapshot().Events.size();
+		const std::vector<LogEntry> LogsBeforeWarmResolution = Log::GetRecentEntries();
+		const uint64_t LogSequenceBeforeWarmResolution = LogsBeforeWarmResolution.empty() ? 0 : LogsBeforeWarmResolution.back().Sequence;
+		for (size_t Instance = 0; Instance < 4; ++Instance)
+		{
+			PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
+			const auto WarmBinding = Bindings.ResolveMaterialBinding(Instance % 2 == 0 ? FirstInstance : SecondInstance,
+				*EnvironmentID, 1);
+			PF_CHECK(Tests, WarmBinding && *WarmBinding == *FirstBinding);
+		}
+		PF_CHECK(Tests, Runtime.BindingLifetimes.size() == InitialBindingSetCount);
+		PF_CHECK(Tests, Diagnostics.CaptureSnapshot().Events.size() == EventsBeforeWarmResolution);
+		bool LoggedWarmFrameProfile = false;
+		for (const LogEntry& Entry : Log::GetRecentEntriesAfter(LogSequenceBeforeWarmResolution))
+			LoggedWarmFrameProfile = LoggedWarmFrameProfile || Entry.Message.starts_with("Profile:");
+		PF_CHECK(Tests, !LoggedWarmFrameProfile);
 
 		PF_CHECK(Tests, WritePpm(TexturePath, 2, 2,
 			{ static_cast<char>(190), static_cast<char>(40), static_cast<char>(10) }));

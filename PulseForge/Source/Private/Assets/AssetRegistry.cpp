@@ -1,6 +1,5 @@
 #include "Assets/AssetRegistry.h"
 #include "Assets/AssetTypes.h"
-#include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
 #include <limits>
@@ -30,7 +29,6 @@ namespace PulseForge
 	std::expected<void, AssetRegistryError> AssetRegistry::Rebuild(
 		const std::filesystem::path& ProjectRoot, std::stop_token CancellationToken)
 	{
-		Detail::ScopedProfileTimer Timer("AssetRegistry::Rebuild");
 		AssetRegistryError Error;
 		const auto Cancel = [&]() -> std::expected<void, AssetRegistryError>
 		{

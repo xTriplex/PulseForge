@@ -19,8 +19,8 @@
 #include "Runtime/CookedContentProvider.h"
 #include "Renderer/AssetCache/TextureAssetCache.h"
 #include "Renderer/EnvironmentLightingCache.h"
+#include "Core/Diagnostics.h"
 #include "Core/Log.h"
-#include "Core/ScopedProfileTimer.h"
 #include "Renderer/Mesh.h"
 #include "Scene/Scene.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
@@ -172,7 +172,7 @@ namespace PulseForge
 			  Textures(Runtime, SourceProject.GetRootPath(), Registry, Preparation, &UploadBudget,
 				  Artifacts, SessionKey,
 				  Runtime.GetDiagnosticRecorder()),
-			  Materials(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
+			  Materials(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder()),
 			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), Registry, Preparation,
 				  &UploadBudget, Artifacts, SessionKey, Runtime.GetDiagnosticRecorder())
 		{
@@ -184,7 +184,8 @@ namespace PulseForge
 			  Registry(std::make_shared<const AssetRegistry>()), CookedContent(std::move(Content)),
 			  Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
 			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
-			  Materials(CookedContent), EnvironmentLighting(Runtime, CookedContent, Runtime.GetDiagnosticRecorder())
+			  Materials(CookedContent, Runtime.GetDiagnosticRecorder()),
+			  EnvironmentLighting(Runtime, CookedContent, Runtime.GetDiagnosticRecorder())
 		{
 			if (!CookedContent)
 				throw std::invalid_argument("Cooked scene renderer requires a content provider");
@@ -213,7 +214,7 @@ namespace PulseForge
 #else
 		ProjectAssetCaches(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content)
 			: CookedContent(std::move(Content)), Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
-			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()), Materials(CookedContent),
+			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()), Materials(CookedContent, Runtime.GetDiagnosticRecorder()),
 			  EnvironmentLighting(Runtime, CookedContent, Runtime.GetDiagnosticRecorder())
 		{
 			if (!CookedContent)
@@ -305,7 +306,7 @@ namespace PulseForge
 	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
 		RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory)
 	{
-		Detail::ScopedProfileTimer Timer("SceneRenderer::Create");
+		ScopedDiagnosticTimer Timer(Runtime.GetDiagnosticRecorder(), "Scene renderer initialization", "SceneRenderer");
 		auto Renderer = std::unique_ptr<SceneRenderer>(new SceneRenderer(Runtime, SourceProject));
 		if (auto Result = Renderer->Initialize(CompiledShaderDirectory); !Result)
 			return std::unexpected(std::move(Result.error()));
@@ -320,7 +321,7 @@ namespace PulseForge
 		if (!Content)
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, {},
 				"Cooked scene renderer requires a content provider" });
-		Detail::ScopedProfileTimer Timer("SceneRenderer::Create cooked");
+		ScopedDiagnosticTimer Timer(Runtime.GetDiagnosticRecorder(), "Cooked scene renderer initialization", "SceneRenderer");
 		auto Renderer = std::unique_ptr<SceneRenderer>(new SceneRenderer(Runtime, std::move(Content)));
 		if (auto Result = Renderer->Initialize(CompiledShaderDirectory); !Result)
 			return std::unexpected(std::move(Result.error()));
@@ -715,11 +716,11 @@ namespace PulseForge
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot)
 	{
-		std::optional<Detail::ScopedProfileTimer> FirstPrepareTimer;
+		std::optional<ScopedDiagnosticTimer> FirstPrepareTimer;
 		if (!m_LoggedFirstSnapshotPreparation)
 		{
 			m_LoggedFirstSnapshotPreparation = true;
-			FirstPrepareTimer.emplace("SceneRenderer first PrepareSnapshot");
+			FirstPrepareTimer.emplace(m_Runtime.GetDiagnosticRecorder(), "Scene renderer first preparation", "SceneRenderer");
 		}
 		m_PreparedSnapshot.reset();
 		m_PreparedMeshResources.clear();

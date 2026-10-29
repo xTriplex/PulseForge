@@ -1,7 +1,7 @@
 #include "Renderer/SceneRendererAmbientOcclusionPass.h"
 
+#include "Core/Diagnostics.h"
 #include "Core/Log.h"
-#include "Core/ScopedProfileTimer.h"
 #include "Assets/MaterialAsset.h"
 #include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Renderer/Mesh.h"
@@ -231,7 +231,7 @@ namespace PulseForge
 	{
 		const auto [HalfWidth, HalfHeight] = CalculateAmbientOcclusionExtent(Width, Height);
 		if (m_Targets[0] && m_Width == Width && m_Height == Height) return {};
-		Detail::ScopedProfileTimer Timer("SSAO first/resize resource creation");
+		ScopedDiagnosticTimer Timer(m_Runtime.GetDiagnosticRecorder(), "SSAO target creation or resize", "AmbientOcclusionPass");
 
 		const auto CreateTarget = [this](uint32_t TargetWidth, uint32_t TargetHeight, DepthAttachmentMode DepthMode,
 									  const char* Name) -> std::expected<RenderTargetHandle, SceneRendererError>

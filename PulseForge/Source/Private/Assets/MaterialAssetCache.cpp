@@ -3,7 +3,7 @@
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/MaterialAssetService.h"
 #endif
-#include "Core/ScopedProfileTimer.h"
+#include "Core/Diagnostics.h"
 #include "Runtime/CookedContentProvider.h"
 
 #include <exception>
@@ -11,14 +11,15 @@
 namespace PulseForge
 {
 #if !defined(PF_COOKED_RUNTIME_ONLY)
-	MaterialAssetCache::MaterialAssetCache(std::filesystem::path ProjectRoot, const AssetRegistry& Registry)
-		: m_ProjectRoot(std::move(ProjectRoot)), m_Registry(&Registry)
+	MaterialAssetCache::MaterialAssetCache(
+		std::filesystem::path ProjectRoot, const AssetRegistry& Registry, DiagnosticRecorder* Diagnostics)
+		: m_ProjectRoot(std::move(ProjectRoot)), m_Registry(&Registry), m_Diagnostics(Diagnostics)
 	{
 	}
 #endif
 
-	MaterialAssetCache::MaterialAssetCache(std::shared_ptr<const CookedContentProvider> Provider)
-		: m_CookedProvider(std::move(Provider))
+	MaterialAssetCache::MaterialAssetCache(std::shared_ptr<const CookedContentProvider> Provider, DiagnosticRecorder* Diagnostics)
+		: m_CookedProvider(std::move(Provider)), m_Diagnostics(Diagnostics)
 	{
 	}
 
@@ -41,7 +42,7 @@ namespace PulseForge
 		if (const auto Existing = m_Materials.find(Asset); Existing != m_Materials.end())
 			return std::cref(Existing->second);
 
-		Detail::ScopedProfileTimer Timer("MaterialAssetCache first load");
+		ScopedDiagnosticTimer Timer(m_Diagnostics, "Material asset load", "MaterialAssetCache");
 		std::expected<MaterialAssetDesc, MaterialAssetError> Material = std::unexpected(MaterialAssetError{
 			MaterialAssetErrorCode::AssetNotFound, Asset, "No source registry or cooked provider is available" });
 		if (m_CookedProvider)

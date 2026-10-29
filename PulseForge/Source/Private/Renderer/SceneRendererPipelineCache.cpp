@@ -1,7 +1,7 @@
 #include "Renderer/SceneRendererPipelineCache.h"
 
+#include "Core/Diagnostics.h"
 #include "Core/Log.h"
-#include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -51,7 +51,7 @@ namespace PulseForge
 		if (!m_VertexLayout)
 			return std::unexpected(MakeResourceError("Cannot create a scene pipeline before a mesh vertex layout is prepared"));
 
-		Detail::ScopedProfileTimer Timer("Scene graphics pipeline creation");
+		ScopedDiagnosticTimer Timer(m_Runtime.GetDiagnosticRecorder(), "Scene graphics pipeline creation", "SceneRendererPipelineCache");
 		GraphicsPipelineDesc Description;
 		Description.VertexShader = m_Resources->SceneVertexShader;
 		Description.FragmentShader = m_Resources->SceneFragmentShader;

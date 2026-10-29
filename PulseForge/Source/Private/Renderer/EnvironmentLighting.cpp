@@ -1,5 +1,5 @@
 #include "Renderer/EnvironmentLighting.h"
-#include "Core/ScopedProfileTimer.h"
+#include "Core/Diagnostics.h"
 
 #include <cmath>
 #include <limits>
@@ -244,9 +244,10 @@ namespace PulseForge
 		const ImportedFloatImage& Source,
 		const EnvironmentProcessingDesc& Description,
 		std::stop_token StopToken,
-		const ImportedFloatImage* CachedBrdfLut)
+		const ImportedFloatImage* CachedBrdfLut,
+		DiagnosticRecorder* Diagnostics)
 	{
-		Detail::ScopedProfileTimer TotalTimer("ProcessEnvironmentImage total");
+		ScopedDiagnosticTimer TotalTimer(Diagnostics, "Environment product processing", "EnvironmentLighting");
 		if (StopToken.stop_requested())
 			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
 		if (Source.Width == 0 || Source.Height == 0 ||
@@ -291,111 +292,111 @@ namespace PulseForge
 			for (std::vector<float>& Face : Output.Environment.Faces)
 				Face.resize(static_cast<size_t>(Description.EnvironmentFaceSize) * Description.EnvironmentFaceSize * 4);
 			{
-				Detail::ScopedProfileTimer Timer("HDRI equirectangular-to-cubemap generation");
-			for (uint32_t Face = 0; Face < 6; ++Face)
-			{
-				for (uint32_t Y = 0; Y < Description.EnvironmentFaceSize; ++Y)
+				ScopedDiagnosticTimer Timer(Diagnostics, "Equirectangular to cubemap", "EnvironmentLighting");
+				for (uint32_t Face = 0; Face < 6; ++Face)
 				{
-					if (StopToken.stop_requested())
-						return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
-					for (uint32_t X = 0; X < Description.EnvironmentFaceSize; ++X)
+					for (uint32_t Y = 0; Y < Description.EnvironmentFaceSize; ++Y)
 					{
-						const float U = (static_cast<float>(X) + 0.5f) / static_cast<float>(Description.EnvironmentFaceSize);
-						const float V = (static_cast<float>(Y) + 0.5f) / static_cast<float>(Description.EnvironmentFaceSize);
-						SetCubeTexel(Output.Environment, Face, X, Y,
-							SampleEquirectangular(Source, CubeFaceTexelDirection(static_cast<CubeFace>(Face), U, V)));
+						if (StopToken.stop_requested())
+							return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
+						for (uint32_t X = 0; X < Description.EnvironmentFaceSize; ++X)
+						{
+							const float U = (static_cast<float>(X) + 0.5f) / static_cast<float>(Description.EnvironmentFaceSize);
+							const float V = (static_cast<float>(Y) + 0.5f) / static_cast<float>(Description.EnvironmentFaceSize);
+							SetCubeTexel(Output.Environment, Face, X, Y,
+								SampleEquirectangular(Source, CubeFaceTexelDirection(static_cast<CubeFace>(Face), U, V)));
+						}
 					}
 				}
-			}
 			}
 
 			Output.DiffuseIrradiance.Size = Description.IrradianceFaceSize;
 			for (std::vector<float>& Face : Output.DiffuseIrradiance.Faces)
 				Face.resize(static_cast<size_t>(Description.IrradianceFaceSize) * Description.IrradianceFaceSize * 4);
 			{
-				Detail::ScopedProfileTimer Timer("HDRI diffuse irradiance convolution");
-			for (uint32_t Face = 0; Face < 6; ++Face)
-			{
-				for (uint32_t Y = 0; Y < Description.IrradianceFaceSize; ++Y)
+				ScopedDiagnosticTimer Timer(Diagnostics, "Diffuse irradiance convolution", "EnvironmentLighting");
+				for (uint32_t Face = 0; Face < 6; ++Face)
 				{
-					if (StopToken.stop_requested())
-						return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
-					for (uint32_t X = 0; X < Description.IrradianceFaceSize; ++X)
+					for (uint32_t Y = 0; Y < Description.IrradianceFaceSize; ++Y)
 					{
-						const glm::vec3 Normal = CubeFaceTexelDirection(
-							static_cast<CubeFace>(Face),
-							(static_cast<float>(X) + 0.5f) / Description.IrradianceFaceSize,
-							(static_cast<float>(Y) + 0.5f) / Description.IrradianceFaceSize);
-						glm::vec3 Irradiance(0.0f);
-						for (uint32_t Sample = 0; Sample < Description.IrradianceSamples; ++Sample)
+						if (StopToken.stop_requested())
+							return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
+						for (uint32_t X = 0; X < Description.IrradianceFaceSize; ++X)
 						{
-							const glm::vec2 Xi = Hammersley(Sample, Description.IrradianceSamples);
-							const float Phi = 2.0f * Pi * Xi.y;
-							const float Radius = std::sqrt(Xi.x);
-							const glm::vec3 Local(Radius * std::cos(Phi), Radius * std::sin(Phi), std::sqrt(1.0f - Xi.x));
-							Irradiance += SampleCube(Output.Environment, TangentToWorld(Normal, Local));
+							const glm::vec3 Normal = CubeFaceTexelDirection(
+								static_cast<CubeFace>(Face),
+								(static_cast<float>(X) + 0.5f) / Description.IrradianceFaceSize,
+								(static_cast<float>(Y) + 0.5f) / Description.IrradianceFaceSize);
+							glm::vec3 Irradiance(0.0f);
+							for (uint32_t Sample = 0; Sample < Description.IrradianceSamples; ++Sample)
+							{
+								const glm::vec2 Xi = Hammersley(Sample, Description.IrradianceSamples);
+								const float Phi = 2.0f * Pi * Xi.y;
+								const float Radius = std::sqrt(Xi.x);
+								const glm::vec3 Local(Radius * std::cos(Phi), Radius * std::sin(Phi), std::sqrt(1.0f - Xi.x));
+								Irradiance += SampleCube(Output.Environment, TangentToWorld(Normal, Local));
+							}
+							Irradiance *= Pi / static_cast<float>(Description.IrradianceSamples);
+							SetCubeTexel(Output.DiffuseIrradiance, Face, X, Y, Irradiance);
 						}
-						Irradiance *= Pi / static_cast<float>(Description.IrradianceSamples);
-						SetCubeTexel(Output.DiffuseIrradiance, Face, X, Y, Irradiance);
 					}
 				}
-			}
 			}
 
 			const uint32_t SpecularMipCount = MipCountFor(Description.SpecularFaceSize);
 			Output.PrefilteredSpecular.reserve(SpecularMipCount);
 			{
-				Detail::ScopedProfileTimer Timer("HDRI GGX specular prefilter");
-			uint32_t MipSize = Description.SpecularFaceSize;
-			for (uint32_t Mip = 0; Mip < SpecularMipCount; ++Mip)
-			{
-				FloatCubeLevel& Level = Output.PrefilteredSpecular.emplace_back();
-				Level.Size = MipSize;
-				for (std::vector<float>& Face : Level.Faces)
-					Face.resize(static_cast<size_t>(MipSize) * MipSize * 4);
-				const float Roughness = SpecularMipCount == 1 ? 0.0f : static_cast<float>(Mip) / (SpecularMipCount - 1);
-				for (uint32_t Face = 0; Face < 6; ++Face)
+				ScopedDiagnosticTimer Timer(Diagnostics, "GGX specular prefilter", "EnvironmentLighting");
+				uint32_t MipSize = Description.SpecularFaceSize;
+				for (uint32_t Mip = 0; Mip < SpecularMipCount; ++Mip)
 				{
-					for (uint32_t Y = 0; Y < MipSize; ++Y)
+					FloatCubeLevel& Level = Output.PrefilteredSpecular.emplace_back();
+					Level.Size = MipSize;
+					for (std::vector<float>& Face : Level.Faces)
+						Face.resize(static_cast<size_t>(MipSize) * MipSize * 4);
+					const float Roughness = SpecularMipCount == 1 ? 0.0f : static_cast<float>(Mip) / (SpecularMipCount - 1);
+					for (uint32_t Face = 0; Face < 6; ++Face)
 					{
-						if (StopToken.stop_requested())
-							return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
-						for (uint32_t X = 0; X < MipSize; ++X)
+						for (uint32_t Y = 0; Y < MipSize; ++Y)
 						{
-							const glm::vec3 Normal = CubeFaceTexelDirection(
-								static_cast<CubeFace>(Face),
-								(static_cast<float>(X) + 0.5f) / MipSize,
-								(static_cast<float>(Y) + 0.5f) / MipSize);
-							glm::vec3 Prefiltered(0.0f);
-							float TotalWeight = 0.0f;
-							if (Roughness <= 1.0e-4f)
+							if (StopToken.stop_requested())
+								return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
+							for (uint32_t X = 0; X < MipSize; ++X)
 							{
-								Prefiltered = SampleCube(Output.Environment, Normal);
-								TotalWeight = 1.0f;
-							}
-							else
-							{
-								for (uint32_t Sample = 0; Sample < Description.PrefilterSamples; ++Sample)
+								const glm::vec3 Normal = CubeFaceTexelDirection(
+									static_cast<CubeFace>(Face),
+									(static_cast<float>(X) + 0.5f) / MipSize,
+									(static_cast<float>(Y) + 0.5f) / MipSize);
+								glm::vec3 Prefiltered(0.0f);
+								float TotalWeight = 0.0f;
+								if (Roughness <= 1.0e-4f)
 								{
-									const glm::vec3 HalfVector = ImportanceSampleGgx(
-										Hammersley(Sample, Description.PrefilterSamples), Roughness, Normal);
-									const glm::vec3 Light = SafeNormalize(2.0f * glm::dot(Normal, HalfVector) * HalfVector - Normal, Normal);
-									const float NdotL = std::max(glm::dot(Normal, Light), 0.0f);
-									if (NdotL > 0.0f)
+									Prefiltered = SampleCube(Output.Environment, Normal);
+									TotalWeight = 1.0f;
+								}
+								else
+								{
+									for (uint32_t Sample = 0; Sample < Description.PrefilterSamples; ++Sample)
 									{
-										Prefiltered += SampleCube(Output.Environment, Light) * NdotL;
-										TotalWeight += NdotL;
+										const glm::vec3 HalfVector = ImportanceSampleGgx(
+											Hammersley(Sample, Description.PrefilterSamples), Roughness, Normal);
+										const glm::vec3 Light = SafeNormalize(2.0f * glm::dot(Normal, HalfVector) * HalfVector - Normal, Normal);
+										const float NdotL = std::max(glm::dot(Normal, Light), 0.0f);
+										if (NdotL > 0.0f)
+										{
+											Prefiltered += SampleCube(Output.Environment, Light) * NdotL;
+											TotalWeight += NdotL;
+										}
 									}
 								}
+								if (TotalWeight > 1.0e-6f)
+									Prefiltered /= TotalWeight;
+								SetCubeTexel(Level, Face, X, Y, Prefiltered);
 							}
-							if (TotalWeight > 1.0e-6f)
-								Prefiltered /= TotalWeight;
-							SetCubeTexel(Level, Face, X, Y, Prefiltered);
 						}
 					}
+					MipSize = std::max(1u, MipSize / 2);
 				}
-				MipSize = std::max(1u, MipSize / 2);
-			}
 			}
 
 			if (CachedBrdfLut && CachedBrdfLut->Width == Description.BrdfLutSize &&
@@ -406,7 +407,7 @@ namespace PulseForge
 			}
 			else
 			{
-				auto Brdf = GenerateBrdfIntegrationLut(Description.BrdfLutSize, Description.BrdfSamples, StopToken);
+				auto Brdf = GenerateBrdfIntegrationLut(Description.BrdfLutSize, Description.BrdfSamples, StopToken, Diagnostics);
 				if (!Brdf)
 					return std::unexpected(std::move(Brdf.error()));
 				Output.BrdfIntegrationLut = std::move(*Brdf);
@@ -423,7 +424,8 @@ namespace PulseForge
 	std::expected<ImportedFloatImage, EnvironmentProcessingError> GenerateBrdfIntegrationLut(
 		uint32_t Size,
 		uint32_t Samples,
-		std::stop_token StopToken)
+		std::stop_token StopToken,
+		DiagnosticRecorder* Diagnostics)
 	{
 		if (!IsPowerOfTwo(Size) || Size > MaxLutSize || Samples == 0 || Samples > MaxSamples)
 			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::InvalidDescription,
@@ -431,7 +433,7 @@ namespace PulseForge
 
 		try
 		{
-			Detail::ScopedProfileTimer Timer("HDRI BRDF integration LUT generation");
+			ScopedDiagnosticTimer Timer(Diagnostics, "BRDF integration LUT generation", "EnvironmentLighting");
 			ImportedFloatImage Output;
 			Output.Width = Size;
 			Output.Height = Size;

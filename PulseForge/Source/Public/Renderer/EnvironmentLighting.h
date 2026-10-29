@@ -14,6 +14,8 @@
 
 namespace PulseForge
 {
+	class DiagnosticRecorder;
+
 	enum class EnvironmentProcessingErrorCode : uint8_t
 	{
 		InvalidSource,
@@ -34,9 +36,11 @@ namespace PulseForge
 		const ImportedFloatImage& Source,
 		const EnvironmentProcessingDesc& Description = {},
 		std::stop_token StopToken = {},
-		const ImportedFloatImage* CachedBrdfLut = nullptr);
+		const ImportedFloatImage* CachedBrdfLut = nullptr,
+		DiagnosticRecorder* Diagnostics = nullptr);
 	[[nodiscard]] PULSEFORGE_API std::expected<ImportedFloatImage, EnvironmentProcessingError> GenerateBrdfIntegrationLut(
 		uint32_t Size,
 		uint32_t Samples,
-		std::stop_token StopToken = {});
+		std::stop_token StopToken = {},
+		DiagnosticRecorder* Diagnostics = nullptr);
 }

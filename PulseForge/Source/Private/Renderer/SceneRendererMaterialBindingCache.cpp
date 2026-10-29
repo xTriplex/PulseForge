@@ -1,6 +1,6 @@
 #include "Renderer/SceneRendererMaterialBindingCache.h"
 
-#include "Core/ScopedProfileTimer.h"
+#include "Core/Diagnostics.h"
 
 #include <algorithm>
 #include <array>
@@ -143,8 +143,6 @@ namespace PulseForge
 		if (!Material)
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, MaterialAsset,
 				"Could not load scene material " + MaterialAsset.ToString() + ": " + Material.error().Message });
-		Detail::ScopedProfileTimer Timer("PBR material/texture binding creation");
-
 		const auto LoadMaterialTexture =
 			[this, &MaterialAsset](const AssetID& TextureAsset, TextureFormat Format, const Texture& Fallback,
 				std::string_view Name) -> std::expected<std::reference_wrapper<const Texture>, SceneRendererError>
@@ -176,6 +174,7 @@ namespace PulseForge
 		if (!EmissiveTexture) return std::unexpected(std::move(EmissiveTexture.error()));
 		const std::string Key = MakeMaterialBindingKey(MaterialAsset, EnvironmentAsset, Material->get(), EnvironmentRevision);
 		if (m_MaterialBindings.contains(Key)) return {};
+		ScopedDiagnosticTimer Timer(m_Runtime.GetDiagnosticRecorder(), "Material binding creation", "SceneRendererMaterialBindingCache");
 
 		const MaterialConstants Constants{ { Material->get().BaseColorFactor.r, Material->get().BaseColorFactor.g,
 											   Material->get().BaseColorFactor.b, Material->get().BaseColorFactor.a },
@@ -223,7 +222,7 @@ namespace PulseForge
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
 		const std::string Key = MakeEnvironmentBindingKey(EnvironmentAsset, IsReady, ResourceRevision);
 		if (m_EnvironmentBindings.contains(Key)) return {};
-		Detail::ScopedProfileTimer Timer("Environment GPU binding creation");
+		ScopedDiagnosticTimer Timer(m_Runtime.GetDiagnosticRecorder(), "Environment binding creation", "SceneRendererMaterialBindingCache");
 		BindingSetDesc Description;
 		Description.Layout = *m_Layout;
 		Description.Textures = { { 0, std::cref(*m_FallbackBaseColor) },

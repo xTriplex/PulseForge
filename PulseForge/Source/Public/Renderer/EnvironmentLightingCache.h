@@ -60,7 +60,8 @@ namespace PulseForge
 			const AssetRegistry& Registry,
 			DerivedDataArtifactStore* ArtifactStore,
 			EnvironmentProcessingDesc Processing,
-			std::stop_token StopToken = {});
+			std::stop_token StopToken = {},
+			DiagnosticRecorder* Diagnostics = nullptr);
 
 	}
 

@@ -4,7 +4,6 @@
 #include "Assets/AssetTypes.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Core/Diagnostics.h"
-#include "Core/ScopedProfileTimer.h"
 #include "Runtime/CookedContentProvider.h"
 
 #include <algorithm>
@@ -629,6 +628,7 @@ namespace PulseForge
 			const std::filesystem::path Root = m_ProjectRoot;
 			DerivedDataArtifactStore* Store = m_ArtifactStore;
 			const EnvironmentProcessingDesc Processing = m_Processing;
+			DiagnosticRecorder* Diagnostics = m_Diagnostics;
 			const std::string Recipe = "environment-lighting-v1/" + Asset.ToString() + "/" +
 				std::to_string(Processing.EnvironmentFaceSize) + "/" + std::to_string(Processing.IrradianceFaceSize) + "/" +
 				std::to_string(Processing.SpecularFaceSize) + "/" + std::to_string(Processing.BrdfLutSize) + "/" +
@@ -636,11 +636,11 @@ namespace PulseForge
 				std::to_string(Processing.BrdfSamples);
 			auto Requested = m_Preparation->Request({ m_SessionKey, Recipe }, AssetPreparationPriority::Interactive,
 				256ull * 1024ull * 1024ull,
-				[Asset, Root, RegistrySnapshot, Store, Processing](std::stop_token Token)
+				[Asset, Root, RegistrySnapshot, Store, Processing, Diagnostics](std::stop_token Token)
 					-> std::expected<AssetPreparationService::CpuPayload, AssetPreparationError>
 				{
 					auto Product = Detail::PrepareEnvironmentCpuProduct(
-						Asset, Root, *RegistrySnapshot, Store, Processing, Token);
+						Asset, Root, *RegistrySnapshot, Store, Processing, Token, Diagnostics);
 					if (!Product)
 						return std::unexpected(std::move(Product.error()));
 					const size_t Retained = GetPreparedEnvironmentRetainedBytes(Product->Data);
@@ -721,7 +721,8 @@ namespace PulseForge
 							T.PreprocessStartTimestampNanoseconds, T.PreprocessEndTimestampNanoseconds,
 							"Environment CPU preprocessing", "EnvironmentLightingCache");
 				}
-				ScopedDiagnosticTimer UploadTimer(m_Diagnostics, "Environment GPU upload", "EnvironmentLightingCache");
+				ScopedDiagnosticTimer UploadTimer(
+					m_Diagnostics, "Environment GPU resource upload submission", "EnvironmentLightingCache");
 				auto Uploaded = UploadProcessedData(Asset, Product->Get().Data);
 				if (!Uploaded)
 				{
@@ -799,7 +800,8 @@ namespace PulseForge
 
 	std::expected<Detail::EnvironmentCpuPreparationResult, AssetPreparationError> Detail::PrepareEnvironmentCpuProduct(
 		AssetID Asset, std::filesystem::path ProjectRoot, const AssetRegistry& Registry,
-		DerivedDataArtifactStore* ArtifactStore, EnvironmentProcessingDesc Processing, std::stop_token StopToken)
+		DerivedDataArtifactStore* ArtifactStore, EnvironmentProcessingDesc Processing, std::stop_token StopToken,
+		DiagnosticRecorder* Diagnostics)
 	{
 		auto Fail = [](std::string Message)
 			-> std::expected<EnvironmentCpuPreparationResult, AssetPreparationError>
@@ -882,7 +884,8 @@ namespace PulseForge
 			if (!Brdf)
 			{
 				Product.RanBrdfPreprocessing = true;
-				auto Generated = GenerateBrdfIntegrationLut(Processing.BrdfLutSize, Processing.BrdfSamples, StopToken);
+				auto Generated = GenerateBrdfIntegrationLut(
+					Processing.BrdfLutSize, Processing.BrdfSamples, StopToken, Diagnostics);
 				if (!Generated) return Fail(Generated.error().Message);
 				Brdf = std::move(*Generated);
 				if (ArtifactStore)
@@ -921,7 +924,7 @@ namespace PulseForge
 						return Fail("Environment source changed between fingerprinting and HDR decode");
 					Product.PreprocessStartTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 					Product.RanEnvironmentPreprocessing = true;
-					auto Processed = ProcessEnvironmentImage(*Imported, Processing, StopToken, &*Brdf);
+					auto Processed = ProcessEnvironmentImage(*Imported, Processing, StopToken, &*Brdf, Diagnostics);
 					if (!Processed) return Fail("Environment preprocessing failed: " + Processed.error().Message);
 					Data = std::move(*Processed);
 					Product.PreprocessEndTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
@@ -973,7 +976,6 @@ namespace PulseForge
 		const AssetID& Asset,
 		const EnvironmentLightingData& Data)
 	{
-		Detail::ScopedProfileTimer UploadTimer("HDR GPU texture uploads (renderer thread)");
 		try
 		{
 			EnvironmentLightingTextures Textures;

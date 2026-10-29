@@ -1,7 +1,6 @@
 #include "Renderer/EnvironmentLightingCache.h"
 
 #include "Core/Diagnostics.h"
-#include "Core/ScopedProfileTimer.h"
 #include "Runtime/CookedContentProvider.h"
 
 #include <span>
@@ -88,7 +87,8 @@ namespace PulseForge
 			return std::unexpected(MakeCookedEnvironmentError(Asset, State.Error));
 		}
 
-		Detail::ScopedProfileTimer Timer("Cooked environment GPU upload");
+		ScopedDiagnosticTimer Timer(
+			m_Diagnostics, "Cooked environment GPU resource upload submission", "EnvironmentLightingCache");
 		try
 		{
 			EnvironmentLightingTextures Textures;
