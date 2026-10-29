@@ -1,12 +1,37 @@
 name: Portable editor CPU CI
 
+run-name: ${{ inputs.validation_mode == 'patch-validation' && format('Portable editor CI · Patch validation · {0}', inputs.patch_validation_selection) || format('Portable editor CI · {0}', github.ref_name) }}
+
 on:
   push:
   pull_request:
   workflow_dispatch:
     inputs:
       validation_mode:
-        description: Select focused automation-probe, macOS desktop, or complete acceptance validation
+        description: Select committed-source validation or bounded experimental patch validation
+        type: choice
+        options:
+          - full
+          - automation-probe-only
+          - macos-desktop-only
+          - windows-asset-diagnostic-only
+          - patch-validation
+        default: full
+        required: true
+      patch_base_sha:
+        description: Existing remote commit to check out exactly for patch validation
+        type: string
+        required: false
+      patch_payload_gzip_base64:
+        description: Bounded gzip-compressed Git binary patch encoded as base64 (patch mode only)
+        type: string
+        required: false
+      patch_sha256:
+        description: SHA-256 of the decoded raw Git patch (patch mode only)
+        type: string
+        required: false
+      patch_validation_selection:
+        description: Existing validation selection to run against the patch
         type: choice
         options:
           - full
@@ -14,24 +39,53 @@ on:
           - macos-desktop-only
           - windows-asset-diagnostic-only
         default: full
-        required: true
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' && format('patch-validation-{0}', github.run_id) || format('{0}-{1}-{2}', github.workflow, github.event_name, github.event.pull_request.number || github.ref) }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
 
 jobs:
   macos-automation-bridge:
     name: macOS · JXA permission bridge probe
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'windows-asset-diagnostic-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection == 'windows-asset-diagnostic-only'))) && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
     runs-on: macos-26
     timeout-minutes: 10
     steps:
       - name: Check out sources
         uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
+          persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
+
+      - name: Verify and apply experimental source patch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_patch_validation.py --self-test
+          python3 .github/scripts/apply_patch_validation.py \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_WORKSPACE" \
+            --identity-file "$RUNNER_TEMP/patch-validation-identity.json" \
+            --workflow-definition-sha "$WORKFLOW_DEFINITION_SHA"
+
+      - name: Preserve experimental source identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: patch-validation-identity-macos-bridge-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch-validation-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Label this as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        run: |
+          echo 'EXPERIMENTAL PATCHED-SOURCE VALIDATION: this run tests the resulting patch tree, not the unmodified base SHA.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Test the automation harness and permission bridge contract
         run: python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py
@@ -134,13 +188,41 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     needs: macos-automation-bridge
-    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && (inputs.patch_validation_selection == 'automation-probe-only' || inputs.patch_validation_selection == 'windows-asset-diagnostic-only')))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     steps:
       - name: Check out sources
         id: checkout_sources
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
+          persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
+
+      - name: Verify and apply experimental source patch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_patch_validation.py --self-test
+          python3 .github/scripts/apply_patch_validation.py \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_WORKSPACE" \
+            --identity-file "$RUNNER_TEMP/patch-validation-identity.json" \
+            --workflow-definition-sha "$WORKFLOW_DEFINITION_SHA"
+
+      - name: Preserve experimental source identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: patch-validation-identity-macos-desktop-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch-validation-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Label this as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        run: |
+          echo 'EXPERIMENTAL PATCHED-SOURCE VALIDATION: this run tests the resulting patch tree, not the unmodified base SHA.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build the Quartz input client in the desktop job
         id: desktop_pointer_client
@@ -692,6 +774,35 @@ jobs:
     needs: macos-desktop
     if: ${{ needs.macos-desktop.result == 'success' }}
     steps:
+      - name: Download patched-source identity from this run's macOS producer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: patch-validation-identity-macos-desktop-${{ github.run_id }}
+          path: ${{ runner.temp }}/Patch Source Identity
+
+      - name: Label package verification as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          EXPECTED_PATCH_BASE_SHA: ${{ inputs.patch_base_sha }}
+          EXPECTED_PATCH_SHA256: ${{ inputs.patch_sha256 }}
+        run: |
+          python3 - "$RUNNER_TEMP/Patch Source Identity/patch-validation-identity.json" <<'PY'
+          import json, os, re, sys
+          with open(sys.argv[1], encoding="utf-8") as identity_file:
+              identity = json.load(identity_file)
+          if identity.get("validation_kind") != "EXPERIMENTAL_PATCHED_SOURCE":
+              raise SystemExit("downloaded producer identity is not an experimental patch identity")
+          if identity.get("base_sha", "").lower() != os.environ["EXPECTED_PATCH_BASE_SHA"].lower():
+              raise SystemExit("package producer base SHA differs from this workflow dispatch")
+          if identity.get("patch_sha256", "").lower() != os.environ["EXPECTED_PATCH_SHA256"].lower():
+              raise SystemExit("package producer patch hash differs from this workflow dispatch")
+          if not re.fullmatch(r"[0-9a-f]{40}", identity.get("resulting_tree", "")):
+              raise SystemExit("package producer did not record a valid resulting Git tree")
+          print(json.dumps(identity, ensure_ascii=False, sort_keys=True))
+          PY
+          echo 'This package came from the patched-source producer in this workflow run; the base SHA itself is not what this run validates.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Download only the exported package
         uses: actions/download-artifact@v6
         with:
@@ -752,6 +863,35 @@ jobs:
       matrix:
         configuration: [Release, Dist]
     steps:
+      - name: Download patched-source identity from this run's macOS producer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: patch-validation-identity-macos-desktop-${{ github.run_id }}
+          path: ${{ runner.temp }}/Patch Source Identity
+
+      - name: Label package verification as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          EXPECTED_PATCH_BASE_SHA: ${{ inputs.patch_base_sha }}
+          EXPECTED_PATCH_SHA256: ${{ inputs.patch_sha256 }}
+        run: |
+          python3 - "$RUNNER_TEMP/Patch Source Identity/patch-validation-identity.json" <<'PY'
+          import json, os, re, sys
+          with open(sys.argv[1], encoding="utf-8") as identity_file:
+              identity = json.load(identity_file)
+          if identity.get("validation_kind") != "EXPERIMENTAL_PATCHED_SOURCE":
+              raise SystemExit("downloaded producer identity is not an experimental patch identity")
+          if identity.get("base_sha", "").lower() != os.environ["EXPECTED_PATCH_BASE_SHA"].lower():
+              raise SystemExit("package producer base SHA differs from this workflow dispatch")
+          if identity.get("patch_sha256", "").lower() != os.environ["EXPECTED_PATCH_SHA256"].lower():
+              raise SystemExit("package producer patch hash differs from this workflow dispatch")
+          if not re.fullmatch(r"[0-9a-f]{40}", identity.get("resulting_tree", "")):
+              raise SystemExit("package producer did not record a valid resulting Git tree")
+          print(json.dumps(identity, ensure_ascii=False, sort_keys=True))
+          PY
+          echo 'This package came from the patched-source producer in this workflow run; the base SHA itself is not what this run validates.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Download only the exported package
         uses: actions/download-artifact@v6
         with:
@@ -796,7 +936,7 @@ jobs:
 
   windows-msvc:
     name: Windows 2022 · MSVC · Ninja Multi-Config · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection != 'full'))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -804,8 +944,60 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
+          persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
+
+      - name: Verify and apply experimental source patch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        shell: pwsh
+        env:
+          WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          python .github/scripts/apply_patch_validation.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/scripts/apply_patch_validation.py `
+            --event "$env:GITHUB_EVENT_PATH" --repository "$env:GITHUB_WORKSPACE" `
+            --identity-file "$env:RUNNER_TEMP/patch-validation-identity.json" `
+            --workflow-definition-sha "$env:WORKFLOW_DEFINITION_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve experimental source identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: patch-validation-identity-windows-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch-validation-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Label this as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        shell: pwsh
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '## EXPERIMENTAL PATCHED-SOURCE VALIDATION'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'This run tests the resulting patch tree, not the unmodified base SHA.'
+
+      - name: Test bounded patch helpers in disposable Git fixtures
+        shell: pwsh
+        run: |
+          python .github/scripts/apply_patch_validation.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File Tests/Platform/PreparePatchValidationTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Restore pinned dependency sources for experimental patches (read only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            Build/CI/Dependencies/pulseforgenvrhi-src
+            Build/CI/Dependencies/pulseforgelua-src
+            Build/CI/Dependencies/vulkan_headers-src
+            Build/CI/Dependencies/_downloads
+          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
 
       - name: Restore pinned dependency sources
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
         uses: actions/cache@v5
         with:
           path: |
@@ -1078,7 +1270,7 @@ jobs:
 
   windows-asset-test-diagnostic:
     name: Windows 2022 · focused asset/cook hang diagnosis
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'windows-asset-diagnostic-only') || (github.event_name == 'push' && contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && (inputs.validation_mode == 'windows-asset-diagnostic-only' || (inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection == 'windows-asset-diagnostic-only'))) || (github.event_name == 'push' && contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
     runs-on: windows-2022
     timeout-minutes: 35
     steps:
@@ -1086,6 +1278,57 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
+          persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
+
+      - name: Verify and apply experimental source patch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        shell: pwsh
+        env:
+          WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          python .github/scripts/apply_patch_validation.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/scripts/apply_patch_validation.py `
+            --event "$env:GITHUB_EVENT_PATH" --repository "$env:GITHUB_WORKSPACE" `
+            --identity-file "$env:RUNNER_TEMP/patch-validation-identity.json" `
+            --workflow-definition-sha "$env:WORKFLOW_DEFINITION_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve experimental source identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: patch-validation-identity-windows-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch-validation-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Label this as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        shell: pwsh
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '## EXPERIMENTAL PATCHED-SOURCE VALIDATION'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'This run tests the resulting patch tree, not the unmodified base SHA.'
+
+      - name: Test bounded patch helpers in disposable Git fixtures
+        shell: pwsh
+        run: |
+          python .github/scripts/apply_patch_validation.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File Tests/Platform/PreparePatchValidationTests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Restore pinned dependency sources for experimental patches (read only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            Build/CI/Dependencies/pulseforgenvrhi-src
+            Build/CI/Dependencies/pulseforgelua-src
+            Build/CI/Dependencies/vulkan_headers-src
+            Build/CI/Dependencies/_downloads
+          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
 
       - name: Report CMake and CTest versions
         shell: pwsh
@@ -1096,6 +1339,7 @@ jobs:
           where.exe ctest
 
       - name: Restore pinned dependency sources
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
         uses: actions/cache@v5
         with:
           path: |
@@ -1203,6 +1447,28 @@ jobs:
       matrix:
         configuration: [Release, Dist]
     steps:
+      - name: Download patched-source identity from this run's Windows producer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: patch-validation-identity-windows-${{ github.run_id }}
+          path: ${{ runner.temp }}/Patch Source Identity
+
+      - name: Label package verification as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        shell: pwsh
+        env:
+          EXPECTED_PATCH_BASE_SHA: ${{ inputs.patch_base_sha }}
+          EXPECTED_PATCH_SHA256: ${{ inputs.patch_sha256 }}
+        run: |
+          $identity = Get-Content -LiteralPath "$env:RUNNER_TEMP/Patch Source Identity/patch-validation-identity.json" -Raw -Encoding utf8 | ConvertFrom-Json
+          if ($identity.validation_kind -ne 'EXPERIMENTAL_PATCHED_SOURCE') { throw 'Downloaded producer identity is not an experimental patch identity.' }
+          if ($identity.base_sha -ne $env:EXPECTED_PATCH_BASE_SHA) { throw 'Package producer base SHA differs from this workflow dispatch.' }
+          if ($identity.patch_sha256 -ne $env:EXPECTED_PATCH_SHA256) { throw 'Package producer patch hash differs from this workflow dispatch.' }
+          if ($identity.resulting_tree -notmatch '^[0-9a-f]{40}$') { throw 'Package producer did not record a valid resulting Git tree.' }
+          $identity | ConvertTo-Json -Depth 5 | Write-Output
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'This package came from the patched-source producer in this workflow run; the base SHA itself is not what this run validates.'
+
       - name: Download only the exported package
         uses: actions/download-artifact@v6
         with:
@@ -1443,7 +1709,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection != 'full'))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -1451,8 +1717,49 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
+          persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
+
+      - name: Verify and apply experimental source patch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/apply_patch_validation.py --self-test
+          python3 .github/scripts/apply_patch_validation.py \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_WORKSPACE" \
+            --identity-file "$RUNNER_TEMP/patch-validation-identity.json" \
+            --workflow-definition-sha "$WORKFLOW_DEFINITION_SHA"
+
+      - name: Preserve experimental source identity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: patch-validation-identity-linux-${{ github.run_id }}
+          path: ${{ runner.temp }}/patch-validation-identity.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Label this as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        run: |
+          echo '## EXPERIMENTAL PATCHED-SOURCE VALIDATION' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This run tests the resulting patch tree, not the unmodified base SHA.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore pinned dependency sources for experimental patches (read only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            Build/CI/Dependencies/pulseforgenvrhi-src
+            Build/CI/Dependencies/pulseforgelua-src
+            Build/CI/Dependencies/vulkan_headers-src
+            Build/CI/Dependencies/_downloads
+          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
 
       - name: Restore pinned dependency sources
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
         uses: actions/cache@v5
         with:
           path: |
@@ -1657,6 +1964,35 @@ jobs:
     needs: linux-gcc
     if: ${{ needs.linux-gcc.result == 'success' }}
     steps:
+      - name: Download patched-source identity from this run's Linux producer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: patch-validation-identity-linux-${{ github.run_id }}
+          path: ${{ runner.temp }}/Patch Source Identity
+
+      - name: Label package verification as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          EXPECTED_PATCH_BASE_SHA: ${{ inputs.patch_base_sha }}
+          EXPECTED_PATCH_SHA256: ${{ inputs.patch_sha256 }}
+        run: |
+          python3 - "$RUNNER_TEMP/Patch Source Identity/patch-validation-identity.json" <<'PY'
+          import json, os, re, sys
+          with open(sys.argv[1], encoding="utf-8") as identity_file:
+              identity = json.load(identity_file)
+          if identity.get("validation_kind") != "EXPERIMENTAL_PATCHED_SOURCE":
+              raise SystemExit("downloaded producer identity is not an experimental patch identity")
+          if identity.get("base_sha", "").lower() != os.environ["EXPECTED_PATCH_BASE_SHA"].lower():
+              raise SystemExit("package producer base SHA differs from this workflow dispatch")
+          if identity.get("patch_sha256", "").lower() != os.environ["EXPECTED_PATCH_SHA256"].lower():
+              raise SystemExit("package producer patch hash differs from this workflow dispatch")
+          if not re.fullmatch(r"[0-9a-f]{40}", identity.get("resulting_tree", "")):
+              raise SystemExit("package producer did not record a valid resulting Git tree")
+          print(json.dumps(identity, ensure_ascii=False, sort_keys=True))
+          PY
+          echo 'This package came from the patched-source producer in this workflow run; the base SHA itself is not what this run validates.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install the platform software Vulkan driver and virtual display
         run: |
           sudo apt-get update
@@ -1723,6 +2059,35 @@ jobs:
       matrix:
         configuration: [Release, Dist]
     steps:
+      - name: Download patched-source identity from this run's Linux producer
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/download-artifact@v6
+        with:
+          name: patch-validation-identity-linux-${{ github.run_id }}
+          path: ${{ runner.temp }}/Patch Source Identity
+
+      - name: Label package verification as experimental patched-source validation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        env:
+          EXPECTED_PATCH_BASE_SHA: ${{ inputs.patch_base_sha }}
+          EXPECTED_PATCH_SHA256: ${{ inputs.patch_sha256 }}
+        run: |
+          python3 - "$RUNNER_TEMP/Patch Source Identity/patch-validation-identity.json" <<'PY'
+          import json, os, re, sys
+          with open(sys.argv[1], encoding="utf-8") as identity_file:
+              identity = json.load(identity_file)
+          if identity.get("validation_kind") != "EXPERIMENTAL_PATCHED_SOURCE":
+              raise SystemExit("downloaded producer identity is not an experimental patch identity")
+          if identity.get("base_sha", "").lower() != os.environ["EXPECTED_PATCH_BASE_SHA"].lower():
+              raise SystemExit("package producer base SHA differs from this workflow dispatch")
+          if identity.get("patch_sha256", "").lower() != os.environ["EXPECTED_PATCH_SHA256"].lower():
+              raise SystemExit("package producer patch hash differs from this workflow dispatch")
+          if not re.fullmatch(r"[0-9a-f]{40}", identity.get("resulting_tree", "")):
+              raise SystemExit("package producer did not record a valid resulting Git tree")
+          print(json.dumps(identity, ensure_ascii=False, sort_keys=True))
+          PY
+          echo 'This package came from the patched-source producer in this workflow run; the base SHA itself is not what this run validates.' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install the platform software Vulkan driver and virtual display
         run: |
           sudo apt-get update
