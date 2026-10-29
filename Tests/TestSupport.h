@@ -1,6 +1,8 @@
 #pragma once
 
+#include <filesystem>
 #include <iostream>
+#include <string>
 #include <string_view>
 
 class TestRunner
@@ -27,6 +29,15 @@ private:
 	int m_AssertionCount = 0;
 	int m_FailureCount = 0;
 };
+
+namespace TestSupport
+{
+	inline void WritePathUtf8(std::ostream& Output, const std::filesystem::path& Path)
+	{
+		const std::u8string EncodedPath = Path.generic_u8string();
+		Output.write(reinterpret_cast<const char*>(EncodedPath.data()), static_cast<std::streamsize>(EncodedPath.size()));
+	}
+}
 
 #define PF_CHECK(Runner, Expression) (Runner).Check(static_cast<bool>(Expression), #Expression, __FILE__, __LINE__)
 

@@ -7,6 +7,7 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 
@@ -34,7 +35,8 @@ namespace PulseForge
 		RegistryBuildFailed,
 		StartSceneNotFound,
 		StartSceneWrongType,
-		DocumentTooLarge
+		DocumentTooLarge,
+		Cancelled
 	};
 
 	struct ProjectError
@@ -62,7 +64,8 @@ namespace PulseForge
 			std::string Name);
 		[[nodiscard]] static std::expected<Project, ProjectError> Open(
 			const std::filesystem::path& ProjectFile,
-			DiagnosticRecorder* Diagnostics = nullptr);
+			DiagnosticRecorder* Diagnostics = nullptr,
+			std::stop_token CancellationToken = {});
 
 		Project(const Project&) = delete;
 		Project& operator=(const Project&) = delete;

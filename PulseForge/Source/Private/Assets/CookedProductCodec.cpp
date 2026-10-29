@@ -124,15 +124,20 @@ namespace PulseForge
 				GetEnvironmentFloatCount(Description) <= MaximumEnvironmentPayloadBytes / sizeof(float);
 		}
 
-		bool AppendLevelFloats(std::vector<std::byte>& Payload, const FloatCubeLevel& Level, uint32_t ExpectedSize)
+		bool AppendLevelFloats(std::vector<std::byte>& Payload, const FloatCubeLevel& Level, uint32_t ExpectedSize,
+			std::stop_token CancellationToken)
 		{
 			const uint64_t FloatCount = static_cast<uint64_t>(ExpectedSize) * ExpectedSize * 4;
 			if (Level.Size != ExpectedSize) return false;
 			for (const auto& Face : Level.Faces)
 			{
-				if (Face.size() != FloatCount || !std::ranges::all_of(Face, [](float Value) { return std::isfinite(Value); }))
-					return false;
-				for (float Value : Face) AppendFloat(Payload, Value);
+				if (Face.size() != FloatCount) return false;
+				for (size_t Index = 0; Index < Face.size(); ++Index)
+				{
+					if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested()) return false;
+					if (!std::isfinite(Face[Index])) return false;
+					AppendFloat(Payload, Face[Index]);
+				}
 			}
 			return true;
 		}
@@ -185,8 +190,10 @@ namespace PulseForge
 		return Description;
 	}
 
-	std::expected<std::vector<std::byte>, std::string> Detail::EncodeMeshProduct(const ImportedGltfMesh& Mesh)
+	std::expected<std::vector<std::byte>, std::string> Detail::EncodeMeshProduct(
+		const ImportedGltfMesh& Mesh, std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested()) return std::unexpected("Mesh product encoding cancelled");
 		if (Mesh.Name.size() > 4096 || Mesh.Vertices.empty() || Mesh.Vertices.size() > MaximumMeshVertices ||
 			Mesh.Indices.empty() || Mesh.Indices.size() > MaximumMeshIndices || Mesh.Indices.size() % 3 != 0)
 			return std::unexpected("Mesh product exceeds artifact bounds");
@@ -201,15 +208,24 @@ namespace PulseForge
 		for (unsigned char Character : Mesh.Name) Out.push_back(static_cast<std::byte>(Character));
 		AppendU32(Out, static_cast<uint32_t>(Mesh.Vertices.size()));
 		AppendU32(Out, static_cast<uint32_t>(Mesh.Indices.size()));
-		for (const auto& Vertex : Mesh.Vertices)
+		for (size_t VertexIndex = 0; VertexIndex < Mesh.Vertices.size(); ++VertexIndex)
 		{
+			if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+				return std::unexpected("Mesh product encoding cancelled");
+			const auto& Vertex = Mesh.Vertices[VertexIndex];
 			for (float Value : Vertex.Position) AppendFloat(Out, Value);
 			for (float Value : Vertex.Color) AppendFloat(Out, Value);
 			for (float Value : Vertex.TexCoord) AppendFloat(Out, Value);
 			for (float Value : Vertex.Normal) AppendFloat(Out, Value);
 			for (float Value : Vertex.Tangent) AppendFloat(Out, Value);
 		}
-		for (uint32_t Index : Mesh.Indices) AppendU32(Out, Index);
+		for (size_t Index = 0; Index < Mesh.Indices.size(); ++Index)
+		{
+			if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested())
+				return std::unexpected("Mesh product encoding cancelled");
+			AppendU32(Out, Mesh.Indices[Index]);
+		}
+		if (CancellationToken.stop_requested()) return std::unexpected("Mesh product encoding cancelled");
 		return Out;
 	}
 
@@ -246,11 +262,14 @@ namespace PulseForge
 		return Mesh;
 	}
 
-	std::expected<std::vector<std::byte>, std::string> Detail::EncodeTextureProduct(const PreparedTextureCpuProduct& Texture)
+	std::expected<std::vector<std::byte>, std::string> Detail::EncodeTextureProduct(
+		const PreparedTextureCpuProduct& Texture, std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested()) return std::unexpected("Texture product encoding cancelled");
 		uint64_t TotalPixels = 0;
 		for (const auto& Mip : Texture.MipLevels)
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected("Texture product encoding cancelled");
 			if (Mip.Pixels.size() > MaximumProductBytes - TotalPixels)
 				return std::unexpected("Texture product exceeds artifact byte limit");
 			TotalPixels += Mip.Pixels.size();
@@ -271,18 +290,25 @@ namespace PulseForge
 		uint32_t Width = Texture.Width, Height = Texture.Height;
 		for (const auto& Mip : Texture.MipLevels)
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected("Texture product encoding cancelled");
 			const uint64_t Expected = static_cast<uint64_t>(Width) * Height * 4;
 			if (Mip.Width != Width || Mip.Height != Height || Mip.Pixels.size() != Expected)
 				return std::unexpected("Texture mip layout is inconsistent");
 			AppendU32(Output, Width);
 			AppendU32(Output, Height);
 			AppendU32(Output, static_cast<uint32_t>(Mip.Pixels.size()));
-			for (uint8_t Value : Mip.Pixels) Output.push_back(static_cast<std::byte>(Value));
+			for (size_t Index = 0; Index < Mip.Pixels.size(); ++Index)
+			{
+				if ((Index & 0xffffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected("Texture product encoding cancelled");
+				Output.push_back(static_cast<std::byte>(Mip.Pixels[Index]));
+			}
 			Width = std::max(1u, Width / 2);
 			Height = std::max(1u, Height / 2);
 		}
 		if (Width != 1 || Height != 1 || Output.size() > MaximumProductBytes)
 			return std::unexpected("Texture mip chain is incomplete");
+		if (CancellationToken.stop_requested()) return std::unexpected("Texture product encoding cancelled");
 		return Output;
 	}
 
@@ -405,8 +431,10 @@ namespace PulseForge
 	}
 
 	std::expected<std::vector<std::byte>, std::string> Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(
-		const EnvironmentLightingData& Data, const EnvironmentProcessingDesc& Description)
+		const EnvironmentLightingData& Data, const EnvironmentProcessingDesc& Description,
+		std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested()) return std::unexpected("Environment product encoding cancelled");
 		if (!IsValidEnvironmentDescription(Description))
 			return std::unexpected("Environment artifact processing dimensions or samples exceed bounds");
 		const uint32_t MipCount = GetMipCount(Description.SpecularFaceSize);
@@ -426,16 +454,23 @@ namespace PulseForge
 			AppendU32(Payload, Description.PrefilterSamples);
 			AppendU32(Payload, Description.BrdfSamples);
 			AppendU32(Payload, MipCount);
-			if (!AppendLevelFloats(Payload, Data.Environment, Description.EnvironmentFaceSize) ||
-				!AppendLevelFloats(Payload, Data.DiffuseIrradiance, Description.IrradianceFaceSize))
+			if (!AppendLevelFloats(Payload, Data.Environment, Description.EnvironmentFaceSize, CancellationToken) ||
+				!AppendLevelFloats(Payload, Data.DiffuseIrradiance, Description.IrradianceFaceSize, CancellationToken))
+			{
+				if (CancellationToken.stop_requested()) return std::unexpected("Environment product encoding cancelled");
 				return std::unexpected("Environment or irradiance cube has an invalid layout or non-finite channel");
+			}
 			uint32_t MipSize = Description.SpecularFaceSize;
 			for (const FloatCubeLevel& Level : Data.PrefilteredSpecular)
 			{
-				if (!AppendLevelFloats(Payload, Level, MipSize))
+				if (!AppendLevelFloats(Payload, Level, MipSize, CancellationToken))
+				{
+					if (CancellationToken.stop_requested()) return std::unexpected("Environment product encoding cancelled");
 					return std::unexpected("Specular cube mip has an invalid layout or non-finite channel");
+				}
 				MipSize = std::max(1u, MipSize / 2);
 			}
+			if (CancellationToken.stop_requested()) return std::unexpected("Environment product encoding cancelled");
 			return Payload;
 		}
 		catch (const std::bad_alloc&)
@@ -506,13 +541,20 @@ namespace PulseForge
 	}
 
 	std::expected<std::vector<std::byte>, std::string> Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(
-		const ImportedFloatImage& Image, uint32_t Samples)
+		const ImportedFloatImage& Image, uint32_t Samples, std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested()) return std::unexpected("BRDF LUT encoding cancelled");
 		if (Image.Width == 0 || Image.Width > 2048 || Image.Height != Image.Width || Samples == 0 || Samples > 4096 ||
 			Image.RGBA32FPixels.size() != static_cast<uint64_t>(Image.Width) * Image.Height * 4 ||
-			Image.RGBA32FPixels.size() * sizeof(float) > MaximumEnvironmentPayloadBytes ||
-			!std::ranges::all_of(Image.RGBA32FPixels, [](float Value) { return std::isfinite(Value); }))
+			Image.RGBA32FPixels.size() * sizeof(float) > MaximumEnvironmentPayloadBytes)
 			return std::unexpected("BRDF LUT dimensions, sample count, or pixels are invalid");
+		for (size_t Index = 0; Index < Image.RGBA32FPixels.size(); ++Index)
+		{
+			if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested())
+				return std::unexpected("BRDF LUT encoding cancelled");
+			if (!std::isfinite(Image.RGBA32FPixels[Index]))
+				return std::unexpected("BRDF LUT dimensions, sample count, or pixels are invalid");
+		}
 		try
 		{
 			std::vector<std::byte> Payload;
@@ -521,7 +563,13 @@ namespace PulseForge
 			AppendU32(Payload, Image.Width);
 			AppendU32(Payload, Image.Height);
 			AppendU32(Payload, Samples);
-			for (float Value : Image.RGBA32FPixels) AppendFloat(Payload, Value);
+			for (size_t Index = 0; Index < Image.RGBA32FPixels.size(); ++Index)
+			{
+				if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected("BRDF LUT encoding cancelled");
+				AppendFloat(Payload, Image.RGBA32FPixels[Index]);
+			}
+			if (CancellationToken.stop_requested()) return std::unexpected("BRDF LUT encoding cancelled");
 			return Payload;
 		}
 		catch (const std::bad_alloc&)

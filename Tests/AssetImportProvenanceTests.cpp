@@ -167,6 +167,14 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	const auto RecipeAsset = UUID::Generate();
 	PF_CHECK(Tests, RecipeAsset.has_value());
 	if (!RecipeAsset) return;
+	const std::vector<std::byte> FingerprintedBytes = MakeTriangleBytes();
+	const AssetContentFingerprint OrdinaryFingerprint = ComputeAssetContentFingerprint(FingerprintedBytes);
+	const auto CancellableFingerprint = ComputeAssetContentFingerprintCancellable(FingerprintedBytes, {});
+	PF_CHECK(Tests, CancellableFingerprint && *CancellableFingerprint == OrdinaryFingerprint);
+	std::stop_source FingerprintStop;
+	FingerprintStop.request_stop();
+	const auto CancelledFingerprint = ComputeAssetContentFingerprintCancellable(FingerprintedBytes, FingerprintStop.get_token());
+	PF_CHECK(Tests, !CancelledFingerprint && CancelledFingerprint.error().find("cancelled") != std::string::npos);
 	AssetFingerprintBuilder IdenticalContent("test-identical-input");
 	IdenticalContent.UpdateText("value", "same");
 	const AssetContentFingerprint IdenticalFingerprint = IdenticalContent.Finish();

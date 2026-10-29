@@ -19,6 +19,8 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentHostTestEditor.cpp
 		PulseForgeEditor/Source/Private/EditorPerformancePanel.cpp
+		PulseForgeEditor/Source/Private/EditorBuildProfilePanel.cpp
+		PulseForgeEditor/Source/Private/EditorBuildProfileController.cpp
 		PulseForgeEditor/Source/Private/EditorPerformanceCaptureService.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp
@@ -68,9 +70,10 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForge/Vendor/spdlog/include
 	)
 	target_link_libraries(PulseForgeEditorUI
-		PUBLIC PulseForgeRenderer PulseForgeEditorCore
+		PUBLIC PulseForgeRenderer PulseForgeEditorCore PulseForgeAssetExportService
 		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeAssetDependencyCatalog
+			PulseForgeBuildProfiles
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
 	)
@@ -128,11 +131,14 @@ if(PULSEFORGE_BUILD_EDITOR)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE
-		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeInput PulseForgeImGui spdlog::spdlog)
+		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeInput PulseForgeImGui
+		PulseForgeBuildProfiles PulseForgeAssetExportService spdlog::spdlog)
 	if(WIN32)
 		target_link_libraries(PulseForgeEditor PRIVATE shell32 ole32 dwmapi)
 	endif()
 	pulseforge_runtime_resource_directory(PulseForgeEditor PULSEFORGE_EDITOR_RESOURCE_DIRECTORY)
+	pulseforge_stage_macos_vulkan_runtime(PulseForgeEditor "${PULSEFORGE_EDITOR_RESOURCE_DIRECTORY}"
+		"${PULSEFORGE_EDITOR_RENDERER}")
 	pulseforge_attach_asset_deployment(PulseForgeEditor "${PULSEFORGE_EDITOR_RESOURCE_DIRECTORY}/EditorAssets"
 		DIRECTORIES
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts" "Fonts"

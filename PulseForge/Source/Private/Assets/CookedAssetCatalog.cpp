@@ -192,12 +192,25 @@ namespace PulseForge
 
 	CookedAssetDigest CookedAssetCatalog::ComputePayloadDigest(std::span<const std::byte> Bytes)
 	{
+		auto Digest = ComputePayloadDigestCancellable(Bytes, {});
+		return Digest ? std::move(*Digest) : CookedAssetDigest{};
+	}
+
+	std::expected<CookedAssetDigest, std::string> CookedAssetCatalog::ComputePayloadDigestCancellable(
+		std::span<const std::byte> Bytes, std::stop_token CancellationToken)
+	{
+		if (CancellationToken.stop_requested()) return std::unexpected("Payload digesting was cancelled");
 		XXH3_state_t* State = XXH3_createState();
 		if (!State || XXH3_128bits_reset(State) != XXH_OK)
 		{
 			if (State) (void)XXH3_freeState(State);
-			return {};
+			return std::unexpected("Could not initialize the cooked payload digest state");
 		}
+		struct StateGuard final
+		{
+			XXH3_state_t* State;
+			~StateGuard() { if (State) (void)XXH3_freeState(State); }
+		} Guard{ State };
 		constexpr std::string_view Domain = "PulseForge.CookedPayload.v1";
 		std::array<std::byte, sizeof(uint64_t)> EncodedLength{};
 		const uint64_t Length = Bytes.size();
@@ -205,16 +218,26 @@ namespace PulseForge
 			EncodedLength[I] = static_cast<std::byte>((Length >> (I * 8)) & 0xffu);
 		(void)XXH3_128bits_update(State, Domain.data(), Domain.size());
 		(void)XXH3_128bits_update(State, EncodedLength.data(), EncodedLength.size());
-		if (!Bytes.empty()) (void)XXH3_128bits_update(State, Bytes.data(), Bytes.size());
+		constexpr size_t ChunkBytes = 1024 * 1024;
+		for (size_t Offset = 0; Offset < Bytes.size();)
+		{
+			if (CancellationToken.stop_requested()) return std::unexpected("Payload digesting was cancelled");
+			const size_t Count = std::min(ChunkBytes, Bytes.size() - Offset);
+			if (XXH3_128bits_update(State, Bytes.data() + Offset, Count) != XXH_OK)
+				return std::unexpected("Cooked payload digest update failed");
+			Offset += Count;
+		}
+		if (CancellationToken.stop_requested()) return std::unexpected("Payload digesting was cancelled");
 		const XXH128_hash_t Hash = XXH3_128bits_digest(State);
-		(void)XXH3_freeState(State);
-		return { std::string(DigestID), Hex(Hash) };
+		return CookedAssetDigest{ std::string(DigestID), Hex(Hash) };
 	}
 
 	std::expected<std::string, CookedAssetCatalogError> CookedAssetCatalog::SerializeManifest(
 		const UUID& ProjectID, const AssetID& StartupScene, const CookedAssetCompatibility& Compatibility,
-		std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries)
+		std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries, std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled"));
 		if (ProjectID.IsNil() || StartupScene.IsNil() || Compatibility.TargetPlatform.empty() ||
 			Compatibility.RendererBackend.empty() || Compatibility.RuntimeABI.empty() ||
 			GetCookedBuildConfigurationName(Compatibility.Configuration).empty())
@@ -223,9 +246,13 @@ namespace PulseForge
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Manifest entry or root count is invalid"));
 
 		std::sort(DynamicRoots.begin(), DynamicRoots.end());
-		if (std::any_of(DynamicRoots.begin(), DynamicRoots.end(), [](const AssetID& ID) { return ID.IsNil(); }) ||
-			std::adjacent_find(DynamicRoots.begin(), DynamicRoots.end()) != DynamicRoots.end())
-			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Dynamic root IDs must be unique and non-nil"));
+		for (size_t Index = 0; Index < DynamicRoots.size(); ++Index)
+		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled"));
+			if (DynamicRoots[Index].IsNil() || (Index > 0 && DynamicRoots[Index - 1] == DynamicRoots[Index]))
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Dynamic root IDs must be unique and non-nil"));
+		}
 
 		std::sort(Entries.begin(), Entries.end(), [](const auto& A, const auto& B) { return EntryKey(A) < EntryKey(B); });
 		Json JsonEntries = Json::array();
@@ -236,6 +263,8 @@ namespace PulseForge
 		std::set<std::tuple<AssetID, uint8_t, std::string>> Identities;
 		for (CookedAssetEntry& Entry : Entries)
 		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled", Entry.Asset));
 			if (Entry.Asset.IsNil() || ProductName(Entry.Product).empty() || Entry.PayloadVersion == 0 ||
 				!IsSafeRelativePayloadPath(Entry.RelativePayloadPath) || Entry.PayloadBytes == 0 ||
 				Entry.PayloadBytes > MaximumPayloadBytes || Entry.DigestAlgorithm != DigestID || Entry.Digest.size() != 32)
@@ -258,13 +287,19 @@ namespace PulseForge
 				return std::tuple{ A.Asset, static_cast<uint8_t>(A.Product), A.Subresource } <
 					std::tuple{ B.Asset, static_cast<uint8_t>(B.Product), B.Subresource };
 			});
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled", Entry.Asset));
 			if (std::any_of(Entry.RuntimeDependencies.begin(), Entry.RuntimeDependencies.end(), [](const auto& D) { return D.Asset.IsNil(); }) ||
 				std::adjacent_find(Entry.RuntimeDependencies.begin(), Entry.RuntimeDependencies.end()) != Entry.RuntimeDependencies.end())
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Runtime dependencies must be unique non-nil identities", Entry.Asset));
 			Json Dependencies = Json::array();
 			for (const auto& Dependency : Entry.RuntimeDependencies)
+			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled", Entry.Asset));
 				Dependencies.push_back(Json::object({ { "assetId", Dependency.Asset.ToString() },
 					{ "product", ProductName(Dependency.Product) }, { "subresource", Dependency.Subresource } }));
+			}
 			JsonEntries.push_back(Json::object({ { "assetId", Entry.Asset.ToString() },
 				{ "product", ProductName(Entry.Product) }, { "subresource", Entry.Subresource },
 				{ "payload", Entry.RelativePayloadPath }, { "payloadVersion", Entry.PayloadVersion },
@@ -273,14 +308,22 @@ namespace PulseForge
 		}
 		for (const CookedAssetEntry& Entry : Entries)
 			for (const CookedAssetDependency& Dependency : Entry.RuntimeDependencies)
+			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled", Entry.Asset));
 				if (!Identities.contains({ Dependency.Asset, static_cast<uint8_t>(Dependency.Product), Dependency.Subresource }))
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {},
 						"Runtime dependency target is absent from cooked entries", Dependency.Asset));
+			}
 		if (!HasStartupScene)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Startup scene has no cooked scene payload", StartupScene));
 		for (const AssetID DynamicRoot : DynamicRoots)
+		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled", DynamicRoot));
 			if (!Assets.contains(DynamicRoot))
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Dynamic root is absent from cooked entries", DynamicRoot));
+		}
 
 		Json Roots = Json::array();
 		for (const AssetID Root : DynamicRoots) Roots.push_back(Root.ToString());
@@ -291,6 +334,8 @@ namespace PulseForge
 			{ "configuration", GetCookedBuildConfigurationName(Compatibility.Configuration) },
 			{ "dynamicRoots", std::move(Roots) }, { "entries", std::move(JsonEntries) } });
 		std::string Data = Manifest.dump(2) + "\n";
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled"));
 		if (Data.size() > MaximumManifestBytes)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::ManifestTooLarge, {}, "Cook manifest exceeds its 16 MiB limit"));
 		return Data;

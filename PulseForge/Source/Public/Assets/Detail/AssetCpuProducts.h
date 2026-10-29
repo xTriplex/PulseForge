@@ -56,8 +56,9 @@ namespace PulseForge::Detail
 		const AssetImportRecipe& Recipe, const AssetID& Asset, std::string_view EffectiveSettings);
 	[[nodiscard]] PULSEFORGE_API DerivedDataArtifactKey MakeTextureArtifactKey(
 		const AssetContentFingerprint& Source, ImageColorSpace ColorSpace);
-	[[nodiscard]] PULSEFORGE_API std::vector<PreparedMipLevel> BuildTextureMipChain(
-		uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, ImageColorSpace ColorSpace);
+	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<PreparedMipLevel>, std::string> BuildTextureMipChain(
+		uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, ImageColorSpace ColorSpace,
+		std::stop_token CancellationToken = {});
 	// CPU-only preparation. A cache hit returns a validated owned product without calling the processor.
 	// Processor overrides are per-call deterministic test seams; normal consumers use the production importer.
 	[[nodiscard]] PULSEFORGE_API std::expected<AssetCpuProductResult<ImportedGltfMesh>, std::string> PrepareMeshCpuProduct(

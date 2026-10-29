@@ -19,8 +19,8 @@ namespace PulseForge
 	{
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::ShadowTargetCache::Initialize(const BindingLayoutHandle& DirectionalLayout,
-		const BindingLayoutHandle& SpotlightLayout, const BindingLayoutHandle& PointLightLayout, const Sampler& ShadowSampler,
+	std::expected<void, SceneRendererError> SceneRenderer::ShadowTargetCache::Initialize(const BindingLayoutHandle& ShadowLayout,
+		const BindingLayoutHandle& PointLightLayout, const Sampler& ShadowSampler,
 		const Texture& FallbackPointShadowTexture)
 	{
 		constexpr uint32_t DirectionalShadowResolution = 1024;
@@ -40,25 +40,20 @@ namespace PulseForge
 			DirectionalTargets[CascadeIndex] = std::move(*Target);
 		}
 
-		BindingSetDesc DirectionalDescription;
-		DirectionalDescription.Layout = DirectionalLayout;
+		BindingSetDesc ShadowDescription;
+		ShadowDescription.Layout = ShadowLayout;
+		const uint32_t DirectionalShadowCount = static_cast<uint32_t>(DirectionalTargets.size());
 		for (uint32_t CascadeIndex = 0; CascadeIndex < DirectionalTargets.size(); ++CascadeIndex)
-			DirectionalDescription.Textures.push_back({ CascadeIndex, std::cref(*DirectionalTargets[CascadeIndex]->GetDepthTexture()) });
-		DirectionalDescription.Samplers.push_back({ 0, std::cref(ShadowSampler) });
-		auto DirectionalBindings = m_Runtime.CreateBindingSet(DirectionalDescription);
-		if (!DirectionalBindings)
+		{
+			const Texture& Texture = *DirectionalTargets[CascadeIndex]->GetDepthTexture();
+			ShadowDescription.Textures.push_back({ CascadeIndex, std::cref(Texture) });
+			ShadowDescription.Textures.push_back({ CascadeIndex + DirectionalShadowCount, std::cref(Texture) });
+		}
+		ShadowDescription.Samplers.push_back({ 0, std::cref(ShadowSampler) });
+		auto ShadowBindings = m_Runtime.CreateBindingSet(ShadowDescription);
+		if (!ShadowBindings)
 			return std::unexpected(
-				MakeShadowTargetResourceError("Could not create directional shadow bindings: " + DirectionalBindings.error().Message));
-
-		BindingSetDesc SpotlightDescription;
-		SpotlightDescription.Layout = SpotlightLayout;
-		for (uint32_t ShadowIndex = 0; ShadowIndex < DirectionalTargets.size(); ++ShadowIndex)
-			SpotlightDescription.Textures.push_back({ ShadowIndex, std::cref(*DirectionalTargets[ShadowIndex]->GetDepthTexture()) });
-		SpotlightDescription.Samplers.push_back({ 0, std::cref(ShadowSampler) });
-		auto SpotlightBindings = m_Runtime.CreateBindingSet(SpotlightDescription);
-		if (!SpotlightBindings)
-			return std::unexpected(MakeShadowTargetResourceError(
-				"Could not create safe initial spotlight shadow bindings: " + SpotlightBindings.error().Message));
+				MakeShadowTargetResourceError("Could not create combined shadow bindings: " + ShadowBindings.error().Message));
 
 		BindingSetDesc PointLightDescription;
 		PointLightDescription.Layout = PointLightLayout;
@@ -71,8 +66,7 @@ namespace PulseForge
 				MakeShadowTargetResourceError("Could not create fallback point-shadow bindings: " + PointLightBindings.error().Message));
 
 		m_DirectionalTargets = std::move(DirectionalTargets);
-		m_DirectionalBindings = std::move(*DirectionalBindings);
-		m_SpotlightBindings = std::move(*SpotlightBindings);
+		m_ShadowBindings = std::move(*ShadowBindings);
 		m_PointLightBindings = std::move(*PointLightBindings);
 		return {};
 	}
@@ -102,8 +96,11 @@ namespace PulseForge
 
 		BindingSetDesc Description;
 		Description.Layout = Layout;
+		const uint32_t DirectionalShadowCount = static_cast<uint32_t>(m_DirectionalTargets.size());
+		for (uint32_t CascadeIndex = 0; CascadeIndex < m_DirectionalTargets.size(); ++CascadeIndex)
+			Description.Textures.push_back({ CascadeIndex, std::cref(*m_DirectionalTargets[CascadeIndex]->GetDepthTexture()) });
 		for (uint32_t ShadowIndex = 0; ShadowIndex < Targets.size(); ++ShadowIndex)
-			Description.Textures.push_back({ ShadowIndex, std::cref(*Targets[ShadowIndex]->GetDepthTexture()) });
+			Description.Textures.push_back({ ShadowIndex + DirectionalShadowCount, std::cref(*Targets[ShadowIndex]->GetDepthTexture()) });
 		Description.Samplers.push_back({ 0, std::cref(ShadowSampler) });
 		auto Bindings = m_Runtime.CreateBindingSet(Description);
 		if (!Bindings)
@@ -111,7 +108,7 @@ namespace PulseForge
 				MakeShadowTargetResourceError("Could not create spotlight shadow bindings: " + Bindings.error().Message));
 
 		m_SpotlightTargets = std::move(Targets);
-		m_SpotlightBindings = std::move(*Bindings);
+		m_ShadowBindings = std::move(*Bindings);
 		m_SpotlightResourceGeneration = Detail::AdvanceSceneRendererGeneration(m_SpotlightResourceGeneration);
 		PF_CORE_INFO("Created {0} persistent {1}x{1} D32 spotlight shadow maps ({2} MiB depth storage)", MaxSpotlightShadowMapCount,
 			SpotlightShadowMapResolution,
@@ -170,14 +167,9 @@ namespace PulseForge
 				   : nullptr;
 	}
 
-	const BindingSet& SceneRenderer::ShadowTargetCache::DirectionalBindings() const noexcept
+	const BindingSet& SceneRenderer::ShadowTargetCache::ShadowBindings() const noexcept
 	{
-		return *m_DirectionalBindings;
-	}
-
-	const BindingSet& SceneRenderer::ShadowTargetCache::SpotlightBindings() const noexcept
-	{
-		return *m_SpotlightBindings;
+		return *m_ShadowBindings;
 	}
 
 	const BindingSet& SceneRenderer::ShadowTargetCache::PointLightBindings() const noexcept

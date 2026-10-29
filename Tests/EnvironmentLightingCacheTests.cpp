@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -211,6 +212,16 @@ void RunEnvironmentLightingCacheTests(TestRunner& Tests)
 		return;
 	const EnvironmentProcessingDesc Description = MakeSmallDescription();
 	const EnvironmentLightingData Original = MakeData(Description);
+	ImportedFloatImage CancellationSource;
+	CancellationSource.Width = 1;
+	CancellationSource.Height = 1;
+	CancellationSource.RGBA32FPixels.assign(4, 0.5f);
+	std::stop_source EnvironmentStop;
+	EnvironmentStop.request_stop();
+	const auto CancelledEnvironment = ProcessEnvironmentImage(
+		CancellationSource, Description, EnvironmentStop.get_token());
+	PF_CHECK(Tests, !CancelledEnvironment &&
+		CancelledEnvironment.error().Code == EnvironmentProcessingErrorCode::Cancelled);
 	const auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(Original, Description);
 	PF_CHECK(Tests, Encoded.has_value());
 	if (!Encoded)
@@ -315,6 +326,12 @@ void RunEnvironmentLightingCacheTests(TestRunner& Tests)
 	const DerivedDataArtifactStoreOptions CpuStoreOptions{ Root.Path / "CpuPreparationArtifacts", true,
 		16 * 1024 * 1024, 8 * 1024 * 1024, 16 };
 	const EnvironmentProcessingDesc CpuProcessing = MakeSmallDescription();
+	std::stop_source CancelledPreparation;
+	CancelledPreparation.request_stop();
+	const auto CancelledCpuPreparation = Detail::PrepareEnvironmentCpuProduct(
+		HdrMetadata->ID, ProjectRoot, HdrRegistry, nullptr, CpuProcessing, CancelledPreparation.get_token());
+	PF_CHECK(Tests, !CancelledCpuPreparation &&
+		CancelledCpuPreparation.error().Message.find("cancelled") != std::string::npos);
 	Detail::EnvironmentCpuPreparationResult ColdProduct;
 	{
 		DerivedDataArtifactStore CpuStore(CpuStoreOptions);

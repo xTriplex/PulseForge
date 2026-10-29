@@ -49,6 +49,8 @@
 #include "Editor/EditorMainMenuPanel.h"
 #include "Editor/EditorPerformancePanel.h"
 #include "Editor/EditorPerformanceCaptureService.h"
+#include "Editor/EditorBuildProfilePanel.h"
+#include "Editor/EditorBuildProfileController.h"
 #include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
@@ -922,6 +924,7 @@ namespace
 
 		void OnDetach() override
 		{
+			m_BuildProfileController.Shutdown("Editor shutdown");
 			m_DeferredEditorOperations.Clear();
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
@@ -1878,6 +1881,7 @@ namespace
 		bool ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
 		{
 			if (!FinishSceneEdit()) return false;
+			m_BuildProfileController.ProjectChanged("Project changed");
 			auto StartupScene = std::move(Prepared.StartupScene);
 			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
@@ -4742,6 +4746,7 @@ namespace
 		void CloseProjectNow()
 		{
 			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); })) return;
+			m_BuildProfileController.ProjectChanged("Project closed");
 			ClearScene();
 			ResetViewportSceneRenderer();
 			ClearGameplayInputProject();
@@ -5240,6 +5245,98 @@ namespace
 			case PulseForgeEditor::EditorPerformanceActionKind::None:
 				break;
 			}
+		}
+
+		std::string BuildProfileExportDirtyReason() const
+		{
+			if (!m_Project) return "Open a project before exporting.";
+			if (m_SceneRuntime) return "Stop Play mode before exporting saved project content.";
+			if (m_SceneEditController.IsActive() || m_SceneEditController.IsDirty())
+				return "The Level Editor has an active or unsaved edit. Export reads saved project files only; finish and save the scene first.";
+			if (!m_MaterialDrafts.GetDirtyAssets(*m_Project).empty())
+				return "Material Details has unsaved changes. Export reads saved project files only; save the material first.";
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+			{
+				if (Identity.Project == m_Project->GetDescription().ID && Session.IsDirty())
+					return "An open document has unsaved changes. Export reads saved project files only; save or close dirty documents first.";
+			}
+			return {};
+		}
+
+		PulseForgeEditor::EditorBuildProfileProjectContext BuildProfileProjectContext() const
+		{
+			PulseForgeEditor::EditorBuildProfileProjectContext Context;
+			if (m_Project)
+			{
+				Context.SavedProjectFile = m_Project->GetFilePath();
+				Context.ProjectStartupScene = m_Project->GetDescription().StartScene;
+			}
+			Context.CurrentSceneAsset = m_SceneAsset;
+			Context.DirtyReason = BuildProfileExportDirtyReason();
+			return Context;
+		}
+
+		void ResolveBuildProfileDialogIntent(const PulseForgeEditor::EditorBuildProfileDialogIntent& Intent)
+		{
+			using PulseForgeEditor::EditorBuildProfileDialogKind;
+			std::optional<std::filesystem::path> SelectedPath;
+			switch (Intent.Kind)
+			{
+			case EditorBuildProfileDialogKind::LoadProfile:
+			{
+				static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "PulseForge Build Profile", "pfbuildprofile" };
+				SelectedPath = ShowOpenDialog(&Filter, Intent.InitialDirectory);
+				break;
+			}
+			case EditorBuildProfileDialogKind::SaveProfileAs:
+			{
+				static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "PulseForge Build Profile", "pfbuildprofile" };
+				SelectedPath = ShowSaveDialog(&Filter, Intent.InitialDirectory, Intent.SuggestedFilename.c_str());
+				break;
+			}
+			case EditorBuildProfileDialogKind::SelectTemplate:
+			{
+				static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "Player template descriptor", "json" };
+				SelectedPath = ShowOpenDialog(&Filter, Intent.InitialDirectory);
+				break;
+			}
+			}
+			m_BuildProfileController.ResolveDialogResult(Intent, SelectedPath);
+		}
+
+		void HandleBuildProfileAction(const PulseForgeEditor::EditorBuildProfileAction& Action,
+			const PulseForgeEditor::EditorBuildProfileProjectContext& Context)
+		{
+			if (auto Intent = m_BuildProfileController.HandleAction(Action, Context))
+				ResolveBuildProfileDialogIntent(*Intent);
+		}
+
+		void DrawBuildProfilesPanel()
+		{
+			bool* IsOpen = m_Layout.GetPanelVisibility(PulseForgeEditor::EditorPanel::BuildProfiles);
+			if (!IsOpen || !*IsOpen) return;
+			const ImGuiWindowClass UtilityClass = PulseForgeEditor::MakeEditorDockingClass(
+				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::SetNextWindowClass(&UtilityClass);
+			const bool WasOpen = *IsOpen;
+			const bool ContentsVisible = ImGui::Begin("Build Profiles###BuildProfiles", IsOpen);
+			const bool DockingDomainValid = PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			const PulseForgeEditor::EditorBuildProfileProjectContext Context = BuildProfileProjectContext();
+			const PulseForgeEditor::EditorBuildProfilePanelState State = m_BuildProfileController.GetPanelState(Context);
+			PulseForgeEditor::EditorBuildProfileDrawResult DrawResult;
+			if (ContentsVisible && DockingDomainValid)
+				DrawResult = m_BuildProfilePanel.DrawContents(State.Profile ? &*State.Profile : nullptr,
+					PathToUtf8(State.ProfilePath), PathToUtf8(State.TemplateDescriptorPath), State.ProjectOpen, State.SavedContentReady,
+					State.Export, State.StatusMessage, m_EditorStyle);
+			ImGui::End();
+			if (WasOpen != *IsOpen)
+			{
+				m_Layout.MarkSettingsDirty();
+				HandleEditorPanelVisibilityChange(PulseForgeEditor::EditorPanel::BuildProfiles);
+			}
+			m_BuildProfileController.ApplyProfileEdit(std::move(DrawResult.UpdatedProfile));
+			HandleBuildProfileAction(DrawResult.Action, Context);
 		}
 
 		void ExecuteMainMenuAction(const PulseForgeEditor::EditorMainMenuAction& Action)
@@ -6659,6 +6756,7 @@ namespace
 				DrawConsolePanel();
 				DrawPerformancePanel();
 			}
+			DrawBuildProfilesPanel();
 			DrawNativeDocumentHosts();
 			DrawInputMappingPanel();
 			m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
@@ -6704,6 +6802,7 @@ namespace
 			case PulseForgeEditor::EditorPanel::Scene:
 			case PulseForgeEditor::EditorPanel::MaterialDetails:
 			case PulseForgeEditor::EditorPanel::Performance:
+			case PulseForgeEditor::EditorPanel::BuildProfiles:
 			case PulseForgeEditor::EditorPanel::Count:
 				return;
 			}
@@ -8697,6 +8796,8 @@ namespace
 		bool m_OpenAssetMoveConfirmation = false;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorPerformancePanel m_PerformancePanel;
+		PulseForgeEditor::EditorBuildProfilePanel m_BuildProfilePanel;
+		PulseForgeEditor::EditorBuildProfileController m_BuildProfileController;
 		PulseForgeEditor::EditorStatusPanel m_StatusPanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorMainMenuPanel m_MainMenuPanel;

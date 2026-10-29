@@ -105,8 +105,11 @@ namespace PulseForge
 
 		std::expected<ByteVector, GltfMeshImportError> ReadFile(
 			const std::filesystem::path& Path,
-			uint64_t MaximumBytes)
+			uint64_t MaximumBytes,
+			std::stop_token CancellationToken)
 		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF input read was cancelled"));
 			std::error_code FileError;
 			const std::filesystem::file_status Status = std::filesystem::symlink_status(Path, FileError);
 			if (FileError || std::filesystem::is_symlink(Status) || !std::filesystem::is_regular_file(Status))
@@ -134,8 +137,11 @@ namespace PulseForge
 					Path,
 					"glTF source or buffer exceeds the importer size limit"));
 			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF input read was cancelled"));
 
-			ByteVector Data(static_cast<size_t>(FileSize));
+			ByteVector Data;
+			Data.reserve(static_cast<size_t>(FileSize));
 			std::ifstream Input(Path, std::ios::binary);
 			if (!Input.is_open())
 			{
@@ -144,15 +150,24 @@ namespace PulseForge
 					Path,
 					"Could not open glTF source or buffer"));
 			}
-			if (!Data.empty())
-				Input.read(reinterpret_cast<char*>(Data.data()), static_cast<std::streamsize>(Data.size()));
-			if (!Input || Input.bad())
+			std::array<std::byte, 256 * 1024> ReadBuffer{};
+			for (uint64_t Offset = 0; Offset < FileSize; Offset += ReadBuffer.size())
 			{
-				return std::unexpected(MakeError(
-					GltfMeshImportErrorCode::FileReadFailed,
-					Path,
-					"Could not read glTF source or buffer completely"));
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF input read was cancelled"));
+				const size_t ChunkSize = static_cast<size_t>((std::min)(static_cast<uint64_t>(ReadBuffer.size()), FileSize - Offset));
+				Input.read(reinterpret_cast<char*>(ReadBuffer.data()), static_cast<std::streamsize>(ChunkSize));
+				if (!Input || Input.bad() || static_cast<size_t>(Input.gcount()) != ChunkSize)
+				{
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::FileReadFailed,
+						Path,
+						"Could not read glTF source or buffer completely"));
+				}
+				Data.insert(Data.end(), ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(ChunkSize));
 			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF input read was cancelled"));
 			return Data;
 		}
 
@@ -164,15 +179,20 @@ namespace PulseForge
 		};
 
 		std::expected<ParsedContainer, GltfMeshImportError> ParseGlb(
-			std::span<const std::byte> FileBytes, const std::filesystem::path& Path)
+			std::span<const std::byte> FileBytes, const std::filesystem::path& Path, std::stop_token CancellationToken)
 		{
-			const auto ReadRange = [FileBytes](uint64_t Offset, std::span<std::byte> Output)
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "GLB parsing was cancelled"));
+			const auto ReadRange = [FileBytes, CancellationToken](uint64_t Offset, std::span<std::byte> Output)
 			{
+				if (CancellationToken.stop_requested()) return false;
 				if (Offset > FileBytes.size() || Output.size() > FileBytes.size() - static_cast<size_t>(Offset)) return false;
 				if (!Output.empty()) std::memcpy(Output.data(), FileBytes.data() + static_cast<size_t>(Offset), Output.size());
 				return true;
 			};
 			auto Layout = Assets::Detail::InspectGlbLayout(FileBytes.size(), MaxJsonBytes, ReadRange);
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "GLB inspection was cancelled"));
 			if (!Layout)
 			{
 				const GltfMeshImportErrorCode Code = Layout.error() == "GLB JSON chunk exceeds the importer limit"
@@ -183,12 +203,24 @@ namespace PulseForge
 
 			ParsedContainer Container;
 			const auto JsonBytes = FileBytes.subspan(static_cast<size_t>(Layout->Json.Offset), Layout->Json.Length);
-			Container.JsonText.assign(reinterpret_cast<const char*>(JsonBytes.data()), JsonBytes.size());
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "GLB JSON extraction was cancelled"));
+			Container.JsonText.resize(JsonBytes.size());
+			constexpr size_t JsonCopyChunkBytes = 256 * 1024;
+			for (size_t Offset = 0; Offset < JsonBytes.size(); Offset += JsonCopyChunkBytes)
+			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "GLB JSON extraction was cancelled"));
+				const size_t Count = std::min(JsonCopyChunkBytes, JsonBytes.size() - Offset);
+				std::memcpy(Container.JsonText.data() + Offset, JsonBytes.data() + Offset, Count);
+			}
 			if (Layout->Binary)
 				Container.BinaryChunk = FileBytes.subspan(static_cast<size_t>(Layout->Binary->Offset), Layout->Binary->Length);
 
 			while (!Container.JsonText.empty())
 			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "GLB JSON normalization was cancelled"));
 				const unsigned char Character = static_cast<unsigned char>(Container.JsonText.back());
 				if (Character != '\0' && !std::isspace(Character)) break;
 				Container.JsonText.pop_back();
@@ -213,7 +245,8 @@ namespace PulseForge
 
 		std::expected<ByteVector, GltfMeshImportError> DecodeBase64(
 			std::string_view Encoded,
-			const std::filesystem::path& Path)
+			const std::filesystem::path& Path,
+			std::stop_token CancellationToken)
 		{
 			if (Encoded.empty() || Encoded.size() % 4 != 0 || Encoded.size() > MaxDecodedBufferBytes * 2)
 			{
@@ -222,11 +255,21 @@ namespace PulseForge
 					Path,
 					"Embedded glTF buffer has invalid base64 length"));
 			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF data URI decoding was cancelled"));
+			const size_t Padding = Encoded.back() == '=' ? (Encoded.size() > 1 && Encoded[Encoded.size() - 2] == '=' ? 2 : 1) : 0;
+			const uint64_t EncodedGroups = Encoded.size() / 4;
+			if (EncodedGroups > MaxDecodedBufferBytes / 3 + 1 || EncodedGroups * 3 < Padding ||
+				EncodedGroups * 3 - Padding > MaxDecodedBufferBytes)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, Path,
+					"Embedded glTF buffer exceeds the importer byte limit"));
 
 			ByteVector Decoded;
-			Decoded.reserve((Encoded.size() / 4) * 3);
+			Decoded.reserve(static_cast<size_t>(EncodedGroups * 3 - Padding));
 			for (size_t Offset = 0; Offset < Encoded.size(); Offset += 4)
 			{
+				if ((Offset & 0xffffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF data URI decoding was cancelled"));
 				const bool IsLast = Offset + 4 == Encoded.size();
 				const char C0 = Encoded[Offset];
 				const char C1 = Encoded[Offset + 1];
@@ -254,6 +297,8 @@ namespace PulseForge
 				if (!Pad3)
 					Decoded.push_back(static_cast<std::byte>(((V2 & 0x03) << 6) | V3));
 			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF data URI decoding was cancelled"));
 			return Decoded;
 		}
 
@@ -308,7 +353,8 @@ namespace PulseForge
 			const Json& Document,
 			const std::filesystem::path& SourcePath,
 			const std::filesystem::path& ProjectRoot,
-			const std::optional<std::span<const std::byte>>& GlbBinaryChunk)
+			const std::optional<std::span<const std::byte>>& GlbBinaryChunk,
+			std::stop_token CancellationToken)
 		{
 			const Json* Buffers = FindField(Document, "buffers");
 			if (Buffers == nullptr || !Buffers->is_array() || Buffers->empty())
@@ -326,6 +372,8 @@ namespace PulseForge
 			bool UsedGlbBinaryChunk = false;
 			for (size_t BufferOrdinal = 0; BufferOrdinal < Buffers->size(); ++BufferOrdinal)
 			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, SourcePath, "glTF buffer loading was cancelled"));
 				const Json& Buffer = (*Buffers)[BufferOrdinal];
 				const auto DeclaredLength = ReadUnsignedInteger(FindField(Buffer, "byteLength"), SourcePath, "buffers.byteLength");
 				if (!DeclaredLength || *DeclaredLength == 0 || *DeclaredLength > MaxDecodedBufferBytes ||
@@ -378,7 +426,7 @@ namespace PulseForge
 							return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
 								"Only base64 application/octet-stream and application/gltf-buffer data URIs are supported"));
 						}
-						auto Decoded = DecodeBase64(Encoded, SourcePath);
+						auto Decoded = DecodeBase64(Encoded, SourcePath, CancellationToken);
 						if (!Decoded) return std::unexpected(std::move(Decoded.error()));
 						OwnedData = std::move(*Decoded);
 					}
@@ -413,8 +461,11 @@ namespace PulseForge
 							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidProjectPath, ManagedBufferPath.error().Path,
 								ManagedBufferPath.error().Message));
 						}
-						auto ReadBuffer = ReadFile(*ManagedBufferPath, MaxDecodedBufferBytes);
+						auto ReadBuffer = ReadFile(*ManagedBufferPath, MaxDecodedBufferBytes, CancellationToken);
 						if (!ReadBuffer) return std::unexpected(std::move(ReadBuffer.error()));
+						if (CancellationToken.stop_requested())
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *ManagedBufferPath,
+								"glTF buffer loading was cancelled after reading an external input"));
 						std::error_code FileError;
 						const std::filesystem::path RelativeBuffer = std::filesystem::relative(*ManagedBufferPath, ProjectRoot, FileError);
 						if (FileError || RelativeBuffer.empty() || RelativeBuffer.is_absolute())
@@ -431,7 +482,12 @@ namespace PulseForge
 							"glTF buffer data is shorter than its declared byteLength"));
 					}
 					if (!ExternalInputKey.empty())
-						LoadedBuffers.ExternalInputs.push_back({ ExternalInputKey, ComputeAssetContentFingerprint(OwnedData) });
+					{
+						auto Fingerprint = ComputeAssetContentFingerprintCancellable(OwnedData, CancellationToken);
+						if (!Fingerprint)
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, SourcePath, Fingerprint.error()));
+						LoadedBuffers.ExternalInputs.push_back({ ExternalInputKey, std::move(*Fingerprint) });
+					}
 					OwnedData.resize(static_cast<size_t>(*DeclaredLength));
 					LoadedBuffers.OwnedBuffers.push_back(std::move(OwnedData));
 					BufferData = LoadedBuffers.OwnedBuffers.back();
@@ -754,11 +810,23 @@ namespace PulseForge
 		std::expected<void, GltfMeshImportError> GenerateVertexNormals(
 			std::vector<GltfMeshVertex>& Vertices,
 			std::span<const uint32_t> Indices,
-			const std::filesystem::path& Path)
+			const std::filesystem::path& Path,
+			std::stop_token CancellationToken)
 		{
-			std::vector<std::array<float, 3>> Accumulated(Vertices.size(), { 0.0f, 0.0f, 0.0f });
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF normal generation was cancelled before allocation"));
+			std::vector<std::array<float, 3>> Accumulated;
+			Accumulated.reserve(Vertices.size());
+			for (size_t Vertex = 0; Vertex < Vertices.size(); ++Vertex)
+			{
+				if ((Vertex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF normal setup was cancelled"));
+				Accumulated.push_back({ 0.0f, 0.0f, 0.0f });
+			}
 			for (size_t Triangle = 0; Triangle < Indices.size(); Triangle += 3)
 			{
+				if ((Triangle & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF normal generation was cancelled"));
 				const GltfMeshVertex& A = Vertices[Indices[Triangle]];
 				const GltfMeshVertex& B = Vertices[Indices[Triangle + 1]];
 				const GltfMeshVertex& C = Vertices[Indices[Triangle + 2]];
@@ -782,6 +850,8 @@ namespace PulseForge
 
 			for (size_t Vertex = 0; Vertex < Vertices.size(); ++Vertex)
 			{
+				if ((Vertex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF normal generation was cancelled"));
 				auto& Normal = Vertices[Vertex].Normal;
 				const auto& Sum = Accumulated[Vertex];
 				const float LengthSquared = Sum[0] * Sum[0] + Sum[1] * Sum[1] + Sum[2] * Sum[2];
@@ -805,15 +875,33 @@ namespace PulseForge
 		std::expected<void, GltfMeshImportError> GenerateVertexTangents(
 			std::vector<GltfMeshVertex>& Vertices,
 			std::vector<uint32_t>& Indices,
-			const std::filesystem::path& Path)
+			const std::filesystem::path& Path,
+			std::stop_token CancellationToken)
 		{
 			constexpr uint32_t Unassigned = std::numeric_limits<uint32_t>::max();
 			const size_t OriginalVertexCount = Vertices.size();
-			std::vector<std::array<uint32_t, 2>> RemappedVertices(OriginalVertexCount, { Unassigned, Unassigned });
-			std::vector<int8_t> AssignedSigns(OriginalVertexCount, 0);
-			std::vector<int8_t> FinalSigns(OriginalVertexCount, 0);
-			std::vector<std::array<float, 3>> TangentSums(OriginalVertexCount, { 0.0f, 0.0f, 0.0f });
-			std::vector<std::array<float, 3>> BitangentSums(OriginalVertexCount, { 0.0f, 0.0f, 0.0f });
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF tangent generation was cancelled before allocation"));
+			std::vector<std::array<uint32_t, 2>> RemappedVertices;
+			std::vector<int8_t> AssignedSigns;
+			std::vector<int8_t> FinalSigns;
+			std::vector<std::array<float, 3>> TangentSums;
+			std::vector<std::array<float, 3>> BitangentSums;
+			RemappedVertices.reserve(OriginalVertexCount);
+			AssignedSigns.reserve(OriginalVertexCount);
+			FinalSigns.reserve(OriginalVertexCount);
+			TangentSums.reserve(OriginalVertexCount);
+			BitangentSums.reserve(OriginalVertexCount);
+			for (size_t Vertex = 0; Vertex < OriginalVertexCount; ++Vertex)
+			{
+				if ((Vertex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF tangent setup was cancelled"));
+				RemappedVertices.push_back({ Unassigned, Unassigned });
+				AssignedSigns.push_back(0);
+				FinalSigns.push_back(0);
+				TangentSums.push_back({ 0.0f, 0.0f, 0.0f });
+				BitangentSums.push_back({ 0.0f, 0.0f, 0.0f });
+			}
 
 			const auto Dot = [](const std::array<float, 3>& A, const std::array<float, 3>& B)
 			{
@@ -839,6 +927,8 @@ namespace PulseForge
 
 			for (size_t Triangle = 0; Triangle < Indices.size(); Triangle += 3)
 			{
+				if ((Triangle & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF tangent generation was cancelled"));
 				const GltfMeshVertex& A = Vertices[Indices[Triangle]];
 				const GltfMeshVertex& B = Vertices[Indices[Triangle + 1]];
 				const GltfMeshVertex& C = Vertices[Indices[Triangle + 2]];
@@ -964,6 +1054,8 @@ namespace PulseForge
 
 			for (size_t VertexIndex = 0; VertexIndex < Vertices.size(); ++VertexIndex)
 			{
+				if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF tangent generation was cancelled"));
 				GltfMeshVertex& Vertex = Vertices[VertexIndex];
 				std::array<float, 3> Normal{ Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2] };
 				if (!Normalize(Normal))
@@ -997,10 +1089,14 @@ namespace PulseForge
 
 		std::expected<void, GltfMeshImportError> NormalizeAuthoredTangents(
 			std::vector<GltfMeshVertex>& Vertices,
-			const std::filesystem::path& Path)
+			const std::filesystem::path& Path,
+			std::stop_token CancellationToken)
 		{
-			for (GltfMeshVertex& Vertex : Vertices)
+			for (size_t Index = 0; Index < Vertices.size(); ++Index)
 			{
+				if ((Index & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF tangent normalization was cancelled"));
+				GltfMeshVertex& Vertex = Vertices[Index];
 				std::array<float, 3> Normal{ Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2] };
 				std::array<float, 3> Tangent{ Vertex.Tangent[0], Vertex.Tangent[1], Vertex.Tangent[2] };
 				const float LengthSquared = Tangent[0] * Tangent[0] + Tangent[1] * Tangent[1] + Tangent[2] * Tangent[2];
@@ -1038,13 +1134,17 @@ namespace PulseForge
 			Builder.UpdateBytes(Label, Bytes);
 		}
 
-		AssetContentFingerprint ComputeMeshFingerprint(const ImportedGltfMesh& Mesh)
+		std::expected<AssetContentFingerprint, GltfMeshImportError> ComputeMeshFingerprint(
+			const ImportedGltfMesh& Mesh, const std::filesystem::path& Path, std::stop_token CancellationToken)
 		{
 			AssetFingerprintBuilder Builder("PulseForge.GltfMeshResult.v1");
 			Builder.UpdateText("name", Mesh.Name);
 			UpdateU32(Builder, "vertexCount", static_cast<uint32_t>(Mesh.Vertices.size()));
-			for (const GltfMeshVertex& Vertex : Mesh.Vertices)
+			for (size_t Index = 0; Index < Mesh.Vertices.size(); ++Index)
 			{
+				if ((Index & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF result fingerprinting was cancelled"));
+				const GltfMeshVertex& Vertex = Mesh.Vertices[Index];
 				for (float Value : Vertex.Position) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
 				for (float Value : Vertex.Color) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
 				for (float Value : Vertex.TexCoord) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
@@ -1052,7 +1152,12 @@ namespace PulseForge
 				for (float Value : Vertex.Tangent) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
 			}
 			UpdateU32(Builder, "indexCount", static_cast<uint32_t>(Mesh.Indices.size()));
-			for (uint32_t Index : Mesh.Indices) UpdateU32(Builder, "index", Index);
+			for (size_t Index = 0; Index < Mesh.Indices.size(); ++Index)
+			{
+				if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, Path, "glTF result fingerprinting was cancelled"));
+				UpdateU32(Builder, "index", Mesh.Indices[Index]);
+			}
 			return Builder.Finish();
 		}
 	}
@@ -1119,9 +1224,10 @@ namespace PulseForge
 		const std::filesystem::path& ProjectRoot,
 		const AssetRegistry& Registry,
 		uint32_t MeshIndex,
-		uint32_t PrimitiveIndex)
+		uint32_t PrimitiveIndex,
+		std::stop_token CancellationToken)
 	{
-		auto Product = ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex);
+		auto Product = ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex, CancellationToken);
 		if (!Product) return std::unexpected(std::move(Product.error()));
 		return std::move(Product->Mesh);
 	}
@@ -1131,8 +1237,11 @@ namespace PulseForge
 		const std::filesystem::path& ProjectRoot,
 		const AssetRegistry& Registry,
 		uint32_t MeshIndex,
-		uint32_t PrimitiveIndex)
+		uint32_t PrimitiveIndex,
+		std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, ProjectRoot, "glTF import was cancelled before processing"));
 		const auto Record = Registry.Find(Asset);
 		if (!Record)
 		{
@@ -1151,6 +1260,8 @@ namespace PulseForge
 
 		try
 		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, ProjectRoot, "glTF import was cancelled before source resolution"));
 			std::error_code FileError;
 			const std::filesystem::path AbsoluteProjectRoot = std::filesystem::absolute(ProjectRoot, FileError).lexically_normal();
 			if (FileError)
@@ -1194,14 +1305,17 @@ namespace PulseForge
 					AssetMetadataSerializer::GetSidecarPath(*Source),
 					CanonicalSettings.error()));
 
-			auto FileBytesResult = ReadFile(*Source, HasExtension(*Source, ".glb") ? MaxContainerBytes : MaxJsonBytes);
+			auto FileBytesResult = ReadFile(*Source, HasExtension(*Source, ".glb") ? MaxContainerBytes : MaxJsonBytes,
+				CancellationToken);
 			if (!FileBytesResult)
 				return std::unexpected(std::move(FileBytesResult.error()));
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled after source reading"));
 			ByteVector FileBytes = std::move(*FileBytesResult);
 			ParsedContainer Container;
 			if (HasExtension(*Source, ".glb"))
 			{
-				auto Parsed = ParseGlb(FileBytes, *Source);
+				auto Parsed = ParseGlb(FileBytes, *Source, CancellationToken);
 				if (!Parsed)
 					return std::unexpected(std::move(Parsed.error()));
 				Container = std::move(*Parsed);
@@ -1238,6 +1352,8 @@ namespace PulseForge
 					*Source,
 					std::string("glTF JSON is malformed: ") + Exception.what()));
 			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled after document parsing"));
 
 			const Json* AssetDocument = FindField(Document, "asset");
 			const Json* Version = AssetDocument == nullptr ? nullptr : FindField(*AssetDocument, "version");
@@ -1252,6 +1368,8 @@ namespace PulseForge
 				? std::optional<uint64_t>(Container.BinaryChunk->size()) : std::nullopt;
 			const Assets::Detail::GltfPrimitiveInspection Inspection = Assets::Detail::InspectStaticPrimitive(
 				Container.JsonText, *Source, AbsoluteProjectRoot, MeshIndex, PrimitiveIndex, BinaryLength);
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled after structural inspection"));
 			if (const Json* RequiredExtensions = FindField(Document, "extensionsRequired"); RequiredExtensions != nullptr)
 			{
 				if (!RequiredExtensions->is_array())
@@ -1278,13 +1396,18 @@ namespace PulseForge
 				}
 			}
 
-			auto Buffers = LoadBuffers(Document, *Source, AbsoluteProjectRoot, Container.BinaryChunk);
+			auto Buffers = LoadBuffers(Document, *Source, AbsoluteProjectRoot, Container.BinaryChunk, CancellationToken);
 			if (!Buffers)
 				return std::unexpected(std::move(Buffers.error()));
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled after buffer loading"));
 			std::vector<AssetImportInputFingerprint> Inputs;
 			Inputs.reserve(Buffers->ExternalInputs.size() + 1);
 			const std::filesystem::path SourceRelativeKey = Record->ProjectRelativePath.lexically_normal();
-			Inputs.push_back({ PathToUtf8(SourceRelativeKey), ComputeAssetContentFingerprint(FileBytes) });
+			auto SourceFingerprint = ComputeAssetContentFingerprintCancellable(FileBytes, CancellationToken);
+			if (!SourceFingerprint)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, SourceFingerprint.error()));
+			Inputs.push_back({ PathToUtf8(SourceRelativeKey), std::move(*SourceFingerprint) });
 			Inputs.insert(Inputs.end(), Buffers->ExternalInputs.begin(), Buffers->ExternalInputs.end());
 			if (auto Normalized = NormalizeAssetImportRecipeInputs(Inputs); !Normalized)
 				return std::unexpected(MakeError(
@@ -1302,6 +1425,8 @@ namespace PulseForge
 			if (!InputFingerprint)
 				return std::unexpected(MakeError(
 					GltfMeshImportErrorCode::InvalidDocument, *Source, InputFingerprint.error()));
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled after recipe construction"));
 			Recipe.InputFingerprint = std::move(*InputFingerprint);
 
 			const Json* Meshes = FindField(Document, "meshes");
@@ -1379,16 +1504,22 @@ namespace PulseForge
 				Imported.Name = Name->get<std::string>();
 			if (Imported.Name.empty())
 				Imported.Name = PathToUtf8(Source->stem());
-			Imported.Vertices.resize(Positions->Count);
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled before vertex allocation"));
+			Imported.Vertices.reserve(static_cast<size_t>(Positions->Count));
 			for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
 			{
+				if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF vertex decoding was cancelled"));
+				GltfMeshVertex Vertex{};
 				for (size_t Component = 0; Component < 3; ++Component)
 				{
 					auto Value = ReadFloatComponent(*Positions, VertexIndex, Component, *Source);
 					if (!Value)
 						return std::unexpected(std::move(Value.error()));
-					Imported.Vertices[VertexIndex].Position[Component] = *Value;
+					Vertex.Position[Component] = *Value;
 				}
+				Imported.Vertices.push_back(std::move(Vertex));
 			}
 
 			constexpr std::array<size_t, 2> TexCoordCounts = { 2, 2 };
@@ -1400,6 +1531,8 @@ namespace PulseForge
 					return std::unexpected(std::move(TexCoords.error()));
 				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
 				{
+					if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF texture-coordinate decoding was cancelled"));
 					for (size_t Component = 0; Component < 2; ++Component)
 					{
 						auto Value = ReadFloatComponent(*TexCoords, VertexIndex, Component, *Source);
@@ -1419,6 +1552,8 @@ namespace PulseForge
 					return std::unexpected(std::move(Colors.error()));
 				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
 				{
+					if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF color decoding was cancelled"));
 					for (size_t Component = 0; Component < Colors->ComponentCount; ++Component)
 					{
 						auto Value = ReadFloatComponent(*Colors, VertexIndex, Component, *Source);
@@ -1439,6 +1574,8 @@ namespace PulseForge
 					return std::unexpected(std::move(Normals.error()));
 				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
 				{
+					if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF normal decoding was cancelled"));
 					float LengthSquared = 0.0f;
 					for (size_t Component = 0; Component < 3; ++Component)
 					{
@@ -1468,6 +1605,9 @@ namespace PulseForge
 				if (!Tangents)
 					return std::unexpected(std::move(Tangents.error()));
 				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
+				{
+					if ((VertexIndex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF tangent decoding was cancelled"));
 					for (size_t Component = 0; Component < 4; ++Component)
 					{
 						auto Value = ReadFloatComponent(*Tangents, VertexIndex, Component, *Source);
@@ -1475,6 +1615,7 @@ namespace PulseForge
 							return std::unexpected(std::move(Value.error()));
 						Imported.Vertices[VertexIndex].Tangent[Component] = *Value;
 					}
+				}
 			}
 
 			if (const Json* IndicesIndexValue = FindField(Primitive, "indices"); IndicesIndexValue != nullptr)
@@ -1504,9 +1645,13 @@ namespace PulseForge
 						*Source,
 						"glTF index accessors must use a valid bufferView without byteStride"));
 				}
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled before index allocation"));
 				Imported.Indices.reserve(IndexAccessor->Count);
 				for (size_t Index = 0; Index < IndexAccessor->Count; ++Index)
 				{
+					if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF index decoding was cancelled"));
 					auto Value = ReadIndex(*IndexAccessor, Index, *Source);
 					if (!Value)
 						return std::unexpected(std::move(Value.error()));
@@ -1529,9 +1674,15 @@ namespace PulseForge
 						*Source,
 						"Unindexed glTF primitive exceeds the importer index limit"));
 				}
-				Imported.Indices.resize(Imported.Vertices.size());
-				for (size_t Index = 0; Index < Imported.Indices.size(); ++Index)
-					Imported.Indices[Index] = static_cast<uint32_t>(Index);
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled before generated index allocation"));
+				Imported.Indices.reserve(Imported.Vertices.size());
+				for (size_t Index = 0; Index < Imported.Vertices.size(); ++Index)
+				{
+					if ((Index & 0xfffu) == 0 && CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF index generation was cancelled"));
+					Imported.Indices.push_back(static_cast<uint32_t>(Index));
+				}
 			}
 
 			if (Imported.Indices.empty() || Imported.Indices.size() % 3 != 0)
@@ -1547,16 +1698,18 @@ namespace PulseForge
 					return std::unexpected(MakeError(
 						GltfMeshImportErrorCode::UnsupportedFeature, *Source,
 						"Primitive has no authored normals and the import settings require them"));
-				if (auto Generated = GenerateVertexNormals(Imported.Vertices, Imported.Indices, *Source); !Generated)
+				if (auto Generated = GenerateVertexNormals(Imported.Vertices, Imported.Indices, *Source, CancellationToken); !Generated)
 					return std::unexpected(std::move(Generated.error()));
 			}
 			if (HasTangents)
 			{
-				if (auto Normalized = NormalizeAuthoredTangents(Imported.Vertices, *Source); !Normalized)
+				if (auto Normalized = NormalizeAuthoredTangents(Imported.Vertices, *Source, CancellationToken); !Normalized)
 					return std::unexpected(std::move(Normalized.error()));
 			}
-			else if (auto Generated = GenerateVertexTangents(Imported.Vertices, Imported.Indices, *Source); !Generated)
+			else if (auto Generated = GenerateVertexTangents(Imported.Vertices, Imported.Indices, *Source, CancellationToken); !Generated)
 				return std::unexpected(std::move(Generated.error()));
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled before validation"));
 			Imported.Name += " primitive " + std::to_string(PrimitiveIndex);
 			if (auto Validation = ValidateMeshDescription(Imported.GetMeshDescription()); !Validation)
 			{
@@ -1574,7 +1727,9 @@ namespace PulseForge
 					Inspection.Diagnostic.empty() ? "glTF primitive failed shared structural inspection" : Inspection.Diagnostic));
 			}
 			GltfMeshImportProduct Product;
-			Product.ResultFingerprint = ComputeMeshFingerprint(Imported);
+			auto ResultFingerprint = ComputeMeshFingerprint(Imported, *Source, CancellationToken);
+			if (!ResultFingerprint) return std::unexpected(std::move(ResultFingerprint.error()));
+			Product.ResultFingerprint = std::move(*ResultFingerprint);
 			Product.Recipe = std::move(Recipe);
 			Product.Mesh = std::move(Imported);
 			return Product;

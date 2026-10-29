@@ -246,9 +246,12 @@ namespace PulseForge
 
 	std::expected<Project, ProjectError> Project::Open(
 		const std::filesystem::path& ProjectFile,
-		DiagnosticRecorder* Diagnostics)
+		DiagnosticRecorder* Diagnostics,
+		std::stop_token CancellationToken)
 	{
 		ScopedDiagnosticTimer TotalTimer(Diagnostics, "Project::Open", "Project");
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(ProjectErrorCode::Cancelled, ProjectFile, "Project opening was cancelled"));
 		if (auto Validation = ValidateProjectPath(ProjectFile); !Validation) return std::unexpected(std::move(Validation.error()));
 
 		std::error_code Error;
@@ -269,6 +272,8 @@ namespace PulseForge
 			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile,
 				Data.error().Code == Detail::BoundedInputErrorCode::TooLarge ? "Project file exceeds the 1 MiB document limit"
 																			 : "Could not read the complete project file"));
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(ProjectErrorCode::Cancelled, AbsoluteProjectFile, "Project opening was cancelled"));
 
 		std::expected<ProjectDesc, ProjectError> Description = std::unexpected(ProjectError{});
 		{
@@ -280,20 +285,26 @@ namespace PulseForge
 			Description.error().Path = AbsoluteProjectFile;
 			return std::unexpected(std::move(Description.error()));
 		}
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(ProjectErrorCode::Cancelled, AbsoluteProjectFile, "Project opening was cancelled"));
 
 		AssetRegistry Registry;
 		std::expected<void, AssetRegistryError> Rebuild;
 		{
 			ScopedDiagnosticTimer RegistryTimer(Diagnostics, "Project asset registry rebuild", "Project");
-			Rebuild = Registry.Rebuild(AbsoluteProjectFile.parent_path());
+			Rebuild = Registry.Rebuild(AbsoluteProjectFile.parent_path(), CancellationToken);
 		}
 		if (!Rebuild)
 		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(ProjectErrorCode::Cancelled, AbsoluteProjectFile, "Project opening was cancelled during asset registry scanning"));
 			const std::string Message = Rebuild.error().Issues.empty()
 				? "Could not rebuild project asset registry"
 				: Rebuild.error().Issues.front().Message;
 			return std::unexpected(MakeError(ProjectErrorCode::RegistryBuildFailed, AbsoluteProjectFile.parent_path(), Message));
 		}
+		if (CancellationToken.stop_requested())
+			return std::unexpected(MakeError(ProjectErrorCode::Cancelled, AbsoluteProjectFile, "Project opening was cancelled after asset registry scanning"));
 		{
 			ScopedDiagnosticTimer ValidationTimer(Diagnostics, "Project startup scene validation", "Project");
 			if (auto StartSceneValidation = ValidateStartScene(Description->StartScene, Registry, AbsoluteProjectFile);

@@ -27,10 +27,17 @@ namespace PulseForge
 		}
 	} // namespace
 
-	std::expected<void, AssetRegistryError> AssetRegistry::Rebuild(const std::filesystem::path& ProjectRoot)
+	std::expected<void, AssetRegistryError> AssetRegistry::Rebuild(
+		const std::filesystem::path& ProjectRoot, std::stop_token CancellationToken)
 	{
 		Detail::ScopedProfileTimer Timer("AssetRegistry::Rebuild");
 		AssetRegistryError Error;
+		const auto Cancel = [&]() -> std::expected<void, AssetRegistryError>
+		{
+			Error.Issues.push_back(MakeIssue(AssetRegistryIssueCode::Cancelled, {}, "Asset registry scan was cancelled"));
+			return std::unexpected(std::move(Error));
+		};
+		if (CancellationToken.stop_requested()) return Cancel();
 		if (ProjectRoot.empty())
 		{
 			Error.Issues.push_back(MakeIssue(
@@ -95,6 +102,7 @@ namespace PulseForge
 
 		while (Iterator != End)
 		{
+			if (CancellationToken.stop_requested()) return Cancel();
 			const std::filesystem::directory_entry Entry = *Iterator;
 			const std::filesystem::path RelativePath = Entry.path().lexically_relative(AbsoluteProjectRoot);
 			const std::filesystem::file_status Status = Entry.symlink_status(FileError);
@@ -144,8 +152,10 @@ namespace PulseForge
 
 		const auto SortByPath = [](const std::filesystem::path& First, const std::filesystem::path& Second)
 		{ return First.generic_u8string() < Second.generic_u8string(); };
+		if (CancellationToken.stop_requested()) return Cancel();
 		std::sort(SourceFiles.begin(), SourceFiles.end(), SortByPath);
 		std::sort(SidecarFiles.begin(), SidecarFiles.end(), SortByPath);
+		if (CancellationToken.stop_requested()) return Cancel();
 		std::unordered_map<std::filesystem::path, std::filesystem::path> SidecarsBySourcePath;
 		SidecarsBySourcePath.reserve(SidecarFiles.size());
 		for (const std::filesystem::path& SidecarPath : SidecarFiles)
@@ -153,6 +163,7 @@ namespace PulseForge
 
 		for (const std::filesystem::path& SourcePath : SourceFiles)
 		{
+			if (CancellationToken.stop_requested()) return Cancel();
 			const auto Sidecar = SidecarsBySourcePath.find(SourcePath);
 			const std::filesystem::path SidecarPath =
 				Sidecar != SidecarsBySourcePath.end() ? Sidecar->second : AssetMetadataSerializer::GetSidecarPath(SourcePath);
@@ -189,6 +200,7 @@ namespace PulseForge
 		RebuiltAssets.reserve(SidecarFiles.size());
 		for (const std::filesystem::path& SidecarPath : SidecarFiles)
 		{
+			if (CancellationToken.stop_requested()) return Cancel();
 			std::filesystem::path SourcePath = SidecarPath;
 			SourcePath.replace_extension();
 			if (IsMetadataSidecarPath(SourcePath))

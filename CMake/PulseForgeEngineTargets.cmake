@@ -340,6 +340,19 @@ target_include_directories(PulseForgeCook PRIVATE PulseForge/Source/Public)
 target_compile_definitions(PulseForgeCook PRIVATE "PF_BUILD_CONFIGURATION=\"$<CONFIG>\"")
 target_link_libraries(PulseForgeCook PRIVATE PulseForgeAssetCookService PulseForgeAssetServices PulseForgeAssetDependencyCatalog)
 set_property(TARGET PulseForgeCook PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+add_library(PulseForgeBuildProfiles STATIC PulseForge/Source/Private/Assets/ExportBuildProfile.cpp)
+target_include_directories(PulseForgeBuildProfiles PUBLIC PulseForge/Source/Public PRIVATE PulseForge/Vendor/json/include)
+target_link_libraries(PulseForgeBuildProfiles PUBLIC PulseForgeAssetCatalog)
+set_property(TARGET PulseForgeBuildProfiles PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+add_library(PulseForgeAssetExportService STATIC PulseForge/Source/Private/Assets/AssetExportService.cpp)
+target_include_directories(PulseForgeAssetExportService PUBLIC PulseForge/Source/Public PRIVATE PulseForge/Vendor/json/include)
+target_link_libraries(PulseForgeAssetExportService PUBLIC PulseForgeBuildProfiles PulseForgeAssetCookService
+	PRIVATE PulseForgeAssetDependencyCatalog PulseForgeAssetServices)
+set_property(TARGET PulseForgeAssetExportService PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+add_executable(PulseForgeExport PulseForge/Source/Private/Assets/AssetExportCommand.cpp)
+target_include_directories(PulseForgeExport PRIVATE PulseForge/Source/Public)
+target_link_libraries(PulseForgeExport PRIVATE PulseForgeAssetExportService)
+set_property(TARGET PulseForgeExport PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/Core.cpp
 	PulseForge/Source/Private/Core/EntryPoint.cpp

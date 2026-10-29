@@ -459,6 +459,10 @@ namespace
 		auto Created = Project::Create(ProjectFile, "Example Project");
 		PF_CHECK(Tests, Created.has_value());
 		if (!Created) return;
+		std::stop_source CancelledOpen;
+		CancelledOpen.request_stop();
+		const auto CancelledProjectOpen = Project::Open(ProjectFile, nullptr, CancelledOpen.get_token());
+		PF_CHECK(Tests, !CancelledProjectOpen && CancelledProjectOpen.error().Code == ProjectErrorCode::Cancelled);
 		PF_CHECK(Tests, Created->GetDescription().Name == "Example Project");
 		PF_CHECK(Tests, !Created->GetDescription().StartScene.has_value());
 		PF_CHECK(Tests, std::filesystem::is_directory(Root / "Assets"));

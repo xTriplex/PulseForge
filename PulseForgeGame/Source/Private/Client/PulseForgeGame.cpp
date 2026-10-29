@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -162,7 +163,33 @@ namespace
 		if (ArgumentCount <= 1)
 		{
 #if defined(PF_COOKED_RUNTIME_ONLY)
-			throw std::runtime_error("Cooked Player requires --cooked-content <root>; source-project fallback is disabled");
+			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+			if (!ResourceDirectory)
+				throw std::runtime_error("Could not locate cooked Player resources: " + ResourceDirectory.error().Message);
+			DefaultArguments = { "--cooked-content", PathToUtf8(*ResourceDirectory / "Content") };
+			const std::filesystem::path RuntimeConfiguration = *ResourceDirectory / "PulseForgeRuntime.cfg";
+			std::error_code ConfigError;
+			if (std::filesystem::exists(RuntimeConfiguration, ConfigError))
+			{
+				if (ConfigError || std::filesystem::file_size(RuntimeConfiguration, ConfigError) > 4096 || ConfigError)
+					throw std::runtime_error("Packaged runtime configuration is unreadable or exceeds its limit");
+				std::ifstream Config(RuntimeConfiguration, std::ios::binary);
+				if (!Config) throw std::runtime_error("Could not read packaged runtime configuration");
+				std::string Line;
+				while (std::getline(Config, Line))
+				{
+					if (Line.starts_with("window="))
+					{
+						DefaultArguments.emplace_back("--window-size");
+						DefaultArguments.emplace_back(Line.substr(7));
+					}
+					else if (!Line.empty() && !Line.starts_with("project="))
+						throw std::runtime_error("Packaged runtime configuration contains an unsupported field");
+				}
+				if (!Config.eof()) throw std::runtime_error("Could not read complete packaged runtime configuration");
+			}
+			for (const std::string& Argument : DefaultArguments)
+				ParsedArguments.push_back(Argument);
 #else
 			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
 			if (!ResourceDirectory)
@@ -259,6 +286,14 @@ public:
 #endif
 		}
 		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
+#if defined(PF_DEBUG)
+		if (m_CookedPlayerAcceptance)
+		{
+			if (!UserDataRoot)
+				throw std::runtime_error("Cooked Player acceptance could not resolve its isolated user-data directory");
+			PF_INFO("PULSEFORGE_COOKED_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
+		}
+#endif
 		if (m_CookedContent)
 		{
 			if (Application.GetRendererAPI() != PulseForge::RendererAPI::Vulkan)

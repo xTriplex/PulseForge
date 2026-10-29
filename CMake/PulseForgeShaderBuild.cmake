@@ -153,7 +153,7 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0
 			-fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1
 			-fvk-b-shift 256 2 -fvk-t-shift 0 2 -fvk-s-shift 128 2
-			-fvk-t-shift 0 3 -fvk-s-shift 128 3 -fvk-t-shift 0 5 -fvk-s-shift 128 5)
+			-fvk-t-shift 0 3 -fvk-s-shift 128 3)
 	pulseforge_add_spirv_shader("${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge environment background vertex shader to SPIR-V"
 		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
@@ -162,16 +162,16 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 	pulseforge_add_spirv_shader("${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_SHADOW_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge directional-shadow vertex shader to SPIR-V"
-		OPTIONS -fvk-b-shift 256 4)
+		OPTIONS -fvk-b-shift 256 3)
 	pulseforge_add_spirv_shader("${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}" "${PULSEFORGE_SHADOW_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge alpha-tested directional/spot shadow fragment shader to SPIR-V"
 		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 	pulseforge_add_spirv_shader("${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_POINT_SHADOW_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge point-shadow vertex shader to SPIR-V"
-		OPTIONS -fvk-b-shift 256 4)
+		OPTIONS -fvk-b-shift 256 3)
 	pulseforge_add_spirv_shader("${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}" "${PULSEFORGE_POINT_SHADOW_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge point-shadow fragment shader to SPIR-V"
-		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 4)
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 3)
 	foreach(PULSEFORGE_SSAO_SHADER IN ITEMS
 		"${PULSEFORGE_SSAO_PREPASS_HLSL}|${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}|vs_6_0|VSMain|normal-depth vertex"
 		"${PULSEFORGE_SSAO_PREPASS_HLSL}|${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}|ps_6_0|PSMain|normal-depth fragment"
@@ -186,7 +186,7 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		list(GET PULSEFORGE_SSAO_FIELDS 3 PULSEFORGE_SSAO_ENTRY)
 		list(GET PULSEFORGE_SSAO_FIELDS 4 PULSEFORGE_SSAO_LABEL)
 		set(PULSEFORGE_SSAO_REGISTER_SHIFTS
-			-fvk-b-shift 256 4 -fvk-t-shift 0 4 -fvk-s-shift 128 4)
+			-fvk-b-shift 256 3 -fvk-t-shift 0 3 -fvk-s-shift 128 3)
 		if("${PULSEFORGE_SSAO_OUTPUT}" STREQUAL "${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}")
 			list(APPEND PULSEFORGE_SSAO_REGISTER_SHIFTS
 				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
@@ -265,6 +265,8 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	endif()
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		pulseforge_runtime_resource_directory(PulseForgeGame PULSEFORGE_GAME_RESOURCE_DIRECTORY)
+		pulseforge_stage_macos_vulkan_runtime(PulseForgeGame "${PULSEFORGE_GAME_RESOURCE_DIRECTORY}"
+			"${PULSEFORGE_SAMPLE_RENDERER}")
 		pulseforge_attach_shader_deployment(PulseForgeGame "${PULSEFORGE_GAME_RESOURCE_DIRECTORY}/Shaders"
 			ASSET_TARGETS PulseForgeSceneShaderAssets SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
 		pulseforge_runtime_resource_directory(PulseForgeCookedGame PULSEFORGE_COOKED_GAME_RESOURCE_DIRECTORY)

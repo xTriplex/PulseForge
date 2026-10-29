@@ -156,6 +156,25 @@ namespace
 		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, true, true, false }));
 	}
 
+	void TestDescriptorSetLimit(TestRunner& Tests)
+	{
+		const std::array<uint32_t, 4> SupportedSpaces = { 0, 1, 2, 3 };
+		const DescriptorSetLimitCheck Supported = CheckDescriptorSetLimit(SupportedSpaces, 4);
+		PF_CHECK(Tests, Supported.RequiredCount == 4 && Supported.MaximumCount == 4 && Supported.IsSupported());
+
+		const std::array<uint32_t, 2> SparseSpaces = { 0, 4 };
+		const DescriptorSetLimitCheck Unsupported = CheckDescriptorSetLimit(SparseSpaces, 4);
+		PF_CHECK(Tests, Unsupported.RequiredCount == 5 && !Unsupported.IsSupported());
+
+		const std::array<uint32_t, 1> MaximumSpace = { (std::numeric_limits<uint32_t>::max)() };
+		const DescriptorSetLimitCheck Unrepresentable = CheckDescriptorSetLimit(MaximumSpace, 4);
+		PF_CHECK(Tests, Unrepresentable.RequiredCount == static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)()) + 1);
+		PF_CHECK(Tests, !Unrepresentable.IsSupported());
+
+		const DescriptorSetLimitCheck Empty = CheckDescriptorSetLimit({}, 0);
+		PF_CHECK(Tests, Empty.RequiredCount == 0 && Empty.IsSupported());
+	}
+
 	void TestSwapchainRetirementPolicy(TestRunner& Tests)
 	{
 		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(false, true, false) == SwapchainFrameStartAction::Skip);
@@ -813,6 +832,7 @@ void RunRendererPolicyTests(TestRunner& Tests)
 {
 	TestQueueFamilySelection(Tests);
 	TestRequiredDeviceFeatures(Tests);
+	TestDescriptorSetLimit(Tests);
 	TestSwapchainRetirementPolicy(Tests);
 	TestPresentationCapabilitySelection(Tests);
 	TestPresentationPoliciesAndCandidatePreference(Tests);

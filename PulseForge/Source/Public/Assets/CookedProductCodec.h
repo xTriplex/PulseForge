@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <expected>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -130,11 +131,11 @@ namespace PulseForge
 		};
 
 		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeMeshProduct(
-			const ImportedGltfMesh& Mesh);
+			const ImportedGltfMesh& Mesh, std::stop_token CancellationToken = {});
 		[[nodiscard]] PULSEFORGE_API std::expected<ImportedGltfMesh, std::string> DecodeMeshProduct(
 			std::span<const std::byte> Bytes);
 		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeTextureProduct(
-			const PreparedTextureCpuProduct& Texture);
+			const PreparedTextureCpuProduct& Texture, std::stop_token CancellationToken = {});
 		[[nodiscard]] PULSEFORGE_API std::expected<PreparedTextureCpuProduct, std::string> DecodeTextureProduct(
 			std::span<const std::byte> Bytes);
 		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeMaterialProduct(
@@ -158,7 +159,8 @@ namespace PulseForge
 			[[nodiscard]] static DerivedDataArtifactKey MakeBrdfLutKey(const EnvironmentProcessingDesc& Description);
 			[[nodiscard]] static std::expected<std::vector<std::byte>, std::string> EncodeEnvironment(
 				const EnvironmentLightingData& Data,
-				const EnvironmentProcessingDesc& Description);
+				const EnvironmentProcessingDesc& Description,
+				std::stop_token CancellationToken = {});
 			[[nodiscard]] static std::expected<EnvironmentLightingData, std::string> DecodeEnvironment(
 				std::span<const std::byte> Payload,
 				const EnvironmentProcessingDesc& Description);
@@ -166,7 +168,8 @@ namespace PulseForge
 				std::span<const std::byte> Payload);
 			[[nodiscard]] static std::expected<std::vector<std::byte>, std::string> EncodeBrdfLut(
 				const ImportedFloatImage& Image,
-				uint32_t Samples);
+				uint32_t Samples,
+				std::stop_token CancellationToken = {});
 			[[nodiscard]] static std::expected<ImportedFloatImage, std::string> DecodeBrdfLut(
 				std::span<const std::byte> Payload,
 				uint32_t ExpectedSize,

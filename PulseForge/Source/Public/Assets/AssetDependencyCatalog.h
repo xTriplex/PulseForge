@@ -165,6 +165,7 @@ namespace PulseForge
 	{
 		std::filesystem::path Path;
 		std::string Message;
+		bool Cancelled = false;
 	};
 
 	class AssetDependencyCatalogBuilder;

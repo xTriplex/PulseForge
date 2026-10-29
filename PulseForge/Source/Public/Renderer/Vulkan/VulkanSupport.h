@@ -167,6 +167,17 @@ namespace PulseForge::VulkanSupport
 
 	bool SupportsRequiredDeviceFeatures(const RequiredDeviceFeatures& Features);
 
+	struct DescriptorSetLimitCheck
+	{
+		uint64_t RequiredCount = 0;
+		uint32_t MaximumCount = 0;
+
+		[[nodiscard]] bool IsSupported() const noexcept { return RequiredCount <= MaximumCount; }
+	};
+
+	[[nodiscard]] DescriptorSetLimitCheck CheckDescriptorSetLimit(
+		std::span<const uint32_t> RegisterSpaces, uint32_t MaximumCount) noexcept;
+
 	struct FormatFeatureSupport
 	{
 		bool SampledImage = false;

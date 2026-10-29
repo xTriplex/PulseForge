@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -75,6 +76,8 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<AssetContentFingerprint, std::string> ComputeAssetImportInputFingerprint(
 		const AssetImportRecipe& Recipe);
 	[[nodiscard]] PULSEFORGE_API AssetContentFingerprint ComputeAssetContentFingerprint(std::span<const std::byte> Bytes);
+	[[nodiscard]] PULSEFORGE_API std::expected<AssetContentFingerprint, std::string> ComputeAssetContentFingerprintCancellable(
+		std::span<const std::byte> Bytes, std::stop_token CancellationToken);
 
 	enum class AssetImportProvenanceErrorCode : uint8_t
 	{

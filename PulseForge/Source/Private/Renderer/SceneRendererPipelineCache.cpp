@@ -20,7 +20,7 @@ namespace PulseForge
 			!PipelineResources.ShadowFragmentShader || !PipelineResources.PointShadowVertexShader ||
 			!PipelineResources.PointShadowFragmentShader || !PipelineResources.SceneMaterialLayout ||
 			!PipelineResources.DirectionalShadowLayout || !PipelineResources.AmbientOcclusionLayout ||
-			!PipelineResources.SpotlightShadowLayout || !PipelineResources.PointLightShadowLayout ||
+			!PipelineResources.PointLightShadowLayout ||
 			!PipelineResources.ShadowObjectLayout || !PipelineResources.PointShadowObjectLayout)
 			return std::unexpected(MakeResourceError("Scene pipeline cache initialization received incomplete shader or layout resources"));
 		m_Resources = std::move(PipelineResources);
@@ -56,7 +56,7 @@ namespace PulseForge
 		Description.VertexShader = m_Resources->SceneVertexShader;
 		Description.FragmentShader = m_Resources->SceneFragmentShader;
 		Description.BindingLayouts = { m_Resources->SceneMaterialLayout, m_Resources->DirectionalShadowLayout,
-			m_Resources->AmbientOcclusionLayout, m_Resources->SpotlightShadowLayout, m_Resources->PointLightShadowLayout };
+			m_Resources->AmbientOcclusionLayout, m_Resources->PointLightShadowLayout };
 		Description.VertexLayout = *m_VertexLayout;
 		Description.ColorFormat = ColorFormat;
 		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;

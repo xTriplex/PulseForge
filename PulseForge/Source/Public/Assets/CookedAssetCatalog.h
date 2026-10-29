@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -96,7 +97,8 @@ namespace PulseForge
 		PayloadDigestMismatch,
 		UnsupportedConfiguration,
 		AssetNotFound,
-		InvalidPayload
+		InvalidPayload,
+		Cancelled
 	};
 
 	struct CookedAssetCatalogError final
@@ -125,8 +127,11 @@ namespace PulseForge
 			const AssetID& StartupScene,
 			const CookedAssetCompatibility& Compatibility,
 			std::vector<AssetID> DynamicRoots,
-			std::vector<CookedAssetEntry> Entries);
+			std::vector<CookedAssetEntry> Entries,
+			std::stop_token CancellationToken = {});
 		[[nodiscard]] static CookedAssetDigest ComputePayloadDigest(std::span<const std::byte> Bytes);
+		[[nodiscard]] static std::expected<CookedAssetDigest, std::string> ComputePayloadDigestCancellable(
+			std::span<const std::byte> Bytes, std::stop_token CancellationToken);
 
 		[[nodiscard]] const UUID& GetProjectID() const noexcept { return m_ProjectID; }
 		[[nodiscard]] const AssetID& GetStartupScene() const noexcept { return m_StartupScene; }

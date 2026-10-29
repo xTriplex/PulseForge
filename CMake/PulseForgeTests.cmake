@@ -102,6 +102,8 @@ if(BUILD_TESTING)
 		Tests/AssetDependencyPublicationTests.cpp
 		Tests/AssetEditTransactionTests.cpp
 		Tests/AssetCookServiceTests.cpp
+		Tests/ExportBuildProfileTests.cpp
+		Tests/AssetExportServiceTests.cpp
 	)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeAssetTests PRIVATE
@@ -109,10 +111,12 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
+	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeBuildProfiles)
+	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetExportService)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAssetTests PulseForgePublicHeaderChecks)
 	endif()
-	add_test(NAME PulseForge.Assets COMMAND PulseForgeAssetTests)
+	add_test(NAME PulseForge.Assets COMMAND PulseForgeAssetTests --asset-core-only)
 	add_test(NAME PulseForge.AssetDependencyCatalog COMMAND PulseForgeAssetTests --dependency-catalog-only)
 	add_test(NAME PulseForge.AssetEditing COMMAND PulseForgeAssetTests --asset-edit-only)
 	add_executable(PulseForgeAssetDependencyConsumer Tests/ModuleConsumers/AssetDependencyConsumer.cpp)
@@ -120,6 +124,8 @@ if(BUILD_TESTING)
 	set_property(TARGET PulseForgeAssetDependencyConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 	add_test(NAME PulseForge.AssetDependencyConsumer COMMAND PulseForgeAssetDependencyConsumer)
 	add_test(NAME PulseForge.AssetCook COMMAND PulseForgeAssetTests --cook-only)
+	add_test(NAME PulseForge.AssetExport COMMAND PulseForgeAssetTests --export-only)
+	set_tests_properties(PulseForge.Assets PulseForge.AssetCook PulseForge.AssetExport PROPERTIES TIMEOUT 120)
 	add_test(NAME PulseForge.CookCliUsage COMMAND PulseForgeCook)
 	set_tests_properties(PulseForge.CookCliUsage PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME PulseForge.CookConfigurationCLI
@@ -297,6 +303,7 @@ if(BUILD_TESTING)
 		add_executable(PulseForgeEditorTests
 			Tests/PulseForgeEditorTests.cpp
 			Tests/EditorTests.cpp
+			Tests/EditorBuildProfileControllerTests.cpp
 			Tests/EditorViewportTests.cpp
 			Tests/EditorViewportSceneRenderViewTests.cpp
 			Tests/EditorAssetPreviewStressHarnessTests.cpp

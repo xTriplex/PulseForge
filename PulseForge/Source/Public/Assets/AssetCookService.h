@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <stop_token>
 #include <vector>
 
 namespace PulseForge
@@ -22,6 +23,7 @@ namespace PulseForge
 		std::vector<AssetID> DynamicRoots;
 		CookedAssetCompatibility Compatibility;
 		std::filesystem::path OutputRoot;
+		std::stop_token CancellationToken;
 	};
 
 	enum class AssetCookErrorCode : uint8_t
@@ -37,7 +39,8 @@ namespace PulseForge
 		SerializationFailed,
 		OutputConflict,
 		StagingFailed,
-		PublicationFailed
+		PublicationFailed,
+		Cancelled
 	};
 
 	struct AssetCookError final

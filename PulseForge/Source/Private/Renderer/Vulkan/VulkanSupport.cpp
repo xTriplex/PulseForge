@@ -214,6 +214,15 @@ namespace PulseForge::VulkanSupport
 			Features.ShaderDemoteToHelperInvocation;
 	}
 
+	DescriptorSetLimitCheck CheckDescriptorSetLimit(std::span<const uint32_t> RegisterSpaces, uint32_t MaximumCount) noexcept
+	{
+		DescriptorSetLimitCheck Check;
+		Check.MaximumCount = MaximumCount;
+		for (const uint32_t RegisterSpace : RegisterSpaces)
+			Check.RequiredCount = std::max(Check.RequiredCount, static_cast<uint64_t>(RegisterSpace) + 1);
+		return Check;
+	}
+
 	bool SupportsFormatUsage(
 		const FormatFeatureSupport& Features,
 		bool RequiresSampledImage,

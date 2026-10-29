@@ -83,7 +83,7 @@ namespace
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialDetails) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = { "Scene Viewport", "Hierarchy",
-			"Inspector", "Content Browser", "Console", "Scene", "Material Editor", "Performance" };
+			"Inspector", "Content Browser", "Console", "Scene", "Material Editor", "Performance", "Build Profiles" };
 
 		EditorPanelVisibility Panels;
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::SceneViewport));

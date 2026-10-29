@@ -14,11 +14,24 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <iostream>
 #include <string>
 
 namespace
 {
 	using namespace PulseForge;
+
+	template<typename Operation>
+	auto RunCookWithBoundary(std::string_view Name, Operation&& CookOperation)
+	{
+		std::cerr << "ASSET_COOK_OPERATION_BEGIN " << Name << std::endl;
+		auto Result = std::forward<Operation>(CookOperation)();
+		if (Result)
+			std::cerr << "ASSET_COOK_OPERATION_END " << Name << " success" << std::endl;
+		else
+			std::cerr << "ASSET_COOK_OPERATION_END " << Name << " failure=" << Result.error().Message << std::endl;
+		return Result;
+	}
 
 	struct CookFixture final
 	{
@@ -137,10 +150,15 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	if (!Snapshot) return;
 	AssetCookRequest Request = Fixture.Request(*Snapshot);
 	auto Planned = AssetCookService::Plan(Request);
-	if (!Planned) std::cerr << "Cook planning failed: " << Planned.error().Message << " (" << Planned.error().Path << ")\n";
+	if (!Planned)
+	{
+		std::cerr << "Cook planning failed: " << Planned.error().Message << " (";
+		TestSupport::WritePathUtf8(std::cerr, Planned.error().Path);
+		std::cerr << ")\n";
+	}
 	PF_CHECK(Tests, Planned.has_value());
 	if (!Planned) return;
-	auto First = AssetCookService::Cook(*Planned);
+	auto First = RunCookWithBoundary("first-manifest", [&] { return AssetCookService::Cook(*Planned); });
 	if (!First) std::cerr << "Cook fixture failed: " << First.error().Message << "\n";
 	PF_CHECK(Tests, First.has_value());
 	if (!First) return;
@@ -149,7 +167,7 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	const std::string FirstManifest{ std::istreambuf_iterator<char>(FirstManifestStream), std::istreambuf_iterator<char>() };
 	FirstManifestStream.close();
 	PF_CHECK(Tests, !FirstManifest.empty());
-	auto Second = AssetCookService::Cook(Request);
+	auto Second = RunCookWithBoundary("repeat-same-generation", [&] { return AssetCookService::Cook(Request); });
 	if (!Second) std::cerr << "Second cook fixture failed: " << Second.error().Message << "\n";
 	PF_CHECK(Tests, Second.has_value());
 	if (!Second) return;
@@ -161,7 +179,7 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	auto DistRequest = Request;
 	DistRequest.Compatibility.Configuration = CookedBuildConfiguration::Dist;
 	DistRequest.OutputRoot = Fixture.Root / "DistCook";
-	const auto DistCook = AssetCookService::Cook(DistRequest);
+	const auto DistCook = RunCookWithBoundary("dist-provenance", [&] { return AssetCookService::Cook(DistRequest); });
 	PF_CHECK(Tests, DistCook.has_value());
 	if (DistCook)
 	{
@@ -205,7 +223,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	auto MaterialRequest = Fixture.Request(*Snapshot);
 	MaterialRequest.DynamicRoots = { Fixture.MaterialAsset };
 	MaterialRequest.OutputRoot = Fixture.Root / "MaterialCook";
-	const auto MaterialCook = AssetCookService::Cook(MaterialRequest);
+	const auto MaterialCook = RunCookWithBoundary("material-and-texture-products", [&]
+		{ return AssetCookService::Cook(MaterialRequest); });
 	PF_CHECK(Tests, MaterialCook.has_value());
 	if (MaterialCook)
 	{
@@ -225,7 +244,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	auto StartupOverrideRequest = Fixture.Request(*Snapshot);
 	StartupOverrideRequest.StartupScene = Fixture.AlternateSceneAsset;
 	StartupOverrideRequest.OutputRoot = Fixture.Root / "Override";
-	auto StartupOverrideCook = AssetCookService::Cook(StartupOverrideRequest);
+	auto StartupOverrideCook = RunCookWithBoundary("startup-scene-override", [&]
+		{ return AssetCookService::Cook(StartupOverrideRequest); });
 	PF_CHECK(Tests, StartupOverrideCook.has_value());
 	if (StartupOverrideCook)
 	{
@@ -236,7 +256,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 
 	auto DynamicRequest = Request;
 	DynamicRequest.DynamicRoots.push_back(Fixture.ScriptAsset);
-	auto WithDynamic = AssetCookService::Cook(DynamicRequest);
+	auto WithDynamic = RunCookWithBoundary("explicit-dynamic-root", [&]
+		{ return AssetCookService::Cook(DynamicRequest); });
 	PF_CHECK(Tests, WithDynamic.has_value());
 	if (!WithDynamic) return;
 	Provider = CookedContentProvider::Open(Fixture.Output, Fixture.Compatibility);
@@ -250,7 +271,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	const std::filesystem::path FormerScriptPayload = Fixture.Output / std::filesystem::u8path(FormerDynamicScript->RelativePayloadPath);
 	const std::filesystem::path Sentinel = Fixture.Output / "keep-this-user-file.pfartifact";
 	CookFixture::WriteText(Sentinel, "unowned sentinel");
-	const auto WithoutDynamic = AssetCookService::Cook(Request);
+	const auto WithoutDynamic = RunCookWithBoundary("remove-dynamic-root", [&]
+		{ return AssetCookService::Cook(Request); });
 	if (!WithoutDynamic) std::cerr << "Cook without dynamic root failed: " << WithoutDynamic.error().Message << "\n";
 	PF_CHECK(Tests, WithoutDynamic.has_value());
 	if (!WithoutDynamic) return;
@@ -278,7 +300,7 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 		CookFixture::WriteText(ScenePath, Changed);
 	}
 	PF_CHECK(Tests, std::filesystem::file_size(Fixture.Source / "Assets" / "Startup.scene") == BeforeMutation);
-	auto Stale = AssetCookService::Cook(*Planned);
+	auto Stale = RunCookWithBoundary("reject-stale-plan", [&] { return AssetCookService::Cook(*Planned); });
 	PF_CHECK(Tests, !Stale && Stale.error().Code == AssetCookErrorCode::SourceChanged);
 	std::ifstream RetainedManifestStream(FirstManifestPath, std::ios::binary);
 	const std::string RetainedManifest{ std::istreambuf_iterator<char>(RetainedManifestStream), std::istreambuf_iterator<char>() };
@@ -313,7 +335,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 				PF_CHECK(Tests, RealPlan.has_value());
 				if (RealPlan)
 				{
-					auto RealCook = AssetCookService::Cook(*RealPlan);
+					auto RealCook = RunCookWithBoundary("real-format-relocated-root-a", [&]
+						{ return AssetCookService::Cook(*RealPlan); });
 					if (!RealCook) std::cerr << "Real-format cook failed: " << RealCook.error().Message << "\n";
 					PF_CHECK(Tests, RealCook.has_value());
 					if (RealCook)
@@ -331,6 +354,9 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 					PF_CHECK(Tests, ModelRecord != Records.end());
 					if (RealProvider && ModelRecord != Records.end())
 						{
+							const CookedAssetEntry* MeshEntry = (*RealProvider)->FindMeshPrimitive(
+								ModelRecord->ID, "mesh/0/primitive/0");
+							PF_CHECK(Tests, MeshEntry && MeshEntry->RelativePayloadPath.size() < 96);
 							const auto MeshPayload = (*RealProvider)->ReadMeshPrimitive(
 								ModelRecord->ID, "mesh/0/primitive/0");
 							PF_CHECK(Tests, MeshPayload.has_value());
@@ -371,7 +397,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 									SecondRequest.SourceSnapshot = *SecondSnapshot;
 									SecondRequest.SourceProjectFile = SecondProject->GetFilePath();
 									SecondRequest.OutputRoot = RealFixture.Root / "B";
-									auto SecondCook = AssetCookService::Cook(SecondRequest);
+									auto SecondCook = RunCookWithBoundary("real-format-relocated-root-b", [&]
+									{ return AssetCookService::Cook(SecondRequest); });
 									PF_CHECK(Tests, SecondCook.has_value());
 									if (SecondCook)
 									{

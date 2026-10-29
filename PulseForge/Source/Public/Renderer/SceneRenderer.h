@@ -262,7 +262,6 @@ namespace PulseForge
 		SamplerHandle m_ShadowSampler;
 		BindingLayoutHandle m_BindingLayout;
 		BindingLayoutHandle m_ShadowBindingLayout;
-		BindingLayoutHandle m_SpotShadowBindingLayout;
 		BindingLayoutHandle m_PointShadowBindingLayout;
 		BindingLayoutHandle m_ShadowObjectBindingLayout;
 		BindingLayoutHandle m_PointShadowObjectBindingLayout;

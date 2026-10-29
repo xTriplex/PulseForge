@@ -1,4 +1,4 @@
-cbuffer SsaoParameters : register(b0, space4)
+cbuffer SsaoParameters : register(b0, space3)
 {
 	float4x4 InverseProjection;
 	float4x4 Projection;
@@ -8,9 +8,9 @@ cbuffer SsaoParameters : register(b0, space4)
 	float4 KernelSamples[32];
 };
 
-Texture2D<float> CameraDepth : register(t0, space4);
-Texture2D<float4> ViewNormalTexture : register(t1, space4);
-SamplerState PointClampSampler : register(s0, space4);
+Texture2D<float> CameraDepth : register(t0, space3);
+Texture2D<float4> ViewNormalTexture : register(t1, space3);
+SamplerState PointClampSampler : register(s0, space3);
 
 struct VertexInput
 {
