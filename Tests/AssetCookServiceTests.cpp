@@ -1,4 +1,5 @@
 #include "Assets/AssetCookService.h"
+#include "Assets/AssetImportProvenance.h"
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/Project.h"
@@ -17,6 +18,7 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <span>
 #include <iostream>
 #include <string>
 
@@ -34,6 +36,15 @@ namespace
 		else
 			std::cerr << "ASSET_COOK_OPERATION_END " << Name << " failure=" << Result.error().Message << std::endl;
 		return Result;
+	}
+
+	std::string CanonicalPrefabFingerprint(const PrefabSourceDocument& Source)
+	{
+		auto Serialized = PrefabSerializer::Serialize(Source);
+		if (!Serialized) return {};
+		const auto Bytes = std::as_bytes(std::span(Serialized->data(), Serialized->size()));
+		const AssetContentFingerprint Fingerprint = ComputeAssetContentFingerprint(Bytes);
+		return Fingerprint.Algorithm + ":" + Fingerprint.DigestHex;
 	}
 
 	struct CookFixture final
@@ -154,7 +165,10 @@ namespace
 		PF_CHECK(Tests, ID.has_value());
 		if (!ID) return;
 		std::error_code Error;
-		const auto TemporaryDirectory = std::filesystem::temp_directory_path(Error);
+		const auto SystemTemporaryDirectory = std::filesystem::temp_directory_path(Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto TemporaryDirectory = std::filesystem::weakly_canonical(SystemTemporaryDirectory, Error);
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		const std::filesystem::path TemporaryRoot = TemporaryDirectory /
@@ -197,6 +211,9 @@ namespace
 			OutputRoot
 		};
 		auto Plan = AssetCookService::Plan(Request);
+		if (!Plan)
+			std::cerr << "G15_SAMPLE_COOK_PLAN_ERROR code=" << static_cast<unsigned>(Plan.error().Code)
+				<< " message=" << Plan.error().Message << std::endl;
 		PF_CHECK(Tests, Plan.has_value());
 		if (!Plan) return;
 		const auto HasProduct = [&](AssetID Asset, CookedAssetProductKind Product)
@@ -247,9 +264,11 @@ namespace
 		PF_CHECK(Tests, LoadedSource.has_value());
 		if (LoadedSource && LeftInstance && LeftInstance->has_value())
 		{
-			if ((**LeftInstance).AppliedSourceFingerprint != LoadedSource->GetFingerprint())
-				std::cerr << "G15_SAMPLE_SOURCE_FINGERPRINT_EXPECTED " << LoadedSource->GetFingerprint() << '\n';
-			PF_CHECK(Tests, (**LeftInstance).AppliedSourceFingerprint == LoadedSource->GetFingerprint());
+			const std::string ExpectedFingerprint = CanonicalPrefabFingerprint(*LoadedSource);
+			if ((**LeftInstance).AppliedSourceFingerprint != ExpectedFingerprint)
+				std::cerr << "G15_SAMPLE_SOURCE_FINGERPRINT expected=" << ExpectedFingerprint << " actual="
+					<< (**LeftInstance).AppliedSourceFingerprint << '\n';
+			PF_CHECK(Tests, !ExpectedFingerprint.empty() && (**LeftInstance).AppliedSourceFingerprint == ExpectedFingerprint);
 		}
 #endif
 	}

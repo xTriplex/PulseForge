@@ -1,7 +1,9 @@
 #include "TestAssetSupport.h"
 
 #include "Assets/PrefabInstanceReconciler.h"
+#include "Assets/AssetImportProvenance.h"
 
+#include <span>
 #include <utility>
 
 namespace
@@ -19,6 +21,15 @@ namespace
 	constexpr AssetID SourceMaterialAsset{ 0x8900000000000000ull, 89 };
 	constexpr AssetID FirstOverrideMaterial{ 0x8a00000000000000ull, 90 };
 	constexpr AssetID SecondOverrideMaterial{ 0x8b00000000000000ull, 91 };
+
+	std::string CanonicalPrefabFingerprint(const PrefabSourceDocument& Source)
+	{
+		auto Serialized = PrefabSerializer::Serialize(Source);
+		if (!Serialized) return {};
+		const auto Bytes = std::as_bytes(std::span(Serialized->data(), Serialized->size()));
+		const AssetContentFingerprint Fingerprint = ComputeAssetContentFingerprint(Bytes);
+		return Fingerprint.Algorithm + ":" + Fingerprint.DigestHex;
+	}
 
 	class LinkedPrefabFixture final
 	{
@@ -1500,7 +1511,7 @@ namespace
 		const auto RecoveredMetadata = RecoveredRoot->GetPrefabInstance();
 		PF_CHECK(Tests, RecoveredMetadata && RecoveredMetadata->has_value() && (**RecoveredMetadata).Conflicts.empty() &&
 				(**RecoveredMetadata).InstanceID == InstanceID &&
-				(**RecoveredMetadata).AppliedSourceFingerprint == RecoveredSource->GetFingerprint());
+				(**RecoveredMetadata).AppliedSourceFingerprint == CanonicalPrefabFingerprint(*RecoveredSource));
 		PF_CHECK(Tests, Reopened.FindEntity(*ChildID).has_value());
 		PF_CHECK(Tests, FindMappedEntity(*RecoveredRoot, SourceChildKey) == ChildID);
 	}

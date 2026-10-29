@@ -90,6 +90,7 @@ namespace PulseForge
 		UUID InstanceID;
 		AssetID SourceAsset;
 		UUID SourceRootKey;
+		// Fingerprint of canonical serialized source data, independent of checkout line endings.
 		std::string AppliedSourceFingerprint;
 		std::vector<PrefabEntityMapping> SourceEntities;
 		std::vector<PrefabLocalEntityMapping> LocalEntities;

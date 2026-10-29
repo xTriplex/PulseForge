@@ -512,6 +512,10 @@ namespace PulseForge
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource, "A linked prefab requires a managed source asset UUID"));
 		if (Source.GetRootKey().IsNil())
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource, "Prefab source root UUID must not be nil"));
+		auto SerializedSource = PrefabSerializer::Serialize(Source);
+		if (!SerializedSource)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource, SerializedSource.error().Message));
+		const std::string SourceSnapshotFingerprint = FingerprintText(*SerializedSource);
 
 		if (Placement.Parent)
 		{
@@ -569,8 +573,7 @@ namespace PulseForge
 		Metadata.InstanceID = *InstanceID;
 		Metadata.SourceAsset = Source.GetSourceAsset();
 		Metadata.SourceRootKey = Source.GetRootKey();
-		Metadata.AppliedSourceFingerprint = Source.GetFingerprint().empty()
-			? FingerprintText(Source.m_OriginalData) : std::string(Source.GetFingerprint());
+		Metadata.AppliedSourceFingerprint = SourceSnapshotFingerprint;
 		Metadata.SourceEntities = Instantiated->SourceEntities;
 		if (auto Validation = Metadata.Validate(Instantiated->Root.GetUUID()); !Validation)
 		{
@@ -764,9 +767,7 @@ namespace PulseForge
 			[](const PrefabEntityMapping& First, const PrefabEntityMapping& Second) { return First.SourceKey < Second.SourceKey; });
 		std::sort(Metadata.LocalEntities.begin(), Metadata.LocalEntities.end(),
 			[](const PrefabLocalEntityMapping& First, const PrefabLocalEntityMapping& Second) { return First.LocalKey < Second.LocalKey; });
-		const std::string AppliedFingerprint = Source.GetFingerprint().empty()
-			? SourceSnapshotFingerprint : std::string(Source.GetFingerprint());
-		Metadata.AppliedSourceFingerprint = AppliedFingerprint;
+		Metadata.AppliedSourceFingerprint = SourceSnapshotFingerprint;
 		Metadata.Conflicts.clear();
 		if (!Conflicts.empty())
 		{
@@ -851,7 +852,7 @@ namespace PulseForge
 			++Summary.Removed;
 		}
 		Metadata.Conflicts.clear();
-		Metadata.AppliedSourceFingerprint = Source.GetFingerprint().empty() ? SourceSnapshotFingerprint : std::string(Source.GetFingerprint());
+		Metadata.AppliedSourceFingerprint = SourceSnapshotFingerprint;
 		if (auto Validation = Metadata.Validate(LinkedRoot.GetUUID()); !Validation)
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance, Validation.error()));
 		if (auto Result = StagedRoot->SetPrefabInstance(Metadata); !Result) return std::unexpected(ToReconcileError(Result.error()));
