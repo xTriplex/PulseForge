@@ -1,20 +1,23 @@
 name: Portable editor CPU CI
 
-run-name: ${{ inputs.validation_mode == 'patch-validation' && format('Portable editor CI · Patch validation · {0}', inputs.patch_validation_selection) || format('Portable editor CI · {0}', github.ref_name) }}
+run-name: ${{ inputs.validation_mode == 'patch-transfer' && format('Portable editor CI · Patch transfer · {0}', inputs.patch_transport_label) || (inputs.validation_mode == 'patch-validation' && format('Portable editor CI · Patch validation · {0}', inputs.patch_validation_selection) || format('Portable editor CI · {0}', github.ref_name)) }}
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
     inputs:
       validation_mode:
-        description: Select committed-source validation or bounded experimental patch validation
+        description: Select committed-source validation, experimental patch validation, or patch transport
         type: choice
         options:
           - full
           - automation-probe-only
           - macos-desktop-only
           - windows-asset-diagnostic-only
+          - patch-transfer
           - patch-validation
         default: full
         required: true
@@ -22,12 +25,16 @@ on:
         description: Existing remote commit to check out exactly for patch validation
         type: string
         required: false
-      patch_payload_gzip_base64:
-        description: Bounded gzip-compressed Git binary patch encoded as base64 (patch mode only)
+      patch_sha256:
+        description: SHA-256 of the complete decoded Git patch
         type: string
         required: false
-      patch_sha256:
-        description: SHA-256 of the decoded raw Git patch (patch mode only)
+      patch_request_json:
+        description: Structured chunk or complete patch manifest; data is parsed from event JSON
+        type: string
+        required: false
+      patch_transport_label:
+        description: Transfer ID and chunk ordinal used to identify one artifact-upload run
         type: string
         required: false
       patch_validation_selection:
@@ -45,13 +52,51 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' && format('patch-validation-{0}', github.run_id) || format('{0}-{1}-{2}', github.workflow, github.event_name, github.event.pull_request.number || github.ref) }}
-  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-transfer' && format('patch-transfer-{0}', inputs.patch_transport_label) || (github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' && format('patch-validation-{0}', github.run_id) || format('{0}-{1}-{2}', github.workflow, github.event_name, github.event.pull_request.number || github.ref)) }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.validation_mode == 'patch-validation' || inputs.validation_mode == 'patch-transfer')) }}
 
 jobs:
+  patch-transport:
+    name: Patch transport · ${{ inputs.patch_transport_label }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-transfer' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the workflow-pinned transport verifier
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .patch-validation-tools
+          sparse-checkout: .github/scripts/patch_validation_transport.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Validate and materialize one bounded chunk
+        run: |
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py upload --event "$GITHUB_EVENT_PATH" --output "$RUNNER_TEMP/patch-chunk"
+
+      - name: Preserve this transport chunk for one day
+        uses: actions/upload-artifact@v6
+        with:
+          name: pulseforge-patch-${{ inputs.patch_transport_label }}
+          path: ${{ runner.temp }}/patch-chunk/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Summarize transport only
+        env:
+          PATCH_TRANSPORT_LABEL: ${{ inputs.patch_transport_label }}
+        run: |
+          echo 'Patch chunk staged for complete experimental patched-source validation; this job does not apply or test a partial patch.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Transfer: $PATCH_TRANSPORT_LABEL" >> "$GITHUB_STEP_SUMMARY"
+
   macos-automation-bridge:
     name: macOS · JXA permission bridge probe
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection == 'windows-asset-diagnostic-only'))) && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'patch-transfer' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection == 'windows-asset-diagnostic-only'))) && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -61,16 +106,36 @@ jobs:
           ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
           persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
 
+      - name: Check out patch verifier from the selected workflow definition
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .patch-validation-tools
+          sparse-checkout: |
+            .github/scripts/apply_patch_validation.py
+            .github/scripts/patch_validation_transport.py
+            Tests/Platform/PreparePatchValidation.ps1
+            Tests/Platform/PreparePatchValidationTests.ps1
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Verify and apply experimental source patch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
         env:
           WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_patch_validation.py --self-test
-          python3 .github/scripts/apply_patch_validation.py \
+          python3 .patch-validation-tools/.github/scripts/apply_patch_validation.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py assemble \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/patch-validation.gz"
+          python3 .patch-validation-tools/.github/scripts/apply_patch_validation.py \
             --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_WORKSPACE" \
             --identity-file "$RUNNER_TEMP/patch-validation-identity.json" \
+            --patch-file "$RUNNER_TEMP/patch-validation.gz" \
             --workflow-definition-sha "$WORKFLOW_DEFINITION_SHA"
 
       - name: Preserve experimental source identity
@@ -188,7 +253,10 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     needs: macos-automation-bridge
-    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && (inputs.patch_validation_selection == 'automation-probe-only' || inputs.patch_validation_selection == 'windows-asset-diagnostic-only')))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
+    permissions:
+      actions: read
+      contents: read
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'patch-transfer' && inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && (inputs.patch_validation_selection == 'automation-probe-only' || inputs.patch_validation_selection == 'windows-asset-diagnostic-only')))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     steps:
       - name: Check out sources
         id: checkout_sources
@@ -198,16 +266,34 @@ jobs:
           ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
           persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
 
+      - name: Check out patch verifier from the selected workflow definition
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .patch-validation-tools
+          sparse-checkout: |
+            .github/scripts/apply_patch_validation.py
+            .github/scripts/patch_validation_transport.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Verify and apply experimental source patch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
         env:
           WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_patch_validation.py --self-test
-          python3 .github/scripts/apply_patch_validation.py \
+          python3 .patch-validation-tools/.github/scripts/apply_patch_validation.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py assemble \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/patch-validation.gz"
+          python3 .patch-validation-tools/.github/scripts/apply_patch_validation.py \
             --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_WORKSPACE" \
             --identity-file "$RUNNER_TEMP/patch-validation-identity.json" \
+            --patch-file "$RUNNER_TEMP/patch-validation.gz" \
             --workflow-definition-sha "$WORKFLOW_DEFINITION_SHA"
 
       - name: Preserve experimental source identity
@@ -772,7 +858,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 10
     needs: macos-desktop
-    if: ${{ needs.macos-desktop.result == 'success' }}
+    if: ${{ inputs.validation_mode != 'patch-transfer' && needs.macos-desktop.result == 'success' }}
     steps:
       - name: Download patched-source identity from this run's macOS producer
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
@@ -857,7 +943,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     needs: macos-desktop
-    if: ${{ needs.macos-desktop.result == 'success' }}
+    if: ${{ inputs.validation_mode != 'patch-transfer' && needs.macos-desktop.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -936,9 +1022,12 @@ jobs:
 
   windows-msvc:
     name: Windows 2022 · MSVC · Ninja Multi-Config · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection != 'full'))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'patch-transfer' && inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection != 'full'))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: windows-2022
     timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out pinned sources and submodules
         uses: actions/checkout@v5
@@ -947,17 +1036,39 @@ jobs:
           ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
           persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
 
+      - name: Check out patch verifier from the selected workflow definition
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .patch-validation-tools
+          sparse-checkout: |
+            .github/scripts/apply_patch_validation.py
+            .github/scripts/patch_validation_transport.py
+            Tests/Platform/PreparePatchValidation.ps1
+            Tests/Platform/PreparePatchValidationTests.ps1
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Verify and apply experimental source patch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
         shell: pwsh
         env:
           WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python .github/scripts/apply_patch_validation.py --self-test
+          python .patch-validation-tools/.github/scripts/apply_patch_validation.py --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python .github/scripts/apply_patch_validation.py `
+          python .patch-validation-tools/.github/scripts/patch_validation_transport.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .patch-validation-tools/.github/scripts/patch_validation_transport.py assemble `
+            --event "$env:GITHUB_EVENT_PATH" --repository "$env:GITHUB_REPOSITORY" `
+            --output "$env:RUNNER_TEMP/patch-validation.gz"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .patch-validation-tools/.github/scripts/apply_patch_validation.py `
             --event "$env:GITHUB_EVENT_PATH" --repository "$env:GITHUB_WORKSPACE" `
             --identity-file "$env:RUNNER_TEMP/patch-validation-identity.json" `
+            --patch-file "$env:RUNNER_TEMP/patch-validation.gz" `
             --workflow-definition-sha "$env:WORKFLOW_DEFINITION_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -980,9 +1091,12 @@ jobs:
       - name: Test bounded patch helpers in disposable Git fixtures
         shell: pwsh
         run: |
-          python .github/scripts/apply_patch_validation.py --self-test
+          $toolRoot = if (Test-Path -LiteralPath '.patch-validation-tools/.github/scripts/apply_patch_validation.py') { '.patch-validation-tools' } else { '.' }
+          python "$toolRoot/.github/scripts/apply_patch_validation.py" --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -NoProfile -File Tests/Platform/PreparePatchValidationTests.ps1
+          python "$toolRoot/.github/scripts/patch_validation_transport.py" --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File "$toolRoot/Tests/Platform/PreparePatchValidationTests.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Restore pinned dependency sources for experimental patches (read only)
@@ -1281,17 +1395,39 @@ jobs:
           ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
           persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
 
+      - name: Check out patch verifier from the selected workflow definition
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .patch-validation-tools
+          sparse-checkout: |
+            .github/scripts/apply_patch_validation.py
+            .github/scripts/patch_validation_transport.py
+            Tests/Platform/PreparePatchValidation.ps1
+            Tests/Platform/PreparePatchValidationTests.ps1
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Verify and apply experimental source patch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
         shell: pwsh
         env:
           WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python .github/scripts/apply_patch_validation.py --self-test
+          python .patch-validation-tools/.github/scripts/apply_patch_validation.py --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python .github/scripts/apply_patch_validation.py `
+          python .patch-validation-tools/.github/scripts/patch_validation_transport.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .patch-validation-tools/.github/scripts/patch_validation_transport.py assemble `
+            --event "$env:GITHUB_EVENT_PATH" --repository "$env:GITHUB_REPOSITORY" `
+            --output "$env:RUNNER_TEMP/patch-validation.gz"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .patch-validation-tools/.github/scripts/apply_patch_validation.py `
             --event "$env:GITHUB_EVENT_PATH" --repository "$env:GITHUB_WORKSPACE" `
             --identity-file "$env:RUNNER_TEMP/patch-validation-identity.json" `
+            --patch-file "$env:RUNNER_TEMP/patch-validation.gz" `
             --workflow-definition-sha "$env:WORKFLOW_DEFINITION_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1314,9 +1450,12 @@ jobs:
       - name: Test bounded patch helpers in disposable Git fixtures
         shell: pwsh
         run: |
-          python .github/scripts/apply_patch_validation.py --self-test
+          $toolRoot = if (Test-Path -LiteralPath '.patch-validation-tools/.github/scripts/apply_patch_validation.py') { '.patch-validation-tools' } else { '.' }
+          python "$toolRoot/.github/scripts/apply_patch_validation.py" --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          pwsh -NoProfile -File Tests/Platform/PreparePatchValidationTests.ps1
+          python "$toolRoot/.github/scripts/patch_validation_transport.py" --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File "$toolRoot/Tests/Platform/PreparePatchValidationTests.ps1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Restore pinned dependency sources for experimental patches (read only)
@@ -1441,7 +1580,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 20
     needs: windows-msvc
-    if: ${{ needs.windows-msvc.result == 'success' }}
+    if: ${{ inputs.validation_mode != 'patch-transfer' && needs.windows-msvc.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -1709,9 +1848,12 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection != 'full'))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'patch-transfer' && inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && !(inputs.validation_mode == 'patch-validation' && inputs.patch_validation_selection != 'full'))) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out pinned sources and submodules
         uses: actions/checkout@v5
@@ -1720,16 +1862,34 @@ jobs:
           ref: ${{ inputs.validation_mode == 'patch-validation' && inputs.patch_base_sha || github.sha }}
           persist-credentials: ${{ !(github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation') }}
 
+      - name: Check out patch verifier from the selected workflow definition
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .patch-validation-tools
+          sparse-checkout: |
+            .github/scripts/apply_patch_validation.py
+            .github/scripts/patch_validation_transport.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Verify and apply experimental source patch
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
         env:
           WORKFLOW_DEFINITION_SHA: ${{ github.workflow_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 .github/scripts/apply_patch_validation.py --self-test
-          python3 .github/scripts/apply_patch_validation.py \
+          python3 .patch-validation-tools/.github/scripts/apply_patch_validation.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py --self-test
+          python3 .patch-validation-tools/.github/scripts/patch_validation_transport.py assemble \
+            --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/patch-validation.gz"
+          python3 .patch-validation-tools/.github/scripts/apply_patch_validation.py \
             --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_WORKSPACE" \
             --identity-file "$RUNNER_TEMP/patch-validation-identity.json" \
+            --patch-file "$RUNNER_TEMP/patch-validation.gz" \
             --workflow-definition-sha "$WORKFLOW_DEFINITION_SHA"
 
       - name: Preserve experimental source identity
@@ -1962,7 +2122,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     needs: linux-gcc
-    if: ${{ needs.linux-gcc.result == 'success' }}
+    if: ${{ inputs.validation_mode != 'patch-transfer' && needs.linux-gcc.result == 'success' }}
     steps:
       - name: Download patched-source identity from this run's Linux producer
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'patch-validation' }}
@@ -2053,7 +2213,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: linux-gcc
-    if: ${{ needs.linux-gcc.result == 'success' }}
+    if: ${{ inputs.validation_mode != 'patch-transfer' && needs.linux-gcc.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:

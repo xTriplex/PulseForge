@@ -18,8 +18,8 @@ $ErrorActionPreference = 'Stop'
 
 function Show-Usage
 {
-	@'
-PreparePatchValidation.ps1 captures selected working-tree paths into a bounded request for
+@'
+PreparePatchValidation.ps1 captures selected working-tree paths into a bounded patch file for
 .github/workflows/portable-editor-ci.yml. It uses a temporary Git index and does not modify
 or stage the user's real index. Staged mode/content is used as the seed, then the working tree
 is overlaid so unstaged edits are included. Explicit paths determine what is sent.
@@ -30,17 +30,93 @@ Example:
     -IncludePath Tests/OneFocusedTest.cpp,Tests/RelatedFixture.txt `
     -Selection windows-asset-diagnostic-only -OutputJsonPath "$env:TEMP/pf-patch-request.json"
 
-Add -Dispatch to send that JSON to GitHub CLI's workflow_dispatch stdin interface. No patch
-content or credential is placed in command text. This requires an already authenticated `gh`
-CLI and does not extract or print its credentials.
+The helper writes a gzip patch file and a small JSON request. With -Dispatch it transfers
+bounded chunks through short-lived GitHub Actions artifacts, verifies each chunk run, then
+dispatches one complete patch validation. Artifacts are public to repository readers and expire
+after one day. No patch content or credential is placed in executable command text. This requires
+an already authenticated `gh` CLI and does not extract or print its credentials.
 
-Limits: <= 100 explicit include paths; decoded patch <= 2 MiB; gzip <= 30000 bytes;
-base64 field <= 40000 characters; resulting patch <= 200 changed paths and 20000 path bytes.
-Oversized or unsupported patches are rejected; they are never committed or uploaded elsewhere.
+Limits: <= 1,000 explicit include paths; decoded patch <= 32 MiB; compressed patch <= 8 MiB;
+<= 44,000 bytes per transport chunk and <= 191 chunks (an ordinary 100 KiB compressed patch uses three);
+<= 1,000 changed paths and 100 KiB of paths; binary patch
+sections <= 4 MiB each and 8 MiB total. These bounds limit accidental binary inclusion and
+decompression abuse. Oversized/unsupported patches are rejected, never committed or uploaded elsewhere.
 Patching workflow YAML after dispatch does not change the workflow definition already running.
-Workflow-graph changes must be committed and validated by the workflow definition from that commit.
+Workflow-definition changes require explicit authorization to publish and dispatch that workflow revision.
 An experimental patched-source run validates its recorded result tree, not its base commit.
 '@ | Write-Output
+}
+
+function Get-TransferRun
+{
+	param([string]$Title, [string]$Root)
+	$gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue
+	if (-not $gh) { throw 'GitHub CLI (gh) is not installed or not on PATH.' }
+	$deadline = [DateTime]::UtcNow.AddMinutes(3)
+	do
+	{
+		$json = & $gh.Source run list --workflow portable-editor-ci.yml --event workflow_dispatch --limit 100 `
+			--json databaseId,displayTitle,status,conclusion,url,headSha,headBranch 2>&1
+		$code = $LASTEXITCODE
+		if ($code -ne 0) { throw "Could not inspect patch transport runs ($code): $($json -join [Environment]::NewLine)" }
+		$runs = (($json -join "`n") | ConvertFrom-Json)
+		$match = @($runs | Where-Object { $_.displayTitle -ceq $Title } | Select-Object -First 1)
+		if ($match.Count -gt 0) { return $match[0] }
+		Start-Sleep -Seconds 2
+	} while ([DateTime]::UtcNow -lt $deadline)
+	throw "Timed out waiting for the unique transport run title '$Title'."
+}
+
+function Wait-TransferRun
+{
+	param([long]$RunId, [string]$ArtifactName, [string]$ExpectedChunkHash, [string]$Root)
+	$gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue
+	$watch = [Diagnostics.ProcessStartInfo]::new()
+	$watch.FileName = $gh.Source
+	$watch.UseShellExecute = $false
+	$watch.RedirectStandardOutput = $true
+	$watch.RedirectStandardError = $true
+	foreach ($argument in @('run', 'watch', "$RunId", '--exit-status')) { $watch.ArgumentList.Add($argument) }
+	$process = [Diagnostics.Process]::new()
+	$process.StartInfo = $watch
+	try
+	{
+		if (-not $process.Start()) { throw "Could not watch owned transport run $RunId." }
+		$stdout = $process.StandardOutput.ReadToEndAsync()
+		$stderr = $process.StandardError.ReadToEndAsync()
+		if (-not $process.WaitForExit(600000))
+		{
+			$process.Kill()
+			if (-not $process.WaitForExit(5000)) { throw "Could not stop gh run watch for transport run $RunId." }
+			throw "Transport run $RunId did not finish within ten minutes."
+		}
+		if ($process.ExitCode -ne 0)
+		{
+			throw "Transport run $RunId failed: $(($stderr.GetAwaiter().GetResult()).Trim()) $(($stdout.GetAwaiter().GetResult()).Trim())"
+		}
+	}
+	finally
+	{
+		if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit(5000) | Out-Null }
+		$process.Dispose()
+	}
+	$download = Join-Path ([IO.Path]::GetTempPath()) ("pf-patch-artifact-{0}" -f [guid]::NewGuid().ToString('N'))
+	New-Item -ItemType Directory -Path $download | Out-Null
+	try
+	{
+		& $gh.Source run download "$RunId" --name $ArtifactName --dir $download *> $null
+		if ($LASTEXITCODE -ne 0) { throw "Could not retrieve chunk artifact '$ArtifactName' from run $RunId." }
+		$chunkPath = Join-Path $download 'patch-chunk.bin'
+		$metadataPath = Join-Path $download 'patch-chunk.json'
+		if (-not (Test-Path -LiteralPath $chunkPath -PathType Leaf) -or -not (Test-Path -LiteralPath $metadataPath -PathType Leaf))
+		{
+			throw "Transport run $RunId did not publish the expected chunk files."
+		}
+		$actualHash = (Get-FileHash -LiteralPath $chunkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+		if ($actualHash -ne $ExpectedChunkHash) { throw "Transport run $RunId artifact chunk checksum mismatch." }
+		return $RunId
+	}
+	finally { Remove-Item -LiteralPath $download -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 function Invoke-Git
@@ -71,6 +147,31 @@ function Get-FileFingerprint
 	return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Assert-PatchSizePolicy
+{
+	param([byte[]]$Patch)
+	$text = [Text.Encoding]::ASCII.GetString($Patch)
+	$sectionStart = 0
+	$marker = "GIT binary patch`n"
+	$diffMarker = 'diff --git '
+	$totalBinaryBytes = 0
+	while ($true)
+	{
+		$nextDiff = $text.IndexOf($diffMarker, $sectionStart, [StringComparison]::Ordinal)
+		$sectionEnd = if ($nextDiff -lt 0) { $text.Length } else { $nextDiff }
+		$binaryMarker = $text.IndexOf($marker, $sectionStart, [StringComparison]::Ordinal)
+		if ($binaryMarker -ge 0 -and $binaryMarker -lt $sectionEnd)
+		{
+			$sectionBytes = $sectionEnd - $binaryMarker
+			if ($sectionBytes -gt 4MB) { throw "A binary diff section is $sectionBytes bytes; per-file limit is 4194304 bytes." }
+			$totalBinaryBytes += $sectionBytes
+			if ($totalBinaryBytes -gt 8MB) { throw "Binary diff sections total $totalBinaryBytes bytes; aggregate limit is 8388608 bytes." }
+		}
+		if ($nextDiff -lt 0) { break }
+		$sectionStart = $nextDiff + $diffMarker.Length
+	}
+}
+
 function Normalize-IncludedPath
 {
 	param([string]$Path)
@@ -87,9 +188,13 @@ function Normalize-IncludedPath
 	{
 		throw "Included path is not a supported repository path: $Path"
 	}
+	if ($value -eq '.patch-validation-tools' -or $value.StartsWith('.patch-validation-tools/', [StringComparison]::OrdinalIgnoreCase))
+	{
+		throw 'The isolated patch-verifier checkout cannot be included in a source patch.'
+	}
 	if ($value -eq '.github/workflows' -or $value.StartsWith('.github/workflows/', [StringComparison]::OrdinalIgnoreCase))
 	{
-		throw 'Workflow YAML cannot be validated through a patch dispatch; commit the workflow change and run that definition.'
+		throw 'Workflow YAML cannot be validated through a source patch; a separately authorized published workflow revision is required.'
 	}
 	return $value
 }
@@ -174,7 +279,7 @@ try
 		throw 'BaseSha must be an existing remote 40-character commit SHA.'
 	}
 	if ($IncludePath.Count -lt 1) { throw 'At least one explicit -IncludePath or -IncludePathFile is required.' }
-	if ($IncludePath.Count -gt 100) { throw 'At most 100 included paths are supported per patch request.' }
+	if ($IncludePath.Count -gt 1000) { throw 'At most 1000 included paths are supported per patch request.' }
 	$normalizedPaths = @($IncludePath | ForEach-Object { Normalize-IncludedPath $_ })
 	$caseAliasMap = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
 	foreach ($path in $normalizedPaths)
@@ -188,7 +293,7 @@ try
 	}
 	$normalizedPaths = @($normalizedPaths | Sort-Object -Unique)
 	$totalPathBytes = [Text.Encoding]::UTF8.GetByteCount(($normalizedPaths -join "`0"))
-	if ($totalPathBytes -gt 20000) { throw 'Included path list exceeds the 20000-byte bound.' }
+	if ($totalPathBytes -gt 100KB) { throw 'Included path list exceeds the 102400-byte bound.' }
 	$remoteFormat = Invoke-Git -Arguments @('check-ref-format', $RemoteRef) -AllowFailure
 	if ($remoteFormat.ExitCode -ne 0) { throw "RemoteRef is not a valid Git ref: $RemoteRef" }
 	$workflowFormat = Invoke-Git -Arguments @('check-ref-format', '--branch', $WorkflowRef) -AllowFailure
@@ -238,9 +343,14 @@ try
 		Invoke-Git -Arguments $gitAddArgs | Out-Null
 		$gitDiffArgs = @('-C', $RepositoryRoot, '-c', 'core.quotePath=false', 'diff', '--binary', '--full-index', '--no-renames', '--cached', $BaseSha, "--output=$patchPath", '--') + $normalizedPaths
 		Invoke-Git -Arguments $gitDiffArgs | Out-Null
+		$expectedTreeResult = Invoke-Git -Arguments @('-C', $RepositoryRoot, 'write-tree')
+		$expectedTree = [string]$expectedTreeResult.Output[-1]
+		if ($expectedTree -notmatch '^[0-9a-fA-F]{40}$') { throw 'Temporary patch index did not produce a valid expected source tree identity.' }
 		$patch = [IO.File]::ReadAllBytes($patchPath)
 		if ($patch.Length -eq 0) { throw 'The selected paths contain no net changes relative to the remote base.' }
-		if ($patch.Length -gt 2MB) { throw "Decoded patch is $($patch.Length) bytes; limit is 2097152 bytes." }
+		$maxPatchBytes = 32MB
+		if ($patch.Length -gt $maxPatchBytes) { throw "Decoded patch is $($patch.Length) bytes; limit is $maxPatchBytes bytes." }
+		Assert-PatchSizePolicy -Patch $patch
 
 		$compressedStream = [IO.MemoryStream]::new()
 		$gzip = [IO.Compression.GZipStream]::new($compressedStream, [IO.Compression.CompressionLevel]::Optimal, $true)
@@ -248,40 +358,109 @@ try
 		$gzip.Dispose()
 		$compressed = $compressedStream.ToArray()
 		$compressedStream.Dispose()
-		if ($compressed.Length -gt 30000) { throw "Compressed patch is $($compressed.Length) bytes; limit is 30000 bytes." }
-		$payload = [Convert]::ToBase64String($compressed)
-		if ($payload.Length -gt 40000) { throw "Base64 patch field is $($payload.Length) characters; limit is 40000." }
+		$maxCompressedBytes = 8MB
+		if ($compressed.Length -gt $maxCompressedBytes)
+		{
+			throw "Compressed patch is $($compressed.Length) bytes; limit is $maxCompressedBytes bytes. Select a complete smaller change set; files were not omitted or committed."
+		}
+		$chunkBytes = 44000
+		$chunkCount = [Math]::Ceiling($compressed.Length / [double]$chunkBytes)
+		$maxChunkCount = [Math]::Ceiling($maxCompressedBytes / [double]$chunkBytes)
+		if ($chunkCount -gt $maxChunkCount) { throw "Patch requires $chunkCount artifact chunks; limit is $maxChunkCount." }
 		$patchHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($patch)).ToLowerInvariant()
+		$compressedHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($compressed)).ToLowerInvariant()
 		$indexFingerprintAfter = Get-FileFingerprint -Path $indexPath
 		if ($indexFingerprintAfter -ne $indexFingerprintBefore) { throw 'The real Git index changed while preparing the patch.' }
-
-		$request = [ordered]@{
-			validation_mode = 'patch-validation'
-			patch_base_sha = $BaseSha.ToLowerInvariant()
-			patch_payload_gzip_base64 = $payload
-			patch_sha256 = $patchHash
-			patch_validation_selection = $Selection
-		}
-		$json = $request | ConvertTo-Json -Depth 4 -Compress
 		$parent = [IO.Path]::GetDirectoryName($OutputJsonPath)
 		if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container))
 		{
 			New-Item -ItemType Directory -Path $parent -Force | Out-Null
 		}
+		$patchFilePath = "$OutputJsonPath.patch.gz"
+		if (Test-Path -LiteralPath $patchFilePath) { throw "Refusing to overwrite an existing patch file: $patchFilePath" }
+		[IO.File]::WriteAllBytes($patchFilePath, $compressed)
+		$transferId = [guid]::NewGuid().ToString('N')
+		$runIds = [Collections.Generic.List[long]]::new()
+		$transportWorkflowSha = $null
+		if ($Dispatch)
+		{
+			for ($chunkIndex = 0; $chunkIndex -lt $chunkCount; $chunkIndex++)
+			{
+				$offset = $chunkIndex * $chunkBytes
+				$count = [Math]::Min($chunkBytes, $compressed.Length - $offset)
+				$chunk = [byte[]]::new($count)
+				[Array]::Copy($compressed, $offset, $chunk, 0, $count)
+				$chunkHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($chunk)).ToLowerInvariant()
+				$chunkRequestPath = Join-Path ([IO.Path]::GetTempPath()) ("pf-patch-chunk-{0}.json" -f [guid]::NewGuid().ToString('N'))
+				$chunkRequest = [ordered]@{
+					validation_mode = 'patch-transfer'
+					patch_base_sha = $BaseSha.ToLowerInvariant()
+					patch_transport_label = "$transferId-$chunkIndex-$chunkCount"
+					patch_request_json = ([ordered]@{
+						kind = 'chunk'
+						transfer_id = $transferId
+						index = [string]$chunkIndex
+						count = [string]$chunkCount
+					chunk_base64 = [Convert]::ToBase64String($chunk)
+						chunk_sha256 = $chunkHash
+						patch_sha256 = $patchHash
+					} | ConvertTo-Json -Compress)
+				}
+				[IO.File]::WriteAllText($chunkRequestPath, ($chunkRequest | ConvertTo-Json -Compress) + "`n", [Text.UTF8Encoding]::new($false))
+				try
+				{
+					Send-WorkflowRequest -RequestPath $chunkRequestPath -Ref $WorkflowRef -Root $RepositoryRoot
+					$title = "Portable editor CI · Patch transfer · $transferId-$chunkIndex-$chunkCount"
+					$run = Get-TransferRun -Title $title -Root $RepositoryRoot
+					if ($run.status -eq 'completed' -and $run.conclusion -ne 'success') { throw "Transport run $($run.databaseId) concluded $($run.conclusion)." }
+					$expectedWorkflowBranch = $WorkflowRef -replace '^refs/heads/', ''
+					if ($run.headBranch -cne $expectedWorkflowBranch -or $run.headSha -notmatch '^[0-9a-fA-F]{40}$')
+					{
+						throw "Transport run $($run.databaseId) used an unexpected workflow ref or had no exact workflow SHA."
+					}
+					if ($transportWorkflowSha -and $transportWorkflowSha -cne $run.headSha)
+					{
+						throw 'The workflow definition changed while patch chunks were being uploaded; this transfer cannot be assembled.'
+					}
+					$transportWorkflowSha = [string]$run.headSha
+					Wait-TransferRun -RunId $run.databaseId -ArtifactName ("pulseforge-patch-{0}-{1}-{2}" -f $transferId, $chunkIndex, $chunkCount) `
+						-ExpectedChunkHash $chunkHash -Root $RepositoryRoot | Out-Null
+					$runIds.Add([long]$run.databaseId)
+					Write-Output "PATCH_TRANSFER=PASS; chunk=$($chunkIndex + 1)/$chunkCount; run=$($run.databaseId); url=$($run.url)"
+				}
+				finally { Remove-Item -LiteralPath $chunkRequestPath -Force -ErrorAction SilentlyContinue }
+			}
+		}
+		$request = [ordered]@{
+			validation_mode = 'patch-validation'
+			patch_base_sha = $BaseSha.ToLowerInvariant()
+			patch_sha256 = $patchHash
+			patch_validation_selection = $Selection
+			patch_request_json = ([ordered]@{
+				kind = 'manifest'
+				base_sha = $BaseSha.ToLowerInvariant()
+				expected_tree = $expectedTree.ToLowerInvariant()
+				selection = $Selection
+				transfer_id = $transferId
+				count = [int]$chunkCount
+				run_ids = @($runIds.ToArray())
+				transport_workflow_sha = $transportWorkflowSha
+				patch_sha256 = $patchHash
+				compressed_sha256 = $compressedHash
+			} | ConvertTo-Json -Depth 4 -Compress)
+		}
+		$json = $request | ConvertTo-Json -Depth 4 -Compress
 		$tempOutputPath = "$OutputJsonPath.$([guid]::NewGuid().ToString('N')).tmp"
 		try
 		{
 			[IO.File]::WriteAllText($tempOutputPath, $json + "`n", [Text.UTF8Encoding]::new($false))
 			[IO.File]::Move($tempOutputPath, $OutputJsonPath)
 		}
-		finally
-		{
-			Remove-Item -LiteralPath $tempOutputPath -Force -ErrorAction SilentlyContinue
-		}
-		Write-Output "PATCH_REQUEST=READY; base=$($BaseSha.ToLowerInvariant()); patch_sha256=$patchHash; raw_bytes=$($patch.Length); compressed_bytes=$($compressed.Length); included_paths=$($normalizedPaths.Count); json=$OutputJsonPath"
+		finally { Remove-Item -LiteralPath $tempOutputPath -Force -ErrorAction SilentlyContinue }
+		Write-Output "PATCH_REQUEST=READY; base=$($BaseSha.ToLowerInvariant()); patch_sha256=$patchHash; expected_tree=$($expectedTree.ToLowerInvariant()); compressed_sha256=$compressedHash; raw_bytes=$($patch.Length); compressed_bytes=$($compressed.Length); chunks=$chunkCount; included_paths=$($normalizedPaths.Count); patch_file=$patchFilePath; json=$OutputJsonPath"
 		Write-Output 'EXPERIMENTAL PATCHED-SOURCE VALIDATION: this validates the resulting patch tree, never the unmodified base commit.'
 		if ($Dispatch) { Send-WorkflowRequest -RequestPath $OutputJsonPath -Ref $WorkflowRef -Root $RepositoryRoot }
-		else { Write-Output "Dispatch with the GitHub CLI JSON stdin mode using this file, or rerun with -Dispatch after authenticating gh: $OutputJsonPath" }
+		else { Write-Output 'The gzip file remains local. Use -Dispatch to upload bounded one-day artifact chunks and start complete patched-source validation.' }
 	}
 	finally
 	{
