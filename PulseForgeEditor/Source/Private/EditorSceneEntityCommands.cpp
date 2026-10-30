@@ -329,7 +329,22 @@ namespace PulseForgeEditor
 					}
 				}
 
-				if (ParentValue)
+				bool AttachedAsLocal = false;
+				if (ParentValue && ParentLinkedRoot && !ChildLinkedRoot)
+				{
+					auto Attached = PulseForge::PrefabInstanceReconciler::AttachSubtreeAsLocal(
+						*SceneValue, *ParentLinkedRoot, Child, *ParentValue);
+					if (!Attached)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidPrefabInstance, Attached.error().Message });
+					AttachedAsLocal = true;
+				}
+
+				if (AttachedAsLocal)
+				{
+					// AttachSubtreeAsLocal records ownership and establishes the requested parent link.
+				}
+				else if (ParentValue)
 				{
 					if (auto Result = Child.SetParent(*ParentValue); !Result) return Result;
 				}
@@ -349,7 +364,7 @@ namespace PulseForgeEditor
 								PulseForge::SceneErrorCode::InvalidPrefabInstance, Result.error().Message });
 					}
 				}
-				else if (ParentLinkedRoot && !ChildLinkedRoot)
+				else if (ParentLinkedRoot && !ChildLinkedRoot && !AttachedAsLocal)
 				{
 					if (auto Result = Actions.RecordPrefabReparent(Child, ParentValue); !Result)
 						return std::unexpected(PulseForge::SceneError{

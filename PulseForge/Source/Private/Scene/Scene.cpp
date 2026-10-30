@@ -1171,6 +1171,19 @@ namespace PulseForge
 		const auto ParentLinkedRoot = FindLinkedRoot(Parent);
 		if (!ThisLinkedRoot) return std::unexpected(ThisLinkedRoot.error());
 		if (!ParentLinkedRoot) return std::unexpected(ParentLinkedRoot.error());
+		if (!ThisLinkedRoot->has_value() && ParentLinkedRoot->has_value())
+		{
+			const auto RootMetadata = (**ParentLinkedRoot).GetPrefabInstance();
+			if (!RootMetadata) return std::unexpected(RootMetadata.error());
+			const bool IsMappedInstanceEntity = RootMetadata->has_value() &&
+				(std::any_of((**RootMetadata).SourceEntities.begin(), (**RootMetadata).SourceEntities.end(),
+					[this](const PrefabEntityMapping& Mapping) { return Mapping.SceneEntity == m_UUID; }) ||
+				 std::any_of((**RootMetadata).LocalEntities.begin(), (**RootMetadata).LocalEntities.end(),
+					[this](const PrefabLocalEntityMapping& Mapping) { return Mapping.SceneEntity == m_UUID; }));
+			if (!IsMappedInstanceEntity)
+				return std::unexpected(MakeSceneError(SceneErrorCode::InvalidPrefabInstance,
+					"Entities outside a linked prefab instance cannot be parented inside it"));
+		}
 		if (ThisLinkedRoot->has_value())
 		{
 			const bool IsLinkedRoot = (**ThisLinkedRoot).GetUUID() == m_UUID;

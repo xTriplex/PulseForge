@@ -1035,7 +1035,10 @@ namespace
 		const auto Local = Destination.CreateEntity("Local child with recorded override");
 		PF_CHECK(Tests, Local.has_value());
 		if (!Local) return;
-		PF_CHECK(Tests, Local->SetParent(LinkedRoot).has_value());
+		const auto LocalAddress = PrefabInstanceReconciler::AttachSubtreeAsLocal(
+			Destination, LinkedRoot, *Local, LinkedRoot);
+		PF_CHECK(Tests, LocalAddress && LocalAddress->IsLocal);
+		if (!LocalAddress) return;
 		const std::string TagComponent(PropertyComponentIds::Tag);
 		const std::string NameProperty(PropertyIds::Name);
 		PF_CHECK(Tests, PrefabInstanceReconciler::RecordPropertyOverride(
@@ -1218,9 +1221,10 @@ namespace
 		const auto LocalChild = Destination.CreateEntity("Instance-local child");
 		PF_CHECK(Tests, LocalChild.has_value());
 		if (!LocalChild) return;
-		PF_CHECK(Tests, LocalChild->SetParent(LinkedRoot).has_value());
-		const auto LocalAddress = PrefabInstanceReconciler::ResolveOrRegisterEntityAddress(LinkedRoot, *LocalChild);
+		const auto LocalAddress = PrefabInstanceReconciler::AttachSubtreeAsLocal(
+			Destination, LinkedRoot, *LocalChild, LinkedRoot);
 		PF_CHECK(Tests, LocalAddress && LocalAddress->IsLocal);
+		if (!LocalAddress) return;
 		PrefabOverrideRecord Removal;
 		Removal.Entity = { SourceChildKey, false };
 		Removal.Operation = PrefabOverrideOperation::RemoveSourceEntity;
@@ -1355,6 +1359,85 @@ namespace
 
 		RunOrdering(true);
 		RunOrdering(false);
+	}
+
+	void TestLinkedInstanceHierarchyRejectsCyclesAndBoundaryCrossings(TestRunner& Tests)
+	{
+		constexpr UUID RootKey{ 0xa310000000000000ull, 1 };
+		constexpr UUID ParentKey{ 0xa310000000000000ull, 2 };
+		constexpr UUID ChildKey{ 0xa310000000000000ull, 3 };
+		constexpr AssetID PrefabAsset{ 0xa320000000000000ull, 1 };
+
+		Scene Authored;
+		const auto Root = Authored.CreateEntityWithUUID(RootKey, "Root");
+		const auto Parent = Authored.CreateEntityWithUUID(ParentKey, "Parent");
+		const auto Child = Authored.CreateEntityWithUUID(ChildKey, "Child");
+		PF_CHECK(Tests, Root && Parent && Child);
+		if (!Root || !Parent || !Child) return;
+		PF_CHECK(Tests, Parent->SetParent(*Root));
+		PF_CHECK(Tests, Child->SetParent(*Parent));
+		auto Bytes = PrefabSerializer::Serialize(Authored, *Root);
+		PF_CHECK(Tests, Bytes.has_value());
+		if (!Bytes) return;
+		auto Source = PrefabSerializer::Parse(*Bytes, PrefabAsset);
+		PF_CHECK(Tests, Source.has_value());
+		if (!Source) return;
+
+		Scene Destination;
+		const auto Outside = Destination.CreateEntityWithUUID(UUID{ 0xa330000000000000ull, 1 }, "Outside");
+		PF_CHECK(Tests, Outside.has_value());
+		if (!Outside) return;
+		const auto First = PrefabInstanceReconciler::InstantiateLinked(*Source, Destination);
+		const auto Second = PrefabInstanceReconciler::InstantiateLinked(*Source, Destination);
+		PF_CHECK(Tests, First && Second);
+		if (!First || !Second) return;
+		const auto FirstParentID = FindMappedEntity(First->Root, ParentKey);
+		const auto FirstChildID = FindMappedEntity(First->Root, ChildKey);
+		const auto SecondParentID = FindMappedEntity(Second->Root, ParentKey);
+		PF_CHECK(Tests, FirstParentID && FirstChildID && SecondParentID);
+		if (!FirstParentID || !FirstChildID || !SecondParentID) return;
+		const auto FirstParent = Destination.FindEntity(*FirstParentID);
+		const auto FirstChild = Destination.FindEntity(*FirstChildID);
+		const auto SecondParent = Destination.FindEntity(*SecondParentID);
+		PF_CHECK(Tests, FirstParent && FirstChild && SecondParent);
+		if (!FirstParent || !FirstChild || !SecondParent) return;
+
+		const auto RejectParent = [&](const Entity& ChildEntity, const Entity& ParentEntity)
+		{
+			const auto Result = ChildEntity.SetParent(ParentEntity);
+			PF_CHECK(Tests, !Result && Result.error().Code == SceneErrorCode::InvalidPrefabInstance);
+		};
+		const auto Cycle = FirstParent->SetParent(*FirstChild);
+		PF_CHECK(Tests, !Cycle && Cycle.error().Code == SceneErrorCode::ParentCycle);
+		RejectParent(*FirstChild, *SecondParent); // Cross-instance parent.
+		RejectParent(*FirstChild, *Outside); // A linked descendant cannot escape its instance.
+		RejectParent(*Outside, First->Root); // An unrelated entity cannot enter a linked instance.
+		RejectParent(First->Root, Second->Root); // Linked roots cannot be nested.
+
+		const auto Adopted = Destination.CreateEntityWithUUID(UUID{ 0xa330000000000000ull, 2 }, "Adopted local root");
+		const auto AdoptedChild = Destination.CreateEntityWithUUID(UUID{ 0xa330000000000000ull, 3 }, "Adopted local child");
+		PF_CHECK(Tests, Adopted && AdoptedChild);
+		if (!Adopted || !AdoptedChild) return;
+		PF_CHECK(Tests, AdoptedChild->SetParent(*Adopted));
+		const auto AdoptedAddress = PrefabInstanceReconciler::AttachSubtreeAsLocal(
+			Destination, First->Root, *Adopted, First->Root);
+		PF_CHECK(Tests, AdoptedAddress && AdoptedAddress->IsLocal);
+		if (!AdoptedAddress) return;
+		const auto AdoptedMetadata = First->Root.GetPrefabInstance();
+		PF_CHECK(Tests, AdoptedMetadata && AdoptedMetadata->has_value() && (**AdoptedMetadata).LocalEntities.size() == 2);
+		const auto AdoptedParent = Adopted->GetParent();
+		const auto AdoptedChildParent = AdoptedChild->GetParent();
+		PF_CHECK(Tests, AdoptedParent && AdoptedParent->has_value() && **AdoptedParent == First->Root);
+		PF_CHECK(Tests, AdoptedChildParent && AdoptedChildParent->has_value() && **AdoptedChildParent == *Adopted);
+
+		const auto FirstParentAfter = FirstParent->GetParent();
+		const auto FirstChildAfter = FirstChild->GetParent();
+		PF_CHECK(Tests, FirstParentAfter && FirstParentAfter->has_value() && **FirstParentAfter == First->Root);
+		PF_CHECK(Tests, FirstChildAfter && FirstChildAfter->has_value() && **FirstChildAfter == *FirstParent);
+		const auto OutsideParent = Outside->GetParent();
+		PF_CHECK(Tests, OutsideParent && !OutsideParent->has_value());
+		const auto SecondRootAfter = Second->Root.GetParent();
+		PF_CHECK(Tests, SecondRootAfter && !SecondRootAfter->has_value());
 	}
 
 	void TestReconcileMovesSubtreeAcrossBranchesThroughNewParent(TestRunner& Tests)
@@ -2047,7 +2130,10 @@ namespace
 		PF_CHECK(Tests, LocalChildResult.has_value());
 		if (!LocalChildResult) return;
 		const Entity LocalChild = *LocalChildResult;
-		PF_CHECK(Tests, LocalChild.SetParent(LinkedChild).has_value());
+		const auto LocalAttach = PrefabInstanceReconciler::AttachSubtreeAsLocal(
+			Destination, LinkedRoot, LocalChild, LinkedChild);
+		PF_CHECK(Tests, LocalAttach && LocalAttach->IsLocal);
+		if (!LocalAttach) return;
 		const auto InitialMetadata = LinkedRoot.GetPrefabInstance();
 		PF_CHECK(Tests, InitialMetadata && InitialMetadata->has_value());
 		if (!InitialMetadata || !InitialMetadata->has_value()) return;
@@ -2139,6 +2225,7 @@ void RunPrefabLinkedInstanceTests(TestRunner& Tests)
 	TestLinkedPrefabRejectsNestedSourceBeforeDestinationMutation(Tests);
 	TestApplyOverridesToSourceDraftAndRevertInstanceOperations(Tests);
 	TestReconcileHierarchyTransitionIgnoresLiveUUIDOrdering(Tests);
+	TestLinkedInstanceHierarchyRejectsCyclesAndBoundaryCrossings(Tests);
 	TestReconcileMovesSubtreeAcrossBranchesThroughNewParent(Tests);
 	TestApplySourceSubtreeRemovalsDeepestFirst(Tests);
 	TestApplySourceReparentsBeforeRemovalAndPreservesConflicts(Tests);

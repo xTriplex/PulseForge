@@ -1176,6 +1176,10 @@ namespace PulseForge
 			Data->Conflicts = std::move(Conflicts);
 			return PrefabReconcilePlan(std::move(Data));
 		}
+		// SetParent validates membership against the staged root's persisted mapping. Publish the
+		// complete candidate mapping before assigning any source hierarchy relationships.
+		if (auto Result = StagedRoot->SetPrefabInstance(Metadata); !Result)
+			return std::unexpected(ToReconcileError(Result.error()));
 
 		for (const Entity& SourceEntity : *SourceSubtree)
 		{
@@ -1517,6 +1521,10 @@ namespace PulseForge
 			Resurrected.emplace(Override->Entity.Key, Created->GetUUID());
 			Mapping->SceneEntity = Created->GetUUID();
 		}
+		// Restored entities must be recognized as members before their original parent links
+		// are rebuilt by Entity::SetParent.
+		if (auto Updated = StagedRoot->SetPrefabInstance(Metadata); !Updated)
+			return std::unexpected(ToReconcileError(Updated.error()));
 
 		const auto ResolveMappedLive = [&](UUID SourceKey) -> std::optional<Entity>
 		{
@@ -1703,6 +1711,106 @@ namespace PulseForge
 		if (auto Result = LinkedRoot.SetPrefabInstance(Metadata); !Result)
 			return std::unexpected(ToReconcileError(Result.error()));
 		return PrefabEntityAddress{ *LocalKey, true };
+	}
+
+	std::expected<PrefabEntityAddress, PrefabReconcileError> PrefabInstanceReconciler::AttachSubtreeAsLocal(
+		Scene& Destination,
+		const Entity& LinkedRoot,
+		const Entity& Target,
+		const Entity& Parent)
+	{
+		const auto OwnedRoot = Destination.FindEntity(LinkedRoot.GetUUID());
+		const auto OwnedTarget = Destination.FindEntity(Target.GetUUID());
+		const auto OwnedParent = Destination.FindEntity(Parent.GetUUID());
+		if (!LinkedRoot.IsValid() || !OwnedRoot || *OwnedRoot != LinkedRoot || !OwnedTarget || *OwnedTarget != Target ||
+			!OwnedParent || *OwnedParent != Parent)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+				"Local subtree attachment requires live entities owned by the destination scene"));
+
+		const auto CurrentMetadata = LinkedRoot.GetPrefabInstance();
+		if (!CurrentMetadata || !CurrentMetadata->has_value())
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+				"Local subtree attachment requires a linked prefab root"));
+		PrefabInstanceComponent Metadata = **CurrentMetadata;
+		if (auto Validation = Metadata.Validate(LinkedRoot.GetUUID()); !Validation)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance, Validation.error()));
+
+		const auto ParentRoot = FindLinkedRoot(Destination, Parent);
+		if (!ParentRoot || !ParentRoot->has_value() || **ParentRoot != LinkedRoot)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+				"Local content must be attached beneath its own linked prefab instance"));
+		const auto TargetRoot = FindLinkedRoot(Destination, Target);
+		if (!TargetRoot) return std::unexpected(TargetRoot.error());
+		if (TargetRoot->has_value())
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+				"Only an unlinked scene subtree can be adopted as local prefab content"));
+
+		auto Subtree = GetSubtree(Target);
+		if (!Subtree) return std::unexpected(Subtree.error());
+		if (std::any_of(Subtree->begin(), Subtree->end(), [&](const Entity& Current) { return Current == Parent; }))
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+				"A local subtree cannot be parented beneath one of its own descendants"));
+
+		std::unordered_set<UUID, UUIDHash> SubtreeIDs;
+		SubtreeIDs.reserve(Subtree->size());
+		for (const Entity& Current : *Subtree)
+		{
+			const auto Owned = Destination.FindEntity(Current.GetUUID());
+			const auto NestedRoot = Current.GetPrefabInstance();
+			if (!Owned || *Owned != Current || !NestedRoot)
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+					"The candidate local subtree contains an invalid or unreadable entity"));
+			if (NestedRoot->has_value())
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride,
+					"Nested linked prefab instances cannot be adopted as local content"));
+			SubtreeIDs.insert(Current.GetUUID());
+		}
+		for (const PrefabEntityMapping& Mapping : Metadata.SourceEntities)
+			if (SubtreeIDs.contains(Mapping.SceneEntity))
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+					"The candidate subtree already contains an entity mapped by this prefab instance"));
+		for (const PrefabLocalEntityMapping& Mapping : Metadata.LocalEntities)
+			if (SubtreeIDs.contains(Mapping.SceneEntity))
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+					"The candidate subtree already contains an instance-local entity"));
+
+		std::unordered_set<UUID, UUIDHash> LocalKeys;
+		LocalKeys.reserve(Metadata.LocalEntities.size() + Subtree->size());
+		for (const PrefabLocalEntityMapping& Mapping : Metadata.LocalEntities) LocalKeys.insert(Mapping.LocalKey);
+		std::optional<PrefabEntityAddress> TargetAddress;
+		for (const Entity& Current : *Subtree)
+		{
+			auto LocalKey = UUID::Generate();
+			if (!LocalKey || !LocalKeys.insert(*LocalKey).second)
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+					LocalKey ? "Could not allocate a unique local prefab identity" : LocalKey.error().Message));
+			Metadata.LocalEntities.push_back({ *LocalKey, Current.GetUUID() });
+			if (Current == Target) TargetAddress = PrefabEntityAddress{ *LocalKey, true };
+		}
+		if (!TargetAddress)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance,
+				"The candidate local subtree did not contain its requested root"));
+		if (auto Validation = Metadata.Validate(LinkedRoot.GetUUID()); !Validation)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance, Validation.error()));
+
+		const auto Before = SceneSerializer::Serialize(Destination);
+		if (!Before) return std::unexpected(SerializationError(Before.error()));
+		if (auto Updated = LinkedRoot.SetPrefabInstance(Metadata); !Updated)
+			return std::unexpected(ToReconcileError(Updated.error()));
+		if (auto Parented = Target.SetParent(Parent); !Parented)
+		{
+			const auto RestoredMetadata = LinkedRoot.SetPrefabInstance(**CurrentMetadata);
+			const auto RestoredScene = SceneSerializer::Serialize(Destination);
+			if (!RestoredMetadata || !RestoredScene || *RestoredScene != *Before)
+			{
+				PrefabReconcileError Recovery = MakeError(PrefabReconcileErrorCode::RecoveryRequired,
+					"Local subtree attachment failed and its previous scene state could not be verified; retain the recovery snapshot");
+				Recovery.RecoverySnapshot = *Before;
+				return std::unexpected(std::move(Recovery));
+			}
+			return std::unexpected(ToReconcileError(Parented.error()));
+		}
+		return *TargetAddress;
 	}
 
 	std::expected<void, PrefabReconcileError> PrefabInstanceReconciler::RecordPropertyOverride(

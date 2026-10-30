@@ -61,7 +61,6 @@ namespace
 		PF_CHECK(Tests, Root.has_value() && Child.has_value() && Local.has_value());
 		if (!Root || !Child || !Local) return;
 		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
-		PF_CHECK(Tests, Local->SetParent(*Child).has_value());
 
 		PrefabInstanceComponent Instance;
 		Instance.InstanceID = InstanceID;
@@ -83,6 +82,7 @@ namespace
 		Instance.Conflicts.push_back({ { LocalKey, true }, PrefabConflictKind::RemovedEntityHasLocalChildren, {}, {},
 			"Local descendant needs review" });
 		PF_CHECK(Tests, Root->SetPrefabInstance(Instance).has_value());
+		PF_CHECK(Tests, Local->SetParent(*Child).has_value());
 
 		const std::array Roots{ *Root };
 		const auto Duplicated = EditorSceneHierarchyOperations::DuplicateSubtrees(SceneValue, Roots);

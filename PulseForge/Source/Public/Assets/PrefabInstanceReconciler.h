@@ -131,6 +131,13 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<PrefabEntityAddress, PrefabReconcileError> ResolveOrRegisterEntityAddress(
 			const Entity& LinkedRoot,
 			const Entity& Target);
+		// Explicitly attaches an unlinked scene subtree as instance-local content. Its identities are recorded
+		// before the hierarchy boundary is crossed, so ordinary parenting cannot smuggle an unowned entity in.
+		[[nodiscard]] static std::expected<PrefabEntityAddress, PrefabReconcileError> AttachSubtreeAsLocal(
+			Scene& Destination,
+			const Entity& LinkedRoot,
+			const Entity& Target,
+			const Entity& Parent);
 		[[nodiscard]] static std::expected<void, PrefabReconcileError> RecordPropertyOverride(
 			const Entity& LinkedRoot,
 			const Entity& Target,
