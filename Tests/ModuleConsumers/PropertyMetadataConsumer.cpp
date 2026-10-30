@@ -1,10 +1,18 @@
+#include "Assets/PrefabAssetService.h"
+#include "Assets/PrefabInstanceReconciler.h"
+#include "Assets/PrefabSerializer.h"
 #include "Scene/Entity.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/PrefabInstanceComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/PropertyMetadata.h"
 #include "Scene/Scene.h"
 
+#include <type_traits>
 #include <variant>
+
+static_assert(std::is_move_constructible_v<PulseForge::PrefabSourceDocument>);
+static_assert(std::is_move_constructible_v<PulseForge::PrefabReconcilePlan>);
 
 int main()
 {
@@ -24,5 +32,12 @@ int main()
 	if (!Entity->SetMeshRenderer(PulseForge::MeshRendererComponent{ MeshID })) return 7;
 	const auto Mesh = PulseForge::ReadProperty(*Entity, PulseForge::PropertyComponentIds::MeshRenderer, PulseForge::PropertyIds::MeshAsset);
 	if (!Mesh || !std::holds_alternative<PulseForge::AssetID>(*Mesh) || std::get<PulseForge::AssetID>(*Mesh) != MeshID) return 8;
+	PulseForge::PrefabInstanceComponent PrefabInstance;
+	PrefabInstance.InstanceID = { 0x1234567812345678ull, 0x8877665544332211ull };
+	PrefabInstance.SourceAsset = { 0x9988776699887766ull, 0x1122334455667788ull };
+	PrefabInstance.SourceRootKey = { 0xabcdef01abcdef01ull, 0x1020304050607080ull };
+	PrefabInstance.AppliedSourceFingerprint = "test-fingerprint";
+	PrefabInstance.SourceEntities.push_back({ PrefabInstance.SourceRootKey, { 0xfeedfacefeedfaceull, 0x123456789abcdef0ull } });
+	if (!PrefabInstance.Validate(PrefabInstance.SourceEntities.front().SceneEntity)) return 9;
 	return 0;
 }

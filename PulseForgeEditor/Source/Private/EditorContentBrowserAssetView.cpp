@@ -23,6 +23,13 @@ namespace PulseForgeEditor
 			case AssetBrowserOpenAction::OpenScene:
 				ActionHandler(EditorContentBrowserAssetAction::OpenScene, Asset.ID);
 				break;
+			case AssetBrowserOpenAction::OpenPrefab:
+			{
+				const auto Handler = ActionHandler;
+				const PulseForge::AssetID Identifier = Asset.ID;
+				DeferredAction = [Handler, Identifier] { Handler(EditorContentBrowserAssetAction::OpenPrefab, Identifier); };
+				break;
+			}
 			case AssetBrowserOpenAction::ShowMaterialDetails:
 			{
 				const auto Handler = ActionHandler;
@@ -72,6 +79,9 @@ namespace PulseForgeEditor
 		if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Material) &&
 			Style.MenuItem(EditorIcon::Material, "Show Material Details"))
 			Defer(EditorContentBrowserAssetAction::ShowMaterialDetails);
+		if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Prefab) &&
+			Style.MenuItem(EditorIcon::Prefab, "Open Prefab"))
+			Defer(EditorContentBrowserAssetAction::OpenPrefab);
 		if (Style.MenuItem(EditorIcon::Rename, "Move / Rename...")) Defer(EditorContentBrowserAssetAction::Move);
 		if (Style.MenuItem(EditorIcon::Duplicate, "Duplicate...")) Defer(EditorContentBrowserAssetAction::Duplicate);
 		if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Prefab) &&

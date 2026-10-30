@@ -13,6 +13,7 @@
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Components/TagComponent.h"
 #include "Scene/Components/TransformComponent.h"
+#include "Scene/Components/PrefabInstanceComponent.h"
 #include "Scene/SceneError.h"
 #include "Scene/UUID.h"
 
@@ -77,6 +78,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<ScriptComponent>, SceneError> GetScript() const;
 		[[nodiscard]] std::expected<void, SceneError> SetScript(const ScriptComponent& Script) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveScript() const;
+		[[nodiscard]] std::expected<std::optional<PrefabInstanceComponent>, SceneError> GetPrefabInstance() const;
+		[[nodiscard]] std::expected<void, SceneError> SetPrefabInstance(const PrefabInstanceComponent& Instance) const;
+		[[nodiscard]] std::expected<void, SceneError> RemovePrefabInstance() const;
 		[[nodiscard]] std::expected<glm::mat4, SceneError> GetWorldMatrix() const;
 		[[nodiscard]] std::expected<std::optional<Entity>, SceneError> GetParent() const;
 		[[nodiscard]] std::expected<std::vector<Entity>, SceneError> GetChildren() const;

@@ -22,7 +22,8 @@ namespace PulseForgeEditor
 	{
 		Level,
 		Material,
-		Texture
+		Texture,
+		Prefab
 	};
 
 	enum class EditorDocumentOpenPreference : uint8_t

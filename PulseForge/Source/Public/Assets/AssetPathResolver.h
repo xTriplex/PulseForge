@@ -14,7 +14,8 @@ namespace PulseForge
 		InvalidProjectRoot,
 		InvalidRelativePath,
 		InvalidAssetsDirectory,
-		InvalidAssetEntry
+		InvalidAssetEntry,
+		MissingAssetEntry
 	};
 
 	struct AssetPathError

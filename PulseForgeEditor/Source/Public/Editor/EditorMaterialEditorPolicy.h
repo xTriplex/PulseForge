@@ -12,6 +12,7 @@ namespace PulseForgeEditor
 	{
 		None,
 		OpenScene,
+		OpenPrefab,
 		ShowMaterialDetails
 	};
 
@@ -23,6 +24,7 @@ namespace PulseForgeEditor
 		if (!Activated || !LeftDoubleClick)
 			return AssetBrowserOpenAction::None;
 		if (PulseForge::AssetExtensionsEqual(Extension, ".scene")) return AssetBrowserOpenAction::OpenScene;
+		if (PulseForge::AssetExtensionsEqual(Extension, ".prefab")) return AssetBrowserOpenAction::OpenPrefab;
 		if (PulseForge::AssetExtensionsEqual(Extension, ".material")) return AssetBrowserOpenAction::ShowMaterialDetails;
 		return AssetBrowserOpenAction::None;
 	}

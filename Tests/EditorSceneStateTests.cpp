@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Assets/PrefabInstanceReconciler.h"
 #include "Editor/EditorSceneEditController.h"
 #include "nlohmann/json.hpp"
 #include "Editor/EditorEntityClipboard.h"
@@ -7,6 +8,8 @@
 #include "Editor/EditorSceneTransitionQueue.h"
 #include "Scene/PropertyMetadata.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
+
+#include <algorithm>
 
 namespace
 {
@@ -375,6 +378,47 @@ namespace
 		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeDelete - 2);
 		PF_CHECK(Tests, Workspace.Selection().GetEntities().empty());
 		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(RootID));
+
+		Scene LinkedScene;
+		const UUID LinkedRootID{ 0xc100000000000000ull, 1 };
+		const UUID LinkedSourceChildID{ 0xc100000000000000ull, 2 };
+		const UUID InstanceID{ 0xc100000000000000ull, 3 };
+		const UUID SourceRootKey{ 0xc100000000000000ull, 4 };
+		const UUID SourceChildKey{ 0xc100000000000000ull, 5 };
+		const AssetID PrefabAsset{ 0xc100000000000000ull, 6 };
+		auto LinkedRoot = LinkedScene.CreateEntityWithUUID(LinkedRootID, "Linked root");
+		auto LinkedSourceChild = LinkedScene.CreateEntityWithUUID(LinkedSourceChildID, "Linked source child");
+		auto OutsideSubtree = LinkedScene.CreateEntityWithUUID(UUID{ 0xc100000000000000ull, 7 }, "Outside subtree");
+		auto OutsideChild = LinkedScene.CreateEntityWithUUID(UUID{ 0xc100000000000000ull, 8 }, "Outside child");
+		PF_CHECK(Tests, LinkedRoot && LinkedSourceChild && OutsideSubtree && OutsideChild);
+		if (!LinkedRoot || !LinkedSourceChild || !OutsideSubtree || !OutsideChild) return;
+		PF_CHECK(Tests, LinkedSourceChild->SetParent(*LinkedRoot));
+		PF_CHECK(Tests, OutsideChild->SetParent(*OutsideSubtree));
+		PrefabInstanceComponent LinkedMetadata;
+		LinkedMetadata.InstanceID = InstanceID;
+		LinkedMetadata.SourceAsset = PrefabAsset;
+		LinkedMetadata.SourceRootKey = SourceRootKey;
+		LinkedMetadata.AppliedSourceFingerprint = "editor-command-local-adoption";
+		LinkedMetadata.SourceEntities = { { SourceRootKey, LinkedRootID }, { SourceChildKey, LinkedSourceChildID } };
+		PF_CHECK(Tests, LinkedRoot->SetPrefabInstance(LinkedMetadata));
+		const auto UnapprovedParent = OutsideSubtree->SetParent(*LinkedRoot);
+		PF_CHECK(Tests, !UnapprovedParent && UnapprovedParent.error().Code == SceneErrorCode::InvalidPrefabInstance);
+		const size_t ErrorsBeforeAdoption = Actions.Errors.size();
+		Commands.ReparentEntity(&LinkedScene, OutsideSubtree->GetUUID(), LinkedRootID, Actions);
+		PF_CHECK(Tests, Actions.Errors.size() == ErrorsBeforeAdoption);
+		const auto AdoptedParent = OutsideSubtree->GetParent();
+		PF_CHECK(Tests, AdoptedParent && AdoptedParent->has_value() && **AdoptedParent == *LinkedRoot);
+		const auto AdoptedChildParent = OutsideChild->GetParent();
+		PF_CHECK(Tests, AdoptedChildParent && AdoptedChildParent->has_value() && **AdoptedChildParent == *OutsideSubtree);
+		const auto AdoptedMetadata = LinkedRoot->GetPrefabInstance();
+		PF_CHECK(Tests, AdoptedMetadata && AdoptedMetadata->has_value() && (**AdoptedMetadata).LocalEntities.size() == 2);
+		if (AdoptedMetadata && AdoptedMetadata->has_value())
+		{
+			PF_CHECK(Tests, std::any_of((**AdoptedMetadata).LocalEntities.begin(), (**AdoptedMetadata).LocalEntities.end(),
+				[&](const PrefabLocalEntityMapping& Mapping) { return Mapping.SceneEntity == OutsideSubtree->GetUUID(); }));
+			PF_CHECK(Tests, std::any_of((**AdoptedMetadata).LocalEntities.begin(), (**AdoptedMetadata).LocalEntities.end(),
+				[&](const PrefabLocalEntityMapping& Mapping) { return Mapping.SceneEntity == OutsideChild->GetUUID(); }));
+		}
 
 		const size_t BeforeFailedCreate = SceneValue.GetEntityCount();
 		Actions.FailNextEdit = true;

@@ -18,6 +18,15 @@ namespace PulseForgeEditor
 			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) = 0;
 		virtual void ReportEditorSceneCommandError(std::string Message) = 0;
 		virtual void SetEditorSceneCommandStatus(std::string Message) = 0;
+		[[nodiscard]] virtual std::expected<void, std::string> RecordPrefabReparent(
+			const PulseForge::Entity& Entity, const std::optional<PulseForge::Entity>& Parent)
+		{
+			(void)Entity; (void)Parent; return {};
+		}
+		[[nodiscard]] virtual std::expected<void, std::string> RecordPrefabRemoval(const PulseForge::Entity& Entity)
+		{
+			(void)Entity; return {};
+		}
 	};
 
 	class EditorSceneEntityCommandActions : public EditorSceneCommandActions

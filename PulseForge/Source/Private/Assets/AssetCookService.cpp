@@ -793,12 +793,22 @@ namespace PulseForge
 					const std::string Text(Bytes.empty() ? "" : reinterpret_cast<const char*>(Bytes.data()), Bytes.size());
 					auto Valid = SceneSerializer::Deserialize(Text, SceneValue);
 					if (!Valid) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Valid.error().Message, Product.SourcePath, Product.Asset));
+					for (const Entity& EntityValue : SceneValue.GetEntities())
+					{
+						auto Prefab = EntityValue.GetPrefabInstance();
+						if (!Prefab) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+							Prefab.error().Message, Product.SourcePath, Product.Asset));
+						if (!Prefab->has_value() || (**Prefab).Conflicts.empty()) continue;
+						return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+							"Scene contains an unresolved linked-prefab conflict for source asset " +
+							(**Prefab).SourceAsset.ToString() + ": " + (**Prefab).Conflicts.front().Message,
+							Product.SourcePath, Product.Asset));
+					}
 				}
 				else if (Product.Product == CookedAssetProductKind::Prefab)
 				{
-					Scene ValidationScene;
 					const std::string Text(Bytes.empty() ? "" : reinterpret_cast<const char*>(Bytes.data()), Bytes.size());
-					auto Valid = PrefabSerializer::Instantiate(Text, ValidationScene);
+					auto Valid = PrefabSerializer::Parse(Text, Product.Asset);
 					if (!Valid) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Valid.error().Message, Product.SourcePath, Product.Asset));
 				}
 				else if (Product.Product == CookedAssetProductKind::Material)

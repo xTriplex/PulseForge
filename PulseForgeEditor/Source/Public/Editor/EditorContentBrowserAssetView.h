@@ -17,6 +17,7 @@ namespace PulseForgeEditor
 	enum class EditorContentBrowserAssetAction
 	{
 		OpenScene,
+		OpenPrefab,
 		ShowMaterialDetails,
 		Move,
 		Duplicate,

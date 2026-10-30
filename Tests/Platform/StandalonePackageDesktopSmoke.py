@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import hashlib
 from io import BytesIO, TextIOWrapper
 import json
+import math
 import os
 import plistlib
 import re
@@ -805,6 +806,77 @@ class WindowsDesktop:
 
 
 class MacOSDesktop:
+    WINDOW_INFO_C = r'''#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <inttypes.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int read_number(CFDictionaryRef Dictionary, CFStringRef Key, CFNumberType Type, void* Value)
+{
+	CFTypeRef Object = CFDictionaryGetValue(Dictionary, Key);
+	if (Object == NULL || CFGetTypeID(Object) != CFNumberGetTypeID())
+		return 0;
+	return CFNumberGetValue((CFNumberRef)Object, Type, Value) ? 1 : 0;
+}
+
+int main(int ArgumentCount, char** Arguments)
+{
+	if (ArgumentCount != 2)
+	{
+		fputs("expected one target process ID\n", stderr);
+		return 2;
+	}
+	char* End = NULL;
+	long TargetPID = strtol(Arguments[1], &End, 10);
+	if (End == Arguments[1] || *End != '\0' || TargetPID <= 0 || TargetPID > INT32_MAX)
+	{
+		fputs("invalid target process ID\n", stderr);
+		return 2;
+	}
+	CFArrayRef Windows = CGWindowListCopyWindowInfo(
+		kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+	if (Windows == NULL)
+	{
+		fputs("CoreGraphics could not enumerate on-screen windows\n", stderr);
+		return 3;
+	}
+	putchar('[');
+	int Matches = 0;
+	CFIndex Count = CFArrayGetCount(Windows);
+	for (CFIndex Index = 0; Index < Count; ++Index)
+	{
+		CFDictionaryRef Info = (CFDictionaryRef)CFArrayGetValueAtIndex(Windows, Index);
+		int32_t OwnerPID = 0;
+		int32_t Layer = -1;
+		int64_t WindowID = 0;
+		if (!read_number(Info, kCGWindowOwnerPID, kCFNumberSInt32Type, &OwnerPID) || OwnerPID != TargetPID ||
+			!read_number(Info, kCGWindowLayer, kCFNumberSInt32Type, &Layer) || Layer != 0 ||
+			!read_number(Info, kCGWindowNumber, kCFNumberSInt64Type, &WindowID) || WindowID <= 0)
+			continue;
+		CFTypeRef BoundsObject = CFDictionaryGetValue(Info, kCGWindowBounds);
+		if (BoundsObject == NULL || CFGetTypeID(BoundsObject) != CFDictionaryGetTypeID())
+			continue;
+		CGRect Bounds;
+		if (!CGRectMakeWithDictionaryRepresentation((CFDictionaryRef)BoundsObject, &Bounds) ||
+			!isfinite(Bounds.origin.x) || !isfinite(Bounds.origin.y) ||
+			!isfinite(Bounds.size.width) || !isfinite(Bounds.size.height) ||
+			Bounds.size.width <= 0 || Bounds.size.height <= 0)
+			continue;
+		printf("%s{\"window_id\":%" PRId64 ",\"owner_pid\":%d,\"x\":%.17g,\"y\":%.17g,"
+			"\"width\":%.17g,\"height\":%.17g}", Matches == 0 ? "" : ",", WindowID, OwnerPID,
+			(double)Bounds.origin.x, (double)Bounds.origin.y, (double)Bounds.size.width, (double)Bounds.size.height);
+		++Matches;
+	}
+	putchar(']');
+	putchar('\n');
+	CFRelease(Windows);
+	return 0;
+}
+'''
+
     def __init__(self, PackageRoot: Path):
         if sys.platform != "darwin":
             raise UnsupportedCapability("macOS bundle capture is only available on macOS")
@@ -819,7 +891,7 @@ class MacOSDesktop:
             raise SmokeFailure(f"macOS package has no readable CFBundleExecutable in Contents/Info.plist: {Error}") from Error
 
     @staticmethod
-    def _osascript(Script: str, Timeout: float = 5.0) -> str:
+    def _osascript(Script: str, Timeout: float = 5.0, Operation: str = "unspecified") -> str:
         try:
             Result = subprocess.run(["osascript", "-e", Script], check=False, capture_output=True,
                                     text=True, encoding="utf-8", errors="strict", timeout=Timeout,
@@ -832,10 +904,12 @@ class MacOSDesktop:
 
             Stdout = Error.stdout if Error.stdout is not None else Error.output
             raise UnsupportedCapability(
-                f"bounded AppleScript/Accessibility operation timed out after {Timeout:.1f}s; "
+                f"bounded AppleScript/Accessibility operation timed out; operation={Operation}; "
+                f"timeout={Timeout:.1f}s; "
                 f"stdout_tail={OutputTail(Stdout)!r}; stderr_tail={OutputTail(Error.stderr)!r}") from Error
         except OSError as Error:
-            raise UnsupportedCapability(f"bounded AppleScript/Accessibility operation failed: {Error}") from Error
+            raise UnsupportedCapability(
+                f"bounded AppleScript/Accessibility operation failed; operation={Operation}; error={Error}") from Error
         if Result.returncode != 0:
             Detail = (Result.stderr or Result.stdout).strip()
             Lower = Detail.casefold()
@@ -845,27 +919,83 @@ class MacOSDesktop:
         return Result.stdout.strip()
 
     def find_window(self, PID: int, Deadline: float) -> Window:
-        Script = f'''tell application "System Events"
-    set targetProcess to first process whose unix id is {PID}
-    if not (visible of targetProcess) then error "PulseForge process is not visible"
-    if (count of windows of targetProcess) is not 1 then error "PulseForge process does not have exactly one window"
-    set frontmost of targetProcess to true
-    set targetWindow to first window of targetProcess
-    set windowPosition to position of targetWindow
-    set windowSize to size of targetWindow
-    return (item 1 of windowPosition as text) & "|" & (item 2 of windowPosition as text) & "|" & (item 1 of windowSize as text) & "|" & (item 2 of windowSize as text)
-end tell'''
-        while time.monotonic() < Deadline:
-            Result = self._osascript(Script)
-            Values = re.fullmatch(r"\s*(-?\d+)\|(-?\d+)\|(\d+)\|(\d+)\s*", Result)
-            if Values:
-                Left, Top, Width, Height = map(int, Values.groups())
-                if Width >= 100 and Height >= 100:
-                    if Width * Height > MAX_CAPTURE_PIXELS:
-                        raise UnsupportedCapability("PulseForge macOS window exceeds the capture pixel safety limit")
-                    return Window(None, Width, Height, Left, Top)
-            time.sleep(0.1)
-        raise UnsupportedCapability(f"macOS Accessibility could not identify a visible app window for PID {PID}")
+        Compiler = shutil.which("clang")
+        if Compiler is None:
+            raise UnsupportedCapability("macOS window observation requires the host clang compiler")
+        Remaining = Deadline - time.monotonic()
+        if Remaining <= 0:
+            raise UnsupportedCapability(f"macOS window query deadline expired before inspection; pid={PID}")
+        print(f"STANDALONE_PACKAGE_SMOKE_WINDOW_QUERY=begin; pid={PID}; "
+              "operation=compile-coregraphics-window-probe", flush=True)
+        try:
+            with tempfile.TemporaryDirectory(prefix="PulseForge Window Query Ω ") as Temporary:
+                Root = Path(Temporary)
+                Source = Root / "window_info.c"
+                Executable = Root / "window_info"
+                Source.write_text(self.WINDOW_INFO_C, encoding="utf-8", newline="\n")
+                Build = subprocess.run(
+                    [Compiler, "-std=c11", "-O2", str(Source), "-framework", "CoreGraphics",
+                     "-framework", "CoreFoundation", "-o", str(Executable)],
+                    check=False, capture_output=True, text=True, encoding="utf-8", errors="strict",
+                    timeout=Remaining,
+                    env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"})
+                if Build.returncode != 0:
+                    Detail = (Build.stderr or Build.stdout).strip()
+                    raise UnsupportedCapability(
+                        f"CoreGraphics window probe compilation failed; exit_code={Build.returncode}; "
+                        f"detail={Detail or 'no diagnostic'}")
+                print(f"STANDALONE_PACKAGE_SMOKE_WINDOW_QUERY=complete; pid={PID}; "
+                      "operation=compile-coregraphics-window-probe", flush=True)
+                Remaining = Deadline - time.monotonic()
+                if Remaining <= 0:
+                    raise UnsupportedCapability(f"macOS window query deadline expired after probe compilation; pid={PID}")
+                print(f"STANDALONE_PACKAGE_SMOKE_WINDOW_QUERY=begin; pid={PID}; "
+                      "operation=coregraphics-window-list", flush=True)
+                Query = subprocess.run(
+                    [str(Executable), str(PID)], check=False, capture_output=True, text=True,
+                    encoding="utf-8", errors="strict", timeout=Remaining,
+                    env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"})
+                if Query.returncode != 0:
+                    Detail = (Query.stderr or Query.stdout).strip()
+                    raise UnsupportedCapability(
+                        f"CoreGraphics window enumeration failed; pid={PID}; "
+                        f"exit_code={Query.returncode}; detail={Detail or 'no diagnostic'}")
+                try:
+                    Windows = json.loads(Query.stdout)
+                except json.JSONDecodeError as Error:
+                    raise UnsupportedCapability(f"CoreGraphics returned malformed window data for pid={PID}") from Error
+        except subprocess.TimeoutExpired as Error:
+            raise UnsupportedCapability(
+                f"bounded CoreGraphics window probe timed out; pid={PID}; "
+                f"timeout={Deadline - time.monotonic():.1f}s") from Error
+        except (OSError, UnicodeError) as Error:
+            raise UnsupportedCapability(f"CoreGraphics window probe failed; pid={PID}; error={Error}") from Error
+        if not isinstance(Windows, list):
+            raise UnsupportedCapability(f"CoreGraphics returned an invalid window list for pid={PID}")
+        for Candidate in Windows:
+            if not isinstance(Candidate, dict) or Candidate.get("owner_pid") != PID:
+                raise UnsupportedCapability(f"CoreGraphics returned a window with mismatched ownership for pid={PID}")
+        if len(Windows) != 1:
+            raise UnsupportedCapability(
+                f"CoreGraphics expected exactly one on-screen Player window; pid={PID}; count={len(Windows)}")
+        Candidate = Windows[0]
+        try:
+            Handle = int(Candidate["window_id"])
+            Left = float(Candidate["x"])
+            Top = float(Candidate["y"])
+            Width = float(Candidate["width"])
+            Height = float(Candidate["height"])
+        except (KeyError, TypeError, ValueError) as Error:
+            raise UnsupportedCapability(f"CoreGraphics returned incomplete window geometry for pid={PID}") from Error
+        if (Handle <= 0 or not all(math.isfinite(Value) for Value in (Left, Top, Width, Height)) or
+                Width < 100 or Height < 100):
+            raise UnsupportedCapability(f"CoreGraphics returned invalid Player window geometry for pid={PID}")
+        if Width * Height > MAX_CAPTURE_PIXELS:
+            raise UnsupportedCapability("PulseForge macOS window exceeds the capture pixel safety limit")
+        print(f"STANDALONE_PACKAGE_SMOKE_WINDOW_QUERY=complete; pid={PID}; "
+              f"operation=coregraphics-window-list; window_id={Handle}; "
+              f"bounds={Left:g},{Top:g},{Width:g},{Height:g}", flush=True)
+        return Window(Handle, int(Width), int(Height), int(Left), int(Top))
 
     def capture(self, Target: Window, Destination: Path) -> None:
         if Target.Handle is None:
@@ -895,7 +1025,7 @@ end tell'''
     click closeButton
     return "MACOS_NATIVE_WINDOW_CLOSE_REQUESTED; pid={PID}"
 end tell'''
-        self._osascript(Script, Timeout)
+        self._osascript(Script, Timeout, "native-window-close")
 
 
 def _resolve_package(PackageRoot: Path, Platform: str) -> tuple[Path, Path]:
@@ -1785,24 +1915,54 @@ def self_test() -> None:
             raise AssertionError("Windows test Vulkan runtime accepted an unrenamed ICD module")
     MacRoute = MacOSDesktop.__new__(MacOSDesktop)
     MacScripts: list[str] = []
-    MacRoute._osascript = lambda Script, Timeout=5.0: (MacScripts.append(Script), "20|40|800|600")[1]
-    MacWindow = MacRoute.find_window(1234, time.monotonic() + 1)
-    assert MacWindow == Window(None, 800, 600, 20, 40)
-    assert "position of targetWindow" in MacScripts[0] and "size of targetWindow" in MacScripts[0]
-    assert "id of targetWindow" not in MacScripts[0]
+    def FakeOsaScript(Script: str, Timeout: float = 5.0, Operation: str = "unspecified") -> str:
+        MacScripts.append(Script)
+        return "MACOS_NATIVE_WINDOW_CLOSE_REQUESTED; pid=1234"
+
+    MacRoute._osascript = FakeOsaScript
+    assert "CGWindowListCopyWindowInfo" in MacRoute.WINDOW_INFO_C
+    assert "kCGWindowOwnerPID" in MacRoute.WINDOW_INFO_C
+    assert "kCGWindowBounds" in MacRoute.WINDOW_INFO_C
+    assert "CGRectMakeWithDictionaryRepresentation" in MacRoute.WINDOW_INFO_C
     with tempfile.TemporaryDirectory(prefix="PulseForge Notice Fixture ") as Temporary:
         Root = Path(Temporary)
         CapturePath = Root / "capture.png"
 
-        def CaptureRegion(Arguments, **_Options):
-            assert Arguments[1:4] == ["-x", "-R", "20,40,800,600"]
-            CapturePath.write_bytes(b"captured")
-            return subprocess.CompletedProcess(Arguments, 0, "", "")
+        def FakeMacProcess(Arguments, **Options):
+            if Arguments[0] == "/usr/bin/clang":
+                assert "-framework" in Arguments and "CoreGraphics" in Arguments and "CoreFoundation" in Arguments
+                SourcePath = Path(Arguments[Arguments.index("-framework") - 1])
+                assert SourcePath.read_text(encoding="utf-8") == MacRoute.WINDOW_INFO_C
+                ExecutablePath = Path(Arguments[Arguments.index("-o") + 1])
+                ExecutablePath.touch()
+                return subprocess.CompletedProcess(Arguments, 0, "", "")
+            if Path(Arguments[0]).name == "window_info":
+                assert Arguments[1:] == ["1234"]
+                return subprocess.CompletedProcess(
+                    Arguments, 0,
+                    json.dumps([{
+                        "window_id": 9876,
+                        "owner_pid": 1234,
+                        "x": 20.0,
+                        "y": 40.0,
+                        "width": 800.0,
+                        "height": 600.0,
+                    }]), "")
+            if Arguments[0] == "/usr/sbin/screencapture":
+                assert Arguments[1:4] == ["-x", "-l", "9876"]
+                CapturePath.write_bytes(b"captured")
+                return subprocess.CompletedProcess(Arguments, 0, "", "")
+            assert Arguments[0] == "osascript"
+            MacScripts.append(Arguments[-1])
+            return subprocess.CompletedProcess(Arguments, 0, "MACOS_NATIVE_WINDOW_CLOSE_REQUESTED; pid=1234", "")
 
-        with patch("subprocess.run", side_effect=CaptureRegion):
+        with patch("shutil.which", return_value="/usr/bin/clang"), patch("subprocess.run", side_effect=FakeMacProcess):
+            MacWindow = MacRoute.find_window(1234, time.monotonic() + 1)
+            assert MacWindow == Window(9876, 800, 600, 20, 40)
             MacRoute.capture(MacWindow, CapturePath)
-        MacRoute.close_window(MacWindow, 1234)
+            MacRoute.close_window(MacWindow, 1234)
         CloseScript = MacScripts[-1]
+        assert "set targetProcess to first process whose unix id is 1234" in CloseScript
         assert "unix id is 1234" in CloseScript and "AXCloseButton" in CloseScript
         assert "STANDALONE_NATIVE_CLOSE_TARGET_READY; pid=1234" in CloseScript
         assert "id of targetWindow" not in CloseScript
@@ -1832,9 +1992,9 @@ def self_test() -> None:
     try:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
                 ["osascript"], 5, output=b"close-target-ready", stderr=b"waiting-for-AX")):
-            MacOSDesktop._osascript("return \"probe\"", Timeout=5.0)
+            MacOSDesktop._osascript("return \"probe\"", Timeout=5.0, Operation="window-geometry-query")
     except UnsupportedCapability as Error:
-        assert "timed out after 5.0s" in str(Error)
+        assert "operation=window-geometry-query" in str(Error) and "timeout=5.0s" in str(Error)
         assert "close-target-ready" in str(Error) and "waiting-for-AX" in str(Error)
     else:
         raise AssertionError("macOS Accessibility timeout discarded its partial operation diagnostics")

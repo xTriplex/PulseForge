@@ -21,6 +21,7 @@
 #include <optional>
 #include <span>
 #include <system_error>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -29,13 +30,87 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 8;
+		constexpr int64_t SceneFormatVersion = 9;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
 		SceneSerializationError MakeError(SceneSerializationErrorCode Code, std::string Message)
 		{
 			return { Code, std::move(Message) };
+		}
+
+		std::expected<void, SceneSerializationError> ValidatePrefabOwnership(const Scene& SceneValue)
+		{
+			std::unordered_set<UUID, UUIDHash> InstanceIdentifiers;
+			std::unordered_set<UUID, UUIDHash> OwnedMappedEntities;
+			for (const Entity& Root : SceneValue.GetEntities())
+			{
+				const auto RootMetadata = Root.GetPrefabInstance();
+				if (!RootMetadata)
+					return std::unexpected(MakeError(SceneSerializationErrorCode::SceneOperationFailed, RootMetadata.error().Message));
+				if (!RootMetadata->has_value()) continue;
+				const PrefabInstanceComponent& Instance = RootMetadata->value();
+				if (auto Validation = Instance.Validate(Root.GetUUID()); !Validation)
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+				if (!InstanceIdentifiers.insert(Instance.InstanceID).second)
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Scene contains duplicate linked prefab instance identities"));
+
+				std::unordered_set<UUID, UUIDHash> Subtree{ Root.GetUUID() };
+				std::vector<Entity> Pending{ Root };
+				for (size_t Index = 0; Index < Pending.size(); ++Index)
+				{
+					auto Children = Pending[Index].GetChildren();
+					if (!Children)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::SceneOperationFailed, Children.error().Message));
+					for (const Entity& Child : *Children)
+					{
+						if (!Subtree.insert(Child.GetUUID()).second)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Linked prefab hierarchy contains a cycle or duplicate child"));
+						const auto ChildMetadata = Child.GetPrefabInstance();
+						if (!ChildMetadata)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::SceneOperationFailed, ChildMetadata.error().Message));
+						if (ChildMetadata->has_value())
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Nested linked prefab instances are not supported"));
+						Pending.push_back(Child);
+					}
+				}
+
+				for (const PrefabEntityMapping& Mapping : Instance.SourceEntities)
+				{
+					if (!OwnedMappedEntities.insert(Mapping.SceneEntity).second)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"A scene entity is mapped by more than one linked prefab instance"));
+					const auto Target = SceneValue.FindEntity(Mapping.SceneEntity);
+					if (!Target) continue; // A missing mapped entity is preserved for explicit recovery during reconcile.
+					if (!Subtree.contains(Mapping.SceneEntity))
+					{
+						const bool HasRecoveryConflict = std::any_of(Instance.Conflicts.begin(), Instance.Conflicts.end(),
+							[&](const PrefabConflictRecord& Conflict)
+							{
+								return !Conflict.Entity.IsLocal && Conflict.Entity.Key == Mapping.SourceKey &&
+									Conflict.Kind == PrefabConflictKind::RemovedSourceEntity;
+							});
+						if (!HasRecoveryConflict)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Prefab source mapping points outside its owning linked subtree without a recovery conflict"));
+					}
+				}
+				for (const PrefabLocalEntityMapping& Mapping : Instance.LocalEntities)
+				{
+					if (!OwnedMappedEntities.insert(Mapping.SceneEntity).second)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Prefab local mapping is duplicated across linked instances"));
+					const auto Target = SceneValue.FindEntity(Mapping.SceneEntity);
+					if (!Target) continue; // A deleted local entity is pruned on the next valid reconciliation.
+					if (!Subtree.contains(Mapping.SceneEntity))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Prefab local mapping is duplicated or points outside its owning linked subtree"));
+				}
+			}
+			return {};
 		}
 
 		std::optional<std::string> FindUnknownField(const Json& Object, std::initializer_list<std::string_view> AllowedFields)
@@ -71,6 +146,256 @@ namespace PulseForge
 					return false;
 			}
 			return true;
+		}
+
+		Json SerializeAddress(const PrefabEntityAddress& Address)
+		{
+			return Json::object({ { "key", Address.Key.ToString() }, { "local", Address.IsLocal } });
+		}
+
+		Json SerializePropertyValue(const PropertyValue& Value)
+		{
+			return std::visit([](const auto& Item) -> Json
+			{
+				using T = std::decay_t<decltype(Item)>;
+				if constexpr (std::is_same_v<T, bool>) return Json::object({ { "type", "boolean" }, { "value", Item } });
+				else if constexpr (std::is_same_v<T, float>) return Json::object({ { "type", "float" }, { "value", Item } });
+				else if constexpr (std::is_same_v<T, glm::vec3>)
+					return Json::object({ { "type", "vector3" }, { "value", { Item.x, Item.y, Item.z } } });
+				else if constexpr (std::is_same_v<T, glm::quat>)
+					return Json::object({ { "type", "quaternion" }, { "value", { Item.w, Item.x, Item.y, Item.z } } });
+				else if constexpr (std::is_same_v<T, AssetID>)
+					return Json::object({ { "type", "asset" }, { "value", Item.ToString() } });
+				else if constexpr (std::is_same_v<T, std::optional<AssetID>>)
+					return Json::object({ { "type", "optionalAsset" }, { "value", Item ? Json(Item->ToString()) : Json(nullptr) } });
+				else return Json::object({ { "type", "string" }, { "value", Item } });
+			}, Value);
+		}
+
+		std::expected<PrefabEntityAddress, SceneSerializationError> ParseAddress(const Json& Value)
+		{
+			if (!Value.is_object() || Value.size() != 2 || !Value.contains("key") || !Value["key"].is_string() ||
+				!Value.contains("local") || !Value["local"].is_boolean())
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab entity address is malformed"));
+			const auto Key = UUID::Parse(Value["key"].get<std::string>());
+			if (!Key || Key->IsNil())
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab entity address key is invalid"));
+			return PrefabEntityAddress{ *Key, Value["local"].get<bool>() };
+		}
+
+		std::expected<PropertyValue, SceneSerializationError> ParsePropertyValue(const Json& Value)
+		{
+			if (!Value.is_object() || Value.size() != 2 || !Value.contains("type") || !Value["type"].is_string() ||
+				!Value.contains("value"))
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab override value is malformed"));
+			const std::string Type = Value["type"].get<std::string>();
+			const Json& Item = Value["value"];
+			if (Type == "boolean" && Item.is_boolean()) return PropertyValue{ Item.get<bool>() };
+			if (Type == "float" && Item.is_number())
+			{
+				const float Number = Item.get<float>();
+				if (std::isfinite(Number)) return PropertyValue{ Number };
+			}
+			if (Type == "vector3")
+			{
+				std::array<float, 3> Values{};
+				if (ReadFiniteFloats(Item, Values)) return PropertyValue{ glm::vec3(Values[0], Values[1], Values[2]) };
+			}
+			if (Type == "quaternion")
+			{
+				std::array<float, 4> Values{};
+				if (ReadFiniteFloats(Item, Values)) return PropertyValue{ glm::quat(Values[0], Values[1], Values[2], Values[3]) };
+			}
+			if ((Type == "asset" || Type == "optionalAsset") && Item.is_string())
+			{
+				const auto Asset = UUID::Parse(Item.get<std::string>());
+				if (Asset && !Asset->IsNil())
+				{
+					if (Type == "asset") return PropertyValue{ *Asset };
+					return PropertyValue{ std::optional<AssetID>{ *Asset } };
+				}
+			}
+			if (Type == "optionalAsset" && Item.is_null()) return PropertyValue{ std::optional<AssetID>{} };
+			if (Type == "string" && Item.is_string() && Item.get<std::string>().size() <= 4096)
+				return PropertyValue{ Item.get<std::string>() };
+			return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+				"Prefab override value has an invalid type or non-finite payload"));
+		}
+
+		std::expected<PrefabInstanceComponent, SceneSerializationError> ParsePrefabInstance(const Json& Value)
+		{
+			constexpr size_t MaximumInstanceRecords = 1'000'000;
+			if (!Value.is_object() || Value.size() != 9)
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab instance record is malformed"));
+			if (auto Fields = ValidateKnownFields(Value,
+					{ "version", "instance", "asset", "root", "fingerprint", "sourceEntities", "localEntities", "overrides", "conflicts" },
+					"Prefab instance record"); !Fields)
+				return std::unexpected(Fields.error());
+			if (!Value.contains("version") || !Value["version"].is_number_integer() || Value["version"].get<int>() != 1 ||
+				!Value.contains("instance") || !Value["instance"].is_string() || !Value.contains("asset") || !Value["asset"].is_string() ||
+				!Value.contains("root") || !Value["root"].is_string() || !Value.contains("fingerprint") || !Value["fingerprint"].is_string() ||
+				!Value.contains("sourceEntities") || !Value["sourceEntities"].is_array() ||
+				!Value.contains("localEntities") || !Value["localEntities"].is_array() ||
+				!Value.contains("overrides") || !Value["overrides"].is_array() ||
+				!Value.contains("conflicts") || !Value["conflicts"].is_array())
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab instance record requires supported version 1 fields"));
+			if (Value["sourceEntities"].size() > SceneSerializer::MaximumEntityCount ||
+				Value["localEntities"].size() > SceneSerializer::MaximumEntityCount ||
+				Value["overrides"].size() > MaximumInstanceRecords || Value["conflicts"].size() > MaximumInstanceRecords)
+				return std::unexpected(MakeError(SceneSerializationErrorCode::DocumentTooLarge, "Prefab instance record exceeds its limits"));
+
+			const auto Instance = UUID::Parse(Value["instance"].get<std::string>());
+			const auto Asset = UUID::Parse(Value["asset"].get<std::string>());
+			const auto Root = UUID::Parse(Value["root"].get<std::string>());
+			if (!Instance || !Asset || !Root || Instance->IsNil() || Asset->IsNil() || Root->IsNil() ||
+				Value["fingerprint"].get<std::string>().empty() || Value["fingerprint"].get<std::string>().size() > 160)
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab instance identity or fingerprint is invalid"));
+
+			PrefabInstanceComponent Result;
+			Result.InstanceID = *Instance;
+			Result.SourceAsset = *Asset;
+			Result.SourceRootKey = *Root;
+			Result.AppliedSourceFingerprint = Value["fingerprint"].get<std::string>();
+			for (const Json& Item : Value["sourceEntities"])
+			{
+				if (!Item.is_object() || Item.size() != 2 || !Item.contains("source") || !Item["source"].is_string() ||
+					!Item.contains("entity") || !Item["entity"].is_string())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab source mapping is malformed"));
+				const auto Source = UUID::Parse(Item["source"].get<std::string>());
+				const auto Entity = UUID::Parse(Item["entity"].get<std::string>());
+				if (!Source || !Entity) return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab source mapping UUID is invalid"));
+				Result.SourceEntities.push_back({ *Source, *Entity });
+			}
+			for (const Json& Item : Value["localEntities"])
+			{
+				if (!Item.is_object() || Item.size() != 2 || !Item.contains("key") || !Item["key"].is_string() ||
+					!Item.contains("entity") || !Item["entity"].is_string())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab local mapping is malformed"));
+				const auto Key = UUID::Parse(Item["key"].get<std::string>());
+				const auto Entity = UUID::Parse(Item["entity"].get<std::string>());
+				if (!Key || !Entity) return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab local mapping UUID is invalid"));
+				Result.LocalEntities.push_back({ *Key, *Entity });
+			}
+			for (const Json& Item : Value["overrides"])
+			{
+				if (!Item.is_object())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab override is malformed"));
+				if (auto Fields = ValidateKnownFields(Item,
+						{ "entity", "operation", "component", "property", "parent", "name", "value" },
+						"Prefab override", SceneSerializationErrorCode::InvalidEntityData); !Fields)
+					return std::unexpected(Fields.error());
+				if (!Item.contains("entity") || !Item.contains("operation") || !Item["operation"].is_number_integer() ||
+					!Item.contains("component") || !Item["component"].is_string() ||
+					!Item.contains("property") || !Item["property"].is_string() ||
+					!Item.contains("parent") || !Item.contains("name") || !Item["name"].is_string())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Prefab override is missing a required typed field"));
+				const auto Address = ParseAddress(Item["entity"]);
+				const int Operation = Item["operation"].get<int>();
+				if (!Address || Operation < 0 || Operation > static_cast<int>(PrefabOverrideOperation::Rename))
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab override identity or operation is invalid"));
+				PrefabOverrideRecord Record;
+				Record.Entity = *Address;
+				Record.Operation = static_cast<PrefabOverrideOperation>(Operation);
+				Record.ComponentID = Item["component"].get<std::string>();
+				Record.PropertyID = Item["property"].get<std::string>();
+				if (Item.contains("value"))
+				{
+					const auto Parsed = ParsePropertyValue(Item["value"]);
+					if (!Parsed) return std::unexpected(Parsed.error());
+					Record.Value = *Parsed;
+				}
+				if (!Item["parent"].is_null())
+				{
+					const auto Parent = ParseAddress(Item["parent"]);
+					if (!Parent) return std::unexpected(Parent.error());
+					Record.Parent = *Parent;
+				}
+				Record.Name = Item["name"].get<std::string>();
+				const bool IsProperty = Record.Operation == PrefabOverrideOperation::SetProperty;
+				if (Item.contains("value") != IsProperty ||
+					(Record.Operation == PrefabOverrideOperation::Reparent && Item["parent"].is_null()) ||
+					(Record.Operation != PrefabOverrideOperation::Reparent && !Item["parent"].is_null()) ||
+					(Record.Operation == PrefabOverrideOperation::Rename && Record.Name.empty()) ||
+					(Record.Operation != PrefabOverrideOperation::Rename && !Record.Name.empty()))
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Prefab override has a payload that does not match its operation"));
+				Result.Overrides.push_back(std::move(Record));
+			}
+			for (const Json& Item : Value["conflicts"])
+			{
+				if (!Item.is_object())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab conflict is malformed"));
+				if (auto Fields = ValidateKnownFields(Item, { "entity", "kind", "component", "property", "message" },
+						"Prefab conflict", SceneSerializationErrorCode::InvalidEntityData); !Fields)
+					return std::unexpected(Fields.error());
+				if (Item.size() != 5 || !Item.contains("entity") || !Item.contains("kind") || !Item["kind"].is_number_integer() ||
+					!Item.contains("component") || !Item["component"].is_string() ||
+					!Item.contains("property") || !Item["property"].is_string() ||
+					!Item.contains("message") || !Item["message"].is_string())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Prefab conflict is missing a required typed field"));
+				const auto Address = ParseAddress(Item["entity"]);
+				const int Kind = Item["kind"].get<int>();
+				if (!Address || Kind < 0 || Kind > static_cast<int>(PrefabConflictKind::UnsupportedNestedInstance))
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab conflict identity or kind is invalid"));
+				PrefabConflictRecord Record{ *Address, static_cast<PrefabConflictKind>(Kind) };
+				Record.ComponentID = Item["component"].get<std::string>();
+				Record.PropertyID = Item["property"].get<std::string>();
+				Record.Message = Item["message"].get<std::string>();
+				Result.Conflicts.push_back(std::move(Record));
+			}
+			const auto RootMapping = std::find_if(Result.SourceEntities.begin(), Result.SourceEntities.end(),
+				[&](const PrefabEntityMapping& Mapping) { return Mapping.SourceKey == Result.SourceRootKey; });
+			if (RootMapping == Result.SourceEntities.end())
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Prefab mappings omit the source root"));
+			if (const auto Validation = Result.Validate(RootMapping->SceneEntity); !Validation)
+				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+			return Result;
+		}
+
+		Json SerializePrefabInstance(const PrefabInstanceComponent& Instance)
+		{
+			Json Result = Json::object({
+				{ "version", 1 },
+				{ "instance", Instance.InstanceID.ToString() },
+				{ "asset", Instance.SourceAsset.ToString() },
+				{ "root", Instance.SourceRootKey.ToString() },
+				{ "fingerprint", Instance.AppliedSourceFingerprint },
+				{ "sourceEntities", Json::array() },
+				{ "localEntities", Json::array() },
+				{ "overrides", Json::array() },
+				{ "conflicts", Json::array() }
+			});
+			for (const PrefabEntityMapping& Mapping : Instance.SourceEntities)
+				Result["sourceEntities"].push_back(Json::object({
+					{ "source", Mapping.SourceKey.ToString() }, { "entity", Mapping.SceneEntity.ToString() } }));
+			for (const PrefabLocalEntityMapping& Mapping : Instance.LocalEntities)
+				Result["localEntities"].push_back(Json::object({
+					{ "key", Mapping.LocalKey.ToString() }, { "entity", Mapping.SceneEntity.ToString() } }));
+			for (const PrefabOverrideRecord& Record : Instance.Overrides)
+			{
+				Json Override = Json::object({
+					{ "entity", SerializeAddress(Record.Entity) },
+					{ "operation", static_cast<uint8_t>(Record.Operation) },
+					{ "component", Record.ComponentID },
+					{ "property", Record.PropertyID },
+					{ "parent", Record.Parent ? SerializeAddress(*Record.Parent) : Json(nullptr) },
+					{ "name", Record.Name }
+				});
+				if (Record.Operation == PrefabOverrideOperation::SetProperty)
+					Override["value"] = SerializePropertyValue(Record.Value);
+				Result["overrides"].push_back(std::move(Override));
+			}
+			for (const PrefabConflictRecord& Record : Instance.Conflicts)
+				Result["conflicts"].push_back(Json::object({
+					{ "entity", SerializeAddress(Record.Entity) },
+					{ "kind", static_cast<uint8_t>(Record.Kind) },
+					{ "component", Record.ComponentID },
+					{ "property", Record.PropertyID },
+					{ "message", Record.Message }
+				}));
+			return Result;
 		}
 
 		SceneSerializationError SceneOperationError(const SceneError& Error)
@@ -111,6 +436,7 @@ namespace PulseForge
 	{
 		if (Source.GetEntityCount() > MaximumEntityCount)
 			return std::unexpected(MakeError(SceneSerializationErrorCode::DocumentTooLarge, "Scene exceeds the 250,000 entity limit"));
+		if (auto Ownership = ValidatePrefabOwnership(Source); !Ownership) return std::unexpected(Ownership.error());
 
 		try
 		{
@@ -134,9 +460,10 @@ namespace PulseForge
 				const auto AudioSource = Current.GetAudioSource();
 				const auto AudioListener = Current.GetAudioListener();
 				const auto Script = Current.GetScript();
+				const auto PrefabInstance = Current.GetPrefabInstance();
 				const auto Parent = Current.GetParent();
 				if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
-					!AudioSource || !AudioListener || !Script || !Parent)
+					!AudioSource || !AudioListener || !Script || !PrefabInstance || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -262,6 +589,12 @@ namespace PulseForge
 					Record["script"] = std::move(SerializedScript);
 				}
 				Record["parent"] = Parent->has_value() ? Json((**Parent).GetUUID().ToString()) : Json(nullptr);
+				if (PrefabInstance->has_value())
+				{
+					if (const auto Validation = (**PrefabInstance).Validate(Current.GetUUID()); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+					Record["prefabInstance"] = SerializePrefabInstance(**PrefabInstance);
+				}
 				Document["entities"].push_back(std::move(Record));
 			}
 
@@ -338,7 +671,7 @@ namespace PulseForge
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Each scene entity must be an object"));
 				if (auto Fields = ValidateKnownFields(SerializedEntity,
 						{ "uuid", "tag", "transform", "camera", "directionalLight", "environmentLight", "pointLight", "spotLight",
-							"meshRenderer", "rigidbody", "boxCollider", "audioSource", "audioListener", "script", "parent" },
+							"meshRenderer", "rigidbody", "boxCollider", "audioSource", "audioListener", "script", "parent", "prefabInstance" },
 						"Scene entity");
 					!Fields)
 					return std::unexpected(Fields.error());
@@ -347,6 +680,10 @@ namespace PulseForge
 				const auto Tag = SerializedEntity.find("tag");
 				const auto Transform = SerializedEntity.find("transform");
 				const auto Parent = SerializedEntity.find("parent");
+				const auto SerializedPrefabInstance = SerializedEntity.find("prefabInstance");
+				if (SerializedPrefabInstance != SerializedEntity.end() && DocumentVersion < 9)
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Linked prefab metadata requires scene format version 9"));
 				if (UUIDValue == SerializedEntity.end() || !UUIDValue->is_string() ||
 					Tag == SerializedEntity.end() || !Tag->is_object() ||
 					Transform == SerializedEntity.end() || !Transform->is_object() ||
@@ -829,6 +1166,14 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 				}
 
+				std::optional<PrefabInstanceComponent> PrefabInstanceData;
+				if (SerializedPrefabInstance != SerializedEntity.end())
+				{
+					auto Parsed = ParsePrefabInstance(*SerializedPrefabInstance);
+					if (!Parsed) return std::unexpected(Parsed.error());
+					PrefabInstanceData = std::move(*Parsed);
+				}
+
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());
 				if (!Created)
 					return std::unexpected(SceneOperationError(Created.error()));
@@ -890,6 +1235,11 @@ namespace PulseForge
 					if (auto ScriptResult = Created->SetScript(*ScriptData); !ScriptResult)
 						return std::unexpected(SceneOperationError(ScriptResult.error()));
 				}
+				if (PrefabInstanceData)
+				{
+					if (auto PrefabResult = Created->SetPrefabInstance(*PrefabInstanceData); !PrefabResult)
+						return std::unexpected(SceneOperationError(PrefabResult.error()));
+				}
 
 				PendingParents.push_back({ *Created, ParentIdentifier });
 			}
@@ -908,6 +1258,7 @@ namespace PulseForge
 				if (auto ParentResult = Relationship.Child.SetParent(*Parent); !ParentResult)
 					return std::unexpected(SceneOperationError(ParentResult.error()));
 			}
+			if (auto Ownership = ValidatePrefabOwnership(Staging); !Ownership) return std::unexpected(Ownership.error());
 
 			Destination.m_Storage.swap(Staging.m_Storage);
 			return {};

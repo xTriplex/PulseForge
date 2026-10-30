@@ -97,7 +97,28 @@ namespace PulseForge
 			FileError.clear();
 			const std::filesystem::file_status Status = std::filesystem::symlink_status(Current, FileError);
 			const bool IsFinal = std::next(Component) == ProjectRelativePath.end();
-			if (FileError || std::filesystem::is_symlink(Status) ||
+			if (IsFinal && FileError == std::errc::no_such_file_or_directory)
+			{
+				return std::unexpected(MakeError(
+					AssetPathErrorCode::MissingAssetEntry,
+					Current,
+					"Managed asset source file does not exist"));
+			}
+			if (FileError)
+			{
+				return std::unexpected(MakeError(
+					AssetPathErrorCode::InvalidAssetEntry,
+					Current,
+					"Could not inspect managed asset path entry"));
+			}
+			if (IsFinal && Status.type() == std::filesystem::file_type::not_found)
+			{
+				return std::unexpected(MakeError(
+					AssetPathErrorCode::MissingAssetEntry,
+					Current,
+					"Managed asset source file does not exist"));
+			}
+			if (std::filesystem::is_symlink(Status) ||
 				(!IsFinal && !std::filesystem::is_directory(Status)) ||
 				(IsFinal && !std::filesystem::is_regular_file(Status)))
 			{

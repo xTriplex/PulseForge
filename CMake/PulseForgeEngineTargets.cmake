@@ -31,6 +31,7 @@ add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/Components/ScriptComponent.cpp
 	PulseForge/Source/Private/Scene/Components/SpotLightComponent.cpp
 	PulseForge/Source/Private/Scene/PropertyMetadata.cpp
+	PulseForge/Source/Private/Scene/Components/PrefabInstanceComponent.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
 	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp
@@ -114,6 +115,7 @@ add_library(PulseForgeAssetServices STATIC
 	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
 	PulseForge/Source/Private/Assets/MaterialAssetService.cpp
 	PulseForge/Source/Private/Assets/PrefabAssetService.cpp
+	PulseForge/Source/Private/Assets/PrefabInstanceReconciler.cpp
 	PulseForge/Source/Private/Assets/Project.cpp
 	PulseForge/Source/Private/Assets/SceneAssetService.cpp
 )

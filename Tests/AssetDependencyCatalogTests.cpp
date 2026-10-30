@@ -270,6 +270,34 @@ namespace
 		PF_CHECK(Tests, PrefabID.has_value());
 		if (!PrefabID) return;
 
+		const auto LinkedInstanceID = UUID::Generate();
+		PF_CHECK(Tests, LinkedInstanceID.has_value());
+		if (!LinkedInstanceID) return;
+		Scene LinkedScene;
+		const auto LinkedRoot = LinkedScene.CreateEntity("Linked dependency fixture");
+		PF_CHECK(Tests, LinkedRoot.has_value());
+		if (!LinkedRoot) return;
+		PF_CHECK(Tests, LinkedRoot->SetMeshRenderer(MeshRendererComponent{ *MeshID, *MaterialID }).has_value());
+		PrefabInstanceComponent LinkedMetadata;
+		LinkedMetadata.InstanceID = *LinkedInstanceID;
+		LinkedMetadata.SourceAsset = PrefabID->ID;
+		LinkedMetadata.SourceRootKey = SceneEntity->GetUUID();
+		LinkedMetadata.AppliedSourceFingerprint = "dependency-catalog-prefab-fingerprint";
+		LinkedMetadata.SourceEntities.push_back({ SceneEntity->GetUUID(), LinkedRoot->GetUUID() });
+		PrefabOverrideRecord MaterialOverride;
+		MaterialOverride.Entity = { SceneEntity->GetUUID(), false };
+		MaterialOverride.Operation = PrefabOverrideOperation::SetProperty;
+		MaterialOverride.ComponentID = std::string(PropertyComponentIds::MeshRenderer);
+		MaterialOverride.PropertyID = std::string(PropertyIds::MaterialAsset);
+		MaterialOverride.Value = std::optional<AssetID>{ *MaterialID };
+		LinkedMetadata.Overrides.push_back(MaterialOverride);
+		PF_CHECK(Tests, LinkedRoot->SetPrefabInstance(LinkedMetadata).has_value());
+		const std::filesystem::path LinkedScenePath = Fixture.Root / "Assets/Scenes/LinkedReference.scene";
+		PF_CHECK(Tests, SceneSerializer::SaveToFile(LinkedScene, LinkedScenePath).has_value());
+		const auto LinkedSceneID = AssetMetadataSerializer::CreateForNewAsset(LinkedScenePath);
+		PF_CHECK(Tests, LinkedSceneID.has_value());
+		if (!LinkedSceneID) return;
+
 		const auto Built = AssetDependencyCatalogBuilder::Build(Fixture.Root, Fixture.ProjectID, 1);
 		PF_CHECK(Tests, Built.has_value());
 		if (!Built) return;
@@ -289,6 +317,21 @@ namespace
 		PF_CHECK(Tests, HasDependency(Snapshot, SceneID->ID, *MaterialID, AssetDependencyEdgeKind::RuntimeReference));
 		PF_CHECK(Tests, HasDependency(Snapshot, PrefabID->ID, *MeshID, AssetDependencyEdgeKind::RuntimeReference));
 		PF_CHECK(Tests, HasDependency(Snapshot, PrefabID->ID, *MaterialID, AssetDependencyEdgeKind::RuntimeReference));
+		PF_CHECK(Tests, HasDependency(Snapshot, LinkedSceneID->ID, PrefabID->ID, AssetDependencyEdgeKind::RuntimeReference));
+		const std::string OverrideLocation = "entities/" + LinkedRoot->GetUUID().ToString() + "/prefabOverrides/" +
+			SceneEntity->GetUUID().ToString() + "/" + MaterialOverride.ComponentID + "." + MaterialOverride.PropertyID;
+		const auto IsOverrideMaterialEdge = [&](const AssetDependencyEdge& Edge)
+		{
+			return Edge.Referrer.Asset == LinkedSceneID->ID && Edge.Target.Asset == *MaterialID &&
+				Edge.Kind == AssetDependencyEdgeKind::RuntimeReference && Edge.Status == AssetDependencyStatus::Resolved &&
+				Edge.Location == OverrideLocation && Edge.OriginalReference == MaterialID->ToString();
+		};
+		const auto LinkedSceneDependencies = Snapshot.GetDirectDependencies(ManagedNode(Snapshot, LinkedSceneID->ID));
+		const auto OverrideDependency = std::find_if(LinkedSceneDependencies.begin(), LinkedSceneDependencies.end(),
+			IsOverrideMaterialEdge);
+		PF_CHECK(Tests, OverrideDependency != LinkedSceneDependencies.end());
+		const auto MaterialReferencers = Snapshot.GetDirectReferencers(AssetDependencyNode{ *MaterialID, {}, {} });
+		PF_CHECK(Tests, std::any_of(MaterialReferencers.begin(), MaterialReferencers.end(), IsOverrideMaterialEdge));
 		PF_CHECK(Tests, HasSourceDependency(Snapshot, *MeshID, BufferRelativeKey, AssetDependencyEdgeKind::ImportInput));
 		const auto MeshEdges = Snapshot.GetDirectDependencies(ManagedNode(Snapshot, *MeshID));
 		PF_CHECK(Tests,
@@ -328,9 +371,10 @@ namespace
 		PF_CHECK(Tests, std::any_of(TextureReferencers.begin(), TextureReferencers.end(),
 							[&](const AssetDependencyEdge& Edge) { return Edge.Referrer.Asset == *MaterialID; }));
 		const auto MeshReferencers = Snapshot.GetDirectReferencers(AssetDependencyNode{ *MeshID, {}, {} });
-		PF_CHECK(Tests, MeshReferencers.size() == 2);
+		PF_CHECK(Tests, MeshReferencers.size() == 3);
 		PF_CHECK(Tests, std::count_if(MeshReferencers.begin(), MeshReferencers.end(), [&](const AssetDependencyEdge& Edge)
-							{ return Edge.Referrer.Asset == SceneID->ID || Edge.Referrer.Asset == PrefabID->ID; }) == 2);
+							{ return Edge.Referrer.Asset == SceneID->ID || Edge.Referrer.Asset == PrefabID->ID ||
+								Edge.Referrer.Asset == LinkedSceneID->ID; }) == 3);
 
 		const auto MeshSubresources = std::find_if(Snapshot.GetSubresources().begin(), Snapshot.GetSubresources().end(),
 			[&](const AssetSubresourceRecord& Record) { return Record.Identity.Asset == *MeshID; });
