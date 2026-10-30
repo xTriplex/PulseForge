@@ -383,6 +383,85 @@ namespace
 		}
 		const auto RedoTranslation = ReadLinkedTranslation(LinkedRootID);
 		PF_CHECK(Tests, RedoTranslation && glm::all(glm::equal(*RedoTranslation, LatestSourceTranslation)));
+
+		// Exercise subtree removal at both history owners: the scene command owns the instance
+		// removal, while the prefab document owns applying that intent to its source draft.
+		const auto RootBeforeRemoval = Destination.FindEntity(LinkedRootID);
+		PF_CHECK(Tests, RootBeforeRemoval.has_value());
+		if (!RootBeforeRemoval) return;
+		const auto RootMetadataBeforeRemoval = RootBeforeRemoval->GetPrefabInstance();
+		PF_CHECK(Tests, RootMetadataBeforeRemoval && RootMetadataBeforeRemoval->has_value());
+		if (!RootMetadataBeforeRemoval || !RootMetadataBeforeRemoval->has_value()) return;
+		const auto ChildMappingBeforeRemoval = std::find_if((**RootMetadataBeforeRemoval).SourceEntities.begin(),
+			(**RootMetadataBeforeRemoval).SourceEntities.end(), [&](const PrefabEntityMapping& Mapping)
+			{
+				return Mapping.SourceKey == SourceChild->GetUUID();
+			});
+		PF_CHECK(Tests, ChildMappingBeforeRemoval != (**RootMetadataBeforeRemoval).SourceEntities.end());
+		if (ChildMappingBeforeRemoval == (**RootMetadataBeforeRemoval).SourceEntities.end()) return;
+		const UUID ChildSceneID = ChildMappingBeforeRemoval->SceneEntity;
+		const auto ChildBeforeRemoval = Destination.FindEntity(ChildSceneID);
+		PF_CHECK(Tests, ChildBeforeRemoval.has_value());
+		if (!ChildBeforeRemoval) return;
+		auto RemoveInstanceChild = SceneHistory.Run(&Destination, Workspace, false, 0, [] { return 0; },
+			"Remove Linked Prefab Child", [&]() -> std::expected<void, SceneError>
+			{
+				const auto CurrentRoot = Destination.FindEntity(LinkedRootID);
+				const auto CurrentChild = Destination.FindEntity(ChildSceneID);
+				if (!CurrentRoot || !CurrentChild)
+					return std::unexpected(SceneError{ SceneErrorCode::InvalidPrefabInstance, "Linked child disappeared" });
+				auto Recorded = PrefabInstanceReconciler::RecordRemoveSourceEntityOverride(*CurrentRoot, *CurrentChild);
+				if (!Recorded) return std::unexpected(SceneError{ SceneErrorCode::InvalidPrefabInstance, Recorded.error().Message });
+				auto Destroyed = Destination.DestroyEntity(*CurrentChild);
+				if (!Destroyed) return std::unexpected(Destroyed.error());
+				return {};
+			}, Restore);
+		PF_CHECK(Tests, RemoveInstanceChild.has_value() && !Destination.FindEntity(ChildSceneID));
+		const auto RemovedRoot = Destination.FindEntity(LinkedRootID);
+		PF_CHECK(Tests, RemovedRoot.has_value());
+		if (!RemovedRoot) return;
+		const auto RemovedMetadata = RemovedRoot->GetPrefabInstance();
+		PF_CHECK(Tests, RemovedMetadata && RemovedMetadata->has_value() && (**RemovedMetadata).Overrides.size() == 1);
+		const auto InstanceUndo = SceneHistory.Undo(&Destination, Workspace, false, Restore);
+		PF_CHECK(Tests, InstanceUndo && *InstanceUndo && Destination.FindEntity(ChildSceneID));
+		const auto RestoredRoot = Destination.FindEntity(LinkedRootID);
+		PF_CHECK(Tests, RestoredRoot.has_value());
+		if (!RestoredRoot) return;
+		const auto RestoredMetadata = RestoredRoot->GetPrefabInstance();
+		PF_CHECK(Tests, RestoredMetadata && RestoredMetadata->has_value() && (**RestoredMetadata).Overrides.empty());
+		const auto InstanceRedo = SceneHistory.Redo(&Destination, Workspace, false, Restore);
+		PF_CHECK(Tests, InstanceRedo && *InstanceRedo && !Destination.FindEntity(ChildSceneID));
+		const auto RedoneRoot = Destination.FindEntity(LinkedRootID);
+		PF_CHECK(Tests, RedoneRoot.has_value());
+		if (!RedoneRoot) return;
+		const auto RedoneMetadata = RedoneRoot->GetPrefabInstance();
+		PF_CHECK(Tests, RedoneMetadata && RedoneMetadata->has_value() && (**RedoneMetadata).Overrides.size() == 1);
+		PF_CHECK(Tests, SceneHistory.IsDirty());
+
+		const auto SourceBytesBeforeRemoval = ReadBytes(PrefabPath);
+		PF_CHECK(Tests, SourceBytesBeforeRemoval.has_value());
+		if (!SourceBytesBeforeRemoval) return;
+		auto AppliedRemoval = PrefabEditor.ApplyInstanceOverridesToSourceDraft(*Session, **RedoneMetadata);
+		PF_CHECK(Tests, AppliedRemoval && AppliedRemoval->Applied == 1 && Session->IsDirty());
+		PF_CHECK(Tests, ReadBytes(PrefabPath) == SourceBytesBeforeRemoval);
+		auto DraftSummary = PrefabEditor.GetSummary(*Session);
+		PF_CHECK(Tests, DraftSummary && DraftSummary->SourceEntityCount == 1 && DraftSummary->CanUndo);
+		PF_CHECK(Tests, PrefabEditor.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		auto UndoneDraftSummary = PrefabEditor.GetSummary(*Session);
+		PF_CHECK(Tests, UndoneDraftSummary && UndoneDraftSummary->SourceEntityCount == 2 && !Session->IsDirty());
+		PF_CHECK(Tests, PrefabEditor.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo));
+		auto RedoneDraftSummary = PrefabEditor.GetSummary(*Session);
+		PF_CHECK(Tests, RedoneDraftSummary && RedoneDraftSummary->SourceEntityCount == 1 && Session->IsDirty());
+		PF_CHECK(Tests, PrefabEditor.Save(*Session));
+		PF_CHECK(Tests, SceneHistory.IsDirty());
+		auto ReloadedAfterRemoval = PrefabAssetService::LoadSource(
+			Created->ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
+		PF_CHECK(Tests, ReloadedAfterRemoval && ReloadedAfterRemoval->GetScene().GetEntityCount() == 1);
+		if (ReloadedAfterRemoval)
+		{
+			PF_CHECK(Tests, ReloadedAfterRemoval->GetScene().FindEntity(SourceRoot->GetUUID()).has_value());
+			PF_CHECK(Tests, !ReloadedAfterRemoval->GetScene().FindEntity(SourceChild->GetUUID()).has_value());
+		}
 	}
 
 	void TestLinkedChildGizmoTransformRecordsOverrideAndHistory(TestRunner& Tests)
