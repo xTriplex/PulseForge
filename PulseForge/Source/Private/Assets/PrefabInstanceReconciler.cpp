@@ -4,6 +4,7 @@
 #include "Scene/SceneSerializer.h"
 
 #include <algorithm>
+#include <set>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,17 @@ namespace PulseForge
 	namespace
 	{
 		using EntityMap = std::unordered_map<UUID, UUID, UUIDHash>;
+
+#if defined(PF_DEBUG)
+		thread_local std::vector<PrefabInstanceReconciler::CommitFailurePoint> CommitFailureSequence;
+
+		bool ConsumeCommitFailurePoint(PrefabInstanceReconciler::CommitFailurePoint Point)
+		{
+			if (CommitFailureSequence.empty() || CommitFailureSequence.front() != Point) return false;
+			CommitFailureSequence.erase(CommitFailureSequence.begin());
+			return true;
+		}
+#endif
 
 		PrefabReconcileError MakeError(PrefabReconcileErrorCode Code, std::string Message,
 			std::vector<PrefabConflictRecord> Conflicts = {})
@@ -150,36 +162,51 @@ namespace PulseForge
 
 		std::expected<void, PrefabReconcileError> SyncFullEntity(const Entity& Source, const Entity& Destination)
 		{
+			std::optional<PrefabReconcileError> FirstFailure;
+			const auto Remember = [&FirstFailure](std::expected<void, PrefabReconcileError> Result)
+			{
+				if (!Result && !FirstFailure) FirstFailure = Result.error();
+			};
+			const auto RememberSceneOperation = [&FirstFailure](std::expected<void, SceneError> Result)
+			{
+				if (!Result && !FirstFailure) FirstFailure = ToReconcileError(Result.error());
+			};
 			const auto Tag = Source.GetTag();
 			const auto Transform = Source.GetTransform();
 			if (!Tag || !Transform)
-				return std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed, "Could not read entity state during reconcile commit"));
-			if (auto Result = Destination.SetTag(*Tag); !Result) return std::unexpected(ToReconcileError(Result.error()));
-			if (auto Result = Destination.SetTransform(*Transform); !Result) return std::unexpected(ToReconcileError(Result.error()));
-			if (auto Result = SyncOptional<CameraComponent>(Source, Destination, &Entity::GetCamera, &Entity::SetCamera, &Entity::RemoveCamera); !Result) return Result;
-			if (auto Result = SyncOptional<DirectionalLightComponent>(Source, Destination, &Entity::GetDirectionalLight, &Entity::SetDirectionalLight, &Entity::RemoveDirectionalLight); !Result) return Result;
-			if (auto Result = SyncOptional<EnvironmentLightComponent>(Source, Destination, &Entity::GetEnvironmentLight, &Entity::SetEnvironmentLight, &Entity::RemoveEnvironmentLight); !Result) return Result;
-			if (auto Result = SyncOptional<PointLightComponent>(Source, Destination, &Entity::GetPointLight, &Entity::SetPointLight, &Entity::RemovePointLight); !Result) return Result;
-			if (auto Result = SyncOptional<SpotLightComponent>(Source, Destination, &Entity::GetSpotLight, &Entity::SetSpotLight, &Entity::RemoveSpotLight); !Result) return Result;
-			if (auto Result = SyncOptional<MeshRendererComponent>(Source, Destination, &Entity::GetMeshRenderer, &Entity::SetMeshRenderer, &Entity::RemoveMeshRenderer); !Result) return Result;
-			if (auto Result = SyncOptional<RigidbodyComponent>(Source, Destination, &Entity::GetRigidbody, &Entity::SetRigidbody, &Entity::RemoveRigidbody); !Result) return Result;
-			if (auto Result = SyncOptional<BoxColliderComponent>(Source, Destination, &Entity::GetBoxCollider, &Entity::SetBoxCollider, &Entity::RemoveBoxCollider); !Result) return Result;
-			if (auto Result = SyncOptional<AudioSourceComponent>(Source, Destination, &Entity::GetAudioSource, &Entity::SetAudioSource, &Entity::RemoveAudioSource); !Result) return Result;
-			if (auto Result = SyncOptional<AudioListenerComponent>(Source, Destination, &Entity::GetAudioListener, &Entity::SetAudioListener, &Entity::RemoveAudioListener); !Result) return Result;
-			if (auto Result = SyncOptional<ScriptComponent>(Source, Destination, &Entity::GetScript, &Entity::SetScript, &Entity::RemoveScript); !Result) return Result;
+				FirstFailure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+					"Could not read entity state during reconcile commit");
+			else
+			{
+				RememberSceneOperation(Destination.SetTag(*Tag));
+				RememberSceneOperation(Destination.SetTransform(*Transform));
+			}
+			Remember(SyncOptional<CameraComponent>(Source, Destination, &Entity::GetCamera, &Entity::SetCamera, &Entity::RemoveCamera));
+			Remember(SyncOptional<DirectionalLightComponent>(Source, Destination, &Entity::GetDirectionalLight, &Entity::SetDirectionalLight, &Entity::RemoveDirectionalLight));
+			Remember(SyncOptional<EnvironmentLightComponent>(Source, Destination, &Entity::GetEnvironmentLight, &Entity::SetEnvironmentLight, &Entity::RemoveEnvironmentLight));
+			Remember(SyncOptional<PointLightComponent>(Source, Destination, &Entity::GetPointLight, &Entity::SetPointLight, &Entity::RemovePointLight));
+			Remember(SyncOptional<SpotLightComponent>(Source, Destination, &Entity::GetSpotLight, &Entity::SetSpotLight, &Entity::RemoveSpotLight));
+			Remember(SyncOptional<MeshRendererComponent>(Source, Destination, &Entity::GetMeshRenderer, &Entity::SetMeshRenderer, &Entity::RemoveMeshRenderer));
+			Remember(SyncOptional<RigidbodyComponent>(Source, Destination, &Entity::GetRigidbody, &Entity::SetRigidbody, &Entity::RemoveRigidbody));
+			Remember(SyncOptional<BoxColliderComponent>(Source, Destination, &Entity::GetBoxCollider, &Entity::SetBoxCollider, &Entity::RemoveBoxCollider));
+			Remember(SyncOptional<AudioSourceComponent>(Source, Destination, &Entity::GetAudioSource, &Entity::SetAudioSource, &Entity::RemoveAudioSource));
+			Remember(SyncOptional<AudioListenerComponent>(Source, Destination, &Entity::GetAudioListener, &Entity::SetAudioListener, &Entity::RemoveAudioListener));
+			Remember(SyncOptional<ScriptComponent>(Source, Destination, &Entity::GetScript, &Entity::SetScript, &Entity::RemoveScript));
 
 			const auto SourcePrefab = Source.GetPrefabInstance();
 			const auto DestinationPrefab = Destination.GetPrefabInstance();
 			if (!SourcePrefab || !DestinationPrefab)
-				return std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed, "Could not read prefab metadata during reconcile commit"));
-			if (SourcePrefab->has_value())
+				Remember(std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+					"Could not read prefab metadata during reconcile commit")));
+			else if (SourcePrefab->has_value())
 			{
-				if (auto Result = Destination.SetPrefabInstance(SourcePrefab->value()); !Result) return std::unexpected(ToReconcileError(Result.error()));
+				RememberSceneOperation(Destination.SetPrefabInstance(SourcePrefab->value()));
 			}
 			else if (DestinationPrefab->has_value())
 			{
-				if (auto Result = Destination.RemovePrefabInstance(); !Result) return std::unexpected(ToReconcileError(Result.error()));
+				RememberSceneOperation(Destination.RemovePrefabInstance());
 			}
+			if (FirstFailure) return std::unexpected(std::move(*FirstFailure));
 			return {};
 		}
 
@@ -206,6 +233,93 @@ namespace PulseForge
 			if (!Parent) return std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed, "Target parent is missing during hierarchy commit"));
 			if (auto Result = Destination.SetParent(*Parent); !Result) return std::unexpected(ToReconcileError(Result.error()));
 			return {};
+		}
+
+		std::expected<std::vector<Entity>, PrefabReconcileError> GetParentFirstOrder(const Scene& Source)
+		{
+			const std::vector<Entity> Entities = Source.GetEntities();
+			std::unordered_map<UUID, Entity, UUIDHash> ByID;
+			std::unordered_map<UUID, size_t, UUIDHash> PendingParentCount;
+			std::unordered_map<UUID, std::vector<UUID>, UUIDHash> ChildrenByParent;
+			ByID.reserve(Entities.size());
+			PendingParentCount.reserve(Entities.size());
+			ChildrenByParent.reserve(Entities.size());
+			for (const Entity& Current : Entities)
+			{
+				if (!ByID.emplace(Current.GetUUID(), Current).second)
+					return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+						"Scene hierarchy contains duplicate entity identities"));
+				PendingParentCount.emplace(Current.GetUUID(), 0);
+			}
+
+			for (const Entity& Current : Entities)
+			{
+				const auto Parent = Current.GetParent();
+				const auto Children = Current.GetChildren();
+				if (!Parent || !Children)
+					return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+						"Could not inspect scene hierarchy before prefab commit"));
+				if (Parent->has_value())
+				{
+					const UUID ParentID = (**Parent).GetUUID();
+					if (!ByID.contains(ParentID))
+						return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+							"Scene hierarchy references a missing parent"));
+					PendingParentCount[Current.GetUUID()] = 1;
+					ChildrenByParent[ParentID].push_back(Current.GetUUID());
+				}
+
+				std::unordered_set<UUID, UUIDHash> UniqueChildren;
+				UniqueChildren.reserve(Children->size());
+				for (const Entity& Child : *Children)
+				{
+					const auto ChildInScene = ByID.find(Child.GetUUID());
+					const auto ChildParent = Child.GetParent();
+					if (ChildInScene == ByID.end() || !ChildParent || !ChildParent->has_value() ||
+						(**ChildParent).GetUUID() != Current.GetUUID() || !UniqueChildren.insert(Child.GetUUID()).second)
+						return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+							"Scene hierarchy has inconsistent parent and child links"));
+				}
+			}
+			for (const Entity& Current : Entities)
+			{
+				const auto ActualChildren = Current.GetChildren();
+				if (!ActualChildren) return std::unexpected(ToReconcileError(ActualChildren.error()));
+				std::vector<UUID> ActualIDs;
+				ActualIDs.reserve(ActualChildren->size());
+				for (const Entity& Child : *ActualChildren) ActualIDs.push_back(Child.GetUUID());
+				std::vector<UUID> ExpectedIDs = ChildrenByParent[Current.GetUUID()];
+				std::sort(ActualIDs.begin(), ActualIDs.end());
+				std::sort(ExpectedIDs.begin(), ExpectedIDs.end());
+				if (ActualIDs != ExpectedIDs)
+					return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+						"Scene hierarchy has inconsistent parent and child links"));
+			}
+
+			std::set<UUID> Ready;
+			for (const auto& [Identifier, ParentTotal] : PendingParentCount)
+				if (ParentTotal == 0) Ready.insert(Identifier);
+
+			std::vector<Entity> Ordered;
+			Ordered.reserve(Entities.size());
+			while (!Ready.empty())
+			{
+				const UUID CurrentID = *Ready.begin();
+				Ready.erase(Ready.begin());
+				Ordered.push_back(ByID.at(CurrentID));
+				auto Children = ChildrenByParent.find(CurrentID);
+				if (Children == ChildrenByParent.end()) continue;
+				std::sort(Children->second.begin(), Children->second.end());
+				for (const UUID ChildID : Children->second)
+				{
+					PendingParentCount[ChildID] = 0;
+					Ready.insert(ChildID);
+				}
+			}
+			if (Ordered.size() != Entities.size())
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+					"Scene hierarchy contains a parent cycle"));
+			return Ordered;
 		}
 
 		std::expected<std::unique_ptr<Scene>, PrefabReconcileError> DeserializeScene(std::string_view Data)
@@ -401,73 +515,349 @@ namespace PulseForge
 			return {};
 		}
 
-		std::expected<void, PrefabReconcileError> RestoreScene(Scene& Destination, const Scene& Backup)
+		std::expected<void, PrefabReconcileError> RestoreScene(
+			Scene& Destination,
+			const Scene& Backup,
+			const std::vector<Entity>& ParentFirst)
 		{
-			for (const Entity& Original : Backup.GetEntities())
+			std::optional<PrefabReconcileError> FirstFailure;
+			const auto Remember = [&FirstFailure](std::expected<void, PrefabReconcileError> Result)
+			{
+				if (!Result && !FirstFailure) FirstFailure = Result.error();
+			};
+#if defined(PF_DEBUG)
+			bool SkippedInjectedRestore = false;
+#endif
+			for (const Entity& Original : ParentFirst)
 			{
 				const auto Current = Destination.FindEntity(Original.GetUUID());
-				if (!Current) continue;
-				if (auto Result = SyncFullEntity(Original, *Current); !Result) return Result;
+				if (!Current)
+				{
+					if (!FirstFailure) FirstFailure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+						"An original entity is missing while restoring a prefab commit");
+					continue;
+				}
+#if defined(PF_DEBUG)
+				const auto OriginalTag = Original.GetTag();
+				const auto CurrentTag = Current->GetTag();
+				const bool HasRestorableChange = OriginalTag && CurrentTag && OriginalTag->Name != CurrentTag->Name;
+				if (!SkippedInjectedRestore && HasRestorableChange && ConsumeCommitFailurePoint(
+					PrefabInstanceReconciler::CommitFailurePoint::DuringRollbackRestore))
+				{
+					SkippedInjectedRestore = true;
+					if (!FirstFailure) FirstFailure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+						"Injected failure while restoring an original prefab entity");
+					continue;
+				}
+#endif
+				Remember(SyncFullEntity(Original, *Current));
 			}
-			for (const Entity& Original : Backup.GetEntities())
+			for (const Entity& Original : ParentFirst)
 			{
 				const auto Current = Destination.FindEntity(Original.GetUUID());
-				if (!Current) continue;
-				if (auto Result = SyncParent(Original, Destination, *Current); !Result) return Result;
+				if (!Current)
+				{
+					if (!FirstFailure) FirstFailure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+						"An original entity is missing while restoring prefab hierarchy");
+					continue;
+				}
+				Remember(SyncParent(Original, Destination, *Current));
 			}
+			if (FirstFailure) return std::unexpected(std::move(*FirstFailure));
 			return {};
+		}
+
+		PrefabReconcileError MakeRecoveryRequired(
+			const PrefabReconcileError& OriginalFailure,
+			const std::vector<std::string>& RecoveryFailures,
+			std::string_view BackupSnapshot)
+		{
+			std::string Message = "Prefab commit failed: " + OriginalFailure.Message + ". Rollback could not be verified";
+			for (const std::string& Failure : RecoveryFailures) Message += "; " + Failure;
+			Message += ". Retain the supplied RecoverySnapshot and scene state for recovery.";
+			PrefabReconcileError Result = MakeError(PrefabReconcileErrorCode::RecoveryRequired, std::move(Message));
+			Result.RecoverySnapshot = BackupSnapshot;
+			return Result;
 		}
 
 		std::expected<void, PrefabReconcileError> CommitScene(Scene& Destination, const Scene& Target, const Scene& Backup)
 		{
-			std::vector<Entity> Created;
-			for (const Entity& TargetEntity : Target.GetEntities())
+			// All allocation-heavy planning and snapshot capture happens before the destination is mutated.
+			auto TargetOrderResult = GetParentFirstOrder(Target);
+			if (!TargetOrderResult) return std::unexpected(TargetOrderResult.error());
+			auto BackupOrderResult = GetParentFirstOrder(Backup);
+			if (!BackupOrderResult) return std::unexpected(BackupOrderResult.error());
+			auto BackupBytes = SceneSerializer::Serialize(Backup);
+			if (!BackupBytes) return std::unexpected(SerializationError(BackupBytes.error()));
+			auto CurrentBytes = SceneSerializer::Serialize(Destination);
+			if (!CurrentBytes) return std::unexpected(SerializationError(CurrentBytes.error()));
+			if (*CurrentBytes != *BackupBytes)
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::StalePlan,
+					"Destination changed before the prefab commit began"));
+
+			const std::vector<Entity>& TargetOrder = *TargetOrderResult;
+			const std::vector<Entity>& BackupOrder = *BackupOrderResult;
+			std::unordered_set<UUID, UUIDHash> TargetIDs;
+			TargetIDs.reserve(TargetOrder.size());
+			std::vector<Entity> Additions;
+			Additions.reserve(TargetOrder.size());
+			for (const Entity& TargetEntity : TargetOrder)
 			{
-				if (Destination.FindEntity(TargetEntity.GetUUID())) continue;
-				const auto Tag = TargetEntity.GetTag();
-				if (!Tag) return std::unexpected(ToReconcileError(Tag.error()));
-				auto NewEntity = Destination.CreateEntityWithUUID(TargetEntity.GetUUID(), Tag->Name);
-				if (!NewEntity)
-				{
-					for (auto It = Created.rbegin(); It != Created.rend(); ++It) (void)Destination.DestroyEntity(*It);
-					return std::unexpected(ToReconcileError(NewEntity.error()));
-				}
-				Created.push_back(*NewEntity);
+				TargetIDs.insert(TargetEntity.GetUUID());
+				if (!Destination.FindEntity(TargetEntity.GetUUID())) Additions.push_back(TargetEntity);
 			}
 
-			const auto Rollback = [&]()
+			std::unordered_map<UUID, size_t, UUIDHash> DepthByID;
+			DepthByID.reserve(BackupOrder.size());
+			for (const Entity& Original : BackupOrder)
 			{
-				for (const Entity& NewEntity : Created) (void)NewEntity.ClearParent();
-				for (auto It = Created.rbegin(); It != Created.rend(); ++It) (void)Destination.DestroyEntity(*It);
-				(void)RestoreScene(Destination, Backup);
+				const auto Parent = Original.GetParent();
+				if (!Parent) return std::unexpected(ToReconcileError(Parent.error()));
+				DepthByID[Original.GetUUID()] = Parent->has_value()
+					? DepthByID.at((**Parent).GetUUID()) + 1 : 0;
+			}
+			std::vector<Entity> Removed;
+			for (const Entity& Original : BackupOrder)
+			{
+				if (TargetIDs.contains(Original.GetUUID())) continue;
+				const auto Current = Destination.FindEntity(Original.GetUUID());
+				if (!Current)
+					return std::unexpected(MakeError(PrefabReconcileErrorCode::StalePlan,
+						"An entity selected for prefab removal is missing before commit"));
+				Removed.push_back(*Current);
+			}
+			std::sort(Removed.begin(), Removed.end(), [&](const Entity& First, const Entity& Second)
+			{
+				const size_t FirstDepth = DepthByID.at(First.GetUUID());
+				const size_t SecondDepth = DepthByID.at(Second.GetUUID());
+				return FirstDepth != SecondDepth ? FirstDepth > SecondDepth : First.GetUUID() < Second.GetUUID();
+			});
+			std::unordered_set<UUID, UUIDHash> RemovedIDs;
+			RemovedIDs.reserve(Removed.size());
+			for (const Entity& Current : Removed) RemovedIDs.insert(Current.GetUUID());
+			for (const Entity& Current : Removed)
+				if (!Current.IsValid())
+					return std::unexpected(MakeError(PrefabReconcileErrorCode::StalePlan,
+						"An entity selected for prefab removal is invalid before commit"));
+
+			const std::vector<Entity> OriginalHandles = Destination.GetEntities();
+			std::vector<Entity> Created;
+			Created.reserve(Additions.size());
+			std::vector<std::string> RecoveryFailures;
+			RecoveryFailures.reserve(OriginalHandles.size() + Additions.size() + 4);
+			const auto Rollback = [&](const PrefabReconcileError& OriginalFailure) -> PrefabReconcileError
+			{
+				RecoveryFailures.clear();
+				if (auto Restored = RestoreScene(Destination, Backup, BackupOrder); !Restored)
+					RecoveryFailures.push_back(Restored.error().Message);
+				for (const Entity& Original : OriginalHandles)
+				{
+					const auto Current = Destination.FindEntity(Original.GetUUID());
+					if (!Current || *Current != Original)
+						RecoveryFailures.push_back("An original entity identity or incarnation was not preserved");
+				}
+
+				if (RecoveryFailures.empty())
+				{
+					for (auto It = Created.rbegin(); It != Created.rend(); ++It)
+					{
+						if (!It->IsValid()) continue;
+						const auto Children = It->GetChildren();
+						if (!Children || !Children->empty())
+						{
+							RecoveryFailures.push_back("An operation-created entity still owns children after rollback");
+							continue;
+						}
+						if (auto Destroyed = Destination.DestroyEntity(*It); !Destroyed)
+							RecoveryFailures.push_back(Destroyed.error().Message);
+					}
+				}
+
+				if (RecoveryFailures.empty())
+				{
+					auto RestoredBytes = SceneSerializer::Serialize(Destination);
+					if (!RestoredBytes) RecoveryFailures.push_back(RestoredBytes.error().Message);
+					else if (*RestoredBytes != *BackupBytes)
+						RecoveryFailures.push_back("Restored scene contents do not match the original scene snapshot");
+				}
+				if (!RecoveryFailures.empty()) return MakeRecoveryRequired(OriginalFailure, RecoveryFailures, *BackupBytes);
+				return OriginalFailure;
 			};
 
-			for (const Entity& TargetEntity : Target.GetEntities())
+			std::optional<PrefabReconcileError> Failure;
+			size_t ExistingSynchronized = 0;
+			try
 			{
-				const auto Current = Destination.FindEntity(TargetEntity.GetUUID());
-				if (!Current) { Rollback(); return std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed, "Entity disappeared during prefab commit")); }
-				if (auto Result = SyncFullEntity(TargetEntity, *Current); !Result) { Rollback(); return Result; }
-			}
-			for (const Entity& TargetEntity : Target.GetEntities())
-			{
-				const auto Current = Destination.FindEntity(TargetEntity.GetUUID());
-				if (!Current) { Rollback(); return std::unexpected(MakeError(PrefabReconcileErrorCode::SceneOperationFailed, "Entity disappeared during hierarchy commit")); }
-				if (auto Result = SyncParent(TargetEntity, Destination, *Current); !Result) { Rollback(); return Result; }
-			}
+				// Create all identities first; the reserved rollback list is updated immediately after each creation.
+				for (const Entity& TargetEntity : Additions)
+				{
+					const auto Tag = TargetEntity.GetTag();
+					if (!Tag) { Failure = ToReconcileError(Tag.error()); break; }
+					auto NewEntity = Destination.CreateEntityWithUUID(TargetEntity.GetUUID(), Tag->Name);
+					if (!NewEntity) { Failure = ToReconcileError(NewEntity.error()); break; }
+					Created.push_back(*NewEntity);
+#if defined(PF_DEBUG)
+					if (ConsumeCommitFailurePoint(PrefabInstanceReconciler::CommitFailurePoint::AfterAdditionCreated))
+					{
+						Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+							"Injected failure after creating a prefab entity");
+						break;
+					}
+#endif
+				}
 
-			std::unordered_set<UUID, UUIDHash> TargetIDs;
-			for (const Entity& TargetEntity : Target.GetEntities()) TargetIDs.insert(TargetEntity.GetUUID());
-			std::vector<Entity> Removed;
-			for (const Entity& Current : Destination.GetEntities())
-				if (!TargetIDs.contains(Current.GetUUID())) Removed.push_back(Current);
+				if (!Failure)
+				{
+					for (const Entity& TargetEntity : TargetOrder)
+					{
+						const auto Current = Destination.FindEntity(TargetEntity.GetUUID());
+						if (!Current)
+						{
+							Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+								"Entity disappeared during prefab component synchronization");
+							break;
+						}
+						const auto TargetTag = TargetEntity.GetTag();
+						const auto CurrentTag = Current->GetTag();
+						const bool HasTagChange = TargetTag && CurrentTag && TargetTag->Name != CurrentTag->Name;
+						if (auto Result = SyncFullEntity(TargetEntity, *Current); !Result)
+						{
+							Failure = Result.error();
+							break;
+						}
+						if (DepthByID.contains(TargetEntity.GetUUID()) && HasTagChange)
+						{
+							++ExistingSynchronized;
+#if defined(PF_DEBUG)
+							if (ExistingSynchronized == 1 && ConsumeCommitFailurePoint(
+								PrefabInstanceReconciler::CommitFailurePoint::AfterExistingEntitySynchronized))
+							{
+								Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+									"Injected failure after synchronizing an existing prefab entity");
+								break;
+							}
+#endif
+						}
+					}
+				}
+
+				if (!Failure)
+				{
+					for (const Entity& TargetEntity : TargetOrder)
+					{
+						const auto Current = Destination.FindEntity(TargetEntity.GetUUID());
+						if (!Current)
+						{
+							Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+								"Entity disappeared during prefab hierarchy synchronization");
+							break;
+						}
+						const auto PreviousParent = Current->GetParent();
+						const auto TargetParent = TargetEntity.GetParent();
+						if (!PreviousParent || !TargetParent)
+						{
+							Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+								"Could not inspect parent before prefab hierarchy synchronization");
+							break;
+						}
+						const std::optional<UUID> PreviousParentID = PreviousParent->has_value()
+							? std::optional<UUID>{ (**PreviousParent).GetUUID() } : std::nullopt;
+						const std::optional<UUID> TargetParentID = TargetParent->has_value()
+							? std::optional<UUID>{ (**TargetParent).GetUUID() } : std::nullopt;
+						if (auto Result = SyncParent(TargetEntity, Destination, *Current); !Result)
+						{
+							Failure = Result.error();
+							break;
+						}
+						if (PreviousParentID != TargetParentID)
+						{
+#if defined(PF_DEBUG)
+							if (ConsumeCommitFailurePoint(PrefabInstanceReconciler::CommitFailurePoint::AfterHierarchyTransition))
+							{
+								Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+									"Injected failure after a prefab hierarchy transition");
+								break;
+							}
+#endif
+						}
+					}
+				}
+
+				if (!Failure)
+				{
+					for (const Entity& Current : Removed)
+					{
+						const auto Children = Current.GetChildren();
+						if (!Children)
+						{
+							Failure = ToReconcileError(Children.error());
+							break;
+						}
+						if (std::any_of(Children->begin(), Children->end(), [&](const Entity& Child)
+							{ return !RemovedIDs.contains(Child.GetUUID()); }))
+						{
+							Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+								"An obsolete entity still has a surviving child after hierarchy synchronization");
+							break;
+						}
+					}
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+					std::string("Prefab commit raised an exception before removal: ") + Exception.what());
+			}
+			catch (...)
+			{
+				Failure = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+					"Prefab commit raised an unknown exception before removal");
+			}
+			if (Failure) return std::unexpected(Rollback(*Failure));
+
+#if defined(PF_DEBUG)
+			if (!Removed.empty() && ConsumeCommitFailurePoint(PrefabInstanceReconciler::CommitFailurePoint::BeforeRemoval))
+				return std::unexpected(Rollback(MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+					"Injected failure before destructive prefab removals")));
+#endif
+			// Destruction is the commit boundary: all handles were verified against the unchanged backup,
+			// all target parents are installed, and Scene::DestroyEntity has no allocation or callback path.
+			size_t RemovedCount = 0;
 			for (const Entity& Current : Removed)
 			{
+				if (!Current.IsValid())
+				{
+					const PrefabReconcileError FailureValue = MakeError(PrefabReconcileErrorCode::SceneOperationFailed,
+						"An entity selected for prefab removal became invalid before the commit boundary");
+					if (RemovedCount == 0) return std::unexpected(Rollback(FailureValue));
+					return std::unexpected(MakeRecoveryRequired(FailureValue,
+						{ "Some obsolete entities were already removed and their original incarnations cannot be restored" }, *BackupBytes));
+				}
 				if (auto Result = Destination.DestroyEntity(Current); !Result)
-					return std::unexpected(ToReconcileError(Result.error()));
+				{
+					const PrefabReconcileError FailureValue = ToReconcileError(Result.error());
+					if (RemovedCount == 0) return std::unexpected(Rollback(FailureValue));
+					return std::unexpected(MakeRecoveryRequired(FailureValue,
+						{ "Some obsolete entities were already removed and their original incarnations cannot be restored" }, *BackupBytes));
+				}
+				++RemovedCount;
 			}
 			return {};
 		}
 	}
+
+#if defined(PF_DEBUG)
+	void PrefabInstanceReconciler::SetCommitFailureSequenceForTesting(
+		std::initializer_list<CommitFailurePoint> Sequence)
+	{
+		CommitFailureSequence.assign(Sequence.begin(), Sequence.end());
+	}
+
+	void PrefabInstanceReconciler::ClearCommitFailureSequenceForTesting() noexcept
+	{
+		CommitFailureSequence.clear();
+	}
+#endif
 
 	struct PrefabReconcilePlan::Detail
 	{
@@ -937,6 +1327,7 @@ namespace PulseForge
 
 		PrefabOverrideEditSummary Summary;
 		std::vector<const PrefabOverrideRecord*> Applicable;
+		std::vector<const PrefabOverrideRecord*> RemovalOperations;
 		for (const PrefabOverrideRecord& Override : Instance.Overrides)
 		{
 			if (OnlyEntity && Override.Entity != *OnlyEntity) continue;
@@ -955,29 +1346,12 @@ namespace PulseForge
 					"An overridden source entity no longer exists; its override remains recoverable",
 					{ Conflict(Override.Entity, PrefabConflictKind::RemovedSourceEntity,
 						"The source entity was removed before this override could be applied") }));
-			Applicable.push_back(&Override);
+			if (Override.Operation == PrefabOverrideOperation::RemoveSourceEntity)
+				RemovalOperations.push_back(&Override);
+			else
+				Applicable.push_back(&Override);
 		}
 
-		std::stable_sort(Applicable.begin(), Applicable.end(), [&Source](const auto* First, const auto* Second)
-		{
-			const bool FirstRemoval = First->Operation == PrefabOverrideOperation::RemoveSourceEntity;
-			const bool SecondRemoval = Second->Operation == PrefabOverrideOperation::RemoveSourceEntity;
-			if (FirstRemoval != SecondRemoval) return FirstRemoval < SecondRemoval;
-			if (!FirstRemoval) return false;
-			const auto Depth = [](const Entity& Value)
-			{
-				size_t Result = 0;
-				auto Parent = Value.GetParent();
-				while (Parent && Parent->has_value())
-				{
-					++Result;
-					Parent = (**Parent).GetParent();
-				}
-				return Result;
-			};
-			return Depth(*Source.GetScene().FindEntity(Second->Entity.Key)) >
-				Depth(*Source.GetScene().FindEntity(First->Entity.Key));
-		});
 		for (const PrefabOverrideRecord* Override : Applicable)
 		{
 			const auto Target = Staged.FindEntity(Override->Entity.Key);
@@ -1020,23 +1394,49 @@ namespace PulseForge
 				if (auto Parented = Target->SetParent(*Parent); !Parented)
 					return std::unexpected(ToReconcileError(Parented.error()));
 			}
-			else if (Override->Operation == PrefabOverrideOperation::RemoveSourceEntity)
-			{
-				if (Override->Entity.Key == Source.GetRootKey())
-					return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, "The prefab source root cannot be removed"));
-				const auto Children = Target->GetChildren();
-				if (!Children) return std::unexpected(ToReconcileError(Children.error()));
-				if (!Children->empty())
-					return std::unexpected(MakeError(PrefabReconcileErrorCode::ConflictsDetected,
-						"Only a source leaf can be removed by the current prefab operation",
-						{ Conflict(Override->Entity, PrefabConflictKind::RemovedEntityHasLocalChildren,
-							"Remove or reparent source descendants before applying this entity removal") }));
-				if (auto Removed = Staged.DestroyEntity(*Target); !Removed)
-					return std::unexpected(ToReconcileError(Removed.error()));
-			}
 			else
 				return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride,
 					"This linked-instance operation cannot be applied to the prefab source"));
+			++Summary.Applied;
+		}
+
+		// Non-removal operations keep their authored order above. Their reparent changes are therefore
+		// present when removal dependencies are computed: survivors can move away before old parents go.
+		auto FinalHierarchy = GetParentFirstOrder(Staged);
+		if (!FinalHierarchy) return std::unexpected(FinalHierarchy.error());
+		std::unordered_map<UUID, size_t, UUIDHash> FinalDepth;
+		FinalDepth.reserve(FinalHierarchy->size());
+		for (const Entity& Current : *FinalHierarchy)
+		{
+			const auto Parent = Current.GetParent();
+			if (!Parent) return std::unexpected(ToReconcileError(Parent.error()));
+			FinalDepth[Current.GetUUID()] = Parent->has_value()
+				? FinalDepth.at((**Parent).GetUUID()) + 1 : 0;
+		}
+		std::sort(RemovalOperations.begin(), RemovalOperations.end(), [&](const auto* First, const auto* Second)
+		{
+			const size_t FirstDepth = FinalDepth.at(First->Entity.Key);
+			const size_t SecondDepth = FinalDepth.at(Second->Entity.Key);
+			return FirstDepth != SecondDepth ? FirstDepth > SecondDepth : First->Entity.Key < Second->Entity.Key;
+		});
+		for (const PrefabOverrideRecord* Override : RemovalOperations)
+		{
+			if (Override->Entity.Key == Source.GetRootKey())
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride,
+					"The prefab source root cannot be removed"));
+			const auto Target = Staged.FindEntity(Override->Entity.Key);
+			if (!Target)
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidSource,
+					"Overridden prefab source entity is missing"));
+			const auto Children = Target->GetChildren();
+			if (!Children) return std::unexpected(ToReconcileError(Children.error()));
+			if (!Children->empty())
+				return std::unexpected(MakeError(PrefabReconcileErrorCode::ConflictsDetected,
+					"Only a source leaf can be removed by the current prefab operation",
+					{ Conflict(Override->Entity, PrefabConflictKind::RemovedEntityHasLocalChildren,
+						"Remove or reparent source descendants before applying this entity removal") }));
+			if (auto Removed = Staged.DestroyEntity(*Target); !Removed)
+				return std::unexpected(ToReconcileError(Removed.error()));
 			++Summary.Applied;
 		}
 

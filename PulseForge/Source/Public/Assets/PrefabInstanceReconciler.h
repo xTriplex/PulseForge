@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <expected>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -44,7 +45,8 @@ namespace PulseForge
 		StalePlan,
 		ConflictsDetected,
 		UnsupportedOverride,
-		SceneOperationFailed
+		SceneOperationFailed,
+		RecoveryRequired
 	};
 
 	struct PrefabReconcileError
@@ -52,6 +54,8 @@ namespace PulseForge
 		PrefabReconcileErrorCode Code;
 		std::string Message;
 		std::vector<PrefabConflictRecord> Conflicts;
+		// Serialized pre-operation scene. Set when an in-place commit cannot verify rollback.
+		std::string RecoverySnapshot;
 	};
 
 	class PULSEFORGE_API PrefabReconcilePlan final
@@ -82,6 +86,19 @@ namespace PulseForge
 	class PULSEFORGE_API PrefabInstanceReconciler final
 	{
 	public:
+#if defined(PF_DEBUG)
+		enum class CommitFailurePoint : uint8_t
+		{
+			AfterAdditionCreated,
+			AfterExistingEntitySynchronized,
+			AfterHierarchyTransition,
+			BeforeRemoval,
+			DuringRollbackRestore
+		};
+		static void SetCommitFailureSequenceForTesting(std::initializer_list<CommitFailurePoint> Sequence);
+		static void ClearCommitFailureSequenceForTesting() noexcept;
+#endif
+
 		[[nodiscard]] static std::expected<PrefabInstantiationResult, PrefabReconcileError> InstantiateLinked(
 			const PrefabSourceDocument& Source,
 			Scene& Destination,

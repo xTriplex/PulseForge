@@ -3,6 +3,7 @@
 #include "Assets/PrefabInstanceReconciler.h"
 #include "Assets/AssetImportProvenance.h"
 
+#include <array>
 #include <span>
 #include <utility>
 
@@ -1243,6 +1244,506 @@ namespace
 		PF_CHECK(Tests, LocalChild->IsValid() && UnrelatedHandle.IsValid() && LinkedRoot.IsValid());
 	}
 
+	void TestReconcileHierarchyTransitionIgnoresLiveUUIDOrdering(TestRunner& Tests)
+	{
+		constexpr UUID RootKey{ 0xa100000000000000ull, 1 };
+		constexpr UUID FirstKey{ 0xa100000000000000ull, 2 };
+		constexpr UUID SecondKey{ 0xa100000000000000ull, 3 };
+		constexpr UUID SiblingKey{ 0xa100000000000000ull, 4 };
+		constexpr AssetID PrefabAsset{ 0xa200000000000000ull, 1 };
+		constexpr UUID OtherEntityID{ 0xa300000000000000ull, 10 };
+
+		const auto RunOrdering = [&](bool FirstEntitySortsBeforeSecond)
+		{
+			Scene SourceScene;
+			const auto SourceRoot = SourceScene.CreateEntityWithUUID(RootKey, "Hierarchy root");
+			const auto SourceFirst = SourceScene.CreateEntityWithUUID(FirstKey, "First");
+			const auto SourceSecond = SourceScene.CreateEntityWithUUID(SecondKey, "Second");
+			const auto SourceSibling = SourceScene.CreateEntityWithUUID(SiblingKey, "Unchanged sibling");
+			PF_CHECK(Tests, SourceRoot && SourceFirst && SourceSecond && SourceSibling);
+			if (!SourceRoot || !SourceFirst || !SourceSecond || !SourceSibling) return;
+			PF_CHECK(Tests, SourceFirst->SetParent(*SourceRoot));
+			PF_CHECK(Tests, SourceSecond->SetParent(*SourceFirst));
+			PF_CHECK(Tests, SourceSibling->SetParent(*SourceRoot));
+			auto InitialBytes = PrefabSerializer::Serialize(SourceScene, *SourceRoot);
+			PF_CHECK(Tests, InitialBytes.has_value());
+			if (!InitialBytes) return;
+			auto InitialSource = PrefabSerializer::Parse(*InitialBytes, PrefabAsset);
+			PF_CHECK(Tests, InitialSource.has_value());
+			if (!InitialSource) return;
+
+			const UUID RootLiveID{ 0xa400000000000000ull, 300 };
+			const UUID FirstLiveID{ 0xa400000000000000ull, FirstEntitySortsBeforeSecond ? 100u : 500u };
+			const UUID SecondLiveID{ 0xa400000000000000ull, FirstEntitySortsBeforeSecond ? 200u : 400u };
+			const UUID SiblingLiveID{ 0xa400000000000000ull, 600 };
+			Scene Destination;
+			const auto Unrelated = Destination.CreateEntityWithUUID(OtherEntityID, "Unrelated");
+			const auto LinkedRoot = Destination.CreateEntityWithUUID(RootLiveID, "Hierarchy root");
+			const auto First = Destination.CreateEntityWithUUID(FirstLiveID, "First");
+			const auto Second = Destination.CreateEntityWithUUID(SecondLiveID, "Second");
+			const auto Sibling = Destination.CreateEntityWithUUID(SiblingLiveID, "Unchanged sibling");
+			PF_CHECK(Tests, Unrelated && LinkedRoot && First && Second && Sibling);
+			if (!Unrelated || !LinkedRoot || !First || !Second || !Sibling) return;
+			PF_CHECK(Tests, First->SetParent(*LinkedRoot));
+			PF_CHECK(Tests, Second->SetParent(*First));
+			PF_CHECK(Tests, Sibling->SetParent(*LinkedRoot));
+			PrefabInstanceComponent Metadata;
+			Metadata.InstanceID = UUID{ 0xa500000000000000ull, FirstEntitySortsBeforeSecond ? 1u : 2u };
+			Metadata.SourceAsset = PrefabAsset;
+			Metadata.SourceRootKey = RootKey;
+			Metadata.AppliedSourceFingerprint = "known-source-revision";
+			Metadata.SourceEntities = { { RootKey, RootLiveID }, { FirstKey, FirstLiveID },
+				{ SecondKey, SecondLiveID }, { SiblingKey, SiblingLiveID } };
+			PF_CHECK(Tests, LinkedRoot->SetPrefabInstance(Metadata));
+
+			const auto OtherRoot = PrefabInstanceReconciler::InstantiateLinked(*InitialSource, Destination);
+			PF_CHECK(Tests, OtherRoot.has_value());
+			if (!OtherRoot) return;
+			const auto OtherChildID = FindMappedEntity(OtherRoot->Root, FirstKey);
+			PF_CHECK(Tests, OtherChildID.has_value());
+			if (!OtherChildID) return;
+			const auto OtherChild = Destination.FindEntity(*OtherChildID);
+			PF_CHECK(Tests, OtherChild.has_value());
+			if (!OtherChild) return;
+
+			const auto SourceTargetRoot = InitialSource->GetScene().FindEntity(RootKey);
+			const auto SourceTargetFirst = InitialSource->GetScene().FindEntity(FirstKey);
+			const auto SourceTargetSecond = InitialSource->GetScene().FindEntity(SecondKey);
+			PF_CHECK(Tests, SourceTargetRoot && SourceTargetFirst && SourceTargetSecond);
+			if (!SourceTargetRoot || !SourceTargetFirst || !SourceTargetSecond) return;
+			PF_CHECK(Tests, SourceTargetSecond->SetParent(*SourceTargetRoot));
+			PF_CHECK(Tests, SourceTargetFirst->SetParent(*SourceTargetSecond));
+
+			const Entity UnrelatedHandle = *Unrelated;
+			const Entity RootHandle = *LinkedRoot;
+			const Entity FirstHandle = *First;
+			const Entity SecondHandle = *Second;
+			const Entity SiblingHandle = *Sibling;
+			const Entity OtherRootHandle = OtherRoot->Root;
+			const Entity OtherChildHandle = *OtherChild;
+			const std::vector<UUID> IDsBefore = [&]
+			{
+				std::vector<UUID> IDs;
+				for (const Entity& Current : Destination.GetEntities()) IDs.push_back(Current.GetUUID());
+				return IDs;
+			}();
+
+			auto Plan = PrefabInstanceReconciler::PlanReconcile(Destination, RootHandle, *InitialSource);
+			PF_CHECK(Tests, Plan.has_value() && Plan->CanApply());
+			if (!Plan) return;
+			const auto Applied = PrefabInstanceReconciler::ApplyReconcile(Destination, *InitialSource, *Plan);
+			PF_CHECK(Tests, Applied.has_value());
+			if (!Applied) return;
+
+			const auto FirstParent = FirstHandle.GetParent();
+			const auto SecondParent = SecondHandle.GetParent();
+			PF_CHECK(Tests, FirstParent && FirstParent->has_value() && **FirstParent == SecondHandle);
+			PF_CHECK(Tests, SecondParent && SecondParent->has_value() && **SecondParent == RootHandle);
+			PF_CHECK(Tests, RootHandle.IsValid() && FirstHandle.IsValid() && SecondHandle.IsValid());
+			PF_CHECK(Tests, Destination.FindEntity(RootLiveID) == RootHandle);
+			PF_CHECK(Tests, Destination.FindEntity(FirstLiveID) == FirstHandle);
+			PF_CHECK(Tests, Destination.FindEntity(SecondLiveID) == SecondHandle);
+			PF_CHECK(Tests, SiblingHandle.IsValid() && Destination.FindEntity(SiblingLiveID) == SiblingHandle);
+			PF_CHECK(Tests, UnrelatedHandle.IsValid() && Destination.FindEntity(OtherEntityID) == UnrelatedHandle);
+			PF_CHECK(Tests, OtherRootHandle.IsValid() && OtherChildHandle.IsValid());
+			const auto OtherChildParent = OtherChildHandle.GetParent();
+			PF_CHECK(Tests, OtherChildParent && OtherChildParent->has_value() && **OtherChildParent == OtherRootHandle);
+			std::vector<UUID> IDsAfter;
+			for (const Entity& Current : Destination.GetEntities()) IDsAfter.push_back(Current.GetUUID());
+			PF_CHECK(Tests, IDsAfter == IDsBefore);
+		};
+
+		RunOrdering(true);
+		RunOrdering(false);
+	}
+
+	void TestReconcileMovesSubtreeAcrossBranchesThroughNewParent(TestRunner& Tests)
+	{
+		constexpr UUID RootKey{ 0xa910000000000000ull, 1 };
+		constexpr UUID LeftKey{ 0xa910000000000000ull, 2 };
+		constexpr UUID RightKey{ 0xa910000000000000ull, 3 };
+		constexpr UUID MovingKey{ 0xa910000000000000ull, 4 };
+		constexpr UUID FirstDescendantKey{ 0xa910000000000000ull, 5 };
+		constexpr UUID SecondDescendantKey{ 0xa910000000000000ull, 6 };
+		constexpr UUID NewParentKey{ 0xa910000000000000ull, 7 };
+		constexpr AssetID PrefabAsset{ 0xa920000000000000ull, 1 };
+
+		Scene Authored;
+		const auto Root = Authored.CreateEntityWithUUID(RootKey, "Root");
+		const auto Left = Authored.CreateEntityWithUUID(LeftKey, "Left branch");
+		const auto Right = Authored.CreateEntityWithUUID(RightKey, "Right branch");
+		const auto Moving = Authored.CreateEntityWithUUID(MovingKey, "Moving subtree");
+		const auto FirstDescendant = Authored.CreateEntityWithUUID(FirstDescendantKey, "First descendant");
+		const auto SecondDescendant = Authored.CreateEntityWithUUID(SecondDescendantKey, "Second descendant");
+		PF_CHECK(Tests, Root && Left && Right && Moving && FirstDescendant && SecondDescendant);
+		if (!Root || !Left || !Right || !Moving || !FirstDescendant || !SecondDescendant) return;
+		PF_CHECK(Tests, Left->SetParent(*Root));
+		PF_CHECK(Tests, Right->SetParent(*Root));
+		PF_CHECK(Tests, Moving->SetParent(*Left));
+		PF_CHECK(Tests, FirstDescendant->SetParent(*Moving));
+		PF_CHECK(Tests, SecondDescendant->SetParent(*Moving));
+		auto Bytes = PrefabSerializer::Serialize(Authored, *Root);
+		PF_CHECK(Tests, Bytes.has_value());
+		if (!Bytes) return;
+		auto Source = PrefabSerializer::Parse(*Bytes, PrefabAsset);
+		PF_CHECK(Tests, Source.has_value());
+		if (!Source) return;
+
+		Scene Destination;
+		const auto Instance = PrefabInstanceReconciler::InstantiateLinked(*Source, Destination);
+		PF_CHECK(Tests, Instance.has_value());
+		if (!Instance) return;
+		std::unordered_map<UUID, Entity, UUIDHash> OriginalHandles;
+		for (const UUID Key : { RootKey, LeftKey, RightKey, MovingKey, FirstDescendantKey, SecondDescendantKey })
+		{
+			const auto LiveID = FindMappedEntity(Instance->Root, Key);
+			PF_CHECK(Tests, LiveID.has_value());
+			if (!LiveID) return;
+			const auto Live = Destination.FindEntity(*LiveID);
+			PF_CHECK(Tests, Live.has_value());
+			if (!Live) return;
+			OriginalHandles.emplace(Key, *Live);
+		}
+
+		const auto SourceRight = Source->GetScene().FindEntity(RightKey);
+		const auto SourceMoving = Source->GetScene().FindEntity(MovingKey);
+		PF_CHECK(Tests, SourceRight && SourceMoving);
+		if (!SourceRight || !SourceMoving) return;
+		const auto NewParent = Source->GetScene().CreateEntityWithUUID(NewParentKey, "New destination parent");
+		PF_CHECK(Tests, NewParent.has_value());
+		if (!NewParent) return;
+		PF_CHECK(Tests, NewParent->SetParent(*SourceRight));
+		PF_CHECK(Tests, SourceMoving->SetParent(*NewParent));
+
+		auto Plan = PrefabInstanceReconciler::PlanReconcile(Destination, Instance->Root, *Source);
+		PF_CHECK(Tests, Plan.has_value() && Plan->CanApply());
+		if (!Plan) return;
+		const auto Applied = PrefabInstanceReconciler::ApplyReconcile(Destination, *Source, *Plan);
+		PF_CHECK(Tests, Applied.has_value());
+		if (!Applied) return;
+
+		const auto LiveNewParentID = FindMappedEntity(Instance->Root, NewParentKey);
+		PF_CHECK(Tests, LiveNewParentID.has_value());
+		if (!LiveNewParentID) return;
+		const auto LiveNewParent = Destination.FindEntity(*LiveNewParentID);
+		PF_CHECK(Tests, LiveNewParent.has_value());
+		if (!LiveNewParent) return;
+		const auto MovingLive = OriginalHandles.at(MovingKey);
+		const auto MovingParent = MovingLive.GetParent();
+		PF_CHECK(Tests, MovingParent && MovingParent->has_value() && **MovingParent == *LiveNewParent);
+		for (const UUID Key : { FirstDescendantKey, SecondDescendantKey })
+		{
+			const Entity& Descendant = OriginalHandles.at(Key);
+			const auto Parent = Descendant.GetParent();
+			PF_CHECK(Tests, Descendant.IsValid() && Parent && Parent->has_value() && **Parent == MovingLive);
+		}
+		for (const auto& [Key, Handle] : OriginalHandles)
+		{
+			PF_CHECK(Tests, Handle.IsValid());
+			const auto LiveID = FindMappedEntity(Instance->Root, Key);
+			PF_CHECK(Tests, LiveID && Destination.FindEntity(*LiveID) == Handle);
+		}
+		const auto RightLiveID = FindMappedEntity(Instance->Root, RightKey);
+		PF_CHECK(Tests, RightLiveID.has_value());
+		if (!RightLiveID) return;
+		const auto RightLive = Destination.FindEntity(*RightLiveID);
+		const auto NewParentParent = LiveNewParent->GetParent();
+		PF_CHECK(Tests, RightLive && NewParentParent && NewParentParent->has_value() && **NewParentParent == *RightLive);
+
+		const auto ReapplyPlan = PrefabInstanceReconciler::PlanReconcile(Destination, Instance->Root, *Source);
+		PF_CHECK(Tests, ReapplyPlan.has_value() && ReapplyPlan->CanApply());
+		if (ReapplyPlan) PF_CHECK(Tests, PrefabInstanceReconciler::ApplyReconcile(Destination, *Source, *ReapplyPlan).has_value());
+	}
+
+	void TestApplySourceSubtreeRemovalsDeepestFirst(TestRunner& Tests)
+	{
+		constexpr UUID RootKey{ 0xa600000000000000ull, 1 };
+		constexpr UUID FirstParentKey{ 0xa600000000000000ull, 2 };
+		constexpr UUID FirstChildKey{ 0xa600000000000000ull, 3 };
+		constexpr UUID FirstLeafKey{ 0xa600000000000000ull, 4 };
+		constexpr UUID SecondParentKey{ 0xa600000000000000ull, 5 };
+		constexpr UUID SecondChildKey{ 0xa600000000000000ull, 6 };
+		constexpr UUID SiblingKey{ 0xa600000000000000ull, 7 };
+		constexpr AssetID PrefabAsset{ 0xa700000000000000ull, 1 };
+
+		Scene Authored;
+		const auto Root = Authored.CreateEntityWithUUID(RootKey, "Root");
+		const auto FirstParent = Authored.CreateEntityWithUUID(FirstParentKey, "First parent");
+		const auto FirstChild = Authored.CreateEntityWithUUID(FirstChildKey, "First child");
+		const auto FirstLeaf = Authored.CreateEntityWithUUID(FirstLeafKey, "First leaf");
+		const auto SecondParent = Authored.CreateEntityWithUUID(SecondParentKey, "Second parent");
+		const auto SecondChild = Authored.CreateEntityWithUUID(SecondChildKey, "Second child");
+		const auto Sibling = Authored.CreateEntityWithUUID(SiblingKey, "Surviving sibling");
+		PF_CHECK(Tests, Root && FirstParent && FirstChild && FirstLeaf && SecondParent && SecondChild && Sibling);
+		if (!Root || !FirstParent || !FirstChild || !FirstLeaf || !SecondParent || !SecondChild || !Sibling) return;
+		PF_CHECK(Tests, FirstParent->SetParent(*Root));
+		PF_CHECK(Tests, FirstChild->SetParent(*FirstParent));
+		PF_CHECK(Tests, FirstLeaf->SetParent(*FirstChild));
+		PF_CHECK(Tests, SecondParent->SetParent(*Root));
+		PF_CHECK(Tests, SecondChild->SetParent(*SecondParent));
+		PF_CHECK(Tests, Sibling->SetParent(*Root));
+		auto Bytes = PrefabSerializer::Serialize(Authored, *Root);
+		PF_CHECK(Tests, Bytes.has_value());
+		if (!Bytes) return;
+		auto Source = PrefabSerializer::Parse(*Bytes, PrefabAsset);
+		PF_CHECK(Tests, Source.has_value());
+		if (!Source) return;
+
+		Scene InstanceScene;
+		const auto Instance = PrefabInstanceReconciler::InstantiateLinked(*Source, InstanceScene);
+		PF_CHECK(Tests, Instance.has_value());
+		if (!Instance) return;
+		const auto LiveFor = [&](UUID Key) { return FindMappedEntity(Instance->Root, Key); };
+		const auto LiveFirstParentID = LiveFor(FirstParentKey);
+		const auto LiveFirstChildID = LiveFor(FirstChildKey);
+		const auto LiveFirstLeafID = LiveFor(FirstLeafKey);
+		const auto LiveSecondParentID = LiveFor(SecondParentKey);
+		const auto LiveSecondChildID = LiveFor(SecondChildKey);
+		PF_CHECK(Tests, LiveFirstParentID && LiveFirstChildID && LiveFirstLeafID && LiveSecondParentID && LiveSecondChildID);
+		if (!LiveFirstParentID || !LiveFirstChildID || !LiveFirstLeafID || !LiveSecondParentID || !LiveSecondChildID) return;
+
+		const std::array<UUID, 5> RemovalOrder{
+			FirstLeafKey, FirstChildKey, FirstParentKey, SecondChildKey, SecondParentKey
+		};
+		for (const UUID Key : RemovalOrder)
+		{
+			const auto LiveID = LiveFor(Key);
+			PF_CHECK(Tests, LiveID.has_value());
+			if (!LiveID) return;
+			const auto Live = InstanceScene.FindEntity(*LiveID);
+			PF_CHECK(Tests, Live.has_value());
+			if (!Live) return;
+			PF_CHECK(Tests, PrefabInstanceReconciler::RecordRemoveSourceEntityOverride(Instance->Root, *Live));
+			PF_CHECK(Tests, InstanceScene.DestroyEntity(*Live));
+		}
+		const auto InstanceMetadata = Instance->Root.GetPrefabInstance();
+		PF_CHECK(Tests, InstanceMetadata && InstanceMetadata->has_value() && (**InstanceMetadata).Overrides.size() == RemovalOrder.size());
+		if (!InstanceMetadata || !InstanceMetadata->has_value()) return;
+
+		const auto BeforeApply = PrefabSerializer::Serialize(Source.value());
+		PF_CHECK(Tests, BeforeApply.has_value());
+		if (!BeforeApply) return;
+		const auto Applied = PrefabInstanceReconciler::ApplyOverridesToSource(Source.value(), **InstanceMetadata);
+		PF_CHECK(Tests, Applied.has_value() && Applied->Applied == RemovalOrder.size());
+		if (!Applied)
+		{
+			const auto AfterFailure = PrefabSerializer::Serialize(Source.value());
+			PF_CHECK(Tests, AfterFailure.has_value() && *AfterFailure == *BeforeApply);
+			return;
+		}
+
+		const Scene& Updated = Source->GetScene();
+		PF_CHECK(Tests, Updated.FindEntity(RootKey).has_value());
+		PF_CHECK(Tests, Updated.FindEntity(SiblingKey).has_value());
+		for (const UUID Key : RemovalOrder) PF_CHECK(Tests, !Updated.FindEntity(Key).has_value());
+		auto UpdatedBytes = PrefabSerializer::Serialize(Source.value());
+		PF_CHECK(Tests, UpdatedBytes.has_value());
+		if (!UpdatedBytes) return;
+		auto Reopened = PrefabSerializer::Parse(*UpdatedBytes, PrefabAsset);
+		PF_CHECK(Tests, Reopened.has_value());
+		if (!Reopened) return;
+		PF_CHECK(Tests, Reopened->GetScene().FindEntity(RootKey).has_value());
+		PF_CHECK(Tests, Reopened->GetScene().FindEntity(SiblingKey).has_value());
+		for (const UUID Key : RemovalOrder) PF_CHECK(Tests, !Reopened->GetScene().FindEntity(Key).has_value());
+	}
+
+	void TestApplySourceReparentsBeforeRemovalAndPreservesConflicts(TestRunner& Tests)
+	{
+		constexpr UUID RootKey{ 0xa810000000000000ull, 1 };
+		constexpr UUID ParentKey{ 0xa810000000000000ull, 2 };
+		constexpr UUID SurvivorKey{ 0xa810000000000000ull, 3 };
+		constexpr UUID ChildKey{ 0xa810000000000000ull, 4 };
+		constexpr UUID BlockerKey{ 0xa810000000000000ull, 5 };
+		constexpr AssetID PrefabAsset{ 0xa820000000000000ull, 1 };
+
+		const auto MakeSource = [&]() -> std::optional<PrefabSourceDocument>
+		{
+			Scene Authored;
+			const auto Root = Authored.CreateEntityWithUUID(RootKey, "Root");
+			const auto Parent = Authored.CreateEntityWithUUID(ParentKey, "Parent to remove");
+			const auto Survivor = Authored.CreateEntityWithUUID(SurvivorKey, "Surviving child");
+			const auto Child = Authored.CreateEntityWithUUID(ChildKey, "Other surviving branch");
+			if (!Root || !Parent || !Survivor || !Child) return std::nullopt;
+			if (!Parent->SetParent(*Root) || !Survivor->SetParent(*Parent) || !Child->SetParent(*Parent)) return std::nullopt;
+			auto Bytes = PrefabSerializer::Serialize(Authored, *Root);
+			if (!Bytes) return std::nullopt;
+			auto Parsed = PrefabSerializer::Parse(*Bytes, PrefabAsset);
+			if (!Parsed) return std::nullopt;
+			return std::move(*Parsed);
+		};
+
+		auto Source = MakeSource();
+		PF_CHECK(Tests, Source.has_value());
+		if (!Source) return;
+		Scene Destination;
+		const auto Instance = PrefabInstanceReconciler::InstantiateLinked(*Source, Destination);
+		PF_CHECK(Tests, Instance.has_value());
+		if (!Instance) return;
+		const auto ParentID = FindMappedEntity(Instance->Root, ParentKey);
+		const auto SurvivorID = FindMappedEntity(Instance->Root, SurvivorKey);
+		PF_CHECK(Tests, ParentID && SurvivorID);
+		if (!ParentID || !SurvivorID) return;
+		const auto Parent = Destination.FindEntity(*ParentID);
+		const auto Survivor = Destination.FindEntity(*SurvivorID);
+		const auto ChildID = FindMappedEntity(Instance->Root, ChildKey);
+		PF_CHECK(Tests, Parent && Survivor && ChildID);
+		if (!Parent || !Survivor || !ChildID) return;
+		const auto Child = Destination.FindEntity(*ChildID);
+		PF_CHECK(Tests, Child.has_value());
+		if (!Child) return;
+		PF_CHECK(Tests, Survivor->SetParent(Instance->Root));
+		PF_CHECK(Tests, PrefabInstanceReconciler::RecordReparentOverride(Instance->Root, *Survivor,
+			std::optional<Entity>{ Instance->Root }));
+		PF_CHECK(Tests, Child->SetParent(Instance->Root));
+		PF_CHECK(Tests, PrefabInstanceReconciler::RecordReparentOverride(Instance->Root, *Child,
+			std::optional<Entity>{ Instance->Root }));
+		PF_CHECK(Tests, PrefabInstanceReconciler::RecordRemoveSourceEntityOverride(Instance->Root, *Parent));
+		PF_CHECK(Tests, Destination.DestroyEntity(*Parent));
+		const auto Metadata = Instance->Root.GetPrefabInstance();
+		PF_CHECK(Tests, Metadata && Metadata->has_value());
+		if (!Metadata || !Metadata->has_value()) return;
+		const auto Applied = PrefabInstanceReconciler::ApplyOverridesToSource(*Source, **Metadata);
+		PF_CHECK(Tests, Applied.has_value() && Applied->Applied == 3);
+		if (!Applied) return;
+		PF_CHECK(Tests, !Source->GetScene().FindEntity(ParentKey));
+		const auto SourceSurvivor = Source->GetScene().FindEntity(SurvivorKey);
+		const auto SourceRoot = Source->GetScene().FindEntity(RootKey);
+		PF_CHECK(Tests, SourceSurvivor && SourceRoot);
+		if (!SourceSurvivor || !SourceRoot) return;
+		const auto SurvivorParent = SourceSurvivor->GetParent();
+		PF_CHECK(Tests, SurvivorParent && SurvivorParent->has_value() && **SurvivorParent == *SourceRoot);
+		const auto Blocker = Source->GetScene().CreateEntityWithUUID(BlockerKey, "Child blocking source removal");
+		PF_CHECK(Tests, Blocker && Blocker->SetParent(*SourceSurvivor));
+		if (!Blocker) return;
+		const auto BeforeConflict = PrefabSerializer::Serialize(*Source);
+		PF_CHECK(Tests, BeforeConflict.has_value());
+		if (!BeforeConflict) return;
+
+		// A stale/non-leaf removal plus an otherwise valid property operation must fail on the staged copy only.
+		PrefabInstanceComponent Conflicting = **Metadata;
+		PrefabOverrideRecord RootRename;
+		RootRename.Entity = { RootKey, false };
+		RootRename.Operation = PrefabOverrideOperation::Rename;
+		RootRename.Name = "Must not partially apply";
+		PrefabOverrideRecord NonLeafRemoval;
+		NonLeafRemoval.Entity = { SurvivorKey, false };
+		NonLeafRemoval.Operation = PrefabOverrideOperation::RemoveSourceEntity;
+		Conflicting.Overrides = { RootRename, NonLeafRemoval };
+		PF_CHECK(Tests, Conflicting.Validate(Instance->Root.GetUUID()).has_value());
+		const auto Rejected = PrefabInstanceReconciler::ApplyOverridesToSource(*Source, Conflicting);
+		PF_CHECK(Tests, !Rejected && Rejected.error().Code == PrefabReconcileErrorCode::ConflictsDetected);
+		const auto AfterConflict = PrefabSerializer::Serialize(*Source);
+		PF_CHECK(Tests, AfterConflict.has_value() && *AfterConflict == *BeforeConflict);
+	}
+
+#if defined(PF_DEBUG)
+	void TestPrefabCommitFailureRestoresOrReportsRecoveryRequired(TestRunner& Tests)
+	{
+		constexpr UUID RootKey{ 0xb100000000000000ull, 1 };
+		constexpr UUID ChildKey{ 0xb100000000000000ull, 2 };
+		constexpr UUID AddedKey{ 0xb100000000000000ull, 3 };
+		constexpr AssetID PrefabAsset{ 0xb200000000000000ull, 1 };
+		constexpr UUID UnrelatedID{ 0xb300000000000000ull, 1 };
+
+		const auto RunFailure = [&](std::initializer_list<PrefabInstanceReconciler::CommitFailurePoint> Sequence,
+			bool ExpectRecoveryRequired)
+		{
+			Scene SourceScene;
+			const auto SourceRoot = SourceScene.CreateEntityWithUUID(RootKey, "Source root");
+			const auto SourceChild = SourceScene.CreateEntityWithUUID(ChildKey, "Source child");
+			PF_CHECK(Tests, SourceRoot && SourceChild);
+			if (!SourceRoot || !SourceChild) return;
+			PF_CHECK(Tests, SourceChild->SetParent(*SourceRoot));
+			auto SourceBytes = PrefabSerializer::Serialize(SourceScene, *SourceRoot);
+			PF_CHECK(Tests, SourceBytes.has_value());
+			if (!SourceBytes) return;
+			auto Source = PrefabSerializer::Parse(*SourceBytes, PrefabAsset);
+			PF_CHECK(Tests, Source.has_value());
+			if (!Source) return;
+
+			Scene Destination;
+			const auto Unrelated = Destination.CreateEntityWithUUID(UnrelatedID, "Unrelated");
+			const auto Primary = PrefabInstanceReconciler::InstantiateLinked(*Source, Destination);
+			const auto Other = PrefabInstanceReconciler::InstantiateLinked(*Source, Destination);
+			PF_CHECK(Tests, Unrelated && Primary && Other);
+			if (!Unrelated || !Primary || !Other) return;
+			const auto PrimaryChildID = FindMappedEntity(Primary->Root, ChildKey);
+			const auto OtherChildID = FindMappedEntity(Other->Root, ChildKey);
+			PF_CHECK(Tests, PrimaryChildID && OtherChildID);
+			if (!PrimaryChildID || !OtherChildID) return;
+			const auto PrimaryChild = Destination.FindEntity(*PrimaryChildID);
+			const auto OtherChild = Destination.FindEntity(*OtherChildID);
+			PF_CHECK(Tests, PrimaryChild && OtherChild);
+			if (!PrimaryChild || !OtherChild) return;
+			const Entity UnrelatedHandle = *Unrelated;
+			const Entity PrimaryRootHandle = Primary->Root;
+			const Entity PrimaryChildHandle = *PrimaryChild;
+			const Entity OtherRootHandle = Other->Root;
+			const Entity OtherChildHandle = *OtherChild;
+			const auto Before = SceneSerializer::Serialize(Destination);
+			PF_CHECK(Tests, Before.has_value());
+			if (!Before) return;
+
+			const auto MutableRoot = Source->GetScene().FindEntity(RootKey);
+			const auto MutableChild = Source->GetScene().FindEntity(ChildKey);
+			PF_CHECK(Tests, MutableRoot && MutableChild);
+			if (!MutableRoot || !MutableChild) return;
+			auto RootTag = MutableRoot->GetTag();
+			PF_CHECK(Tests, RootTag.has_value());
+			if (!RootTag) return;
+			RootTag->Name = "Updated source root";
+			PF_CHECK(Tests, MutableRoot->SetTag(*RootTag));
+			PF_CHECK(Tests, Source->GetScene().DestroyEntity(*MutableChild));
+			const auto Added = Source->GetScene().CreateEntityWithUUID(AddedKey, "Added source child");
+			PF_CHECK(Tests, Added.has_value());
+			if (!Added) return;
+			PF_CHECK(Tests, Added->SetParent(*MutableRoot));
+
+			auto Plan = PrefabInstanceReconciler::PlanReconcile(Destination, PrimaryRootHandle, *Source);
+			PF_CHECK(Tests, Plan.has_value() && Plan->CanApply());
+			if (!Plan) return;
+			PrefabInstanceReconciler::SetCommitFailureSequenceForTesting(Sequence);
+			const auto Applied = PrefabInstanceReconciler::ApplyReconcile(Destination, *Source, *Plan);
+			PrefabInstanceReconciler::ClearCommitFailureSequenceForTesting();
+			PF_CHECK(Tests, !Applied.has_value());
+			if (Applied) return;
+
+			const auto After = SceneSerializer::Serialize(Destination);
+			if (!After) std::cerr << "Prefab commit failure stage " << static_cast<int>(*Sequence.begin()) <<
+				" left an unserializable scene: " << After.error().Message << '\n';
+			PF_CHECK(Tests, After.has_value());
+			if (ExpectRecoveryRequired)
+			{
+				PF_CHECK(Tests, Applied.error().Code == PrefabReconcileErrorCode::RecoveryRequired);
+				PF_CHECK(Tests, Applied.error().RecoverySnapshot == *Before);
+				PF_CHECK(Tests, After.has_value() && *After != *Before);
+			}
+			else
+			{
+				PF_CHECK(Tests, Applied.error().Code == PrefabReconcileErrorCode::SceneOperationFailed);
+				PF_CHECK(Tests, Applied.error().RecoverySnapshot.empty());
+				PF_CHECK(Tests, After.has_value() && *After == *Before);
+			}
+			PF_CHECK(Tests, UnrelatedHandle.IsValid() && Destination.FindEntity(UnrelatedID) == UnrelatedHandle);
+			PF_CHECK(Tests, PrimaryRootHandle.IsValid() && PrimaryChildHandle.IsValid());
+			PF_CHECK(Tests, Destination.FindEntity(PrimaryRootHandle.GetUUID()) == PrimaryRootHandle);
+			PF_CHECK(Tests, Destination.FindEntity(*PrimaryChildID) == PrimaryChildHandle);
+			PF_CHECK(Tests, OtherRootHandle.IsValid() && OtherChildHandle.IsValid());
+			PF_CHECK(Tests, Destination.FindEntity(OtherRootHandle.GetUUID()) == OtherRootHandle);
+			PF_CHECK(Tests, Destination.FindEntity(*OtherChildID) == OtherChildHandle);
+			if (!ExpectRecoveryRequired)
+				PF_CHECK(Tests, !FindMappedEntity(PrimaryRootHandle, AddedKey).has_value());
+		};
+
+		using FailurePoint = PrefabInstanceReconciler::CommitFailurePoint;
+		for (const FailurePoint Point : { FailurePoint::AfterAdditionCreated,
+			FailurePoint::AfterExistingEntitySynchronized, FailurePoint::AfterHierarchyTransition,
+			FailurePoint::BeforeRemoval })
+			RunFailure({ Point }, false);
+		RunFailure({ FailurePoint::AfterHierarchyTransition, FailurePoint::DuringRollbackRestore }, true);
+	}
+#endif
+
 	void TestDuplicateMissingPrefabMappingTargetsRejected(TestRunner& Tests)
 	{
 		LinkedPrefabFixture Fixture;
@@ -1637,6 +2138,13 @@ void RunPrefabLinkedInstanceTests(TestRunner& Tests)
 	TestDeletedLocalOverridePrunesBeforePersistingOtherConflicts(Tests);
 	TestLinkedPrefabRejectsNestedSourceBeforeDestinationMutation(Tests);
 	TestApplyOverridesToSourceDraftAndRevertInstanceOperations(Tests);
+	TestReconcileHierarchyTransitionIgnoresLiveUUIDOrdering(Tests);
+	TestReconcileMovesSubtreeAcrossBranchesThroughNewParent(Tests);
+	TestApplySourceSubtreeRemovalsDeepestFirst(Tests);
+	TestApplySourceReparentsBeforeRemovalAndPreservesConflicts(Tests);
+#if defined(PF_DEBUG)
+	TestPrefabCommitFailureRestoresOrReportsRecoveryRequired(Tests);
+#endif
 	TestRemovedSourceEntityWithLocalChildrenRecordsConflict(Tests);
 	TestMissingSourceConflictPreservesMaterializedInstance(Tests);
 }
