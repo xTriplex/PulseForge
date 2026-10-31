@@ -7,6 +7,7 @@ void RunPrefabLinkedInstanceEditorTests(TestRunner& Tests);
 void RunEditorBuildProfileControllerTests(TestRunner& Tests);
 void RunEditorAssetEditSchedulingTests(TestRunner& Tests);
 void RunEditorInspectorRegressionTests(TestRunner& Tests);
+void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
 #endif
@@ -36,6 +37,7 @@ int main()
 	RunEditorDocumentWorkspaceTests(Tests);
 	RunEditorAssetImportOperationTests(Tests);
 	RunEditorInspectorRegressionTests(Tests);
+	RunEditorScriptAuthoringInspectorTests(Tests);
 	RunProjectRuntimeTests(Tests);
 	return Tests.Finish();
 }

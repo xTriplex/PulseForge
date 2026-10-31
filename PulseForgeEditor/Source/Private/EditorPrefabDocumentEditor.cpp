@@ -1,12 +1,15 @@
 #include "Editor/EditorPrefabDocumentEditor.h"
 
 #include "Assets/AssetTypes.h"
+#include "Assets/AssetPathResolver.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/PrefabInstanceReconciler.h"
 #include "Assets/PrefabSerializer.h"
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorHierarchyPanel.h"
 #include "Editor/EditorInspectorPanel.h"
+#include "Editor/EditorScriptAuthoringService.h"
+#include "Editor/EditorPlatformServices.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorSceneEditController.h"
 #include "Editor/EditorSceneEntityCommands.h"
@@ -244,6 +247,37 @@ namespace PulseForgeEditor
 			{
 				m_State.Error = std::move(Message);
 			}
+
+		[[nodiscard]] std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
+			const PulseForge::AssetID& Asset) override
+		{
+			if (!m_State.Registry) return std::unexpected("The prefab document project registry is unavailable.");
+			return PulseForgeEditor::ReadScriptSourceMetadata(m_State.ProjectRoot, *m_State.Registry, Asset);
+		}
+
+		[[nodiscard]] PulseForge::UUID GetScriptProjectIdentity() const override
+		{
+			return m_Session.Identity.Project;
+		}
+
+		[[nodiscard]] std::expected<void, std::string> OpenScriptAsset(const PulseForge::AssetID& Asset) override
+		{
+			if (!m_State.Registry) return std::unexpected("The prefab document project registry is unavailable.");
+			auto Path = PulseForgeEditor::ResolveScriptSourcePath(m_State.ProjectRoot, *m_State.Registry, Asset);
+			if (!Path) return std::unexpected(Path.error());
+			return EditorPlatformServices::OpenFileWithDefaultApplication(*Path);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RequestScriptReload(const PulseForge::Entity&) override
+		{
+			return std::unexpected("Script reload is available only for a live Play session, not a prefab source or preview document.");
+		}
+
+		[[nodiscard]] std::vector<PulseForge::ScriptDiagnostic> GetScriptDiagnostics(
+			const PulseForge::UUID&, const PulseForge::AssetID&) const override
+		{
+			return {};
+		}
 
 			[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
 				std::string Description,

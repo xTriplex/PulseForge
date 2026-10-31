@@ -1,0 +1,33 @@
+{
+  "format": "PulseForgePrefab",
+  "version": 3,
+  "root": "11000000-0000-4000-8000-000000000001",
+  "scene": {
+    "format": "PulseForgeScene",
+    "version": 9,
+    "entities": [
+      {
+        "uuid": "11000000-0000-4000-8000-000000000001",
+        "tag": { "name": "Linked assembly source" },
+        "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+        "camera": { "verticalFovRadians": 0.78539816, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true },
+        "audioListener": { "primary": true },
+        "parent": null
+      },
+      {
+        "uuid": "11000000-0000-4000-8000-000000000002",
+        "tag": { "name": "Linked cube" },
+        "transform": { "translation": [0.0, 0.15, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.85, 0.85, 0.85] },
+        "meshRenderer": { "meshAsset": "d0030000-0000-4000-8000-000000000001", "materialAsset": "d0040000-0000-4000-8000-000000000001" },
+        "script": { "asset": "d0060000-0000-4000-8000-000000000001", "enabled": true },
+        "parent": "11000000-0000-4000-8000-000000000001"
+      },
+      {
+        "uuid": "11000000-0000-4000-8000-000000000003",
+        "tag": { "name": "Source accent" },
+        "transform": { "translation": [0.0, 1.35, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.35, 0.35, 0.35] },
+        "parent": "11000000-0000-4000-8000-000000000002"
+      }
+    ]
+  }
+}

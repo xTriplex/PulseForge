@@ -16,7 +16,6 @@
 #include "Assets/AssetDependencyCatalog.h"
 #include "Assets/AssetEditTransaction.h"
 #include "Assets/AssetMetadata.h"
-#include "Assets/AssetPathResolver.h"
 #include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
@@ -67,6 +66,7 @@
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorApplicationFactory.h"
 #include "Editor/EditorPlatformServices.h"
+#include "Editor/EditorScriptAuthoringService.h"
 #include "Editor/EditorPlayerProcess.h"
 #include "Editor/EditorPlayerExecutablePath.h"
 #include "Editor/EditorInteractionPolicy.h"
@@ -142,7 +142,6 @@
 namespace
 {
 	using EditorJson = nlohmann::ordered_json;
-
 	std::optional<std::string> BuildContentFingerprint(
 		const std::filesystem::path& ProjectFile, const std::optional<std::filesystem::path>& SceneFile,
 		std::string& UnavailableReason)
@@ -613,6 +612,52 @@ namespace
 		}
 
 		void ReportInspectorError(std::string Message) override { SetError(std::move(Message)); }
+
+		[[nodiscard]] std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
+			const PulseForge::AssetID& Asset) override
+		{
+			if (!m_Project) return std::unexpected("Open a project before inspecting Lua script declarations.");
+			return PulseForgeEditor::ReadScriptSourceMetadata(
+				m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Asset);
+		}
+
+		[[nodiscard]] PulseForge::UUID GetScriptProjectIdentity() const override
+		{
+			return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{};
+		}
+
+		[[nodiscard]] std::expected<void, std::string> OpenScriptAsset(const PulseForge::AssetID& Asset) override
+		{
+			if (!m_Project) return std::unexpected("Open a project before opening a Lua script.");
+			auto Path = PulseForgeEditor::ResolveScriptSourcePath(
+				m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Asset);
+			if (!Path) return std::unexpected(Path.error());
+			return PulseForgeEditor::EditorPlatformServices::OpenFileWithDefaultApplication(*Path);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RequestScriptReload(const PulseForge::Entity& Entity) override
+		{
+			if (!m_SceneRuntime || !m_RuntimeScene)
+				return std::unexpected("Script reload is available only for an active Play session.");
+			const auto RuntimeEntity = m_RuntimeScene->FindEntity(Entity.GetUUID());
+			if (!RuntimeEntity || *RuntimeEntity != Entity)
+				return std::unexpected("The selected script attachment is not part of the current Play session.");
+			auto Result = m_SceneRuntime->RequestScriptReload(*RuntimeEntity);
+			if (!Result) return std::unexpected(Result.error().Message);
+			SetStatus("Script reload queued. Lua state will reset at the next runtime safe point.");
+			return {};
+		}
+
+		[[nodiscard]] std::vector<PulseForge::ScriptDiagnostic> GetScriptDiagnostics(
+			const PulseForge::UUID& Entity, const PulseForge::AssetID& Asset) const override
+		{
+			std::vector<PulseForge::ScriptDiagnostic> Result;
+			if (!m_SceneRuntime) return Result;
+			for (const PulseForge::ScriptDiagnostic& Diagnostic : m_SceneRuntime->GetScriptDiagnostics())
+				if (Diagnostic.Entity == Entity && Diagnostic.ScriptAsset == Asset)
+					Result.push_back(Diagnostic);
+			return Result;
+		}
 
 		PulseForge::Project* GetPrefabProject() override { return m_Project ? &*m_Project : nullptr; }
 

@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Assets/ScriptSourceMetadata.h"
 #include "Scene/PropertyMetadata.h"
 #include "Scene/Scene.h"
+#include "Scripting/ScriptRuntime.h"
 
 #include <expected>
 #include <functional>
@@ -26,6 +28,30 @@ namespace PulseForgeEditor
 		[[nodiscard]] virtual std::expected<void, std::string> RunInspectorSceneEdit(
 			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) = 0;
 		virtual void ReportInspectorError(std::string Message) = 0;
+		[[nodiscard]] virtual std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
+			const PulseForge::AssetID& Asset)
+		{
+			(void)Asset;
+			return std::unexpected("Script source metadata is unavailable in this Inspector context");
+		}
+		[[nodiscard]] virtual PulseForge::UUID GetScriptProjectIdentity() const { return {}; }
+		[[nodiscard]] virtual std::expected<void, std::string> OpenScriptAsset(const PulseForge::AssetID& Asset)
+		{
+			(void)Asset;
+			return std::unexpected("Opening script source is unavailable in this Inspector context");
+		}
+		[[nodiscard]] virtual std::expected<void, std::string> RequestScriptReload(const PulseForge::Entity& Entity)
+		{
+			(void)Entity;
+			return std::unexpected("Script reload is unavailable in this Inspector context");
+		}
+		[[nodiscard]] virtual std::vector<PulseForge::ScriptDiagnostic> GetScriptDiagnostics(
+			const PulseForge::UUID& Entity, const PulseForge::AssetID& Asset) const
+		{
+			(void)Entity;
+			(void)Asset;
+			return {};
+		}
 		[[nodiscard]] virtual bool IsLinkedPrefabEntity(const PulseForge::Entity& Entity) const { (void)Entity; return false; }
 		[[nodiscard]] virtual std::expected<void, std::string> RecordPrefabPropertyOverride(
 			const PulseForge::Entity& Entity, std::string_view ComponentID, std::string_view PropertyID)
@@ -81,7 +107,8 @@ namespace PulseForgeEditor
 		void DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity);
 
 		bool m_FocusEntityNameNextFrame = false;
-		std::string m_NewScriptPropertyIdentifier;
-		float m_NewScriptPropertyValue = 0.0f;
+		std::optional<PulseForge::UUID> m_CachedScriptProject;
+		std::optional<PulseForge::AssetID> m_CachedScriptAsset;
+		std::optional<std::expected<PulseForge::ScriptSourceMetadata, std::string>> m_CachedScriptMetadata;
 	};
 } // namespace PulseForgeEditor

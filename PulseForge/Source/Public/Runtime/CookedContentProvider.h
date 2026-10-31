@@ -44,6 +44,9 @@ namespace PulseForge
 
 		[[nodiscard]] const CookedAssetEntry* FindScript(const AssetID& Asset) const noexcept;
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadScript(const AssetID& Asset) const;
+		[[nodiscard]] const CookedAssetEntry* FindScriptByProjectPath(std::string_view ProjectRelativePath) const noexcept;
+		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadScriptByProjectPath(
+			std::string_view ProjectRelativePath) const;
 
 		[[nodiscard]] const CookedAssetEntry* FindAudio(const AssetID& Asset) const noexcept;
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadAudio(const AssetID& Asset) const;

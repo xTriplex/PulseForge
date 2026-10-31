@@ -53,6 +53,110 @@ namespace PulseForge::ScriptEnvironment
 			return static_cast<LuaEntity*>(luaL_testudata(State, 1, EntityMetatableName));
 		}
 
+		template <size_t Capacity> void CopyHostError(std::array<char, Capacity>& Buffer, std::string_view Message);
+		void RecordModuleError(ScriptInstance& Instance, std::string_view Message) noexcept;
+
+		ScriptModuleRuntime* FindScriptModule(ScriptInstance& Instance, std::string_view ProjectRelativePath)
+		{
+			const auto It = std::lower_bound(Instance.Modules.begin(), Instance.Modules.end(),
+				ProjectRelativePath, [](const ScriptModuleRuntime& Module, std::string_view Path)
+				{ return Module.ProjectRelativePath < Path; });
+			return It != Instance.Modules.end() && It->ProjectRelativePath == ProjectRelativePath
+				? &*It : nullptr;
+		}
+
+		int LuaRequire(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->SourceSnapshot)
+				return ReturnHostError(State, "script module snapshot is unavailable");
+			if (lua_type(State, 1) != LUA_TSTRING)
+			{
+				RecordModuleError(*Instance, "require expects a declared module path string");
+				return ReturnHostError(State, "require expects a declared module path string");
+			}
+
+			size_t RequestedLength = 0;
+			const char* RequestedText = lua_tolstring(State, 1, &RequestedLength);
+			const std::string_view RequestedName(RequestedText, RequestedLength);
+			size_t ImporterLength = 0;
+			const char* ImporterText = lua_tolstring(State, lua_upvalueindex(1), &ImporterLength);
+			if (!ImporterText)
+			{
+				RecordModuleError(*Instance, "require has no declared importer identity");
+				return ReturnHostError(State, "require has no declared importer identity");
+			}
+			const std::string_view ImporterPath(ImporterText, ImporterLength);
+
+			const std::vector<ScriptModuleImport>* Imports = nullptr;
+			if (ImporterPath == Instance->SourceSnapshot->MainSourcePath)
+				Imports = &Instance->SourceSnapshot->MainImports;
+			else if (ScriptModuleRuntime* Importer = FindScriptModule(*Instance, ImporterPath))
+				Imports = &Importer->Imports;
+			if (!Imports)
+			{
+				RecordModuleError(*Instance, "require importer is not part of the validated script snapshot");
+				return ReturnHostError(State, "require importer is not part of the validated script snapshot");
+			}
+
+			const auto Import = std::find_if(Imports->begin(), Imports->end(), [RequestedName](const ScriptModuleImport& Candidate)
+			{ return Candidate.DeclaredName == RequestedName; });
+			if (Import == Imports->end())
+			{
+				RecordModuleError(*Instance, "script attempted to load a module it did not declare");
+				return ReturnHostError(State, "script attempted to load a module it did not declare");
+			}
+
+			ScriptModuleRuntime* Module = FindScriptModule(*Instance, Import->TargetPath);
+			if (!Module)
+			{
+				RecordModuleError(*Instance, "declared script module is missing from the validated snapshot");
+				return ReturnHostError(State, "declared script module is missing from the validated snapshot");
+			}
+			if (Module->State == ScriptModuleLoadState::Loaded)
+			{
+				lua_rawgeti(State, LUA_REGISTRYINDEX, Module->ValueReference);
+				return 1;
+			}
+			if (Module->State == ScriptModuleLoadState::Loading)
+			{
+				RecordModuleError(*Instance, "cyclic script module load was rejected");
+				return ReturnHostError(State, "cyclic script module load was rejected");
+			}
+
+			Module->State = ScriptModuleLoadState::Loading;
+			lua_rawgeti(State, LUA_REGISTRYINDEX, Module->CompiledChunkReference);
+			PushChunkEnvironment(State, Module->ProjectRelativePath);
+			(void)lua_setupvalue(State, -2, 1);
+			const int Status = lua_pcall(State, 0, 1, 0);
+			if (Status != LUA_OK)
+			{
+				std::array<char, 512> Error{};
+				size_t ErrorLength = 0;
+				const char* ErrorText = lua_tolstring(State, -1, &ErrorLength);
+				if (!ErrorText) ErrorText = "script module evaluation failed";
+				const std::string_view ErrorView(ErrorText,
+					ErrorLength == 0 ? std::char_traits<char>::length(ErrorText) : ErrorLength);
+				CopyHostError(Error, ErrorView);
+				RecordModuleError(*Instance, ErrorView);
+				lua_pop(State, 1);
+				Module->State = ScriptModuleLoadState::Unloaded;
+				lua_pushnil(State);
+				lua_pushstring(State, Error.data());
+				return 2;
+			}
+
+			if (lua_isnil(State, -1))
+			{
+				lua_pop(State, 1);
+				lua_pushboolean(State, 1);
+			}
+			lua_pushvalue(State, -1);
+			Module->ValueReference = luaL_ref(State, LUA_REGISTRYINDEX);
+			Module->State = ScriptModuleLoadState::Loaded;
+			return 1;
+		}
+
 		bool IsCurrentEntity(const ScriptInstance& Instance, const Entity& Value)
 		{
 			if (!Instance.SourceScene || !Value.IsValid()) return false;
@@ -85,6 +189,12 @@ namespace PulseForge::ScriptEnvironment
 			const size_t CopyLength = std::min(Message.size(), Capacity - 1);
 			std::copy_n(Message.data(), CopyLength, Buffer.data());
 			Buffer[CopyLength] = '\0';
+		}
+
+		void RecordModuleError(ScriptInstance& Instance, std::string_view Message) noexcept
+		{
+			CopyHostError(Instance.ModuleFailureMessage, Message);
+			Instance.ModuleFailurePending = true;
 		}
 
 		int LuaEntityUUID(lua_State* State)
@@ -147,11 +257,27 @@ namespace PulseForge::ScriptEnvironment
 			const auto Result = CaptureScriptFloatPropertyRead(
 				[&UserData, Identifier] { return ReadProperty(UserData->Value, PropertyComponentIds::ScriptFloat, Identifier); });
 			if (Result.State == ScriptFloatPropertyReadState::Failed) return ReturnHostError(State, Result.Failure.data());
+			ScriptInstance* Instance = GetScriptInstance(State);
+			const ScriptFloatPropertyDeclaration* Declaration = nullptr;
+			if (Instance && Instance->SourceSnapshot)
+			{
+				const auto It = std::find_if(Instance->SourceSnapshot->Metadata.FloatProperties.begin(),
+					Instance->SourceSnapshot->Metadata.FloatProperties.end(), [Identifier](const ScriptFloatPropertyDeclaration& Value)
+					{ return Value.ID == Identifier; });
+				if (It != Instance->SourceSnapshot->Metadata.FloatProperties.end()) Declaration = &*It;
+			}
 			if (Result.State == ScriptFloatPropertyReadState::Missing)
 			{
+				if (Declaration)
+				{
+					lua_pushnumber(State, Declaration->DefaultValue);
+					return 1;
+				}
 				lua_pushnil(State);
 				return 1;
 			}
+			if (Declaration && (Result.Value < Declaration->Minimum || Result.Value > Declaration->Maximum))
+				return ReturnHostError(State, "authored script property override is outside its declared range");
 			lua_pushnumber(State, Result.Value);
 			return 1;
 		}
@@ -687,7 +813,42 @@ namespace PulseForge::ScriptEnvironment
 			lua_pushlstring(State, Name.data(), Name.size());
 			Instance->CallbackNameReferences[Index] = luaL_ref(State, LUA_REGISTRYINDEX);
 		}
+		lua_pushcfunction(State, ExecutePreparedChunk);
+		Instance->ExecuteChunkCallbackReference = luaL_ref(State, LUA_REGISTRYINDEX);
 		return 0;
+	}
+
+	int ExecutePreparedChunk(lua_State* State)
+	{
+		ScriptInstance* Instance = GetScriptInstance(State);
+		if (!Instance || Instance->ExecutingChunkReference == LUA_NOREF || !Instance->ExecutingImporterPath)
+			return ReturnHostError(State, "prepared script chunk is unavailable");
+		lua_rawgeti(State, LUA_REGISTRYINDEX, Instance->ExecutingChunkReference);
+		PushChunkEnvironment(State,
+			std::string_view(Instance->ExecutingImporterPath, Instance->ExecutingImporterPathLength));
+		(void)lua_setupvalue(State, -2, 1);
+		const int Status = lua_pcall(State, 0, 0, 0);
+		if (Status != LUA_OK) return lua_error(State);
+		return 0;
+	}
+
+	void PushChunkEnvironment(lua_State* State, std::string_view ImporterPath)
+	{
+		ScriptInstance* Instance = GetScriptInstance(State);
+		if (!Instance) return;
+
+		lua_createtable(State, 0, 1); // Chunk environment proxy.
+		const int EnvironmentIndex = lua_gettop(State);
+		lua_createtable(State, 0, 2); // Shared global lookup/write-through metatable.
+		lua_rawgeti(State, LUA_REGISTRYINDEX, Instance->EnvironmentReference);
+		lua_setfield(State, -2, "__index");
+		lua_rawgeti(State, LUA_REGISTRYINDEX, Instance->EnvironmentReference);
+		lua_setfield(State, -2, "__newindex");
+		lua_setmetatable(State, EnvironmentIndex);
+
+		lua_pushlstring(State, ImporterPath.data(), ImporterPath.size());
+		lua_pushcclosure(State, LuaRequire, 1);
+		lua_setfield(State, EnvironmentIndex, "require");
 	}
 
 } // namespace PulseForge::ScriptEnvironment

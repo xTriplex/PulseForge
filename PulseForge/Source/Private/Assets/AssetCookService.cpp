@@ -47,6 +47,12 @@ namespace PulseForge
 			return { Code, Asset, std::move(Path), std::move(Message) };
 		}
 
+		std::string PathUtf8(const std::filesystem::path& Path)
+		{
+			const std::u8string Text = Path.generic_u8string();
+			return { reinterpret_cast<const char*>(Text.data()), Text.size() };
+		}
+
 		std::expected<std::filesystem::path, AssetCookError> AbsoluteNormalized(const std::filesystem::path& Path)
 		{
 			std::error_code ErrorCode;
@@ -872,6 +878,14 @@ namespace PulseForge
 			Entry.DigestAlgorithm = Digest->Algorithm;
 			Entry.Digest = Digest->Value;
 			Entry.RuntimeDependencies = Product.RuntimeDependencies;
+			if (Product.Product == CookedAssetProductKind::Script)
+			{
+				const auto SourceRecord = Plan.Request.SourceSnapshot->GetRegistry().Find(Product.Asset);
+				if (!SourceRecord || !HasAssetTypeExtension(SourceRecord->ProjectRelativePath, AssetFileType::Script))
+					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+						"Cooked script source identity changed after planning", Product.SourcePath, Product.Asset));
+				Entry.SourceRelativePath = PathUtf8(SourceRecord->ProjectRelativePath);
+			}
 			Payloads.push_back(std::move(Bytes));
 			Entries.push_back(std::move(Entry));
 		}

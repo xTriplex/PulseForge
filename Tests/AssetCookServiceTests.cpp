@@ -10,6 +10,7 @@
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
 #include "Runtime/CookedContentProvider.h"
+#include "Scripting/ScriptRuntime.h"
 #include "Scene/SceneSerializer.h"
 #include "TestSupport.h"
 
@@ -77,6 +78,7 @@ namespace
 			if (!Project) { Root.clear(); return; }
 			std::filesystem::create_directories(Source / "Assets");
 			Scene SceneData;
+			if (!SceneData.CreateEntity("Cooked scene content")) { Root.clear(); return; }
 			auto SceneText = SceneSerializer::Serialize(SceneData);
 			if (!SceneText) { Root.clear(); return; }
 			const auto ScenePath = Source / "Assets" / "Startup.scene";
@@ -89,8 +91,9 @@ namespace
 			auto AlternateSceneMetadata = AssetMetadataSerializer::CreateForNewAsset(AlternateScenePath);
 			if (!AlternateSceneMetadata) { Root.clear(); return; }
 			AlternateSceneAsset = AlternateSceneMetadata->ID;
-			const auto ScriptPath = Source / "Assets" / "Dynamic.lua";
-			WriteText(ScriptPath, "function OnCreate() end\n");
+			const auto ScriptPath = Source / "Assets" / "Scripts" / "Dynamic.lua";
+			std::filesystem::create_directories(ScriptPath.parent_path());
+			WriteText(ScriptPath, "function OnUpdate() end\n");
 			auto ScriptMetadata = AssetMetadataSerializer::CreateForNewAsset(ScriptPath);
 			if (!ScriptMetadata) { Root.clear(); return; }
 			ScriptAsset = ScriptMetadata->ID;
@@ -272,6 +275,102 @@ namespace
 		}
 #endif
 	}
+
+	void TestLuaAuthoringSampleCookAndRuntime(TestRunner& Tests)
+	{
+#if defined(PF_LUA_AUTHORING_SAMPLE_PROJECT)
+		constexpr AssetID ScriptAsset{ 0xd006000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID ModuleAsset{ 0xd007000000004000ull, 0x8000000000000016ull };
+		constexpr AssetID StartupScene{ 0xd001000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID PrefabAsset{ 0xd002000000004000ull, 0x8000000000000001ull };
+		const auto ID = UUID::Generate();
+		PF_CHECK(Tests, ID.has_value());
+		if (!ID) return;
+		std::error_code Error;
+		const auto SystemTemporaryDirectory = std::filesystem::temp_directory_path(Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto TemporaryDirectory = std::filesystem::weakly_canonical(SystemTemporaryDirectory, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const std::filesystem::path TemporaryRoot = TemporaryDirectory /
+			std::filesystem::u8path("PulseForge-LuaAuthoringCook-" + ID->ToString());
+		const std::filesystem::path CookOutputRoot = TemporaryRoot.parent_path() /
+			std::filesystem::u8path("PulseForge-LuaAuthoringCook-output-" + ID->ToString());
+		struct OwnedRoot final
+		{
+			std::filesystem::path ProjectPath;
+			std::filesystem::path OutputPath;
+			~OwnedRoot()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(ProjectPath, Error);
+				Error.clear();
+				std::filesystem::remove_all(OutputPath, Error);
+			}
+		} Cleanup{ TemporaryRoot, CookOutputRoot };
+		std::filesystem::copy(std::filesystem::path(PF_LUA_AUTHORING_SAMPLE_PROJECT).parent_path(), TemporaryRoot,
+			std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto ProjectValue = Project::Open(TemporaryRoot / std::filesystem::path(PF_LUA_AUTHORING_SAMPLE_PROJECT).filename());
+		PF_CHECK(Tests, ProjectValue.has_value());
+		if (!ProjectValue) return;
+		auto Snapshot = AssetDependencyCatalogBuilder::Build(
+			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
+		if (!Snapshot) std::cerr << "Lua authoring sample catalog failed: " << Snapshot.error().Message << "\n";
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		AssetCookRequest Request{
+			*Snapshot, ProjectValue->GetFilePath(), StartupScene, {},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			CookOutputRoot
+		};
+		auto Plan = AssetCookService::Plan(Request);
+		if (!Plan) std::cerr << "Lua authoring sample cook plan failed: " << Plan.error().Message << '\n';
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto HasProduct = [&](AssetID Asset)
+		{
+			return std::any_of(Plan->Products.begin(), Plan->Products.end(), [Asset](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Asset && Product.Product == CookedAssetProductKind::Script; });
+		};
+		PF_CHECK(Tests, HasProduct(ScriptAsset) && HasProduct(ModuleAsset));
+		auto Cooked = AssetCookService::Cook(*Plan);
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		auto Provider = CookedContentProvider::Open(Request.OutputRoot, Request.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		PF_CHECK(Tests, (*Provider)->FindScriptByProjectPath("Assets/Scripts/LinkedInstancePulse.lua") != nullptr);
+		PF_CHECK(Tests, (*Provider)->FindScriptByProjectPath("Assets/Scripts/shared/motion.lua") != nullptr);
+		auto RuntimeScene = (*Provider)->LoadScene(StartupScene);
+		PF_CHECK(Tests, RuntimeScene.has_value());
+		if (!RuntimeScene) return;
+		const UUID LeftChildID{ 0x2100000000004000ull, 0x8000000000000002ull };
+		const UUID RightChildID{ 0x2200000000004000ull, 0x8000000000000002ull };
+		const auto LeftChild = (*RuntimeScene)->FindEntity(LeftChildID);
+		const auto RightChild = (*RuntimeScene)->FindEntity(RightChildID);
+		PF_CHECK(Tests, LeftChild && RightChild);
+		if (!LeftChild || !RightChild) return;
+		ScriptRuntime Runtime(*Provider);
+		PF_CHECK(Tests, Runtime.Start(**RuntimeScene).has_value());
+		PF_CHECK(Tests, Runtime.Advance(**RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		const auto LeftTransform = LeftChild->GetTransform();
+		const auto RightTransform = RightChild->GetTransform();
+		PF_CHECK(Tests, LeftTransform && LeftTransform->Translation.x == 1.25f);
+		PF_CHECK(Tests, RightTransform && RightTransform->Translation.x == 0.4f);
+		PF_CHECK(Tests, Runtime.GetDiagnostics().empty());
+		Runtime.Stop();
+		PF_CHECK(Tests, (*Provider)->FindPrefab(PrefabAsset) != nullptr);
+#endif
+	}
 }
 
 void RunAssetCookServiceTests(TestRunner& Tests)
@@ -334,6 +433,9 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	PF_CHECK(Tests, (*Provider)->GetStartupScene() == Fixture.SceneAsset);
 	const auto SceneBytes = (*Provider)->ReadScene(Fixture.SceneAsset);
 	PF_CHECK(Tests, SceneBytes.has_value());
+	auto CookedScene = (*Provider)->LoadScene(Fixture.SceneAsset);
+	PF_CHECK(Tests, CookedScene.has_value());
+	if (CookedScene) PF_CHECK(Tests, (*CookedScene)->GetEntities().size() == 1);
 	PF_CHECK(Tests, !(*Provider)->FindScript(Fixture.ScriptAsset));
 	const auto RuntimeInputMap = (*Provider)->LoadGameplayInput((*Provider)->GetProjectID());
 	PF_CHECK(Tests, RuntimeInputMap.has_value());
@@ -554,4 +656,5 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 		}
 	}
 	TestLinkedPrefabSampleCookAndRuntimeScene(Tests);
+	TestLuaAuthoringSampleCookAndRuntime(Tests);
 }

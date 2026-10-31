@@ -106,6 +106,7 @@ if(BUILD_TESTING)
 		Tests/AssetDependencyCatalogTests.cpp
 		Tests/AssetDependencyCorrectionTests.cpp
 		Tests/AssetDependencyPublicationTests.cpp
+		Tests/ScriptSourceMetadataTests.cpp
 		Tests/AssetEditTransactionTests.cpp
 		Tests/AssetCookServiceTests.cpp
 		Tests/ExportBuildProfileTests.cpp
@@ -114,10 +115,12 @@ if(BUILD_TESTING)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeAssetTests PRIVATE
 		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\""
-		"PF_PREFAB_LINKED_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PrefabLinkedInstances/PrefabLinkedInstances.pfproj\"")
+			"PF_PREFAB_LINKED_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PrefabLinkedInstances/PrefabLinkedInstances.pfproj\""
+			"PF_LUA_AUTHORING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/LuaAuthoring/PrefabLinkedInstances.pfproj\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
-		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
+		PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
+	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeRuntime)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeBuildProfiles)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetExportService)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
@@ -130,6 +133,11 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeAssetDependencyConsumer PRIVATE PulseForgeAssetDependencyCatalog)
 	set_property(TARGET PulseForgeAssetDependencyConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 	add_test(NAME PulseForge.AssetDependencyConsumer COMMAND PulseForgeAssetDependencyConsumer)
+	add_test(NAME PulseForge.ScriptMetadata COMMAND PulseForgeAssetTests --script-metadata-only)
+	add_executable(PulseForgeScriptSourceMetadataConsumer Tests/ModuleConsumers/ScriptSourceMetadataConsumer.cpp)
+	target_link_libraries(PulseForgeScriptSourceMetadataConsumer PRIVATE PulseForgeScriptAssets)
+	set_property(TARGET PulseForgeScriptSourceMetadataConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.ScriptSourceMetadataConsumer COMMAND PulseForgeScriptSourceMetadataConsumer)
 	add_test(NAME PulseForge.AssetCook COMMAND PulseForgeAssetTests --cook-only)
 	add_test(NAME PulseForge.AssetExport COMMAND PulseForgeAssetTests --export-only)
 	set_tests_properties(PulseForge.Assets PulseForge.AssetCook PulseForge.AssetExport PROPERTIES TIMEOUT 120)
@@ -303,7 +311,7 @@ if(BUILD_TESTING)
 	if(PULSEFORGE_BUILD_EDITOR)
 		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
 			PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
-			PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetDependencyCatalog PulseForgeAudio PulseForgeAudioAssets
+			PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetDependencyCatalog PulseForgeAudio PulseForgeAudioAssets
 			PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime
 			PulseForgeRenderer PulseForgeApplication PulseForgeSceneRenderer
 		)
@@ -325,6 +333,7 @@ if(BUILD_TESTING)
 			Tests/EditorDocumentWorkspaceTests.cpp
 			Tests/EditorAssetImportOperationTests.cpp
 			Tests/EditorInspectorRegressionTests.cpp
+			Tests/EditorScriptAuthoringInspectorTests.cpp
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp
@@ -342,6 +351,9 @@ if(BUILD_TESTING)
 		endif()
 		target_link_libraries(PulseForgeEditorTests PRIVATE
 			PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES} PulseForgeImGui spdlog::spdlog)
+		if(WIN32)
+			target_link_libraries(PulseForgeEditorTests PRIVATE shell32 dwmapi)
+		endif()
 		if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
 		endif()
@@ -380,6 +392,7 @@ if(BUILD_TESTING)
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer
 		PulseForgeAssetDependencyConsumer
+		PulseForgeScriptSourceMetadataConsumer
 		PulseForgeCookedAssetCatalogTests
 		PulseForgeCookedAssetCatalogConsumer
 		PulseForgeDerivedDataTests

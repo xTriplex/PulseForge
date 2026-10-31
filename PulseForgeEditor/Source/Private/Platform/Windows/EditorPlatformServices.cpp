@@ -2,6 +2,9 @@
 #define NOMINMAX
 #include <Windows.h>
 #include <dwmapi.h>
+#include <shellapi.h>
+
+#include <string>
 
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3.h>
@@ -12,6 +15,17 @@
 
 namespace PulseForgeEditor
 {
+	std::expected<void, std::string> EditorPlatformServices::OpenFileWithDefaultApplicationNative(
+		const std::filesystem::path& AbsoluteFilePath)
+	{
+		const HINSTANCE Result = ShellExecuteW(nullptr, L"open", AbsoluteFilePath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		const INT_PTR ResultCode = reinterpret_cast<INT_PTR>(Result);
+		if (ResultCode <= 32)
+			return std::unexpected("Windows could not open the script with its associated application (ShellExecute code " +
+				std::to_string(ResultCode) + ")");
+		return {};
+	}
+
 	void EditorPlatformServices::ApplyMainWindowAppearance(GLFWwindow* Window) noexcept
 	{
 		const HWND NativeWindow = Window ? glfwGetWin32Window(Window) : nullptr;

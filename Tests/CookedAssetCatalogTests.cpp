@@ -186,15 +186,22 @@ namespace
 		PF_CHECK(Tests, !Truncated && Truncated.error().Code == CookedAssetCatalogErrorCode::InvalidManifest);
 
 		std::string Unsupported = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 2", "\"version\": 77"));
+		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 3", "\"version\": 77"));
 		Fixture.WriteManifest(Unsupported);
 		const auto Version = Fixture.Open();
 		PF_CHECK(Tests, !Version && Version.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
 		std::string LegacyVersion = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(LegacyVersion, "\"version\": 2", "\"version\": 1"));
+		PF_CHECK(Tests, ReplaceOnce(LegacyVersion, "\"version\": 3", "\"version\": 2"));
+		PF_CHECK(Tests, ReplaceOnce(LegacyVersion, "      \"sourcePath\": \"\",\n", ""));
 		Fixture.WriteManifest(LegacyVersion);
 		const auto LegacyManifest = Fixture.Open();
-		PF_CHECK(Tests, !LegacyManifest && LegacyManifest.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, LegacyManifest.has_value());
+		std::string UnsupportedLegacy = *Baseline;
+		PF_CHECK(Tests, ReplaceOnce(UnsupportedLegacy, "\"version\": 3", "\"version\": 1"));
+		Fixture.WriteManifest(UnsupportedLegacy);
+		const auto UnsupportedLegacyManifest = Fixture.Open();
+		PF_CHECK(Tests, !UnsupportedLegacyManifest &&
+			UnsupportedLegacyManifest.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
 
 		Fixture.WriteManifest(*Baseline);
 		auto Incompatible = Fixture.Open({ "other-target", Compatibility.RendererBackend, Compatibility.RuntimeABI });
