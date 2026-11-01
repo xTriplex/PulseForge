@@ -635,6 +635,16 @@ namespace
 			return PulseForgeEditor::EditorPlatformServices::OpenFileWithDefaultApplication(*Path);
 		}
 
+		[[nodiscard]] std::expected<void, std::string> OpenScriptDiagnostic(
+			const PulseForge::ScriptDiagnostic& Diagnostic) override
+		{
+			if (!m_Project) return std::unexpected("Open a project before opening a Lua diagnostic source.");
+			auto Path = PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+				m_Project->GetRootPath(), m_Project->GetAssetRegistry(), m_Project->GetDescription().ID, Diagnostic);
+			if (!Path) return std::unexpected(Path.error());
+			return PulseForgeEditor::EditorPlatformServices::OpenFileWithDefaultApplication(*Path);
+		}
+
 		[[nodiscard]] std::expected<void, std::string> RequestScriptReload(const PulseForge::Entity& Entity) override
 		{
 			if (!m_SceneRuntime || !m_RuntimeScene)

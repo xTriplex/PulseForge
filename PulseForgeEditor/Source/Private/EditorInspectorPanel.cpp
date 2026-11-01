@@ -17,6 +17,12 @@
 
 namespace PulseForgeEditor
 {
+	void DispatchScriptDiagnosticOpen(EditorInspectorPanelActions& Actions, const PulseForge::ScriptDiagnostic& Diagnostic)
+	{
+		auto Opened = Actions.OpenScriptDiagnostic(Diagnostic);
+		if (!Opened) Actions.ReportInspectorError("Could not open diagnostic script source: " + Opened.error());
+	}
+
 	namespace
 	{
 		std::string PathToUtf8(const std::filesystem::path& Path)
@@ -1045,13 +1051,10 @@ namespace PulseForgeEditor
 			}
 			ImGui::TextColored(ImVec4(0.96f, 0.53f, 0.31f, 1.0f), "%s", Label.c_str());
 			ImGui::TextWrapped("%s", Diagnostic.Message.c_str());
-			if (Diagnostic.Line > 0)
-				ImGui::TextDisabled("External-editor line navigation is not supported.");
+			ImGui::TextDisabled("Opens the current file for this asset; it may differ from the diagnostic's captured source. Line navigation is unavailable.");
 			if (ImGui::SmallButton("Open script source for diagnostic"))
 			{
-				// Resolve the registered asset through the current project; never open a path parsed from error text.
-				auto Opened = Inspector.Actions.OpenScriptAsset(ScriptAsset);
-				if (!Opened) Inspector.Actions.ReportInspectorError("Could not open diagnostic script source: " + Opened.error());
+				DispatchScriptDiagnosticOpen(Inspector.Actions, Diagnostic);
 			}
 			ImGui::PopID();
 		}

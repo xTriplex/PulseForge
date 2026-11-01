@@ -24,6 +24,23 @@ namespace PulseForge
 	class Scene;
 	class CookedContentProvider;
 
+	enum class ScriptRuntimeAllocationPointForTesting : uint8_t
+	{
+		None,
+		MainChunkReference,
+		ModuleChunkReference
+	};
+
+#if defined(PF_DEBUG)
+	struct ScriptRuntimeAllocationFaultHooksForTesting final
+	{
+		void* Context = nullptr;
+		bool (*RejectAllocation)(void* Context, ScriptRuntimeAllocationPointForTesting Point,
+			size_t ModuleIndex, size_t RequestedBytes) noexcept = nullptr;
+		size_t RegistryPaddingForTesting = 0;
+	};
+#endif
+
 	struct ScriptRuntimeDesc
 	{
 		size_t MaxSourceBytes = 2u * 1024u * 1024u;
@@ -33,6 +50,11 @@ namespace PulseForge
 		size_t MaxScriptModuleCount = 128;
 		int MaxInstructionsPerCallback = 100000;
 		uint64_t SessionGeneration = 0;
+#if defined(PF_DEBUG)
+		// Optional deterministic allocator fault seam for production-path tests. The hook and its
+		// context must outlive this runtime; it is unavailable in Release and Dist builds.
+		const ScriptRuntimeAllocationFaultHooksForTesting* AllocationFaultHooksForTesting = nullptr;
+#endif
 	};
 
 	enum class ScriptDiagnosticCode : uint8_t
@@ -62,6 +84,9 @@ namespace PulseForge
 		size_t Line = 0;
 		// Snapshot identity keeps diagnostics from distinct source edits separate.
 		std::string SourceFingerprint;
+		// Structured, trusted source identity for Editor navigation. These are never parsed from Message.
+		UUID SourceProject;
+		AssetID SourceAsset;
 	};
 
 	enum class ScriptRuntimeCallback : uint8_t

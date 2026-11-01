@@ -33,6 +33,11 @@ namespace PulseForge::ScriptRuntimeDetail
 		size_t UsedBytes = 0;
 		size_t MaximumBytes = 0;
 		LuaMemoryPool* Pool = nullptr;
+#if defined(PF_DEBUG)
+		const ScriptRuntimeAllocationFaultHooksForTesting* FaultHooks = nullptr;
+		ScriptRuntimeAllocationPointForTesting ActiveReferencePoint = ScriptRuntimeAllocationPointForTesting::None;
+		size_t ActiveModuleIndex = 0;
+#endif
 	};
 
 	struct ScriptModuleImport final
@@ -43,6 +48,7 @@ namespace PulseForge::ScriptRuntimeDetail
 
 	struct ScriptModuleSource final
 	{
+		AssetID SourceAsset;
 		std::string ProjectRelativePath; // Canonical extensionless module identity.
 		std::string SourceRelativePath; // Canonical project-relative .lua path used for imports.
 		std::string Source;
@@ -70,6 +76,7 @@ namespace PulseForge::ScriptRuntimeDetail
 	struct ScriptSourceSnapshot final
 	{
 		AssetID ScriptAsset;
+		UUID SourceProject;
 		std::string Fingerprint;
 		std::string MainSourcePath;
 		std::string MainSource;

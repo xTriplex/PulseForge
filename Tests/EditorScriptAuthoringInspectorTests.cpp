@@ -84,6 +84,13 @@ namespace
 			return {};
 		}
 
+		std::expected<void, std::string> OpenScriptDiagnostic(const PulseForge::ScriptDiagnostic& Diagnostic) override
+		{
+			OpenedDiagnosticAsset = Diagnostic.SourceAsset;
+			if (!DiagnosticOpenError.empty()) return std::unexpected(DiagnosticOpenError);
+			return {};
+		}
+
 		std::expected<void, std::string> RequestScriptReload(const PulseForge::Entity&) override
 		{
 			++ReloadRequestCount;
@@ -107,6 +114,8 @@ namespace
 		mutable PulseForge::AssetID LastDiagnosticAsset;
 		PulseForge::AssetID LastScriptAsset;
 		PulseForge::AssetID OpenedScriptAsset;
+		PulseForge::AssetID OpenedDiagnosticAsset;
+		std::string DiagnosticOpenError;
 		int MetadataReadCount = 0;
 		int ReloadRequestCount = 0;
 		int EditCount = 0;
@@ -170,6 +179,29 @@ void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests)
 	PF_CHECK(Tests, Actions.Errors.empty());
 	PF_CHECK(Tests, Entity.GetScript()->value().FloatProperties.size() == 2);
 	PF_CHECK(Tests, !Entity.GetScript()->value().FloatProperties.contains("speed"));
+	const PulseForge::UUID DiagnosticProject{ 0xdaa0000000000000ull, 77 };
+	const PulseForge::AssetID FirstModuleAsset{ 0xdaa0000000000000ull, 2 };
+	const PulseForge::AssetID SecondModuleAsset{ 0xdaa0000000000000ull, 3 };
+	PulseForge::ScriptDiagnostic MainSourceDiagnostic = Diagnostic;
+	MainSourceDiagnostic.SourceProject = DiagnosticProject;
+	MainSourceDiagnostic.SourceAsset = ScriptAsset;
+	PulseForgeEditor::DispatchScriptDiagnosticOpen(Actions, MainSourceDiagnostic);
+	PF_CHECK(Tests, Actions.OpenedDiagnosticAsset == ScriptAsset);
+	PulseForge::ScriptDiagnostic FirstModuleDiagnostic = MainSourceDiagnostic;
+	FirstModuleDiagnostic.SourceAsset = FirstModuleAsset;
+	FirstModuleDiagnostic.SourceRelativePath = "Assets/Scripts/shared/first module.lua";
+	FirstModuleDiagnostic.Message = "@Assets/Scripts/fake.lua:99:spoofed path ignored";
+	PulseForgeEditor::DispatchScriptDiagnosticOpen(Actions, FirstModuleDiagnostic);
+	PF_CHECK(Tests, Actions.OpenedDiagnosticAsset == FirstModuleAsset);
+	PulseForge::ScriptDiagnostic SecondModuleDiagnostic = FirstModuleDiagnostic;
+	SecondModuleDiagnostic.SourceAsset = SecondModuleAsset;
+	SecondModuleDiagnostic.SourceRelativePath = "Assets/Scripts/shared/second.lua";
+	PulseForgeEditor::DispatchScriptDiagnosticOpen(Actions, SecondModuleDiagnostic);
+	PF_CHECK(Tests, Actions.OpenedDiagnosticAsset == SecondModuleAsset);
+	Actions.DiagnosticOpenError = "injected external-editor launch failure";
+	PulseForgeEditor::DispatchScriptDiagnosticOpen(Actions, SecondModuleDiagnostic);
+	PF_CHECK(Tests, Actions.Errors.size() == 1 && Actions.Errors.back().find("injected external-editor launch failure") != std::string::npos);
+	Actions.DiagnosticOpenError.clear();
 
 	ImGui::End();
 	ImGui::Render();
@@ -206,4 +238,75 @@ void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests)
 	auto Metadata = PulseForgeEditor::ReadScriptSourceMetadata(ProjectRoot, Project->GetAssetRegistry(), ScriptAssetResult->ID);
 	PF_CHECK(Tests, Metadata && Metadata->FloatProperties.size() == 1 &&
 		Metadata->FloatProperties.front().ID == "move.speed" && Metadata->FloatProperties.front().DefaultValue == 2.0f);
+
+	std::filesystem::create_directories(ProjectRoot / "Assets/Scripts/shared");
+	constexpr std::string_view EmptyModuleSource = "return { value = 1 }\n";
+	const auto MakeManagedSource = [&](std::string_view RelativePath)
+	{
+		return PulseForge::AssetOperations::CreateAssetFromBytes(Project->GetAssetRegistry(), ProjectRoot,
+			std::as_bytes(std::span(EmptyModuleSource.data(), EmptyModuleSource.size())), std::filesystem::u8path(RelativePath));
+	};
+	const auto FirstModule = MakeManagedSource("Assets/Scripts/shared/first module Ω.lua");
+	const auto SecondModule = MakeManagedSource("Assets/Scripts/shared/second.lua");
+	PF_CHECK(Tests, FirstModule && SecondModule && FirstModule->ID != SecondModule->ID);
+	if (!FirstModule || !SecondModule) return;
+
+	PulseForge::ScriptDiagnostic ManagedMainSourceDiagnostic{
+		.Entity = Entity.GetUUID(), .ScriptAsset = ScriptAssetResult->ID, .Code = PulseForge::ScriptDiagnosticCode::CompileFailed,
+		.Message = "@Assets/Scripts/fake.lua:90: ignored path text", .SourceRelativePath = "Assets/Scripts/žluťoučký.lua",
+		.Line = 12, .SourceFingerprint = "old-generation", .SourceProject = Project->GetDescription().ID,
+		.SourceAsset = ScriptAssetResult->ID
+	};
+	const auto MainSourcePath = PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, ManagedMainSourceDiagnostic);
+	PF_CHECK(Tests, MainSourcePath && *MainSourcePath ==
+		(ProjectRoot / std::filesystem::u8path("Assets/Scripts/žluťoučký.lua")).lexically_normal());
+
+	PulseForge::ScriptDiagnostic ManagedFirstModuleDiagnostic = ManagedMainSourceDiagnostic;
+	ManagedFirstModuleDiagnostic.SourceAsset = FirstModule->ID;
+	ManagedFirstModuleDiagnostic.SourceRelativePath = "Assets/Scripts/shared/first module Ω.lua";
+	const auto FirstModulePath = PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, ManagedFirstModuleDiagnostic);
+	PF_CHECK(Tests, FirstModulePath && *FirstModulePath ==
+		(ProjectRoot / std::filesystem::u8path("Assets/Scripts/shared/first module Ω.lua")).lexically_normal());
+	if (!MainSourcePath || !FirstModulePath) return;
+	PulseForge::ScriptDiagnostic ManagedSecondModuleDiagnostic = ManagedFirstModuleDiagnostic;
+	ManagedSecondModuleDiagnostic.SourceAsset = SecondModule->ID;
+	ManagedSecondModuleDiagnostic.SourceRelativePath = "Assets/Scripts/shared/second.lua";
+	const auto SecondModulePath = PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, ManagedSecondModuleDiagnostic);
+	PF_CHECK(Tests, SecondModulePath && *SecondModulePath ==
+		(ProjectRoot / "Assets/Scripts/shared/second.lua").lexically_normal() && *SecondModulePath != *FirstModulePath);
+	if (!SecondModulePath) return;
+	PulseForge::ScriptDiagnostic WrongProjectDiagnostic = ManagedFirstModuleDiagnostic;
+	WrongProjectDiagnostic.SourceProject = PulseForge::UUID{ 0xdaa0000000000000ull, 999 };
+	PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, WrongProjectDiagnostic));
+
+	auto OtherProject = PulseForge::Project::Create(ProjectRoot / "Other" / "Other.pfproj", "Other script project");
+	PF_CHECK(Tests, OtherProject.has_value());
+	if (!OtherProject) return;
+	std::filesystem::create_directories(OtherProject->GetRootPath() / "Assets/Scripts/shared");
+	const auto SameNamedOtherProjectAsset = PulseForge::AssetOperations::CreateAssetFromBytes(
+		OtherProject->GetAssetRegistry(), OtherProject->GetRootPath(),
+		std::as_bytes(std::span(EmptyModuleSource.data(), EmptyModuleSource.size())),
+		std::filesystem::u8path("Assets/Scripts/shared/first module Ω.lua"));
+	PF_CHECK(Tests, SameNamedOtherProjectAsset && SameNamedOtherProjectAsset->ID != FirstModule->ID);
+	if (!SameNamedOtherProjectAsset) return;
+	PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		OtherProject->GetRootPath(), OtherProject->GetAssetRegistry(), OtherProject->GetDescription().ID, FirstModuleDiagnostic));
+
+	auto MovedModule = PulseForge::AssetOperations::Move(Project->GetAssetRegistry(), ProjectRoot, FirstModule->ID,
+		"Assets/Scripts/shared/relocated Ω.lua");
+	PF_CHECK(Tests, MovedModule && MovedModule->ID == FirstModule->ID);
+	PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, FirstModuleDiagnostic));
+	if (MovedModule)
+	{
+		PF_CHECK(Tests, PulseForge::AssetOperations::Delete(Project->GetAssetRegistry(), ProjectRoot, MovedModule->ID));
+		const auto ReusedSpelling = MakeManagedSource("Assets/Scripts/shared/first module Ω.lua");
+		PF_CHECK(Tests, ReusedSpelling && ReusedSpelling->ID != FirstModule->ID);
+		PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+			ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, FirstModuleDiagnostic));
+	}
 }

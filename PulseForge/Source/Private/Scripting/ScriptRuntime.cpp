@@ -68,7 +68,9 @@ namespace PulseForge
 
 		ScriptDiagnostic MakeDiagnostic(UUID EntityIdentifier, AssetID ScriptAsset, ScriptDiagnosticCode Code, std::string Message)
 		{
-			return { EntityIdentifier, ScriptAsset, Code, std::move(Message) };
+			ScriptDiagnostic Result{ EntityIdentifier, ScriptAsset, Code, std::move(Message) };
+			Result.SourceAsset = ScriptAsset;
+			return Result;
 		}
 
 		ScriptDiagnostic MakeScriptDiagnostic(
@@ -80,6 +82,15 @@ namespace PulseForge
 			std::string_view FallbackPath = {})
 		{
 			ScriptDiagnostic Result = MakeDiagnostic(EntityIdentifier, ScriptAsset, Code, std::move(Message));
+			Result.SourceProject = Snapshot.SourceProject;
+			Result.SourceAsset = Snapshot.ScriptAsset;
+			const auto AssetForPath = [&](std::string_view Path) -> AssetID
+			{
+				if (Path == Snapshot.MainSourcePath) return Snapshot.ScriptAsset;
+				for (const ScriptModuleSource& Module : Snapshot.Modules)
+					if (Path == Module.SourceRelativePath) return Module.SourceAsset;
+				return {};
+			};
 			const auto TryPath = [&](std::string_view Path) -> bool
 			{
 				if (Path.empty()) return false;
@@ -99,6 +110,7 @@ namespace PulseForge
 					if (Error != std::errc{} || ParsedEnd != End) continue;
 					Result.SourceRelativePath = Path;
 					Result.Line = Line;
+					if (const AssetID SourceAsset = AssetForPath(Path); !SourceAsset.IsNil()) Result.SourceAsset = SourceAsset;
 					return true;
 				}
 				return false;
@@ -113,6 +125,7 @@ namespace PulseForge
 			}
 			if (Result.SourceRelativePath.empty())
 				Result.SourceRelativePath = FallbackPath.empty() ? Snapshot.MainSourcePath : std::string(FallbackPath);
+			if (const AssetID SourceAsset = AssetForPath(Result.SourceRelativePath); !SourceAsset.IsNil()) Result.SourceAsset = SourceAsset;
 			Result.SourceFingerprint = Snapshot.Fingerprint;
 			return Result;
 		}
@@ -136,6 +149,14 @@ namespace PulseForge
 				}
 				return nullptr;
 			}
+
+#if defined(PF_DEBUG)
+			if (Memory.FaultHooks && Memory.FaultHooks->RejectAllocation &&
+				Memory.ActiveReferencePoint != ScriptRuntimeAllocationPointForTesting::None &&
+				Memory.FaultHooks->RejectAllocation(Memory.FaultHooks->Context, Memory.ActiveReferencePoint,
+					Memory.ActiveModuleIndex, NewSize))
+				return nullptr;
+#endif
 
 			const size_t PreviousSize = Pointer ? std::min(OldSize, Memory.UsedBytes) : 0;
 			const size_t BaseSize = Memory.UsedBytes - PreviousSize;
@@ -169,10 +190,110 @@ namespace PulseForge
 
 		std::string LuaErrorMessage(lua_State* State)
 		{
-			const char* Message = lua_tostring(State, -1);
-			std::string Result = Message ? Message : "Lua returned a non-string error object";
+			if (lua_type(State, -1) != LUA_TSTRING)
+			{
+				lua_pop(State, 1);
+				return "Lua returned a non-string error object";
+			}
+			size_t MessageBytes = 0;
+			const char* Message = lua_tolstring(State, -1, &MessageBytes);
+			std::string Result(Message, MessageBytes);
 			lua_pop(State, 1);
 			return Result;
+		}
+
+		int StorePreparedChunkReference(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			const auto Point = static_cast<ScriptRuntimeAllocationPointForTesting>(lua_tointeger(State, 2));
+			const size_t ModuleIndex = static_cast<size_t>(lua_tointeger(State, 3));
+#if defined(PF_DEBUG)
+			Instance->Memory.ActiveReferencePoint = Point;
+			Instance->Memory.ActiveModuleIndex = ModuleIndex;
+#else
+			(void)Point;
+			(void)ModuleIndex;
+#endif
+			lua_pushvalue(State, 1);
+			const int Reference = luaL_ref(State, LUA_REGISTRYINDEX);
+#if defined(PF_DEBUG)
+			Instance->Memory.ActiveReferencePoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance->Memory.ActiveModuleIndex = 0;
+#endif
+			lua_pushinteger(State, Reference);
+			return 1;
+		}
+
+#if defined(PF_DEBUG)
+		int PrepareRegistryGrowthForTesting(lua_State* State)
+		{
+			const lua_Integer Count = lua_tointeger(State, 1);
+			for (lua_Integer Index = 0; Index < Count; ++Index)
+			{
+				lua_pushboolean(State, 1);
+				lua_rawseti(State, LUA_REGISTRYINDEX, static_cast<lua_Integer>(3 + Index));
+			}
+			return 0;
+		}
+
+		int ClearRegistryGrowthForTesting(lua_State* State)
+		{
+			const lua_Integer Count = lua_tointeger(State, 1);
+			lua_pushinteger(State, 0);
+			lua_rawseti(State, LUA_REGISTRYINDEX, 1);
+			for (lua_Integer Index = 0; Index < Count; ++Index)
+			{
+				lua_pushnil(State);
+				lua_rawseti(State, LUA_REGISTRYINDEX, static_cast<lua_Integer>(3 + Index));
+			}
+			return 0;
+		}
+
+		bool RunRegistryGrowthSetup(lua_State* State, lua_CFunction Function, size_t Count)
+		{
+			const int StackBase = lua_gettop(State);
+			if (!lua_checkstack(State, 2)) return false;
+			lua_pushcfunction(State, Function);
+			lua_pushinteger(State, static_cast<lua_Integer>(Count));
+			const bool Succeeded = lua_pcall(State, 1, 0, 0) == LUA_OK;
+			lua_settop(State, StackBase);
+			return Succeeded;
+		}
+#endif
+
+		std::expected<int, std::string> ProtectedStorePreparedChunkReference(
+			ScriptInstance& Instance, ScriptRuntimeAllocationPointForTesting Point, size_t ModuleIndex)
+		{
+			lua_State* State = Instance.State;
+			const int StackBase = lua_gettop(State) - 1; // The compiled function is the only value above the preparation baseline.
+			if (StackBase < 0 || !lua_checkstack(State, 4))
+			{
+				lua_settop(State, std::max(0, StackBase));
+				return std::unexpected("Lua stack limit reached before protecting compiled chunk storage");
+			}
+
+			lua_pushcfunction(State, StorePreparedChunkReference);
+			lua_insert(State, -2);
+			lua_pushinteger(State, static_cast<lua_Integer>(Point));
+			lua_pushinteger(State, static_cast<lua_Integer>(ModuleIndex));
+			const int Status = lua_pcall(State, 3, 1, 0);
+#if defined(PF_DEBUG)
+			Instance.Memory.ActiveReferencePoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance.Memory.ActiveModuleIndex = 0;
+#endif
+			if (Status != LUA_OK)
+			{
+				std::string Message = LuaErrorMessage(State);
+				lua_settop(State, StackBase);
+				return std::unexpected("Lua could not allocate while storing the compiled chunk reference: " + Message);
+			}
+
+			int IsInteger = 0;
+			const lua_Integer Reference = lua_tointegerx(State, -1, &IsInteger);
+			lua_settop(State, StackBase);
+			if (!IsInteger || Reference < std::numeric_limits<int>::min() || Reference > std::numeric_limits<int>::max())
+				return std::unexpected("Lua returned an invalid compiled chunk registry reference");
+			return static_cast<int>(Reference);
 		}
 
 		std::expected<bool, std::string> RunCallback(
@@ -302,7 +423,8 @@ namespace PulseForge
 				return Existing.Entity == Diagnostic.Entity && Existing.ScriptAsset == Diagnostic.ScriptAsset &&
 					Existing.Code == Diagnostic.Code && Existing.Message == Diagnostic.Message &&
 					Existing.SourceRelativePath == Diagnostic.SourceRelativePath && Existing.Line == Diagnostic.Line &&
-					Existing.SourceFingerprint == Diagnostic.SourceFingerprint;
+					Existing.SourceFingerprint == Diagnostic.SourceFingerprint && Existing.SourceProject == Diagnostic.SourceProject &&
+					Existing.SourceAsset == Diagnostic.SourceAsset;
 			};
 			if (std::any_of(Diagnostics.begin(), Diagnostics.end(), SameFailure)) return;
 			if (Diagnostics.size() == MaximumRetainedDiagnostics) Diagnostics.erase(Diagnostics.begin());
@@ -333,22 +455,25 @@ namespace PulseForge
 		{
 			struct SourceFile final
 			{
+				AssetID Asset;
 				std::string RelativePath;
 				std::string Source;
 			};
 
-			const auto ReadProjectPath = [&](const std::string& RelativePath) -> std::expected<std::string, ScriptSourceReadError>
+			const auto ReadProjectPath = [&](const std::string& RelativePath) -> std::expected<SourceFile, ScriptSourceReadError>
 			{
 				if (CookedAssets)
 				{
-					if (!CookedAssets->FindScriptByProjectPath(RelativePath))
+					const CookedAssetEntry* Entry = CookedAssets->FindScriptByProjectPath(RelativePath);
+					if (!Entry)
 						return std::unexpected(ScriptSourceReadError{ "Declared script module is not present in the cooked catalog: " + RelativePath });
 					auto Bytes = CookedAssets->ReadScriptByProjectPath(RelativePath);
 					if (!Bytes) return std::unexpected(ScriptSourceReadError{ Bytes.error().Message });
 					if (Bytes->size() > Description.MaxSourceBytes)
 						return std::unexpected(ScriptSourceReadError{
 							"Script source exceeds the configured per-file source limit: " + RelativePath });
-					return std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
+					return SourceFile{ Entry->Asset, RelativePath,
+						std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()) };
 				}
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 				if (!SourceProject)
@@ -381,7 +506,9 @@ namespace PulseForge
 					return std::unexpected(ScriptSourceReadError{ "Script module path is not present in the source registry: " + RelativePath });
 				const auto Resolved = AssetPathResolver::ResolveManagedSourcePath(SourceProject->GetRootPath(), Exact->ProjectRelativePath);
 				if (!Resolved) return std::unexpected(ScriptSourceReadError{ Resolved.error().Message });
-				return ReadTextFile(*Resolved, Description.MaxSourceBytes);
+				auto Source = ReadTextFile(*Resolved, Description.MaxSourceBytes);
+				if (!Source) return std::unexpected(Source.error());
+				return SourceFile{ Exact->ID, RelativePath, std::move(*Source) };
 #else
 				return std::unexpected(ScriptSourceReadError{ "Cooked script provider is unavailable" });
 #endif
@@ -393,6 +520,7 @@ namespace PulseForge
 				const CookedAssetEntry* Entry = CookedAssets->FindScript(ScriptAsset);
 				if (!Entry) return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset,
 					ScriptDiagnosticCode::AssetNotFound, "Script asset is not present in the cooked catalog"));
+				MainFile.Asset = ScriptAsset;
 				MainFile.RelativePath = Entry->SourceRelativePath;
 				auto Bytes = CookedAssets->ReadScript(ScriptAsset);
 				if (!Bytes) return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset,
@@ -413,6 +541,7 @@ namespace PulseForge
 				if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Script))
 					return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset,
 						ScriptDiagnosticCode::WrongAssetType, "Script asset must reference a .lua source file"));
+				MainFile.Asset = ScriptAsset;
 				MainFile.RelativePath = GenericPathString(Record->ProjectRelativePath.lexically_normal());
 				const auto ResolvedPath = AssetPathResolver::ResolveManagedSourcePath(SourceProject->GetRootPath(), Record->ProjectRelativePath);
 				if (!ResolvedPath) return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset,
@@ -433,6 +562,11 @@ namespace PulseForge
 				return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset,
 					ScriptDiagnosticCode::FileReadFailed, "Script snapshot exceeds the configured total source limit"));
 			Result->ScriptAsset = ScriptAsset;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			Result->SourceProject = SourceProject ? SourceProject->GetDescription().ID : UUID{};
+	#else
+			Result->SourceProject = {};
+	#endif
 			Result->MainSourcePath = MainFile.RelativePath;
 			Result->MainSource = std::move(MainFile.Source);
 			AssetFingerprintBuilder Fingerprint("PulseForge.ScriptSourceSnapshot.v1");
@@ -445,6 +579,8 @@ namespace PulseForge
 				auto Diagnostic = MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::InvalidComponent,
 					"Invalid script metadata: " + MainMetadata.error().Message);
 				Diagnostic.SourceRelativePath = Result->MainSourcePath;
+				Diagnostic.SourceProject = Result->SourceProject;
+				Diagnostic.SourceAsset = ScriptAsset;
 				Diagnostic.Line = MainMetadata.error().Line;
 				auto Identity = Fingerprint.Finish();
 				Diagnostic.SourceFingerprint = Identity.Algorithm + ":" + Identity.DigestHex;
@@ -502,19 +638,20 @@ namespace PulseForge
 					return std::unexpected(Source.error().Message);
 				}
 				Fingerprint.UpdateText("module-path", ModuleID);
-				Fingerprint.UpdateText("module-source", *Source);
-				if (Source->size() > Description.MaxTotalScriptSourceBytes - TotalSourceBytes)
+				Fingerprint.UpdateText("module-source", Source->Source);
+				if (Source->Source.size() > Description.MaxTotalScriptSourceBytes - TotalSourceBytes)
 					return std::unexpected("Script module graph exceeds the configured total source limit");
-				auto Metadata = ParseScriptSourceMetadata(*Source);
+				auto Metadata = ParseScriptSourceMetadata(Source->Source);
 				if (!Metadata) return std::unexpected("Invalid metadata in module " + ModuleID + " at line " +
 					std::to_string(Metadata.error().Line) + ": " + Metadata.error().Message);
 				if (!Metadata->FloatProperties.empty())
 					return std::unexpected("Only the main script may declare authored float properties: " + ModuleID);
 
 				ScriptModuleSource Module;
+				Module.SourceAsset = Source->Asset;
 				Module.ProjectRelativePath = ModuleID;
-				Module.SourceRelativePath = FilePath;
-				Module.Source = std::move(*Source);
+				Module.SourceRelativePath = std::move(Source->RelativePath);
+				Module.Source = std::move(Source->Source);
 				TotalSourceBytes += Module.Source.size();
 				auto [It, Inserted] = ModuleSources.emplace(ModuleID, std::move(Module));
 				(void)Inserted;
@@ -598,6 +735,9 @@ namespace PulseForge
 			Instance->Services = Services;
 			Instance->Memory.MaximumBytes = Description.MaxLuaMemoryBytes;
 			Instance->Memory.Pool = &MemoryPool;
+#if defined(PF_DEBUG)
+			Instance->Memory.FaultHooks = Description.AllocationFaultHooksForTesting;
+#endif
 			Instance->MaximumInstructions = Description.MaxInstructionsPerCallback;
 			Instance->State = lua_newstate(BoundedLuaAllocator, &Instance->Memory, luaL_makeseed(nullptr));
 			if (!Instance->State)
@@ -612,10 +752,15 @@ namespace PulseForge
 				return std::unexpected(MakeScriptDiagnostic(EntityIdentifier, Component.ScriptAsset,
 					ScriptDiagnosticCode::LuaInitializationFailed, LuaErrorMessage(Instance->State), *Instance->SourceSnapshot));
 
-			lua_pushcfunction(Instance->State, ScriptEnvironment::Initialize);
-			if (lua_pcall(Instance->State, 0, 0, 0) != LUA_OK)
+#if defined(PF_DEBUG)
+			const size_t RegistryPadding = Instance->Memory.FaultHooks
+				? Instance->Memory.FaultHooks->RegistryPaddingForTesting : 0;
+			if (RegistryPadding != 0 && !RunRegistryGrowthSetup(
+				Instance->State, PrepareRegistryGrowthForTesting, RegistryPadding))
 				return std::unexpected(MakeScriptDiagnostic(EntityIdentifier, Component.ScriptAsset,
-					ScriptDiagnosticCode::LuaInitializationFailed, LuaErrorMessage(Instance->State), *Instance->SourceSnapshot));
+					ScriptDiagnosticCode::LuaInitializationFailed,
+					"Could not prepare deterministic Lua registry growth for the fault test", *Instance->SourceSnapshot));
+#endif
 
 			const std::string MainChunkName = "@" + (Instance->SourceSnapshot->MainSourcePath.empty()
 				? std::string("PulseForge script") : Instance->SourceSnapshot->MainSourcePath);
@@ -628,11 +773,19 @@ namespace PulseForge
 					Instance->SourceSnapshot->MainSourcePath);
 				return std::unexpected(std::move(Diagnostic));
 			}
-			Instance->MainChunkReference = luaL_ref(Instance->State, LUA_REGISTRYINDEX);
+			auto MainReference = ProtectedStorePreparedChunkReference(
+				*Instance, ScriptRuntimeAllocationPointForTesting::MainChunkReference, 0);
+			if (!MainReference)
+				return std::unexpected(MakeScriptDiagnostic(EntityIdentifier, Component.ScriptAsset,
+					ScriptDiagnosticCode::LuaInitializationFailed,
+					"Could not retain the compiled main script: " + MainReference.error(), *Instance->SourceSnapshot,
+					Instance->SourceSnapshot->MainSourcePath));
+			Instance->MainChunkReference = *MainReference;
 
 			Instance->Modules.reserve(Instance->SourceSnapshot->Modules.size());
-			for (const ScriptModuleSource& Module : Instance->SourceSnapshot->Modules)
+			for (size_t ModuleIndex = 0; ModuleIndex < Instance->SourceSnapshot->Modules.size(); ++ModuleIndex)
 			{
+				const ScriptModuleSource& Module = Instance->SourceSnapshot->Modules[ModuleIndex];
 				const std::string ChunkName = "@" + Module.SourceRelativePath;
 				const int Status = luaL_loadbufferx(Instance->State, Module.Source.data(), Module.Source.size(), ChunkName.c_str(), "t");
 				if (Status != LUA_OK)
@@ -642,18 +795,43 @@ namespace PulseForge
 						Module.SourceRelativePath);
 					return std::unexpected(std::move(Diagnostic));
 				}
+				auto ModuleReference = ProtectedStorePreparedChunkReference(
+					*Instance, ScriptRuntimeAllocationPointForTesting::ModuleChunkReference, ModuleIndex);
+				if (!ModuleReference)
+					return std::unexpected(MakeScriptDiagnostic(EntityIdentifier, Component.ScriptAsset,
+						ScriptDiagnosticCode::LuaInitializationFailed,
+						"Could not retain compiled module '" + Module.SourceRelativePath + "': " + ModuleReference.error(),
+						*Instance->SourceSnapshot, Module.SourceRelativePath));
+
 				ScriptModuleRuntime RuntimeModule;
 				RuntimeModule.ProjectRelativePath = Module.ProjectRelativePath;
 				RuntimeModule.Imports = Module.Imports;
-				RuntimeModule.CompiledChunkReference = luaL_ref(Instance->State, LUA_REGISTRYINDEX);
+				RuntimeModule.CompiledChunkReference = *ModuleReference;
 				Instance->Modules.push_back(std::move(RuntimeModule));
 			}
+
+#if defined(PF_DEBUG)
+			if (RegistryPadding != 0 && !RunRegistryGrowthSetup(
+				Instance->State, ClearRegistryGrowthForTesting, RegistryPadding))
+				return std::unexpected(MakeScriptDiagnostic(EntityIdentifier, Component.ScriptAsset,
+					ScriptDiagnosticCode::LuaInitializationFailed,
+					"Could not clear deterministic Lua registry growth after the fault test", *Instance->SourceSnapshot));
+#endif
+
+			// Environment setup creates callbacks and user bindings only after every compiled chunk
+			// has been safely retained. Compilation itself does not execute the script.
+			lua_pushcfunction(Instance->State, ScriptEnvironment::Initialize);
+			if (lua_pcall(Instance->State, 0, 0, 0) != LUA_OK)
+				return std::unexpected(MakeScriptDiagnostic(EntityIdentifier, Component.ScriptAsset,
+					ScriptDiagnosticCode::LuaInitializationFailed, LuaErrorMessage(Instance->State), *Instance->SourceSnapshot));
 			return Instance;
 		}
 
 		std::expected<void, std::string> ActivateInstance(ScriptInstance& Instance)
 		{
 			lua_State* State = Instance.State;
+			if (!lua_checkstack(State, 1))
+				return std::unexpected(std::string("Lua stack limit reached before executing the prepared script"));
 			Instance.ExecutingChunkReference = Instance.MainChunkReference;
 			Instance.ExecutingImporterPath = Instance.SourceSnapshot->MainSourcePath.data();
 			Instance.ExecutingImporterPathLength = Instance.SourceSnapshot->MainSourcePath.size();

@@ -5,10 +5,33 @@
 
 #include <stdexcept>
 #include <fstream>
+#include <sstream>
 #include <string_view>
 
 namespace
 {
+#if defined(PF_DEBUG)
+	struct LuaAllocationFaultProbe final
+	{
+		PulseForge::ScriptRuntimeAllocationPointForTesting TargetPoint =
+			PulseForge::ScriptRuntimeAllocationPointForTesting::MainChunkReference;
+		size_t TargetModuleIndex = 0;
+		bool Armed = true;
+		size_t RejectedAllocationCount = 0;
+		size_t LastRequestedBytes = 0;
+	};
+
+	bool RejectLuaAllocation(void* Context, PulseForge::ScriptRuntimeAllocationPointForTesting Point,
+		size_t ModuleIndex, size_t RequestedBytes) noexcept
+	{
+		auto& Probe = *static_cast<LuaAllocationFaultProbe*>(Context);
+		if (!Probe.Armed || Probe.TargetPoint != Point || Probe.TargetModuleIndex != ModuleIndex) return false;
+		++Probe.RejectedAllocationCount;
+		Probe.LastRequestedBytes = RequestedBytes;
+		return true;
+	}
+#endif
+
 	std::vector<std::byte> MakeSilentScriptTestWave()
 	{
 		constexpr uint32_t SampleCount = 44100 * 5;
@@ -137,6 +160,21 @@ end
 		PF_CHECK(Tests, AuthoredPropertyRuntime.GetDiagnostics().empty());
 		AuthoredPropertyRuntime.Stop();
 
+		const auto NonStringErrorAsset = CreateScriptAsset("non_string_error.lua", "function OnUpdate() error({}) end\n");
+		PF_CHECK(Tests, NonStringErrorAsset.has_value());
+		if (!NonStringErrorAsset) return;
+		Scene NonStringErrorScene;
+		const auto NonStringErrorEntity = NonStringErrorScene.CreateEntity("Non-string Lua error");
+		PF_CHECK(Tests, NonStringErrorEntity &&
+			NonStringErrorEntity->SetScript(ScriptComponent{ NonStringErrorAsset->ID }).has_value());
+		if (!NonStringErrorEntity) return;
+		ScriptRuntime NonStringErrorRuntime(*ProjectResult);
+		PF_CHECK(Tests, NonStringErrorRuntime.Start(NonStringErrorScene).has_value());
+		PF_CHECK(Tests, NonStringErrorRuntime.Advance(NonStringErrorScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, NonStringErrorRuntime.GetDiagnostics().size() == 1 &&
+			NonStringErrorRuntime.GetDiagnostics().front().Message == "Lua returned a non-string error object");
+		NonStringErrorRuntime.Stop();
+
 		const auto WriteScriptSource = [&](const AssetID& Asset, std::string_view Source)
 		{
 			const auto Record = ProjectResult->GetAssetRegistry().Find(Asset);
@@ -145,6 +183,117 @@ end
 			Output.write(Source.data(), static_cast<std::streamsize>(Source.size()));
 			return Output.good();
 		};
+
+#if defined(PF_DEBUG)
+		LuaAllocationFaultProbe MainReferenceFault;
+		const ScriptRuntimeAllocationFaultHooksForTesting MainReferenceHooks{ &MainReferenceFault, RejectLuaAllocation };
+		const auto MainReferenceAsset = CreateScriptAsset("main_reference_fault.lua",
+			"function OnUpdate() assert(entity:set_translation(11, 0, 0)) end\n");
+		PF_CHECK(Tests, MainReferenceAsset.has_value());
+		if (!MainReferenceAsset) return;
+		Scene MainReferenceFaultScene;
+		const auto MainReferenceEntity = MainReferenceFaultScene.CreateEntity("Main reference allocation failure");
+		PF_CHECK(Tests, MainReferenceEntity &&
+			MainReferenceEntity->SetScript(ScriptComponent{ MainReferenceAsset->ID }).has_value());
+		if (!MainReferenceEntity) return;
+		ScriptRuntimeDesc MainReferenceFaultDescription;
+		MainReferenceFaultDescription.AllocationFaultHooksForTesting = &MainReferenceHooks;
+		ScriptRuntime MainReferenceFaultRuntime(*ProjectResult, MainReferenceFaultDescription);
+		PF_CHECK(Tests, MainReferenceFaultRuntime.Start(MainReferenceFaultScene).has_value());
+		PF_CHECK(Tests, MainReferenceFault.RejectedAllocationCount > 0 && MainReferenceFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, MainReferenceFaultRuntime.GetScriptCount() == 0 && MainReferenceFaultRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, MainReferenceFaultRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::LuaInitializationFailed &&
+			MainReferenceFaultRuntime.GetDiagnostics().front().Message.find("Could not retain the compiled main script") != std::string::npos);
+		MainReferenceFaultRuntime.Stop();
+		MainReferenceFault.Armed = false;
+		PF_CHECK(Tests, MainReferenceFaultRuntime.Start(MainReferenceFaultScene).has_value());
+		PF_CHECK(Tests, MainReferenceFaultRuntime.GetScriptCount() == 1 && MainReferenceFaultRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, MainReferenceFaultRuntime.Advance(MainReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, MainReferenceEntity->GetTransform()->Translation.x == 11.0f);
+		MainReferenceFaultRuntime.Stop();
+
+		std::filesystem::create_directories(ProjectRoot / "Assets/Scripts/fault_modules");
+		std::ostringstream ModuleMetadata;
+		ModuleMetadata << "--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[";
+		AssetID ExpectedModuleDiagnosticAsset;
+		for (size_t ModuleIndex = 0; ModuleIndex < 64; ++ModuleIndex)
+		{
+			const std::string ModuleName = "fault_modules/module_" + std::to_string(ModuleIndex);
+			if (ModuleIndex != 0) ModuleMetadata << ',';
+			ModuleMetadata << '\"' << ModuleName << '\"';
+			const auto ModuleAsset = CreateScriptAsset(ModuleName + ".lua", "return {}\n");
+			PF_CHECK(Tests, ModuleAsset.has_value());
+			if (!ModuleAsset) return;
+			if (ModuleIndex == 9) ExpectedModuleDiagnosticAsset = ModuleAsset->ID;
+		}
+		ModuleMetadata << "]}\n]]\nfunction OnUpdate() end\n";
+		const auto ModuleReferenceAsset = CreateScriptAsset("module_reference_fault.lua", ModuleMetadata.str());
+		PF_CHECK(Tests, ModuleReferenceAsset.has_value());
+		if (!ModuleReferenceAsset) return;
+		LuaAllocationFaultProbe ModuleReferenceFault;
+		ModuleReferenceFault.TargetPoint = ScriptRuntimeAllocationPointForTesting::ModuleChunkReference;
+		ModuleReferenceFault.TargetModuleIndex = 63;
+		const ScriptRuntimeAllocationFaultHooksForTesting ModuleReferenceHooks{
+			&ModuleReferenceFault, RejectLuaAllocation, 62 };
+		ScriptRuntimeDesc ModuleReferenceFaultDescription;
+		ModuleReferenceFaultDescription.AllocationFaultHooksForTesting = &ModuleReferenceHooks;
+		Scene ModuleReferenceFaultScene;
+		const auto ModuleReferenceEntity = ModuleReferenceFaultScene.CreateEntity("Module reference allocation failure");
+		PF_CHECK(Tests, ModuleReferenceEntity &&
+			ModuleReferenceEntity->SetScript(ScriptComponent{ ModuleReferenceAsset->ID }).has_value());
+		if (!ModuleReferenceEntity) return;
+		ScriptRuntime ModuleReferenceFaultRuntime(*ProjectResult, ModuleReferenceFaultDescription);
+		PF_CHECK(Tests, ModuleReferenceFaultRuntime.Start(ModuleReferenceFaultScene).has_value());
+		PF_CHECK(Tests, ModuleReferenceFault.RejectedAllocationCount > 0 && ModuleReferenceFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, ModuleReferenceFaultRuntime.GetScriptCount() == 0 && ModuleReferenceFaultRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, ModuleReferenceFaultRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::LuaInitializationFailed &&
+			ModuleReferenceFaultRuntime.GetDiagnostics().front().Message.find("Could not retain compiled module") != std::string::npos &&
+			ModuleReferenceFaultRuntime.GetDiagnostics().front().SourceRelativePath == "Assets/Scripts/fault_modules/module_9.lua" &&
+			ModuleReferenceFaultRuntime.GetDiagnostics().front().SourceAsset == ExpectedModuleDiagnosticAsset);
+		ModuleReferenceFaultRuntime.Stop();
+
+		const auto ReloadReferenceAsset = CreateScriptAsset("reload_reference_fault.lua",
+			"local state = 10\nfunction OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n");
+		PF_CHECK(Tests, ReloadReferenceAsset.has_value());
+		if (!ReloadReferenceAsset) return;
+		Scene ReloadReferenceFaultScene;
+		const auto ReloadReferenceEntity = ReloadReferenceFaultScene.CreateEntity("Reload reference allocation failure");
+		PF_CHECK(Tests, ReloadReferenceEntity &&
+			ReloadReferenceEntity->SetScript(ScriptComponent{ ReloadReferenceAsset->ID }).has_value());
+		if (!ReloadReferenceEntity) return;
+		LuaAllocationFaultProbe ReloadReferenceFault;
+		ReloadReferenceFault.Armed = false;
+		const ScriptRuntimeAllocationFaultHooksForTesting ReloadReferenceHooks{ &ReloadReferenceFault, RejectLuaAllocation };
+		ScriptRuntimeDesc ReloadReferenceDescription;
+		ReloadReferenceDescription.AllocationFaultHooksForTesting = &ReloadReferenceHooks;
+		ScriptRuntime ReloadReferenceRuntime(*ProjectResult, ReloadReferenceDescription);
+		PF_CHECK(Tests, ReloadReferenceRuntime.Start(ReloadReferenceFaultScene).has_value());
+		PF_CHECK(Tests, ReloadReferenceRuntime.Advance(ReloadReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadReferenceEntity->GetTransform()->Translation.x == 11.0f);
+		PF_CHECK(Tests, WriteScriptSource(ReloadReferenceAsset->ID,
+			"local state = 100\nfunction OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"));
+		ReloadReferenceFault.Armed = true;
+		const auto FailedReferenceReload = ReloadReferenceRuntime.RequestReload(*ReloadReferenceEntity);
+		PF_CHECK(Tests, FailedReferenceReload.has_value());
+		if (!FailedReferenceReload) return;
+		const auto FailedReferenceReloadCount = ReloadReferenceRuntime.ServicePendingReloads(ReloadReferenceFaultScene);
+		PF_CHECK(Tests, FailedReferenceReloadCount && *FailedReferenceReloadCount == 0);
+		PF_CHECK(Tests, ReloadReferenceFault.RejectedAllocationCount > 0 && ReloadReferenceFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, ReloadReferenceRuntime.GetDiagnostics().size() == 1 &&
+			ReloadReferenceRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::LuaInitializationFailed &&
+			ReloadReferenceRuntime.GetDiagnostics().front().Message.find("Could not retain the compiled main script") != std::string::npos);
+		PF_CHECK(Tests, ReloadReferenceRuntime.Advance(ReloadReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadReferenceEntity->GetTransform()->Translation.x == 12.0f);
+		ReloadReferenceFault.Armed = false;
+		const auto RetriedReferenceReload = ReloadReferenceRuntime.RequestReload(*ReloadReferenceEntity);
+		PF_CHECK(Tests, RetriedReferenceReload.has_value());
+		if (!RetriedReferenceReload) return;
+		const auto RetriedReferenceReloadCount = ReloadReferenceRuntime.ServicePendingReloads(ReloadReferenceFaultScene);
+		PF_CHECK(Tests, RetriedReferenceReloadCount && *RetriedReferenceReloadCount == 1);
+		PF_CHECK(Tests, ReloadReferenceRuntime.Advance(ReloadReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadReferenceEntity->GetTransform()->Translation.x == 101.0f);
+		ReloadReferenceRuntime.Stop();
+#endif
 
 		constexpr std::string_view DeclaredPropertySource =
 			"--[[PulseForgeScript:1\n"

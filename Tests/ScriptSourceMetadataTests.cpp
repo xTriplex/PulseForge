@@ -47,7 +47,19 @@ void RunScriptSourceMetadataTests(TestRunner& Tests)
 	PF_CHECK(Tests, !ResolveScriptModuleAssetPath("Assets/Other/player.lua", "module"));
 
 	const auto InvalidJSON = ParseScriptSourceMetadata("--[[PulseForgeScript:1\n{\n\"version\":1,\n]\n]]\n");
-	PF_CHECK(Tests, !InvalidJSON && InvalidJSON.error().Line >= 2 && !InvalidJSON.error().Message.empty());
+	PF_CHECK(Tests, !InvalidJSON && InvalidJSON.error().Line == 4 && !InvalidJSON.error().Message.empty());
+	const auto InvalidJSONImmediatelyAfterMarker = ParseScriptSourceMetadata(
+		"--[[PulseForgeScript:1\n]\n]]\n");
+	PF_CHECK(Tests, !InvalidJSONImmediatelyAfterMarker && InvalidJSONImmediatelyAfterMarker.error().Line == 2);
+	const auto InvalidJSONSeveralLinesIntoMetadata = ParseScriptSourceMetadata(
+		"--[[PulseForgeScript:1\n{\n\"version\":1,\n\"properties\":[\n]\n]]\n");
+	PF_CHECK(Tests, !InvalidJSONSeveralLinesIntoMetadata && InvalidJSONSeveralLinesIntoMetadata.error().Line == 5);
+	const auto InvalidJSONCRLF = ParseScriptSourceMetadata(
+		"--[[PulseForgeScript:1\r\n{\r\n\"version\":1,\r\n]\r\n]]\r\n");
+	PF_CHECK(Tests, !InvalidJSONCRLF && InvalidJSONCRLF.error().Line == 4);
+	const auto TruncatedJSONAtBlockEnd = ParseScriptSourceMetadata(
+		"--[[PulseForgeScript:1\n{\n\"version\":1,\n\"properties\":[\n{\n]]\n");
+	PF_CHECK(Tests, !TruncatedJSONAtBlockEnd && TruncatedJSONAtBlockEnd.error().Line == 5);
 	PF_CHECK(Tests, !ParseScriptSourceMetadata("--[[PulseForgeScript:1\n{\"version\":2}\n]]\n"));
 	PF_CHECK(Tests, !ParseScriptSourceMetadata("--[[PulseForgeScript:1\n{\"version\":1,\"properties\":["
 		"{\"id\":\"same\",\"label\":\"One\",\"type\":\"float\",\"default\":0,\"min\":0,\"max\":1},"

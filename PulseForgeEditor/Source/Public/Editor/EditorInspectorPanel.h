@@ -40,6 +40,12 @@ namespace PulseForgeEditor
 			(void)Asset;
 			return std::unexpected("Opening script source is unavailable in this Inspector context");
 		}
+		[[nodiscard]] virtual std::expected<void, std::string> OpenScriptDiagnostic(
+			const PulseForge::ScriptDiagnostic& Diagnostic)
+		{
+			(void)Diagnostic;
+			return std::unexpected("Opening a diagnostic source is unavailable in this Inspector context");
+		}
 		[[nodiscard]] virtual std::expected<void, std::string> RequestScriptReload(const PulseForge::Entity& Entity)
 		{
 			(void)Entity;
@@ -70,6 +76,10 @@ namespace PulseForgeEditor
 			return std::unexpected("Prefab property reset is unavailable in this editor context");
 		}
 	};
+
+	// Routes the diagnostic's structured source identity through the active editor action owner.
+	// The human-readable message is never used to select a file.
+	void DispatchScriptDiagnosticOpen(EditorInspectorPanelActions& Actions, const PulseForge::ScriptDiagnostic& Diagnostic);
 
 	class EditorInspectorPanel final
 	{

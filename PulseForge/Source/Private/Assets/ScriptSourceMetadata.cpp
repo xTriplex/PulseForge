@@ -130,8 +130,12 @@ namespace PulseForge
 		catch (const Json::parse_error& Exception)
 		{
 			const std::string_view JsonText = Source.substr(JsonStart, JsonBytes);
+			// nlohmann reports parse_error::byte as a one-based byte position. EOF is
+			// represented by size + 1, so clamp after converting to a zero-based offset.
+			const size_t JsonOffset = Exception.byte == 0 ? 0 : std::min(Exception.byte - 1, JsonText.size());
+			const size_t SourceOffset = JsonStart + JsonOffset; // Bounded by Source.size() above.
 			return std::unexpected(Error(std::string("Invalid script metadata JSON: ") + Exception.what(),
-				LineForOffset(JsonText, Exception.byte)));
+				LineForOffset(Source, SourceOffset)));
 		}
 		catch (const Json::exception& Exception)
 		{

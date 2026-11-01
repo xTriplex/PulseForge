@@ -32,6 +32,29 @@ namespace PulseForgeEditor
 		return *Path;
 	}
 
+	std::expected<std::filesystem::path, std::string> ResolveScriptDiagnosticSourcePath(
+		const std::filesystem::path& ProjectRoot, const PulseForge::AssetRegistry& Registry,
+		const PulseForge::UUID& ActiveProjectIdentity, const PulseForge::ScriptDiagnostic& Diagnostic)
+	{
+		if (Diagnostic.SourceProject.IsNil() || Diagnostic.SourceProject != ActiveProjectIdentity)
+			return std::unexpected("The diagnostic belongs to a different or unidentified project session.");
+		if (Diagnostic.SourceAsset.IsNil())
+			return std::unexpected("The diagnostic has no trusted managed-source asset identity.");
+		if (Diagnostic.SourceRelativePath.empty())
+			return std::unexpected("The diagnostic has no managed source path identity.");
+
+		const auto Record = Registry.Find(Diagnostic.SourceAsset);
+		if (!Record) return std::unexpected("The diagnostic source asset is no longer registered in the active project.");
+		if (!PulseForge::HasAssetTypeExtension(Record->ProjectRelativePath, PulseForge::AssetFileType::Script))
+			return std::unexpected("The diagnostic source identity no longer refers to a managed Lua script.");
+
+		const std::string CurrentRelativePath = PathToUtf8(Record->ProjectRelativePath.lexically_normal());
+		const std::filesystem::path DiagnosticPath = std::filesystem::u8path(Diagnostic.SourceRelativePath).lexically_normal();
+		if (PathToUtf8(DiagnosticPath) != CurrentRelativePath)
+			return std::unexpected("The diagnostic source moved since it was recorded; refresh the diagnostic before opening it.");
+		return ResolveScriptSourcePath(ProjectRoot, Registry, Diagnostic.SourceAsset);
+	}
+
 	std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
 		const std::filesystem::path& ProjectRoot, const PulseForge::AssetRegistry& Registry,
 		const PulseForge::AssetID& ScriptAsset)
