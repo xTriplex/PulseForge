@@ -7,6 +7,8 @@
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scripting/ScriptRuntime.h"
 
+#include "Assets/AssetID.h"
+
 #include <expected>
 #include <functional>
 #include <memory>
@@ -41,6 +43,27 @@ namespace PulseForge
 		// Accepted requests are committed by the owning host after SceneRuntime::Advance returns.
 		std::function<bool(const AssetID&)> QueueSceneTransition;
 		std::function<bool()> QueueStop;
+	};
+
+	enum class SceneRuntimeBoundaryRequestKind : uint8_t
+	{
+		SceneTransition,
+		Stop
+	};
+
+	struct SceneRuntimeBoundaryRequest
+	{
+		uint64_t SessionGeneration = 0;
+		uint64_t RequestGeneration = 0;
+		SceneRuntimeBoundaryRequestKind Kind = SceneRuntimeBoundaryRequestKind::SceneTransition;
+		std::optional<AssetID> Scene;
+	};
+
+	enum class SceneRuntimeBoundaryResolution : uint8_t
+	{
+		Committed,
+		Rejected,
+		Cancelled
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t
@@ -101,6 +124,11 @@ namespace PulseForge
 		// Queues an explicit state-reset reload for one attachment in the active Play/Player scene.
 		[[nodiscard]] std::expected<uint64_t, SceneRuntimeError> RequestScriptReload(const Entity& Target);
 		[[nodiscard]] std::span<const ScriptDiagnostic> GetScriptDiagnostics() const noexcept;
+		// Owners inspect requests only after Advance returns, then acknowledge the matching session/request token.
+		[[nodiscard]] std::optional<SceneRuntimeBoundaryRequest> GetPendingBoundaryRequest() const noexcept;
+		[[nodiscard]] bool ResolveBoundaryRequest(
+			const SceneRuntimeBoundaryRequest& Request,
+			SceneRuntimeBoundaryResolution Resolution) noexcept;
 		// Updates scripts, advances fixed-step physics, then synchronizes spatial audio before rendering.
 		[[nodiscard]] std::expected<SceneRuntimeFrameResult, SceneRuntimeError> Advance(
 			Scene& Source,
@@ -115,6 +143,5 @@ namespace PulseForge
 		SceneRuntimeDesc m_Description;
 		SceneRuntimeServices m_Services;
 		std::unique_ptr<Impl> m_Impl;
-		uint64_t m_NextSessionGeneration = 0;
 	};
 }

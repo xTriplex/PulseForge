@@ -753,17 +753,258 @@ namespace
 		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [](const PhysicsContactEvent& Event)
 			{ return Event.Phase == PhysicsContactPhase::End && Event.IsSensorPair; }));
 
-		// Changing a filter ends the old gameplay pair before a newly accepted pair can begin.
+		// A filter edit on the static sensor retires the current pair and refreshes a sleeping
+		// dynamic counterpart. Rejected cached Persisted contacts must neither block nor publish.
 		PF_CHECK(Tests, OverlappingBody->SetTransform(TransformComponent{}).has_value());
-		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		const auto Reestablished = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, Reestablished.has_value());
+		if (!Reestablished) return;
 		(void)SensorRuntime.TakeContactEvents();
-		BoxColliderComponent RejectingFilter = BoxColliderComponent{};
-		RejectingFilter.CollisionMask = 0;
-		PF_CHECK(Tests, OverlappingBody->SetCollider(RejectingFilter).has_value());
+		for (uint32_t Index = 0; Index < 120; ++Index)
+		{
+			const auto SleepStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, SleepStep.has_value());
+			if (!SleepStep) return;
+			(void)SensorRuntime.TakeContactEvents();
+		}
+		PF_CHECK(Tests, !PhysicsSceneRuntimeTestAccess::IsBodyActive(SensorRuntime, OverlappingBody->GetUUID()));
+		BoxColliderComponent RejectingTrigger = SphereShape;
+		RejectingTrigger.CollisionMask = 0;
+		const auto RejectedStaticFilter = Trigger->SetCollider(RejectingTrigger);
+		PF_CHECK(Tests, RejectedStaticFilter.has_value());
+		if (!RejectedStaticFilter) return;
+		const auto RejectedStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, RejectedStep.has_value());
+		if (!RejectedStep) return;
+		Events = SensorRuntime.TakeContactEvents();
+		auto HasSensorPhase = [&Trigger, &OverlappingBody](const auto& CurrentEvents, PhysicsContactPhase Phase)
+		{
+			return std::any_of(CurrentEvents.begin(), CurrentEvents.end(), [&Trigger, &OverlappingBody, Phase](const PhysicsContactEvent& Event)
+			{
+				const bool SamePair = (Event.FirstIdentifier == Trigger->GetUUID() && Event.SecondIdentifier == OverlappingBody->GetUUID()) ||
+					(Event.SecondIdentifier == Trigger->GetUUID() && Event.FirstIdentifier == OverlappingBody->GetUUID());
+				return SamePair &&
+					Event.Phase == Phase && Event.IsSensorPair;
+			});
+		};
+		// Jolt may already have retired a sleeping pair before this edit. The observable
+		// requirement here is that the rejected filter cannot recreate it.
+		PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		for (uint32_t Index = 0; Index < 4; ++Index)
+		{
+			const auto RejectedAdvance = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, RejectedAdvance.has_value());
+			if (!RejectedAdvance) return;
+			Events = SensorRuntime.TakeContactEvents();
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		}
+
+		// Reaccepting a still-overlapping sleeping body creates a new real Begin and then Stay.
+		RejectingTrigger.CollisionMask = 0xffffffffu;
+		const auto AcceptedStaticFilter = Trigger->SetCollider(RejectingTrigger);
+		PF_CHECK(Tests, AcceptedStaticFilter.has_value());
+		if (!AcceptedStaticFilter) return;
+		const auto AcceptedStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, AcceptedStep.has_value());
+		if (!AcceptedStep) return;
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		const auto AcceptedStayStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, AcceptedStayStep.has_value());
+		if (!AcceptedStayStep) return;
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		// Now retire a currently active accepted pair through a mask-only edit.
+		RejectingTrigger.CollisionMask = 0;
+		PF_CHECK(Tests, Trigger->SetCollider(RejectingTrigger).has_value());
+		const auto ActivePairRejected = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, ActivePairRejected.has_value());
+		if (!ActivePairRejected) return;
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::End));
+		for (uint32_t Index = 0; Index < 4; ++Index)
+		{
+			PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+			Events = SensorRuntime.TakeContactEvents();
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		}
+		RejectingTrigger.CollisionMask = 0xffffffffu;
+		PF_CHECK(Tests, Trigger->SetCollider(RejectingTrigger).has_value());
 		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
 		Events = SensorRuntime.TakeContactEvents();
-		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [](const PhysicsContactEvent& Event)
-			{ return Event.Phase == PhysicsContactPhase::End && Event.IsSensorPair; }));
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+
+		// Category and mask acceptance is symmetric and both sides can trigger refresh.
+		BoxColliderComponent CategorizedBody = BoxColliderComponent{};
+		CategorizedBody.CollisionCategory = 2;
+		const auto BodyCategoryChanged = OverlappingBody->SetCollider(CategorizedBody);
+		PF_CHECK(Tests, BodyCategoryChanged.has_value());
+		if (!BodyCategoryChanged) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		(void)SensorRuntime.TakeContactEvents();
+		BoxColliderComponent CategorizedTrigger = SphereShape;
+		CategorizedTrigger.CollisionCategory = 4;
+		CategorizedTrigger.CollisionMask = 2;
+		const auto TriggerCategoryChanged = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, TriggerCategoryChanged.has_value());
+		if (!TriggerCategoryChanged) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		CategorizedTrigger.CollisionMask = 1;
+		const auto CategoryRejected = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, CategoryRejected.has_value());
+		if (!CategoryRejected) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::End));
+		for (uint32_t Index = 0; Index < 3; ++Index)
+		{
+			PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+			Events = SensorRuntime.TakeContactEvents();
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		}
+		CategorizedTrigger.CollisionMask = 2;
+		PF_CHECK(Tests, Trigger->SetCollider(CategorizedTrigger).has_value());
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		CategorizedTrigger.IsSensor = false;
+		const auto SensorToBlocking = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, SensorToBlocking.has_value());
+		if (!SensorToBlocking) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [&Trigger, &OverlappingBody](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == Trigger->GetUUID() && Event.SecondIdentifier == OverlappingBody->GetUUID()) ||
+				(Event.SecondIdentifier == Trigger->GetUUID() && Event.FirstIdentifier == OverlappingBody->GetUUID());
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && !Event.IsSensorPair;
+		}));
+		CategorizedTrigger.IsSensor = true;
+		const auto BlockingToSensor = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, BlockingToSensor.has_value());
+		if (!BlockingToSensor) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+
+		// Filter and sensor edits change actual solver response, not only gameplay events.
+		Scene BlockingScene;
+		const auto BlockingFloor = BlockingScene.CreateEntity("Filter response floor");
+		const auto BlockingBody = BlockingScene.CreateEntity("Filter response body");
+		PF_CHECK(Tests, BlockingFloor && BlockingBody);
+		if (!BlockingFloor || !BlockingBody) return;
+		TransformComponent BlockingFloorTransform;
+		BlockingFloorTransform.Translation.y = -0.5f;
+		TransformComponent BlockingBodyTransform;
+		BlockingBodyTransform.Translation.y = 0.4f;
+		PF_CHECK(Tests, BlockingFloor->SetTransform(BlockingFloorTransform).has_value());
+		PF_CHECK(Tests, BlockingFloor->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, BlockingFloor->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, BlockingBody->SetTransform(BlockingBodyTransform).has_value());
+		PF_CHECK(Tests, BlockingBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false }).has_value());
+		BoxColliderComponent BlockingBodyCollider;
+		BlockingBodyCollider.CollisionCategory = 2;
+		PF_CHECK(Tests, BlockingBody->SetCollider(BlockingBodyCollider).has_value());
+		PhysicsSceneRuntimeDesc BlockingDescription;
+		BlockingDescription.FixedStepSeconds = 1.0 / 60.0;
+		BlockingDescription.MaxFrameDeltaSeconds = 0.2;
+		BlockingDescription.MaxSubsteps = 8;
+		BlockingDescription.Gravity = glm::vec3(0.0f);
+		PhysicsSceneRuntime BlockingRuntime(BlockingDescription);
+		const auto BlockingStarted = BlockingRuntime.Start(BlockingScene);
+		PF_CHECK(Tests, BlockingStarted.has_value());
+		if (!BlockingStarted) return;
+		const auto BlockingBegin = BlockingRuntime.Advance(BlockingScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, BlockingBegin.has_value());
+		if (!BlockingBegin) return;
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [&BlockingFloor, &BlockingBody](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloor->GetUUID() && Event.SecondIdentifier == BlockingBody->GetUUID()) ||
+				(Event.SecondIdentifier == BlockingFloor->GetUUID() && Event.FirstIdentifier == BlockingBody->GetUUID());
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && !Event.IsSensorPair;
+		}));
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBody->GetUUID(), { 0.0f, -1000.0f, 0.0f }).has_value());
+		const auto BlockingResponseStep = BlockingRuntime.Advance(BlockingScene, Timestep(0.1));
+		PF_CHECK(Tests, BlockingResponseStep.has_value());
+		if (!BlockingResponseStep) return;
+		const auto BlockingPosition = BlockingBody->GetTransform();
+		PF_CHECK(Tests, BlockingPosition && BlockingPosition->Translation.y > 0.3f);
+		(void)BlockingRuntime.TakeContactEvents();
+		BoxColliderComponent RejectedFloorCollider;
+		RejectedFloorCollider.CollisionMask = 0;
+		const auto StaticMaskRejected = BlockingFloor->SetCollider(RejectedFloorCollider);
+		PF_CHECK(Tests, StaticMaskRejected.has_value());
+		if (!StaticMaskRejected) return;
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBody->GetUUID(), { 0.0f, -1000.0f, 0.0f }).has_value());
+		const auto FilteredResponseStep = BlockingRuntime.Advance(BlockingScene, Timestep(0.1));
+		PF_CHECK(Tests, FilteredResponseStep.has_value());
+		if (!FilteredResponseStep) return;
+		const auto FilteredPosition = BlockingBody->GetTransform();
+		PF_CHECK(Tests, FilteredPosition && FilteredPosition->Translation.y < -0.5f);
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::none_of(Events.begin(), Events.end(), [&BlockingFloor, &BlockingBody](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloor->GetUUID() && Event.SecondIdentifier == BlockingBody->GetUUID()) ||
+				(Event.SecondIdentifier == BlockingFloor->GetUUID() && Event.FirstIdentifier == BlockingBody->GetUUID());
+			return SamePair && (Event.Phase == PhysicsContactPhase::Begin || Event.Phase == PhysicsContactPhase::Stay);
+		}));
+		const UUID BlockingFloorID = BlockingFloor->GetUUID();
+		const UUID BlockingBodyID = BlockingBody->GetUUID();
+		RejectedFloorCollider.CollisionMask = 0xffffffffu;
+		RejectedFloorCollider.IsSensor = true;
+		PF_CHECK(Tests, BlockingFloor->SetCollider(RejectedFloorCollider).has_value());
+		PF_CHECK(Tests, BlockingScene.DestroyEntity(*BlockingBody).has_value());
+		auto SensorResponseBody = BlockingScene.CreateEntityWithUUID(BlockingBodyID, "Sensor response body");
+		PF_CHECK(Tests, SensorResponseBody.has_value());
+		if (!SensorResponseBody) return;
+		BlockingBodyTransform.Translation.y = 0.4f;
+		PF_CHECK(Tests, SensorResponseBody->SetTransform(BlockingBodyTransform).has_value());
+		PF_CHECK(Tests, SensorResponseBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, SensorResponseBody->SetCollider(BlockingBodyCollider).has_value());
+		const auto SensorTransitionStep = BlockingRuntime.Advance(BlockingScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, SensorTransitionStep.has_value());
+		if (!SensorTransitionStep) return;
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [BlockingFloorID, BlockingBodyID](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloorID && Event.SecondIdentifier == BlockingBodyID) ||
+				(Event.SecondIdentifier == BlockingFloorID && Event.FirstIdentifier == BlockingBodyID);
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && Event.IsSensorPair;
+		}));
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBodyID, { 0.0f, -1000.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, BlockingRuntime.Advance(BlockingScene, Timestep(0.1)).has_value());
+		const auto SensorResponsePosition = SensorResponseBody->GetTransform();
+		PF_CHECK(Tests, SensorResponsePosition && SensorResponsePosition->Translation.y < -0.5f);
+		RejectedFloorCollider.IsSensor = false;
+		PF_CHECK(Tests, BlockingFloor->SetCollider(RejectedFloorCollider).has_value());
+		PF_CHECK(Tests, BlockingScene.DestroyEntity(*SensorResponseBody).has_value());
+		auto SolidResponseBody = BlockingScene.CreateEntityWithUUID(BlockingBodyID, "Solid response body");
+		PF_CHECK(Tests, SolidResponseBody.has_value());
+		if (!SolidResponseBody) return;
+		PF_CHECK(Tests, SolidResponseBody->SetTransform(BlockingBodyTransform).has_value());
+		PF_CHECK(Tests, SolidResponseBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, SolidResponseBody->SetCollider(BlockingBodyCollider).has_value());
+		const auto SolidTransitionStep = BlockingRuntime.Advance(BlockingScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, SolidTransitionStep.has_value());
+		if (!SolidTransitionStep) return;
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [BlockingFloorID, BlockingBodyID](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloorID && Event.SecondIdentifier == BlockingBodyID) ||
+				(Event.SecondIdentifier == BlockingFloorID && Event.FirstIdentifier == BlockingBodyID);
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && !Event.IsSensorPair;
+		}));
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBodyID, { 0.0f, -1000.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, BlockingRuntime.Advance(BlockingScene, Timestep(0.1)).has_value());
+		const auto SolidResponsePosition = SolidResponseBody->GetTransform();
+		PF_CHECK(Tests, SolidResponsePosition && SolidResponsePosition->Translation.y > 0.3f);
 
 	#if defined(PF_DEBUG)
 		// Removal records cannot be dropped safely: overflow must stop runtime delivery explicitly.

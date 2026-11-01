@@ -1173,7 +1173,128 @@ end
 		PF_CHECK(Tests, ContactCallbacks.TriggerCallbacks == 2 && ContactCallbacks.ActorCallbacks == 1 &&
 			ContactCallbacks.TriggerEntityCallbacks == 1);
 		PF_CHECK(Tests, ContactRuntime.GetScriptDiagnostics().empty());
+		const auto ContactBoundaryRequest = ContactRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, ContactBoundaryRequest &&
+			ContactBoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::SceneTransition &&
+			ContactBoundaryRequest->Scene == DeferredContactSceneAsset);
+		if (ContactBoundaryRequest)
+		{
+			auto StaleBoundaryRequest = *ContactBoundaryRequest;
+			++StaleBoundaryRequest.SessionGeneration;
+			PF_CHECK(Tests, !ContactRuntime.ResolveBoundaryRequest(
+				StaleBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			const uint32_t CallbacksBeforeSuspendedFrame = ContactCallbacks.TriggerCallbacks;
+			const auto SuspendedContactFrame = ContactRuntime.Advance(ContactScene, Timestep(0.1));
+			PF_CHECK(Tests, SuspendedContactFrame && SuspendedContactFrame->PhysicsSteps == 0);
+			PF_CHECK(Tests, ContactCallbacks.TriggerCallbacks == CallbacksBeforeSuspendedFrame);
+			PF_CHECK(Tests, ContactRuntime.ResolveBoundaryRequest(
+				*ContactBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			PF_CHECK(Tests, !ContactRuntime.ResolveBoundaryRequest(
+				*ContactBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			PF_CHECK(Tests, !ContactRuntime.GetPendingBoundaryRequest());
+			PF_CHECK(Tests, ContactRuntime.Advance(ContactScene, Timestep(1.0 / 60.0)).has_value());
+		}
 		ContactRuntime.Stop();
+		PF_CHECK(Tests, ContactRuntime.Start(ContactScene).has_value());
+		if (ContactBoundaryRequest)
+			PF_CHECK(Tests, !ContactRuntime.ResolveBoundaryRequest(
+				*ContactBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+		ContactRuntime.Stop();
+
+		const auto FirstBoundaryRequestScript = CreateScriptAsset("first_boundary_request.lua",
+			"function OnUpdate()\n"
+			"  local queued, message = scene.request_transition('" + DeferredContactSceneAsset.ToString() + "')\n"
+			"  assert(queued, message)\n"
+			"end\n");
+		const auto SecondBoundaryRequestScript = CreateScriptAsset("second_boundary_request.lua",
+			"function OnUpdate()\n"
+			"  local queued, message = scene.request_transition('" + DeferredContactSceneAsset.ToString() + "')\n"
+			"  assert(queued, message)\n"
+			"end\n");
+		PF_CHECK(Tests, FirstBoundaryRequestScript.has_value() && SecondBoundaryRequestScript.has_value());
+		if (!FirstBoundaryRequestScript || !SecondBoundaryRequestScript) return;
+		Scene StaleAcknowledgementScene;
+		const auto StaleAcknowledgementEntity = StaleAcknowledgementScene.CreateEntity("Boundary acknowledgement identity");
+		PF_CHECK(Tests, StaleAcknowledgementEntity.has_value());
+		if (!StaleAcknowledgementEntity) return;
+		PF_CHECK(Tests, StaleAcknowledgementEntity->SetScript(ScriptComponent{ FirstBoundaryRequestScript->ID }).has_value());
+		SceneRuntimeServices StaleAcknowledgementServices;
+		StaleAcknowledgementServices.QueueSceneTransition = [](const AssetID&) { return true; };
+		SceneRuntime StaleAcknowledgementRuntime(*ProjectResult, PhysicsQueryDescription, StaleAcknowledgementServices);
+		PF_CHECK(Tests, StaleAcknowledgementRuntime.Start(StaleAcknowledgementScene).has_value());
+		const auto FirstRequestFrame = StaleAcknowledgementRuntime.Advance(StaleAcknowledgementScene, Timestep(0.0));
+		PF_CHECK(Tests, FirstRequestFrame && FirstRequestFrame->PhysicsSteps == 0);
+		const auto FirstBoundaryRequest = StaleAcknowledgementRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, FirstBoundaryRequest.has_value());
+		if (!FirstBoundaryRequest) return;
+		PF_CHECK(Tests, StaleAcknowledgementRuntime.ResolveBoundaryRequest(
+			*FirstBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+		PF_CHECK(Tests, StaleAcknowledgementEntity->SetScript(ScriptComponent{ SecondBoundaryRequestScript->ID }).has_value());
+		const auto SecondRequestFrame = StaleAcknowledgementRuntime.Advance(StaleAcknowledgementScene, Timestep(0.0));
+		PF_CHECK(Tests, SecondRequestFrame && SecondRequestFrame->PhysicsSteps == 0);
+		const auto SecondBoundaryRequest = StaleAcknowledgementRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, SecondBoundaryRequest && FirstBoundaryRequest->SessionGeneration == SecondBoundaryRequest->SessionGeneration &&
+			FirstBoundaryRequest->RequestGeneration != SecondBoundaryRequest->RequestGeneration);
+		if (SecondBoundaryRequest)
+		{
+			PF_CHECK(Tests, !StaleAcknowledgementRuntime.ResolveBoundaryRequest(
+				*FirstBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			const auto StillPendingRequest = StaleAcknowledgementRuntime.GetPendingBoundaryRequest();
+			PF_CHECK(Tests, StillPendingRequest &&
+				StillPendingRequest->SessionGeneration == SecondBoundaryRequest->SessionGeneration &&
+				StillPendingRequest->RequestGeneration == SecondBoundaryRequest->RequestGeneration);
+			PF_CHECK(Tests, StaleAcknowledgementRuntime.ResolveBoundaryRequest(
+				*SecondBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+		}
+		StaleAcknowledgementRuntime.Stop();
+
+		const auto StopPriorityAsset = CreateScriptAsset("stop_priority.lua",
+			"local requested = false\n"
+			"function OnUpdate()\n"
+			"  if requested then return end\n"
+			"  requested = true\n"
+			"  assert(scene.request_transition('" + DeferredContactSceneAsset.ToString() + "'))\n"
+			"  assert(scene.request_stop())\n"
+			"end\n");
+		PF_CHECK(Tests, StopPriorityAsset.has_value());
+		if (!StopPriorityAsset) return;
+		Scene StopPriorityScene;
+		const auto StopPriorityEntity = StopPriorityScene.CreateEntity("Stop precedence script");
+		PF_CHECK(Tests, StopPriorityEntity && StopPriorityEntity->SetScript(ScriptComponent{ StopPriorityAsset->ID }));
+		if (!StopPriorityEntity) return;
+		std::optional<AssetID> StopPriorityTransition;
+		bool StopPriorityQueued = false;
+		SceneRuntimeServices StopPriorityServices;
+		StopPriorityServices.QueueSceneTransition = [&StopPriorityTransition](const AssetID& Requested)
+		{
+			StopPriorityTransition = Requested;
+			return true;
+		};
+		StopPriorityServices.QueueStop = [&StopPriorityQueued]()
+		{
+			StopPriorityQueued = true;
+			return true;
+		};
+		SceneRuntime StopPriorityRuntime(*ProjectResult, PhysicsQueryDescription, StopPriorityServices);
+		PF_CHECK(Tests, StopPriorityRuntime.Start(StopPriorityScene).has_value());
+		const auto StopPriorityFrame = StopPriorityRuntime.Advance(StopPriorityScene, Timestep(0.0));
+		PF_CHECK(Tests, StopPriorityFrame && StopPriorityFrame->PhysicsSteps == 0);
+		const auto StopPriorityRequest = StopPriorityRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, StopPriorityQueued && StopPriorityTransition == DeferredContactSceneAsset && StopPriorityRequest &&
+			StopPriorityRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop && !StopPriorityRequest->Scene);
+		if (StopPriorityRequest)
+		{
+			auto SupersededTransition = *StopPriorityRequest;
+			SupersededTransition.Kind = SceneRuntimeBoundaryRequestKind::SceneTransition;
+			SupersededTransition.Scene = DeferredContactSceneAsset;
+			--SupersededTransition.RequestGeneration;
+			PF_CHECK(Tests, !StopPriorityRuntime.ResolveBoundaryRequest(
+				SupersededTransition, SceneRuntimeBoundaryResolution::Rejected));
+			PF_CHECK(Tests, StopPriorityRuntime.ResolveBoundaryRequest(
+				*StopPriorityRequest, SceneRuntimeBoundaryResolution::Cancelled));
+			PF_CHECK(Tests, StopPriorityRuntime.Advance(StopPriorityScene, Timestep(1.0 / 60.0)).has_value());
+		}
+		StopPriorityRuntime.Stop();
 
 		constexpr std::string_view ForceScript = R"(
 function OnUpdate()

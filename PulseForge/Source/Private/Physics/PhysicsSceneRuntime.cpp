@@ -11,6 +11,8 @@ JPH_SUPPRESS_WARNINGS
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/MotionProperties.h>
+#include <Jolt/Physics/Collision/TransformedShape.h>
+#include <Jolt/Geometry/AABox.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -26,7 +28,6 @@ JPH_SUPPRESS_WARNINGS
 #include <algorithm>
 #include <array>
 #include <cstdarg>
-#include <cstdio>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -105,6 +106,12 @@ namespace PulseForge
 			return First.Shape == Second.Shape && First.BoxHalfExtents == Second.BoxHalfExtents &&
 				First.SphereRadius == Second.SphereRadius && First.CapsuleRadius == Second.CapsuleRadius &&
 				First.CapsuleHalfCylinder == Second.CapsuleHalfCylinder;
+		}
+
+		bool AcceptsCollisionPair(const PhysicsBodyIdentity* First, const PhysicsBodyIdentity* Second) noexcept
+		{
+			return First && Second && First->Identifier != Second->Identifier &&
+				(First->Category & Second->Mask) != 0 && (Second->Category & First->Mask) != 0;
 		}
 
 		bool IsFinite(const glm::quat& Value)
@@ -440,10 +447,7 @@ namespace PulseForge
 			{
 				const PhysicsBodyIdentity* FirstIdentity = GetPhysicsBodyIdentity(First);
 				const PhysicsBodyIdentity* SecondIdentity = GetPhysicsBodyIdentity(Second);
-				if (!FirstIdentity || !SecondIdentity || FirstIdentity->Identifier == SecondIdentity->Identifier)
-					return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
-				if ((FirstIdentity->Category & SecondIdentity->Mask) == 0 ||
-					(SecondIdentity->Category & FirstIdentity->Mask) == 0)
+				if (!AcceptsCollisionPair(FirstIdentity, SecondIdentity))
 					return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
 				return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
 			}
@@ -454,6 +458,13 @@ namespace PulseForge
 				const auto* FirstIdentity = GetPhysicsBodyIdentity(First);
 				const auto* SecondIdentity = GetPhysicsBodyIdentity(Second);
 				Settings.mIsSensor = FirstIdentity && SecondIdentity && (FirstIdentity->IsSensor || SecondIdentity->IsSensor);
+				if (!AcceptsCollisionPair(FirstIdentity, SecondIdentity))
+				{
+					// A cache refresh can report an added contact before broadphase validation
+					// observes an edited filter. Never publish or solve that rejected pair.
+					Settings.mIsSensor = true;
+					return;
+				}
 				Owner.EnqueueContact(ContactRecordKind::Added, First.GetID(), Second.GetID(), FirstIdentity, SecondIdentity);
 			}
 
@@ -463,6 +474,13 @@ namespace PulseForge
 				const auto* FirstIdentity = GetPhysicsBodyIdentity(First);
 				const auto* SecondIdentity = GetPhysicsBodyIdentity(Second);
 				Settings.mIsSensor = FirstIdentity && SecondIdentity && (FirstIdentity->IsSensor || SecondIdentity->IsSensor);
+				if (!AcceptsCollisionPair(FirstIdentity, SecondIdentity))
+				{
+					// Jolt may persist a cached contact without calling OnContactValidate again. Keep a
+					// stale rejected pair non-blocking and out of gameplay events until cache refresh.
+					Settings.mIsSensor = true;
+					return;
+				}
 				Owner.EnqueueContact(ContactRecordKind::Persisted, First.GetID(), Second.GetID(), FirstIdentity, SecondIdentity);
 			}
 
@@ -796,6 +814,8 @@ namespace PulseForge
 				DrainedContactQueue.clear();
 				DrainedContactQueue.swap(ContactQueue);
 			}
+			// Jolt reports removals after contact generation. Process those first so an old
+			// invalidated cache entry cannot retire a replacement Begin for the same body pair.
 			for (const ContactRecord& Record : DrainedContactQueue)
 			{
 				if (Record.Kind == ContactRecordKind::Removed)
@@ -809,7 +829,10 @@ namespace PulseForge
 					continue;
 				}
 
-				if (Record.Event.SessionGeneration != SessionGeneration) continue;
+			}
+			for (const ContactRecord& Record : DrainedContactQueue)
+			{
+				if (Record.Kind == ContactRecordKind::Removed || Record.Event.SessionGeneration != SessionGeneration) continue;
 				const auto Existing = ActiveContacts.find(Record.Pair);
 				if (Existing == ActiveContacts.end())
 				{
@@ -829,6 +852,21 @@ namespace PulseForge
 				}
 			}
 			DrainedContactQueue.clear();
+		}
+
+		void ActivateOverlappingDynamicBodies(JPH::BodyID EditedBody)
+		{
+			JPH::BodyInterface& BodyInterface = System.GetBodyInterface();
+			const JPH::AABox EditedBounds = BodyInterface.GetTransformedShape(EditedBody).GetWorldSpaceBounds();
+			for (const auto& [Identifier, Body] : Bodies)
+			{
+				(void)Identifier;
+				if (Body.ID == EditedBody || Body.Rigidbody.MotionType != RigidbodyMotionType::Dynamic ||
+					!BodyInterface.IsAdded(Body.ID))
+					continue;
+				const JPH::AABox CandidateBounds = BodyInterface.GetTransformedShape(Body.ID).GetWorldSpaceBounds();
+				if (EditedBounds.Overlaps(CandidateBounds)) BodyInterface.ActivateBody(Body.ID);
+			}
 		}
 
 		void AppendStays(bool HasStepped)
@@ -1010,9 +1048,10 @@ namespace PulseForge
 					Existing.Collider.IsSensor != NewCollider.IsSensor;
 				if (ContactSettingsChanged) EndContactsForBody(Existing.ID.GetIndexAndSequenceNumber());
 
-				// Shape creation and settings validation finish before mutating the live body. Re-applying
-				// the shape when filter/sensor state changes invalidates Jolt's cached contact constraints.
-				if (!SameShape || ContactSettingsChanged)
+				// Shape creation and settings validation finish before mutating the live body. SetShape
+				// invalidates Jolt's cache only when the shape pointer changes; filter and sensor edits
+				// use the explicit InvalidateContactCache call below.
+				if (!SameShape)
 				{
 					if (!UpdatedShape)
 					{
@@ -1052,7 +1091,6 @@ namespace PulseForge
 				}
 				if (Existing.Collider.IsSensor != NewCollider.IsSensor)
 					BodyInterface.SetIsSensor(Existing.ID, NewCollider.IsSensor);
-				if (SettingsChanged && IsDynamic) BodyInterface.ActivateBody(Existing.ID);
 
 				if (!SameIncarnation || ScenePoseChanged)
 				{
@@ -1074,6 +1112,13 @@ namespace PulseForge
 				Existing.Identity->Mask = NewCollider.CollisionMask;
 				Existing.Identity->IsSensor = NewCollider.IsSensor;
 				if (SettingsChanged) Existing.Identity->BodyGeneration = ++NextBodyGeneration;
+
+				if (ContactSettingsChanged) BodyInterface.InvalidateContactCache(Existing.ID);
+				if (ContactSettingsChanged || !SameShape)
+				{
+					if (IsDynamic) BodyInterface.ActivateBody(Existing.ID);
+					ActivateOverlappingDynamicBodies(Existing.ID);
+				}
 				return true;
 			}
 			catch (const std::exception& Exception)

@@ -16,6 +16,7 @@ namespace PulseForge
 	{
 		AssetID Asset;
 		std::unique_ptr<Scene> Value;
+		std::optional<SceneRuntimeBoundaryRequest> OriginRequest;
 	};
 
 	namespace
@@ -143,6 +144,9 @@ namespace PulseForge
 	std::expected<void, PlayerSessionError> PlayerSession::RequestSceneTransition(const AssetID& SceneAsset)
 	{
 		if (!IsRunning()) return std::unexpected(MakeError(PlayerSessionErrorCode::NotStarted, "Player session is not running"));
+		if (m_PendingScene)
+			return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed,
+				"A scene transition is already pending"));
 		if (SceneAsset.IsNil())
 			return std::unexpected(MakeError(PlayerSessionErrorCode::InvalidSceneAsset, "Transition scene UUID must not be nil"));
 
@@ -192,6 +196,7 @@ namespace PulseForge
 			// from script teardown callbacks.
 			auto CandidateScene = std::move(m_PendingScene->Value);
 			const AssetID CandidateAsset = m_PendingScene->Asset;
+			const auto OriginRequest = m_PendingScene->OriginRequest;
 			m_PendingScene.reset();
 #if defined(PF_COOKED_RUNTIME_ONLY)
 			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices);
@@ -202,14 +207,20 @@ namespace PulseForge
 #endif
 			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
 			{
+				if (OriginRequest && m_Runtime)
+					(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Rejected);
 				return std::unexpected(MakeError(
 					PlayerSessionErrorCode::RuntimeStartFailed, "Could not start requested player scene: " + Started.error().Message));
 			}
 			if (auto Paused = CandidateRuntime->SetPaused(m_Paused); !Paused)
 			{
+				if (OriginRequest && m_Runtime)
+					(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Rejected);
 				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed,
 					"Could not apply player pause state to requested scene: " + Paused.error().Message));
 			}
+			if (OriginRequest && m_Runtime)
+				(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Committed);
 
 			// Keep the old scene alive until its runtime has released every non-owning scene reference.
 			auto RetiredScene = std::move(m_Scene);
@@ -224,22 +235,30 @@ namespace PulseForge
 		if (m_Paused) return SceneRuntimeFrameResult{};
 
 		auto Result = m_Runtime->Advance(*m_Scene, Timestep(ScaledDeltaSeconds));
+		const auto BoundaryRequest = m_Runtime->GetPendingBoundaryRequest();
+		if (m_StopRequested || (BoundaryRequest && BoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop))
+		{
+			Stop();
+			if (!Result)
+				return std::unexpected(MakeError(
+					PlayerSessionErrorCode::RuntimeOperationFailed, "Could not advance player scene runtime: " + Result.error().Message));
+			return *Result;
+		}
+		if (BoundaryRequest && BoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::SceneTransition && BoundaryRequest->Scene)
+		{
+			const AssetID RequestedScene = *BoundaryRequest->Scene;
+			m_RequestedSceneTransition.reset();
+			if (auto Queued = RequestSceneTransition(RequestedScene); !Queued)
+			{
+				(void)m_Runtime->ResolveBoundaryRequest(*BoundaryRequest, SceneRuntimeBoundaryResolution::Rejected);
+				return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
+					"Could not prepare requested scene transition: " + Queued.error().Message));
+			}
+			m_PendingScene->OriginRequest = BoundaryRequest;
+		}
 		if (!Result)
 			return std::unexpected(MakeError(
 				PlayerSessionErrorCode::RuntimeOperationFailed, "Could not advance player scene runtime: " + Result.error().Message));
-		if (m_StopRequested)
-		{
-			Stop();
-			return *Result;
-		}
-		if (m_RequestedSceneTransition)
-		{
-			const AssetID RequestedScene = *m_RequestedSceneTransition;
-			m_RequestedSceneTransition.reset();
-			if (auto Queued = RequestSceneTransition(RequestedScene); !Queued)
-				return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
-					"Could not prepare requested scene transition: " + Queued.error().Message));
-		}
 		return *Result;
 	}
 

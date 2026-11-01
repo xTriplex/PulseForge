@@ -1129,13 +1129,19 @@ namespace
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
-				if (auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime); !Result)
+				auto* RuntimeBeforeAdvance = m_SceneRuntime.get();
+				auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime);
+				const bool HasDeferredBoundaryRequest = m_SceneRuntime->GetPendingBoundaryRequest().has_value();
+				if (HasDeferredBoundaryRequest || m_RuntimeStopRequested || m_QueuedRuntimeSceneTransition)
+					ServiceRuntimeBoundaryRequests();
+				if (!Result && !HasDeferredBoundaryRequest && m_SceneRuntime)
 				{
 					const std::string Message = "Runtime update failed: " + Result.error().Message;
 					StopRuntime();
 					SetError(Message);
 				}
-				else ServiceRuntimeBoundaryRequests();
+				else if (!Result && HasDeferredBoundaryRequest && m_SceneRuntime.get() == RuntimeBeforeAdvance)
+					SetError("Runtime update failed while a deferred transition was being processed: " + Result.error().Message);
 			}
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			AdvanceEditorRuntimePlayStopTest();
@@ -8499,11 +8505,28 @@ namespace
 			if (!m_QueuedRuntimeSceneTransition || !m_Project || !m_SceneRuntime) return;
 			const PulseForge::AssetID RequestedAsset = *m_QueuedRuntimeSceneTransition;
 			m_QueuedRuntimeSceneTransition.reset();
+			const auto BoundaryRequest = m_SceneRuntime->GetPendingBoundaryRequest();
+			if (!BoundaryRequest || BoundaryRequest->Kind != PulseForge::SceneRuntimeBoundaryRequestKind::SceneTransition ||
+				BoundaryRequest->Scene != RequestedAsset)
+			{
+				if (BoundaryRequest)
+					(void)m_SceneRuntime->ResolveBoundaryRequest(
+						*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Rejected);
+				SetError("Runtime scene transition request no longer matches its active runtime session.");
+				return;
+			}
+			auto RejectBoundaryRequest = [this, &BoundaryRequest]()
+			{
+				if (m_SceneRuntime && BoundaryRequest)
+					(void)m_SceneRuntime->ResolveBoundaryRequest(
+						*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Rejected);
+			};
 
 			auto CandidateScene = std::make_unique<PulseForge::Scene>();
 			if (auto Loaded = PulseForge::SceneAssetService::Load(RequestedAsset, m_Project->GetRootPath(),
 					m_Project->GetAssetRegistry(), *CandidateScene, PulseForge::Application::Get().GetDiagnosticsRecorder()); !Loaded)
 			{
+				RejectBoundaryRequest();
 				SetError("Runtime scene transition was rejected: " + Loaded.error().Message);
 				return;
 			}
@@ -8511,9 +8534,12 @@ namespace
 				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
 			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
 			{
+				RejectBoundaryRequest();
 				SetError("Runtime scene transition could not start: " + Started.error().Message);
 				return;
 			}
+			(void)m_SceneRuntime->ResolveBoundaryRequest(
+				*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Committed);
 
 			auto RetiredScene = std::move(m_RuntimeScene);
 			auto RetiredRuntime = std::move(m_SceneRuntime);
