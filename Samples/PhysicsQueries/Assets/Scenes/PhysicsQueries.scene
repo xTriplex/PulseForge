@@ -1,0 +1,66 @@
+{
+  "format": "PulseForgeScene",
+  "version": 10,
+  "entities": [
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000011",
+      "tag": { "name": "Filtered sphere target" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "meshRenderer": { "meshAsset": "b0170000-0000-4000-8000-000000000004" },
+      "rigidbody": { "motionType": "static", "mass": 1.0, "friction": 0.5, "restitution": 0.0, "allowSleeping": true },
+      "collider": { "shape": "sphere", "halfExtents": [0.5, 0.5, 0.5], "sphereRadius": 0.7, "capsuleRadius": 0.35, "capsuleHeight": 1.8, "isSensor": false, "collisionCategory": 2, "collisionMask": 4294967295 },
+      "parent": null
+    },
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000013",
+      "tag": { "name": "Capsule target" },
+      "transform": { "translation": [2.2, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "meshRenderer": { "meshAsset": "b0170000-0000-4000-8000-000000000004" },
+      "rigidbody": { "motionType": "static", "mass": 1.0, "friction": 0.5, "restitution": 0.0, "allowSleeping": true },
+      "collider": { "shape": "capsule", "halfExtents": [0.5, 0.5, 0.5], "sphereRadius": 0.5, "capsuleRadius": 0.5, "capsuleHeight": 2.4, "isSensor": false, "collisionCategory": 4, "collisionMask": 4294967295 },
+      "parent": null
+    },
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000014",
+      "tag": { "name": "Non-blocking sensor" },
+      "transform": { "translation": [4.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "rigidbody": { "motionType": "static", "mass": 1.0, "friction": 0.5, "restitution": 0.0, "allowSleeping": true },
+      "collider": { "shape": "sphere", "halfExtents": [0.5, 0.5, 0.5], "sphereRadius": 1.0, "capsuleRadius": 0.35, "capsuleHeight": 1.8, "isSensor": true, "collisionCategory": 8, "collisionMask": 1 },
+      "script": { "asset": "b0170000-0000-4000-8000-000000000005", "enabled": true },
+      "parent": null
+    },
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000012",
+      "tag": { "name": "Force-driven box" },
+      "transform": { "translation": [-3.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.45, 0.45, 0.45] },
+      "meshRenderer": { "meshAsset": "b0170000-0000-4000-8000-000000000004" },
+      "rigidbody": { "motionType": "dynamic", "mass": 1.0, "friction": 0.4, "restitution": 0.0, "allowSleeping": false },
+      "collider": { "shape": "box", "halfExtents": [0.5, 0.5, 0.5], "sphereRadius": 0.5, "capsuleRadius": 0.35, "capsuleHeight": 1.8, "isSensor": false, "collisionCategory": 1, "collisionMask": 8 },
+      "script": { "asset": "b0170000-0000-4000-8000-000000000003", "enabled": true },
+      "parent": null
+    },
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000015",
+      "tag": { "name": "Ground" },
+      "transform": { "translation": [0.0, -1.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [7.0, 0.5, 1.0] },
+      "meshRenderer": { "meshAsset": "b0170000-0000-4000-8000-000000000004" },
+      "rigidbody": { "motionType": "static", "mass": 1.0, "friction": 0.8, "restitution": 0.0, "allowSleeping": true },
+      "collider": { "shape": "box", "halfExtents": [0.5, 0.5, 0.5], "sphereRadius": 0.5, "capsuleRadius": 0.35, "capsuleHeight": 1.8, "isSensor": false, "collisionCategory": 1, "collisionMask": 4294967295 },
+      "parent": null
+    },
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000016",
+      "tag": { "name": "Acceptance camera" },
+      "transform": { "translation": [0.0, 2.0, 12.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.78539816, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true },
+      "parent": null
+    },
+    {
+      "uuid": "b0170000-0000-4000-8000-000000000017",
+      "tag": { "name": "Acceptance light" },
+      "transform": { "translation": [1.0, 4.0, 2.0], "rotation": [0.92387953, -0.38268343, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "directionalLight": { "color": [1.0, 1.0, 1.0], "intensity": 2.0, "castShadows": false, "shadowDistance": 35.0, "shadowBias": 1.0, "shadowNormalBias": 0.025, "shadowSoftness": 1.0 },
+      "parent": null
+    }
+  ]
+}

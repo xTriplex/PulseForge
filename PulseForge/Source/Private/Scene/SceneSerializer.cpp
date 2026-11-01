@@ -30,7 +30,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 9;
+		constexpr int64_t SceneFormatVersion = 10;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -148,6 +148,22 @@ namespace PulseForge
 			return true;
 		}
 
+		bool ReadUInt32(const Json& Value, uint32_t& Output)
+		{
+			if (!Value.is_number_integer()) return false;
+			if (Value.is_number_unsigned())
+			{
+				const uint64_t Number = Value.get<uint64_t>();
+				if (Number > std::numeric_limits<uint32_t>::max()) return false;
+				Output = static_cast<uint32_t>(Number);
+				return true;
+			}
+			const int64_t Number = Value.get<int64_t>();
+			if (Number < 0 || static_cast<uint64_t>(Number) > std::numeric_limits<uint32_t>::max()) return false;
+			Output = static_cast<uint32_t>(Number);
+			return true;
+		}
+
 		Json SerializeAddress(const PrefabEntityAddress& Address)
 		{
 			return Json::object({ { "key", Address.Key.ToString() }, { "local", Address.IsLocal } });
@@ -168,6 +184,8 @@ namespace PulseForge
 					return Json::object({ { "type", "asset" }, { "value", Item.ToString() } });
 				else if constexpr (std::is_same_v<T, std::optional<AssetID>>)
 					return Json::object({ { "type", "optionalAsset" }, { "value", Item ? Json(Item->ToString()) : Json(nullptr) } });
+				else if constexpr (std::is_same_v<T, uint32_t>)
+					return Json::object({ { "type", "uint32" }, { "value", Item } });
 				else return Json::object({ { "type", "string" }, { "value", Item } });
 			}, Value);
 		}
@@ -216,6 +234,20 @@ namespace PulseForge
 				}
 			}
 			if (Type == "optionalAsset" && Item.is_null()) return PropertyValue{ std::optional<AssetID>{} };
+			if (Type == "uint32" && Item.is_number_integer())
+			{
+				if (Item.is_number_unsigned())
+				{
+					const uint64_t Number = Item.get<uint64_t>();
+					if (Number <= std::numeric_limits<uint32_t>::max()) return PropertyValue{ static_cast<uint32_t>(Number) };
+				}
+				else
+				{
+					const int64_t Number = Item.get<int64_t>();
+					if (Number >= 0 && static_cast<uint64_t>(Number) <= std::numeric_limits<uint32_t>::max())
+						return PropertyValue{ static_cast<uint32_t>(Number) };
+				}
+			}
 			if (Type == "string" && Item.is_string() && Item.get<std::string>().size() <= 4096)
 				return PropertyValue{ Item.get<std::string>() };
 			return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
@@ -555,9 +587,18 @@ namespace PulseForge
 				}
 				if (BoxCollider->has_value())
 				{
-					const glm::vec3 HalfExtents = BoxCollider->value().HalfExtents;
-					Record["boxCollider"] = Json::object({
-						{ "halfExtents", { HalfExtents.x, HalfExtents.y, HalfExtents.z } }
+					const BoxColliderComponent& Collider = BoxCollider->value();
+					const char* Shape = Collider.Shape == ColliderShape::Box ? "box" :
+						Collider.Shape == ColliderShape::Sphere ? "sphere" : "capsule";
+					Record["collider"] = Json::object({
+						{ "shape", Shape },
+						{ "halfExtents", { Collider.HalfExtents.x, Collider.HalfExtents.y, Collider.HalfExtents.z } },
+						{ "sphereRadius", Collider.SphereRadius },
+						{ "capsuleRadius", Collider.CapsuleRadius },
+						{ "capsuleHeight", Collider.CapsuleHeight },
+						{ "isSensor", Collider.IsSensor },
+						{ "collisionCategory", Collider.CollisionCategory },
+						{ "collisionMask", Collider.CollisionMask }
 					});
 				}
 				if (AudioSource->has_value())
@@ -671,7 +712,7 @@ namespace PulseForge
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Each scene entity must be an object"));
 				if (auto Fields = ValidateKnownFields(SerializedEntity,
 						{ "uuid", "tag", "transform", "camera", "directionalLight", "environmentLight", "pointLight", "spotLight",
-							"meshRenderer", "rigidbody", "boxCollider", "audioSource", "audioListener", "script", "parent", "prefabInstance" },
+							"meshRenderer", "rigidbody", "boxCollider", "collider", "audioSource", "audioListener", "script", "parent", "prefabInstance" },
 						"Scene entity");
 					!Fields)
 					return std::unexpected(Fields.error());
@@ -1029,25 +1070,75 @@ namespace PulseForge
 				}
 
 				std::optional<BoxColliderComponent> BoxColliderData;
-				const auto SerializedBoxCollider = SerializedEntity.find("boxCollider");
-				if (SerializedBoxCollider != SerializedEntity.end())
+				const auto SerializedLegacyBox = SerializedEntity.find("boxCollider");
+				const auto SerializedCollider = SerializedEntity.find("collider");
+				if (SerializedLegacyBox != SerializedEntity.end() && SerializedCollider != SerializedEntity.end())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Entity cannot contain both legacy boxCollider and collider records"));
+				if (SerializedLegacyBox != SerializedEntity.end())
 				{
-					if (!SerializedBoxCollider->is_object())
+					if (!SerializedLegacyBox->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity boxCollider must be an object"));
-					if (auto Fields = ValidateKnownFields(*SerializedBoxCollider, { "halfExtents" }, "Box collider component",
+					if (auto Fields = ValidateKnownFields(*SerializedLegacyBox, { "halfExtents" }, "Legacy box collider component",
 							SceneSerializationErrorCode::InvalidEntityData);
 						!Fields)
 						return std::unexpected(Fields.error());
-					const auto HalfExtents = SerializedBoxCollider->find("halfExtents");
+					const auto HalfExtents = SerializedLegacyBox->find("halfExtents");
 					std::array<float, 3> HalfExtentValues{};
-					if (HalfExtents == SerializedBoxCollider->end() || !ReadFiniteFloats(*HalfExtents, HalfExtentValues))
-						return std::unexpected(MakeError(
-							SceneSerializationErrorCode::InvalidEntityData,
+					if (HalfExtents == SerializedLegacyBox->end() || !ReadFiniteFloats(*HalfExtents, HalfExtentValues))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 							"Box collider halfExtents must contain three finite numbers"));
 					BoxColliderData = BoxColliderComponent{ { HalfExtentValues[0], HalfExtentValues[1], HalfExtentValues[2] } };
-					if (auto Validation = BoxColliderData->Validate(); !Validation)
-						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 				}
+			else if (SerializedCollider != SerializedEntity.end())
+			{
+				if (!SerializedCollider->is_object())
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity collider must be an object"));
+				if (auto Fields = ValidateKnownFields(*SerializedCollider,
+						{ "shape", "halfExtents", "sphereRadius", "capsuleRadius", "capsuleHeight", "isSensor", "collisionCategory", "collisionMask" },
+						"Collider component", SceneSerializationErrorCode::InvalidEntityData);
+					!Fields)
+					return std::unexpected(Fields.error());
+				const auto Shape = SerializedCollider->find("shape");
+				const auto HalfExtents = SerializedCollider->find("halfExtents");
+				const auto SphereRadius = SerializedCollider->find("sphereRadius");
+				const auto CapsuleRadius = SerializedCollider->find("capsuleRadius");
+				const auto CapsuleHeight = SerializedCollider->find("capsuleHeight");
+				const auto IsSensor = SerializedCollider->find("isSensor");
+				const auto Category = SerializedCollider->find("collisionCategory");
+				const auto Mask = SerializedCollider->find("collisionMask");
+				std::array<float, 3> HalfExtentValues{};
+				uint32_t CategoryValue = 0;
+				uint32_t MaskValue = 0;
+				if (Shape == SerializedCollider->end() || !Shape->is_string() ||
+					HalfExtents == SerializedCollider->end() || !ReadFiniteFloats(*HalfExtents, HalfExtentValues) ||
+					SphereRadius == SerializedCollider->end() || !SphereRadius->is_number() ||
+					CapsuleRadius == SerializedCollider->end() || !CapsuleRadius->is_number() ||
+					CapsuleHeight == SerializedCollider->end() || !CapsuleHeight->is_number() ||
+					IsSensor == SerializedCollider->end() || !IsSensor->is_boolean() ||
+					Category == SerializedCollider->end() || !ReadUInt32(*Category, CategoryValue) ||
+					Mask == SerializedCollider->end() || !ReadUInt32(*Mask, MaskValue))
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Collider record is missing valid typed fields"));
+				const float SphereRadiusValue = SphereRadius->get<float>();
+				const float CapsuleRadiusValue = CapsuleRadius->get<float>();
+				const float CapsuleHeightValue = CapsuleHeight->get<float>();
+				if (!std::isfinite(SphereRadiusValue) || !std::isfinite(CapsuleRadiusValue) || !std::isfinite(CapsuleHeightValue))
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Collider dimensions must be finite"));
+				const std::string ShapeName = Shape->get<std::string>();
+				ColliderShape ShapeValue;
+				if (ShapeName == "box") ShapeValue = ColliderShape::Box;
+				else if (ShapeName == "sphere") ShapeValue = ColliderShape::Sphere;
+				else if (ShapeName == "capsule") ShapeValue = ColliderShape::Capsule;
+				else return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+					"Collider shape must be box, sphere, or capsule"));
+				BoxColliderData = BoxColliderComponent{
+					{ HalfExtentValues[0], HalfExtentValues[1], HalfExtentValues[2] }, ShapeValue,
+					SphereRadiusValue, CapsuleRadiusValue, CapsuleHeightValue, IsSensor->get<bool>(), CategoryValue, MaskValue };
+			}
+			if (BoxColliderData)
+				if (auto Validation = BoxColliderData->Validate(); !Validation)
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 
 				std::optional<AudioSourceComponent> AudioSourceData;
 				const auto SerializedAudioSource = SerializedEntity.find("audioSource");

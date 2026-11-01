@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <nlohmann/json.hpp>
+#include <string>
 
 namespace PulseForge
 {
@@ -11,6 +13,18 @@ namespace PulseForge
 		{
 			return Runtime.GetFullSceneReconciliationCountForTesting();
 		}
+
+		static bool IsBodyActive(const PhysicsSceneRuntime& Runtime, UUID Entity)
+		{
+			return Runtime.IsBodyActiveForTesting(Entity);
+		}
+
+	#if defined(PF_DEBUG)
+		static bool OverflowContactRemovalQueue(PhysicsSceneRuntime& Runtime, UUID First, UUID Second)
+		{
+			return Runtime.OverflowContactRemovalQueueForTesting(First, Second);
+		}
+	#endif
 	};
 } // namespace PulseForge
 
@@ -226,6 +240,14 @@ namespace
 		Collider.HalfExtents.y = 0.0f;
 		PF_CHECK(Tests, !Collider.Validate().has_value());
 		Collider.HalfExtents = { 0.75f, 0.5f, 0.25f };
+		BoxColliderComponent InvalidShape = Collider;
+		InvalidShape.Shape = ColliderShape::Sphere;
+		InvalidShape.SphereRadius = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !InvalidShape.Validate().has_value());
+		InvalidShape = Collider;
+		InvalidShape.Shape = ColliderShape::Capsule;
+		InvalidShape.CapsuleHeight = InvalidShape.CapsuleRadius;
+		PF_CHECK(Tests, !InvalidShape.Validate().has_value());
 
 		Scene Source;
 		const auto Body = Source.CreateEntity("Physics body");
@@ -235,6 +257,23 @@ namespace
 		Rigidbody = { RigidbodyMotionType::Dynamic, 3.0f, 0.6f, 0.15f, false };
 		PF_CHECK(Tests, Body->SetRigidbody(Rigidbody).has_value());
 		PF_CHECK(Tests, Body->SetBoxCollider(Collider).has_value());
+		const auto SphereBody = Source.CreateEntity("Sphere physics body");
+		const auto CapsuleBody = Source.CreateEntity("Capsule physics body");
+		PF_CHECK(Tests, SphereBody && CapsuleBody);
+		if (!SphereBody || !CapsuleBody) return;
+		BoxColliderComponent SphereCollider;
+		SphereCollider.Shape = ColliderShape::Sphere;
+		SphereCollider.SphereRadius = 1.25f;
+		SphereCollider.IsSensor = true;
+		SphereCollider.CollisionCategory = 2;
+		SphereCollider.CollisionMask = 0x7u;
+		BoxColliderComponent CapsuleCollider;
+		CapsuleCollider.Shape = ColliderShape::Capsule;
+		CapsuleCollider.CapsuleRadius = 0.4f;
+		CapsuleCollider.CapsuleHeight = 2.2f;
+		CapsuleCollider.CollisionCategory = 4;
+		PF_CHECK(Tests, SphereBody->SetCollider(SphereCollider).has_value());
+		PF_CHECK(Tests, CapsuleBody->SetCollider(CapsuleCollider).has_value());
 		Rigidbody.Mass = std::numeric_limits<float>::quiet_NaN();
 		const auto InvalidRigidbodySet = Body->SetRigidbody(Rigidbody);
 		PF_CHECK(Tests, !InvalidRigidbodySet && InvalidRigidbodySet.error().Code == SceneErrorCode::InvalidPhysicsComponent);
@@ -257,7 +296,7 @@ namespace
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 9") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 10") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
 
@@ -273,6 +312,46 @@ namespace
 								LoadedRigidbody->value().Friction == 0.6f && LoadedRigidbody->value().Restitution == 0.15f &&
 								!LoadedRigidbody->value().AllowSleeping);
 			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() && LoadedCollider->value().HalfExtents == Collider.HalfExtents);
+		}
+		const auto LoadedSphere = Destination.FindEntity(SphereBody->GetUUID());
+		const auto LoadedCapsule = Destination.FindEntity(CapsuleBody->GetUUID());
+		PF_CHECK(Tests, LoadedSphere && LoadedCapsule);
+		if (LoadedSphere && LoadedCapsule)
+		{
+			const auto LoadedSphereCollider = LoadedSphere->GetCollider();
+			const auto LoadedCapsuleCollider = LoadedCapsule->GetCollider();
+			PF_CHECK(Tests, LoadedSphereCollider && LoadedSphereCollider->has_value() &&
+				LoadedSphereCollider->value().Shape == ColliderShape::Sphere &&
+				LoadedSphereCollider->value().SphereRadius == 1.25f && LoadedSphereCollider->value().IsSensor &&
+				LoadedSphereCollider->value().CollisionCategory == 2 && LoadedSphereCollider->value().CollisionMask == 0x7u);
+			PF_CHECK(Tests, LoadedCapsuleCollider && LoadedCapsuleCollider->has_value() &&
+				LoadedCapsuleCollider->value().Shape == ColliderShape::Capsule &&
+				LoadedCapsuleCollider->value().CapsuleRadius == 0.4f && LoadedCapsuleCollider->value().CapsuleHeight == 2.2f);
+		}
+
+		Scene LegacySource;
+		const auto LegacyBody = LegacySource.CreateEntity("Legacy box body");
+		PF_CHECK(Tests, LegacyBody && LegacyBody->SetBoxCollider({ { 0.6f, 0.7f, 0.8f } }));
+		if (!LegacyBody) return;
+		const auto LegacySerialized = SceneSerializer::Serialize(LegacySource);
+		PF_CHECK(Tests, LegacySerialized.has_value());
+		if (!LegacySerialized) return;
+		auto LegacyDocument = nlohmann::json::parse(*LegacySerialized);
+		LegacyDocument["version"] = 9;
+		auto& LegacyEntity = LegacyDocument["entities"][0];
+		const auto NewColliderRecord = LegacyEntity["collider"];
+		LegacyEntity.erase("collider");
+		LegacyEntity["boxCollider"] = { { "halfExtents", NewColliderRecord["halfExtents"] } };
+		Scene LegacyLoaded;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(LegacyDocument.dump(2), LegacyLoaded).has_value());
+		const auto LoadedLegacyBody = LegacyLoaded.FindEntity(LegacyBody->GetUUID());
+		PF_CHECK(Tests, LoadedLegacyBody.has_value());
+		if (LoadedLegacyBody)
+		{
+			const auto LegacyCollider = LoadedLegacyBody->GetCollider();
+			PF_CHECK(Tests, LegacyCollider && LegacyCollider->has_value() &&
+				LegacyCollider->value().Shape == ColliderShape::Box &&
+				LegacyCollider->value().HalfExtents == glm::vec3(0.6f, 0.7f, 0.8f));
 		}
 	}
 
@@ -302,6 +381,8 @@ namespace
 		PhysicsSceneRuntime Runtime(Description);
 		const auto BeforeStart = Runtime.Advance(Source, Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, !BeforeStart && BeforeStart.error().Code == PhysicsSceneRuntimeErrorCode::NotRunning);
+		const auto QueryBeforeStart = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 1.0f);
+		PF_CHECK(Tests, !QueryBeforeStart && QueryBeforeStart.error().Code == PhysicsSceneRuntimeErrorCode::NotRunning);
 		const auto ForceBeforeStart = Runtime.ApplyForce(FallingBody->GetUUID(), { 0.0f, 10.0f, 0.0f });
 		PF_CHECK(Tests, !ForceBeforeStart && ForceBeforeStart.error().Code == PhysicsSceneRuntimeErrorCode::NotRunning);
 		PF_CHECK(Tests, Runtime.Start(Source).has_value());
@@ -448,6 +529,495 @@ namespace
 			PF_CHECK(Tests, !RejectedOverflow && RejectedOverflow.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			PF_CHECK(Tests, !OverflowRuntime.IsRunning());
 		}
+	}
+
+	void TestPhysicsShapesQueriesAndSensorEvents(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene QueryScene;
+		const auto Box = QueryScene.CreateEntity("Query box");
+		const auto Sphere = QueryScene.CreateEntity("Query sphere");
+		const auto Capsule = QueryScene.CreateEntity("Query capsule");
+		PF_CHECK(Tests, Box && Sphere && Capsule);
+		if (!Box || !Sphere || !Capsule) return;
+
+		const auto ConfigureStatic = [](const Entity& Target, float X, const BoxColliderComponent& Collider)
+		{
+			TransformComponent Transform;
+			Transform.Translation.x = X;
+			return Target.SetTransform(Transform) && Target.SetRigidbody({ RigidbodyMotionType::Static }) &&
+				Target.SetCollider(Collider);
+		};
+		BoxColliderComponent BoxShape;
+		BoxShape.CollisionCategory = 1;
+		BoxColliderComponent SphereShape;
+		SphereShape.Shape = ColliderShape::Sphere;
+		SphereShape.SphereRadius = 0.75f;
+		SphereShape.IsSensor = true;
+		SphereShape.CollisionCategory = 2;
+		BoxColliderComponent CapsuleShape;
+		CapsuleShape.Shape = ColliderShape::Capsule;
+		CapsuleShape.CapsuleRadius = 0.5f;
+		CapsuleShape.CapsuleHeight = 2.5f;
+		CapsuleShape.CollisionCategory = 4;
+		PF_CHECK(Tests, ConfigureStatic(*Box, 4.0f, BoxShape));
+		PF_CHECK(Tests, ConfigureStatic(*Sphere, 8.0f, SphereShape));
+		PF_CHECK(Tests, ConfigureStatic(*Capsule, 12.0f, CapsuleShape));
+
+		PhysicsSceneRuntimeDesc Description;
+		Description.Gravity = glm::vec3(0.0f);
+		Description.SessionGeneration = 77;
+		PhysicsSceneRuntime Runtime(Description);
+		PF_CHECK(Tests, Runtime.Start(QueryScene));
+		const uint64_t ReconciliationsBeforeQueries = PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime);
+		const auto Nearest = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 5.0f, 0.0f, 0.0f }, 20.0f);
+		PF_CHECK(Tests, Nearest && Nearest->has_value() && (**Nearest).Target == *Box);
+		if (Nearest && Nearest->has_value())
+		{
+			PF_CHECK(Tests, (**Nearest).SessionGeneration == 77);
+			PF_CHECK(Tests, std::abs((**Nearest).Position.x - 3.5f) < 0.05f);
+		}
+		PhysicsQueryFilter SphereFilter;
+		SphereFilter.CategoryMask = 2;
+		SphereFilter.IncludeSensors = true;
+		const auto SensorHit = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, SphereFilter);
+		PF_CHECK(Tests, SensorHit && SensorHit->has_value() && (**SensorHit).Target == *Sphere);
+		SphereFilter.IncludeSensors = false;
+		const auto SensorExcluded = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, SphereFilter);
+		PF_CHECK(Tests, SensorExcluded && !SensorExcluded->has_value());
+		PhysicsQueryFilter CapsuleFilter;
+		CapsuleFilter.CategoryMask = 4;
+		const auto CapsuleHit = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, CapsuleFilter);
+		PF_CHECK(Tests, CapsuleHit && CapsuleHit->has_value() && (**CapsuleHit).Target == *Capsule);
+		const std::array<UUID, 1> Excluded{ Box->GetUUID() };
+		PhysicsQueryFilter ExclusionFilter;
+		ExclusionFilter.ExcludedEntities = Excluded;
+		ExclusionFilter.IncludeSensors = true;
+		const auto ExcludedBox = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, ExclusionFilter);
+		PF_CHECK(Tests, ExcludedBox && ExcludedBox->has_value() && (**ExcludedBox).Target == *Sphere);
+
+		BoxColliderComponent OverlapSphere;
+		OverlapSphere.Shape = ColliderShape::Sphere;
+		OverlapSphere.SphereRadius = 1.0f;
+		const auto Overlap = Runtime.OverlapShape(OverlapSphere, { 4.0f, 0.0f, 0.0f }, glm::quat(1, 0, 0, 0));
+		PF_CHECK(Tests, Overlap && std::any_of(Overlap->Hits.begin(), Overlap->Hits.end(),
+			[&](const PhysicsQueryHit& Hit) { return Hit.Target == *Box; }));
+		if (Overlap)
+		{
+			const auto BoxHit = std::find_if(Overlap->Hits.begin(), Overlap->Hits.end(),
+				[&](const PhysicsQueryHit& Hit) { return Hit.Target == *Box; });
+			PF_CHECK(Tests, BoxHit != Overlap->Hits.end());
+			if (BoxHit != Overlap->Hits.end())
+				PF_CHECK(Tests, std::abs(glm::length(BoxHit->Normal) - 1.0f) < 0.001f);
+		}
+		BoxColliderComponent WideOverlap;
+		WideOverlap.HalfExtents = { 20.0f, 2.0f, 2.0f };
+		const auto Truncated = Runtime.OverlapShape(WideOverlap, { 0.0f, 0.0f, 0.0f }, glm::quat(1, 0, 0, 0), {}, 1);
+		PF_CHECK(Tests, Truncated && Truncated->Hits.size() == 1 && Truncated->Truncated);
+		BoxColliderComponent CastShape;
+		const auto Cast = Runtime.CastShape(CastShape, { 0.0f, 0.0f, 0.0f }, glm::quat(1, 0, 0, 0),
+			{ 1.0f, 0.0f, 0.0f }, 20.0f);
+		PF_CHECK(Tests, Cast && Cast->has_value() && (**Cast).Target == *Box);
+		const auto InvalidRay = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, 10.0f);
+		PF_CHECK(Tests, !InvalidRay && InvalidRay.error().Code == PhysicsSceneRuntimeErrorCode::InvalidQuery);
+		const auto StartingInsideBox = Runtime.Raycast({ 4.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 10.0f);
+		PF_CHECK(Tests, StartingInsideBox && StartingInsideBox->has_value() &&
+			(**StartingInsideBox).Target == *Box && (**StartingInsideBox).Fraction == 0.0f);
+		const auto StartingOverlappedCast = Runtime.CastShape(OverlapSphere, { 4.0f, 0.0f, 0.0f },
+			glm::quat(1, 0, 0, 0), { 1.0f, 0.0f, 0.0f }, 10.0f);
+		PF_CHECK(Tests, StartingOverlappedCast && StartingOverlappedCast->has_value() &&
+			(**StartingOverlappedCast).Target == *Box && (**StartingOverlappedCast).Fraction == 0.0f);
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == ReconciliationsBeforeQueries);
+		TransformComponent NonUniformCapsuleScale;
+		NonUniformCapsuleScale.Scale = { 1.0f, 2.0f, 1.0f };
+		PF_CHECK(Tests, Capsule->SetTransform(NonUniformCapsuleScale).has_value());
+		const auto RejectedNonUniformCapsule = Runtime.Advance(QueryScene, Timestep(0.0));
+		PF_CHECK(Tests, !RejectedNonUniformCapsule &&
+			RejectedNonUniformCapsule.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+		const auto CapsuleStillQueryable = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, CapsuleFilter);
+		PF_CHECK(Tests, CapsuleStillQueryable && CapsuleStillQueryable->has_value() && (**CapsuleStillQueryable).Target == *Capsule);
+		TransformComponent RestoredCapsuleScale;
+		PF_CHECK(Tests, Capsule->SetTransform(RestoredCapsuleScale).has_value());
+		PF_CHECK(Tests, Runtime.Advance(QueryScene, Timestep(0.0)).has_value());
+		BoxColliderComponent EditedSphereShape = SphereShape;
+		EditedSphereShape.CollisionCategory = 16;
+		PF_CHECK(Tests, Sphere->SetCollider(EditedSphereShape).has_value());
+		PF_CHECK(Tests, Runtime.Advance(QueryScene, Timestep(0.0)).has_value());
+		const auto OldCategoryMiss = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, SphereFilter);
+		PF_CHECK(Tests, OldCategoryMiss && !OldCategoryMiss->has_value());
+		SphereFilter.CategoryMask = 16;
+		SphereFilter.IncludeSensors = true;
+		const auto NewCategoryHit = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, SphereFilter);
+		PF_CHECK(Tests, NewCategoryHit && NewCategoryHit->has_value() && (**NewCategoryHit).Target == *Sphere);
+		BoxColliderComponent ReplacedSphereShape = EditedSphereShape;
+		ReplacedSphereShape.Shape = ColliderShape::Box;
+		ReplacedSphereShape.HalfExtents = { 1.25f, 0.75f, 0.75f };
+		PF_CHECK(Tests, Sphere->SetCollider(ReplacedSphereShape).has_value());
+		PF_CHECK(Tests, Runtime.Advance(QueryScene, Timestep(0.0)).has_value());
+		const auto ReplacedShapeHit = Runtime.Raycast(
+			{ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, SphereFilter);
+		PF_CHECK(Tests, ReplacedShapeHit && ReplacedShapeHit->has_value() && (**ReplacedShapeHit).Target == *Sphere &&
+			std::abs((**ReplacedShapeHit).Position.x - 6.75f) < 0.05f);
+		const auto DeferredBody = QueryScene.CreateEntity("Body pending physics synchronization");
+		PF_CHECK(Tests, DeferredBody.has_value());
+		if (!DeferredBody) return;
+		TransformComponent DeferredBodyTransform;
+		DeferredBodyTransform.Translation.x = 16.0f;
+		BoxColliderComponent DeferredBodyCollider;
+		DeferredBodyCollider.CollisionCategory = 32;
+		PF_CHECK(Tests, DeferredBody->SetTransform(DeferredBodyTransform).has_value());
+		PF_CHECK(Tests, DeferredBody->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, DeferredBody->SetCollider(DeferredBodyCollider).has_value());
+		PhysicsQueryFilter PendingCategoryFilter;
+		PendingCategoryFilter.CategoryMask = 32;
+		const auto PendingBodyMiss = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, PendingCategoryFilter);
+		PF_CHECK(Tests, PendingBodyMiss && !PendingBodyMiss->has_value());
+		PF_CHECK(Tests, Runtime.Advance(QueryScene, Timestep(0.0)).has_value());
+		const auto SynchronizedBodyHit = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, PendingCategoryFilter);
+		PF_CHECK(Tests, SynchronizedBodyHit && SynchronizedBodyHit->has_value() && (**SynchronizedBodyHit).Target == *DeferredBody);
+
+		const PhysicsQueryHit OldBoxHit = **Nearest;
+		const UUID ReusedBoxIdentifier = Box->GetUUID();
+		PF_CHECK(Tests, QueryScene.DestroyEntity(*Box).has_value());
+		PF_CHECK(Tests, Runtime.Advance(QueryScene, Timestep(0.0)).has_value());
+		const auto QueryAfterRemoval = Runtime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f);
+		PF_CHECK(Tests, QueryAfterRemoval && QueryAfterRemoval->has_value() && (**QueryAfterRemoval).Target != OldBoxHit.Target);
+		PF_CHECK(Tests, !OldBoxHit.Target.IsValid());
+		const auto ReusedBox = QueryScene.CreateEntityWithUUID(ReusedBoxIdentifier, "Reused query body identity");
+		PF_CHECK(Tests, ReusedBox.has_value());
+		if (!ReusedBox) return;
+		TransformComponent ReusedBoxTransform;
+		ReusedBoxTransform.Translation.x = 4.0f;
+		PF_CHECK(Tests, ReusedBox->SetTransform(ReusedBoxTransform).has_value());
+		PF_CHECK(Tests, ReusedBox->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, ReusedBox->SetCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, Runtime.Advance(QueryScene, Timestep(0.0)).has_value());
+		PhysicsQueryFilter ReusedIdentityFilter;
+		ReusedIdentityFilter.CategoryMask = 1;
+		const auto QueryAfterUUIDReuse = Runtime.Raycast(
+			{ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 20.0f, ReusedIdentityFilter);
+		PF_CHECK(Tests, QueryAfterUUIDReuse && QueryAfterUUIDReuse->has_value() &&
+			(**QueryAfterUUIDReuse).Target == *ReusedBox && (**QueryAfterUUIDReuse).EntityIdentifier == ReusedBoxIdentifier &&
+			(**QueryAfterUUIDReuse).BodyGeneration != OldBoxHit.BodyGeneration);
+
+		Scene SensorScene;
+		const auto Trigger = SensorScene.CreateEntity("Trigger");
+		const auto OverlappingBody = SensorScene.CreateEntity("Overlapping body");
+		PF_CHECK(Tests, Trigger && OverlappingBody);
+		if (!Trigger || !OverlappingBody) return;
+		PF_CHECK(Tests, Trigger->SetRigidbody({ RigidbodyMotionType::Static }));
+		PF_CHECK(Tests, Trigger->SetCollider(SphereShape));
+		PF_CHECK(Tests, OverlappingBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }));
+		PF_CHECK(Tests, OverlappingBody->SetCollider(BoxColliderComponent{}));
+		PhysicsSceneRuntime SensorRuntime(Description);
+		PF_CHECK(Tests, SensorRuntime.Start(SensorScene));
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)));
+		auto Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [](const PhysicsContactEvent& Event)
+			{ return Event.Phase == PhysicsContactPhase::Begin && Event.IsSensorPair; }));
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)));
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [](const PhysicsContactEvent& Event)
+			{ return Event.Phase == PhysicsContactPhase::Stay && Event.IsSensorPair; }));
+		const auto SensorOverlapTransform = OverlappingBody->GetTransform();
+		PF_CHECK(Tests, SensorOverlapTransform && SensorOverlapTransform->Translation == glm::vec3(0.0f));
+		uint32_t SleepingStays = 0;
+		uint32_t RepeatedBegins = 0;
+		uint32_t UnexpectedEnds = 0;
+		for (uint32_t Index = 0; Index < 120; ++Index)
+		{
+			PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+			for (const PhysicsContactEvent& Event : SensorRuntime.TakeContactEvents())
+			{
+				if (Event.Phase == PhysicsContactPhase::Stay && Event.IsSensorPair) ++SleepingStays;
+				if (Event.Phase == PhysicsContactPhase::Begin && Event.IsSensorPair) ++RepeatedBegins;
+				if (Event.Phase == PhysicsContactPhase::End && Event.IsSensorPair) ++UnexpectedEnds;
+			}
+		}
+		PF_CHECK(Tests, !PhysicsSceneRuntimeTestAccess::IsBodyActive(SensorRuntime, OverlappingBody->GetUUID()));
+		PF_CHECK(Tests, SleepingStays > 0);
+		PF_CHECK(Tests, RepeatedBegins == 0);
+		PF_CHECK(Tests, UnexpectedEnds == 1);
+		PF_CHECK(Tests, SensorRuntime.ApplyForce(OverlappingBody->GetUUID(), { 0.0f, 1.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::IsBodyActive(SensorRuntime, OverlappingBody->GetUUID()));
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		// Jolt retired the sleeping pair, so wake-up at the same pose creates a new contact Begin.
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [](const PhysicsContactEvent& Event)
+			{ return Event.Phase == PhysicsContactPhase::Begin && Event.IsSensorPair; }));
+		TransformComponent MovedAway;
+		MovedAway.Translation.x = 5.0f;
+		PF_CHECK(Tests, OverlappingBody->SetTransform(MovedAway));
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)));
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [](const PhysicsContactEvent& Event)
+			{ return Event.Phase == PhysicsContactPhase::End && Event.IsSensorPair; }));
+
+		// A filter edit on the static sensor retires the current pair and refreshes a sleeping
+		// dynamic counterpart. Rejected cached Persisted contacts must neither block nor publish.
+		PF_CHECK(Tests, OverlappingBody->SetTransform(TransformComponent{}).has_value());
+		const auto Reestablished = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, Reestablished.has_value());
+		if (!Reestablished) return;
+		(void)SensorRuntime.TakeContactEvents();
+		for (uint32_t Index = 0; Index < 120; ++Index)
+		{
+			const auto SleepStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, SleepStep.has_value());
+			if (!SleepStep) return;
+			(void)SensorRuntime.TakeContactEvents();
+		}
+		PF_CHECK(Tests, !PhysicsSceneRuntimeTestAccess::IsBodyActive(SensorRuntime, OverlappingBody->GetUUID()));
+		BoxColliderComponent RejectingTrigger = SphereShape;
+		RejectingTrigger.CollisionMask = 0;
+		const auto RejectedStaticFilter = Trigger->SetCollider(RejectingTrigger);
+		PF_CHECK(Tests, RejectedStaticFilter.has_value());
+		if (!RejectedStaticFilter) return;
+		const auto RejectedStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, RejectedStep.has_value());
+		if (!RejectedStep) return;
+		Events = SensorRuntime.TakeContactEvents();
+		auto HasSensorPhase = [&Trigger, &OverlappingBody](const auto& CurrentEvents, PhysicsContactPhase Phase)
+		{
+			return std::any_of(CurrentEvents.begin(), CurrentEvents.end(), [&Trigger, &OverlappingBody, Phase](const PhysicsContactEvent& Event)
+			{
+				const bool SamePair = (Event.FirstIdentifier == Trigger->GetUUID() && Event.SecondIdentifier == OverlappingBody->GetUUID()) ||
+					(Event.SecondIdentifier == Trigger->GetUUID() && Event.FirstIdentifier == OverlappingBody->GetUUID());
+				return SamePair &&
+					Event.Phase == Phase && Event.IsSensorPair;
+			});
+		};
+		// Jolt may already have retired a sleeping pair before this edit. The observable
+		// requirement here is that the rejected filter cannot recreate it.
+		PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		for (uint32_t Index = 0; Index < 4; ++Index)
+		{
+			const auto RejectedAdvance = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, RejectedAdvance.has_value());
+			if (!RejectedAdvance) return;
+			Events = SensorRuntime.TakeContactEvents();
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		}
+
+		// Reaccepting a still-overlapping sleeping body creates a new real Begin and then Stay.
+		RejectingTrigger.CollisionMask = 0xffffffffu;
+		const auto AcceptedStaticFilter = Trigger->SetCollider(RejectingTrigger);
+		PF_CHECK(Tests, AcceptedStaticFilter.has_value());
+		if (!AcceptedStaticFilter) return;
+		const auto AcceptedStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, AcceptedStep.has_value());
+		if (!AcceptedStep) return;
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		const auto AcceptedStayStep = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, AcceptedStayStep.has_value());
+		if (!AcceptedStayStep) return;
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		// Now retire a currently active accepted pair through a mask-only edit.
+		RejectingTrigger.CollisionMask = 0;
+		PF_CHECK(Tests, Trigger->SetCollider(RejectingTrigger).has_value());
+		const auto ActivePairRejected = SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, ActivePairRejected.has_value());
+		if (!ActivePairRejected) return;
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::End));
+		for (uint32_t Index = 0; Index < 4; ++Index)
+		{
+			PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+			Events = SensorRuntime.TakeContactEvents();
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		}
+		RejectingTrigger.CollisionMask = 0xffffffffu;
+		PF_CHECK(Tests, Trigger->SetCollider(RejectingTrigger).has_value());
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+
+		// Category and mask acceptance is symmetric and both sides can trigger refresh.
+		BoxColliderComponent CategorizedBody = BoxColliderComponent{};
+		CategorizedBody.CollisionCategory = 2;
+		const auto BodyCategoryChanged = OverlappingBody->SetCollider(CategorizedBody);
+		PF_CHECK(Tests, BodyCategoryChanged.has_value());
+		if (!BodyCategoryChanged) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		(void)SensorRuntime.TakeContactEvents();
+		BoxColliderComponent CategorizedTrigger = SphereShape;
+		CategorizedTrigger.CollisionCategory = 4;
+		CategorizedTrigger.CollisionMask = 2;
+		const auto TriggerCategoryChanged = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, TriggerCategoryChanged.has_value());
+		if (!TriggerCategoryChanged) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		CategorizedTrigger.CollisionMask = 1;
+		const auto CategoryRejected = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, CategoryRejected.has_value());
+		if (!CategoryRejected) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::End));
+		for (uint32_t Index = 0; Index < 3; ++Index)
+		{
+			PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+			Events = SensorRuntime.TakeContactEvents();
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Begin));
+			PF_CHECK(Tests, !HasSensorPhase(Events, PhysicsContactPhase::Stay));
+		}
+		CategorizedTrigger.CollisionMask = 2;
+		PF_CHECK(Tests, Trigger->SetCollider(CategorizedTrigger).has_value());
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+		CategorizedTrigger.IsSensor = false;
+		const auto SensorToBlocking = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, SensorToBlocking.has_value());
+		if (!SensorToBlocking) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [&Trigger, &OverlappingBody](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == Trigger->GetUUID() && Event.SecondIdentifier == OverlappingBody->GetUUID()) ||
+				(Event.SecondIdentifier == Trigger->GetUUID() && Event.FirstIdentifier == OverlappingBody->GetUUID());
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && !Event.IsSensorPair;
+		}));
+		CategorizedTrigger.IsSensor = true;
+		const auto BlockingToSensor = Trigger->SetCollider(CategorizedTrigger);
+		PF_CHECK(Tests, BlockingToSensor.has_value());
+		if (!BlockingToSensor) return;
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(1.0 / 60.0)).has_value());
+		Events = SensorRuntime.TakeContactEvents();
+		PF_CHECK(Tests, HasSensorPhase(Events, PhysicsContactPhase::Begin));
+
+		// Filter and sensor edits change actual solver response, not only gameplay events.
+		Scene BlockingScene;
+		const auto BlockingFloor = BlockingScene.CreateEntity("Filter response floor");
+		const auto BlockingBody = BlockingScene.CreateEntity("Filter response body");
+		PF_CHECK(Tests, BlockingFloor && BlockingBody);
+		if (!BlockingFloor || !BlockingBody) return;
+		TransformComponent BlockingFloorTransform;
+		BlockingFloorTransform.Translation.y = -0.5f;
+		TransformComponent BlockingBodyTransform;
+		BlockingBodyTransform.Translation.y = 0.4f;
+		PF_CHECK(Tests, BlockingFloor->SetTransform(BlockingFloorTransform).has_value());
+		PF_CHECK(Tests, BlockingFloor->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, BlockingFloor->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, BlockingBody->SetTransform(BlockingBodyTransform).has_value());
+		PF_CHECK(Tests, BlockingBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false }).has_value());
+		BoxColliderComponent BlockingBodyCollider;
+		BlockingBodyCollider.CollisionCategory = 2;
+		PF_CHECK(Tests, BlockingBody->SetCollider(BlockingBodyCollider).has_value());
+		PhysicsSceneRuntimeDesc BlockingDescription;
+		BlockingDescription.FixedStepSeconds = 1.0 / 60.0;
+		BlockingDescription.MaxFrameDeltaSeconds = 0.2;
+		BlockingDescription.MaxSubsteps = 8;
+		BlockingDescription.Gravity = glm::vec3(0.0f);
+		PhysicsSceneRuntime BlockingRuntime(BlockingDescription);
+		const auto BlockingStarted = BlockingRuntime.Start(BlockingScene);
+		PF_CHECK(Tests, BlockingStarted.has_value());
+		if (!BlockingStarted) return;
+		const auto BlockingBegin = BlockingRuntime.Advance(BlockingScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, BlockingBegin.has_value());
+		if (!BlockingBegin) return;
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [&BlockingFloor, &BlockingBody](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloor->GetUUID() && Event.SecondIdentifier == BlockingBody->GetUUID()) ||
+				(Event.SecondIdentifier == BlockingFloor->GetUUID() && Event.FirstIdentifier == BlockingBody->GetUUID());
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && !Event.IsSensorPair;
+		}));
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBody->GetUUID(), { 0.0f, -1000.0f, 0.0f }).has_value());
+		const auto BlockingResponseStep = BlockingRuntime.Advance(BlockingScene, Timestep(0.1));
+		PF_CHECK(Tests, BlockingResponseStep.has_value());
+		if (!BlockingResponseStep) return;
+		const auto BlockingPosition = BlockingBody->GetTransform();
+		PF_CHECK(Tests, BlockingPosition && BlockingPosition->Translation.y > 0.3f);
+		(void)BlockingRuntime.TakeContactEvents();
+		BoxColliderComponent RejectedFloorCollider;
+		RejectedFloorCollider.CollisionMask = 0;
+		const auto StaticMaskRejected = BlockingFloor->SetCollider(RejectedFloorCollider);
+		PF_CHECK(Tests, StaticMaskRejected.has_value());
+		if (!StaticMaskRejected) return;
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBody->GetUUID(), { 0.0f, -1000.0f, 0.0f }).has_value());
+		const auto FilteredResponseStep = BlockingRuntime.Advance(BlockingScene, Timestep(0.1));
+		PF_CHECK(Tests, FilteredResponseStep.has_value());
+		if (!FilteredResponseStep) return;
+		const auto FilteredPosition = BlockingBody->GetTransform();
+		PF_CHECK(Tests, FilteredPosition && FilteredPosition->Translation.y < -0.5f);
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::none_of(Events.begin(), Events.end(), [&BlockingFloor, &BlockingBody](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloor->GetUUID() && Event.SecondIdentifier == BlockingBody->GetUUID()) ||
+				(Event.SecondIdentifier == BlockingFloor->GetUUID() && Event.FirstIdentifier == BlockingBody->GetUUID());
+			return SamePair && (Event.Phase == PhysicsContactPhase::Begin || Event.Phase == PhysicsContactPhase::Stay);
+		}));
+		const UUID BlockingFloorID = BlockingFloor->GetUUID();
+		const UUID BlockingBodyID = BlockingBody->GetUUID();
+		RejectedFloorCollider.CollisionMask = 0xffffffffu;
+		RejectedFloorCollider.IsSensor = true;
+		PF_CHECK(Tests, BlockingFloor->SetCollider(RejectedFloorCollider).has_value());
+		PF_CHECK(Tests, BlockingScene.DestroyEntity(*BlockingBody).has_value());
+		auto SensorResponseBody = BlockingScene.CreateEntityWithUUID(BlockingBodyID, "Sensor response body");
+		PF_CHECK(Tests, SensorResponseBody.has_value());
+		if (!SensorResponseBody) return;
+		BlockingBodyTransform.Translation.y = 0.4f;
+		PF_CHECK(Tests, SensorResponseBody->SetTransform(BlockingBodyTransform).has_value());
+		PF_CHECK(Tests, SensorResponseBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, SensorResponseBody->SetCollider(BlockingBodyCollider).has_value());
+		const auto SensorTransitionStep = BlockingRuntime.Advance(BlockingScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, SensorTransitionStep.has_value());
+		if (!SensorTransitionStep) return;
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [BlockingFloorID, BlockingBodyID](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloorID && Event.SecondIdentifier == BlockingBodyID) ||
+				(Event.SecondIdentifier == BlockingFloorID && Event.FirstIdentifier == BlockingBodyID);
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && Event.IsSensorPair;
+		}));
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBodyID, { 0.0f, -1000.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, BlockingRuntime.Advance(BlockingScene, Timestep(0.1)).has_value());
+		const auto SensorResponsePosition = SensorResponseBody->GetTransform();
+		PF_CHECK(Tests, SensorResponsePosition && SensorResponsePosition->Translation.y < -0.5f);
+		RejectedFloorCollider.IsSensor = false;
+		PF_CHECK(Tests, BlockingFloor->SetCollider(RejectedFloorCollider).has_value());
+		PF_CHECK(Tests, BlockingScene.DestroyEntity(*SensorResponseBody).has_value());
+		auto SolidResponseBody = BlockingScene.CreateEntityWithUUID(BlockingBodyID, "Solid response body");
+		PF_CHECK(Tests, SolidResponseBody.has_value());
+		if (!SolidResponseBody) return;
+		PF_CHECK(Tests, SolidResponseBody->SetTransform(BlockingBodyTransform).has_value());
+		PF_CHECK(Tests, SolidResponseBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, SolidResponseBody->SetCollider(BlockingBodyCollider).has_value());
+		const auto SolidTransitionStep = BlockingRuntime.Advance(BlockingScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, SolidTransitionStep.has_value());
+		if (!SolidTransitionStep) return;
+		Events = BlockingRuntime.TakeContactEvents();
+		PF_CHECK(Tests, std::any_of(Events.begin(), Events.end(), [BlockingFloorID, BlockingBodyID](const PhysicsContactEvent& Event)
+		{
+			const bool SamePair = (Event.FirstIdentifier == BlockingFloorID && Event.SecondIdentifier == BlockingBodyID) ||
+				(Event.SecondIdentifier == BlockingFloorID && Event.FirstIdentifier == BlockingBodyID);
+			return SamePair && Event.Phase == PhysicsContactPhase::Begin && !Event.IsSensorPair;
+		}));
+		PF_CHECK(Tests, BlockingRuntime.ApplyForce(BlockingBodyID, { 0.0f, -1000.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, BlockingRuntime.Advance(BlockingScene, Timestep(0.1)).has_value());
+		const auto SolidResponsePosition = SolidResponseBody->GetTransform();
+		PF_CHECK(Tests, SolidResponsePosition && SolidResponsePosition->Translation.y > 0.3f);
+
+	#if defined(PF_DEBUG)
+		// Removal records cannot be dropped safely: overflow must stop runtime delivery explicitly.
+		PF_CHECK(Tests, SensorRuntime.Advance(SensorScene, Timestep(0.0)).has_value());
+		const auto Overflowed = PhysicsSceneRuntimeTestAccess::OverflowContactRemovalQueue(
+			SensorRuntime, Trigger->GetUUID(), OverlappingBody->GetUUID());
+		PF_CHECK(Tests, Overflowed);
+		const auto OverflowFailure = SensorRuntime.Advance(SensorScene, Timestep(0.0));
+		PF_CHECK(Tests, !OverflowFailure && OverflowFailure.error().Code == PhysicsSceneRuntimeErrorCode::ContactQueueOverflow);
+		PF_CHECK(Tests, SensorRuntime.GetStats().ContactQueueOverflows > 0);
+		const auto UnavailableQuery = SensorRuntime.Raycast({ 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }, 10.0f);
+		PF_CHECK(Tests, !UnavailableQuery && UnavailableQuery.error().Code == PhysicsSceneRuntimeErrorCode::ContactQueueOverflow);
+	#endif
 	}
 
 	void TestPhysicsTargetedSynchronizationAndCapacity(TestRunner& Tests)
@@ -1409,6 +1979,7 @@ void RunSceneTests(TestRunner& Tests)
 	TestSceneEntityAndHierarchy(Tests);
 	TestPhysicsComponentsAndPersistence(Tests);
 	TestPhysicsSceneRuntime(Tests);
+	TestPhysicsShapesQueriesAndSensorEvents(Tests);
 	TestPhysicsTargetedSynchronizationAndCapacity(Tests);
 	TestPhysicsFullSceneCapacityReclamation(Tests);
 	TestPhysicsLiveReconciliation(Tests);

@@ -342,6 +342,55 @@ namespace PulseForge
 			return true;
 		}
 
+		std::expected<bool, std::string> RunContactCallback(
+			ScriptInstance& Instance, size_t CallbackIndex, const Entity& OtherEntity)
+		{
+			lua_State* State = Instance.State;
+			const int StackBase = lua_gettop(State);
+			if (CallbackIndex >= Instance.CallbackNameReferences.size())
+				return std::unexpected(std::string("Invalid physics callback index"));
+			if (!lua_checkstack(State, 5))
+				return std::unexpected(std::string("Lua stack limit reached before physics callback"));
+
+			lua_rawgeti(State, LUA_REGISTRYINDEX, Instance.EnvironmentReference);
+			lua_rawgeti(State, LUA_REGISTRYINDEX, Instance.CallbackNameReferences[CallbackIndex]);
+			lua_rawget(State, -2);
+			lua_remove(State, -2);
+			if (lua_isnil(State, -1))
+			{
+				lua_settop(State, StackBase);
+				return false;
+			}
+			if (!lua_isfunction(State, -1))
+			{
+				lua_settop(State, StackBase);
+				return std::unexpected(std::string(CallbackNames[CallbackIndex]) + " must be a function when defined");
+			}
+
+			lua_rawgeti(State, LUA_REGISTRYINDEX, Instance.ContactCallbackDispatcherReference);
+			lua_insert(State, -2);
+			lua_pushlightuserdata(State, const_cast<Entity*>(&OtherEntity));
+			Instance.InstructionBudget = (Instance.MaximumInstructions / InstructionHookQuantum) * InstructionHookQuantum;
+			lua_sethook(State, InstructionBudgetHook, LUA_MASKCOUNT, InstructionHookQuantum);
+			const auto Callback = static_cast<ScriptRuntimeCallback>(CallbackIndex);
+			Observe(Instance.Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::CallbackEntered,
+					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset, .Callback = Callback });
+			const int Status = lua_pcall(State, 2, 0, 0);
+			lua_sethook(State, nullptr, 0, 0);
+			if (Status != LUA_OK)
+			{
+				std::string Message = LuaErrorMessage(State);
+				lua_settop(State, StackBase);
+				return std::unexpected(std::move(Message));
+			}
+			lua_settop(State, StackBase);
+			Observe(Instance.Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::CallbackCompleted,
+					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset, .Callback = Callback });
+			return true;
+		}
+
 		std::string GenericPathString(const std::filesystem::path& Path)
 		{
 			const std::u8string Encoded = Path.generic_u8string();
@@ -1418,6 +1467,55 @@ namespace PulseForge
 		{
 			return std::unexpected(MakeRuntimeError(
 				ScriptRuntimeErrorCode::OperationFailed, std::string("Could not advance script runtime: ") + Exception.what()));
+		}
+	}
+
+	bool ScriptRuntime::DispatchPhysicsContact(Scene& Source, const PhysicsContactEvent& Event) noexcept
+	{
+		if (!m_Impl || m_Impl->Source != &Source || Event.SessionGeneration != m_Description.SessionGeneration)
+			return true;
+		size_t CallbackIndex = 0;
+		if (Event.IsSensorPair)
+		{
+			CallbackIndex = Event.Phase == PhysicsContactPhase::Begin ? 6 :
+				Event.Phase == PhysicsContactPhase::Stay ? 7 : 8;
+		}
+		else
+		{
+			CallbackIndex = Event.Phase == PhysicsContactPhase::Begin ? 3 :
+				Event.Phase == PhysicsContactPhase::Stay ? 4 : 5;
+		}
+
+		try
+		{
+			const auto DispatchTo = [&](const Entity& Recipient, const Entity& Other) -> bool
+			{
+				const auto Current = Source.FindEntity(Recipient.GetUUID());
+				if (!Current || *Current != Recipient) return true;
+				const auto Script = m_Impl->Scripts.find(Recipient.GetUUID());
+				if (Script == m_Impl->Scripts.end()) return true;
+				ScriptInstance& Instance = *Script->second;
+				if (Instance.BoundEntity != Recipient || Instance.Faulted || Instance.Destroying || !Instance.SourceSnapshot)
+					return true;
+				Instance.DeferredRuntimeTransitionRequested = false;
+				auto Result = RunContactCallback(Instance, CallbackIndex, Other);
+				if (!Result)
+				{
+					Instance.Faulted = true;
+					m_Impl->RecordDiagnostic(MakeScriptDiagnostic(Recipient.GetUUID(), Instance.Asset,
+						ScriptDiagnosticCode::UpdateFailed, std::move(Result.error()), *Instance.SourceSnapshot,
+						Instance.SourceSnapshot->MainSourcePath));
+				}
+				m_Impl->RecordPendingModuleFailure(Instance);
+				return !Instance.DeferredRuntimeTransitionRequested;
+			};
+
+			if (!DispatchTo(Event.First, Event.Second)) return false;
+			return DispatchTo(Event.Second, Event.First);
+		}
+		catch (...)
+		{
+			return false;
 		}
 	}
 } // namespace PulseForge

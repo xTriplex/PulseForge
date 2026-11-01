@@ -97,6 +97,8 @@ namespace PulseForge
 		std::unique_ptr<PendingScene> m_PendingScene;
 		std::optional<AssetID> m_SceneAsset;
 		bool m_Paused = false;
+		bool m_StopRequested = false;
+		std::optional<AssetID> m_RequestedSceneTransition;
 		double m_TimeScale = 1.0;
 	};
 } // namespace PulseForge

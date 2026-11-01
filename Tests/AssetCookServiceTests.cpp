@@ -10,6 +10,7 @@
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
 #include "Runtime/CookedContentProvider.h"
+#include "Runtime/PlayerSession.h"
 #include "Scripting/ScriptRuntime.h"
 #include "Scene/SceneSerializer.h"
 #include "TestSupport.h"
@@ -371,6 +372,148 @@ namespace
 		PF_CHECK(Tests, (*Provider)->FindPrefab(PrefabAsset) != nullptr);
 #endif
 	}
+
+	void TestPhysicsQueriesSampleCookedPlayer(TestRunner& Tests)
+	{
+#if defined(PF_PHYSICS_QUERIES_SAMPLE_PROJECT)
+		constexpr AssetID SceneAsset{ 0xb017000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID QueryScript{ 0xb017000000004000ull, 0x8000000000000003ull };
+		constexpr AssetID SensorScript{ 0xb017000000004000ull, 0x8000000000000005ull };
+		constexpr AssetID SphereTarget{ 0xb017000000004000ull, 0x8000000000000011ull };
+		constexpr AssetID SensorEntity{ 0xb017000000004000ull, 0x8000000000000014ull };
+		constexpr AssetID MovingEntity{ 0xb017000000004000ull, 0x8000000000000012ull };
+		const auto ID = UUID::Generate();
+		PF_CHECK(Tests, ID.has_value());
+		if (!ID) return;
+		std::error_code Error;
+		const auto TemporaryDirectory = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path(Error), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto SourceRoot = TemporaryDirectory / std::filesystem::u8path("PulseForge-PhysicsQueries-" + ID->ToString());
+		const auto OutputRoot = TemporaryDirectory / std::filesystem::u8path("PulseForge-PhysicsQueries-Cook-" + ID->ToString());
+		struct OwnedRoots final
+		{
+			std::filesystem::path Source;
+			std::filesystem::path Output;
+			~OwnedRoots()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Source, CleanupError);
+				CleanupError.clear();
+				std::filesystem::remove_all(Output, CleanupError);
+			}
+		} Cleanup{ SourceRoot, OutputRoot };
+		std::filesystem::copy(std::filesystem::path(PF_PHYSICS_QUERIES_SAMPLE_PROJECT).parent_path(), SourceRoot,
+			std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto OpenedProject = Project::Open(SourceRoot / std::filesystem::path(PF_PHYSICS_QUERIES_SAMPLE_PROJECT).filename());
+		PF_CHECK(Tests, OpenedProject.has_value());
+		if (!OpenedProject) return;
+		auto Snapshot = AssetDependencyCatalogBuilder::Build(
+			OpenedProject->GetRootPath(), OpenedProject->GetDescription().ID, 1);
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		AssetCookRequest Request{
+			*Snapshot, OpenedProject->GetFilePath(), SceneAsset, {},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			OutputRoot
+		};
+		auto Plan = AssetCookService::Plan(Request);
+		if (!Plan) std::cerr << "G17 sample cook plan failed: " << Plan.error().Message << '\n';
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto HasProduct = [&](AssetID Asset, CookedAssetProductKind Kind)
+		{
+			return std::any_of(Plan->Products.begin(), Plan->Products.end(), [Asset, Kind](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Asset && Product.Product == Kind; });
+		};
+		PF_CHECK(Tests, HasProduct(QueryScript, CookedAssetProductKind::Script));
+		PF_CHECK(Tests, HasProduct(SensorScript, CookedAssetProductKind::Script));
+
+		// SceneRuntime is the shared coordinator used by Editor Play. Exercise the same authored
+		// scripts and physics interactions through that source-project path before testing the cook.
+		const auto SourceSceneRecord = OpenedProject->GetAssetRegistry().Find(SceneAsset);
+		PF_CHECK(Tests, SourceSceneRecord.has_value());
+		if (!SourceSceneRecord) return;
+		Scene SourcePlayScene;
+		const auto SourceScenePath = OpenedProject->GetRootPath() / SourceSceneRecord->ProjectRelativePath;
+		const auto SourceSceneLoad = SceneSerializer::LoadFromFile(SourceScenePath, SourcePlayScene);
+		PF_CHECK(Tests, SourceSceneLoad.has_value());
+		if (!SourceSceneLoad) return;
+		bool EditorPlayStopQueued = false;
+		SceneRuntimeServices EditorPlayServices;
+		EditorPlayServices.QueueStop = [&EditorPlayStopQueued]()
+		{
+			EditorPlayStopQueued = true;
+			return true;
+		};
+		SceneRuntimeDesc EditorPlayDescription;
+		EditorPlayDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		EditorPlayDescription.Physics.Gravity = glm::vec3(0.0f);
+		SceneRuntime EditorPlay(*OpenedProject, EditorPlayDescription, std::move(EditorPlayServices));
+		const auto EditorPlayStart = EditorPlay.Start(SourcePlayScene);
+		PF_CHECK(Tests, EditorPlayStart.has_value());
+		if (!EditorPlayStart) return;
+		for (uint32_t Frame = 0; Frame < 300 && !EditorPlayStopQueued; ++Frame)
+		{
+			const auto Advanced = EditorPlay.Advance(SourcePlayScene, Timestep(1.0 / 60.0));
+			if (!Advanced)
+			{
+				std::cerr << "G17 Editor Play sample failed: " << Advanced.error().Message << '\n';
+				break;
+			}
+		}
+		const bool EditorPlayHadDiagnostics = !EditorPlay.GetScriptDiagnostics().empty();
+		EditorPlay.Stop(); // The host applies the queued Stop only after Advance returns.
+		PF_CHECK(Tests, EditorPlayStopQueued && !EditorPlay.IsRunning());
+		PF_CHECK(Tests, !EditorPlayHadDiagnostics);
+		PF_CHECK(Tests, !SourcePlayScene.FindEntity(SensorEntity).has_value());
+
+		auto Cooked = AssetCookService::Cook(*Plan);
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		auto Provider = CookedContentProvider::Open(OutputRoot, Request.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		PF_CHECK(Tests, (*Provider)->FindScript(QueryScript) != nullptr && (*Provider)->FindScript(SensorScript) != nullptr);
+		auto CookedScene = (*Provider)->LoadScene(SceneAsset);
+		PF_CHECK(Tests, CookedScene.has_value());
+		if (!CookedScene) return;
+		const auto Sphere = (*CookedScene)->FindEntity(SphereTarget);
+		const auto Trigger = (*CookedScene)->FindEntity(SensorEntity);
+		PF_CHECK(Tests, Sphere && Trigger);
+		if (!Sphere || !Trigger) return;
+		const auto SphereCollider = Sphere->GetCollider();
+		const auto TriggerCollider = Trigger->GetCollider();
+		PF_CHECK(Tests, SphereCollider && SphereCollider->has_value() && (**SphereCollider).Shape == ColliderShape::Sphere);
+		PF_CHECK(Tests, TriggerCollider && TriggerCollider->has_value() && (**TriggerCollider).IsSensor);
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		RuntimeDescription.Physics.Gravity = glm::vec3(0.0f);
+		PlayerSession Session(*Provider, RuntimeDescription);
+		PF_CHECK(Tests, Session.Start().has_value());
+		uint32_t Frames = 0;
+		while (Session.IsRunning() && Frames < 300)
+		{
+			auto Frame = Session.Advance(Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, Frame.has_value());
+			if (!Frame) break;
+			++Frames;
+		}
+		PF_CHECK(Tests, Frames > 0 && Frames < 300);
+		PF_CHECK(Tests, !Session.IsRunning());
+#else
+		(void)Tests;
+#endif
+	}
 }
 
 void RunAssetCookServiceTests(TestRunner& Tests)
@@ -657,4 +800,5 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	}
 	TestLinkedPrefabSampleCookAndRuntimeScene(Tests);
 	TestLuaAuthoringSampleCookAndRuntime(Tests);
+	TestPhysicsQueriesSampleCookedPlayer(Tests);
 }

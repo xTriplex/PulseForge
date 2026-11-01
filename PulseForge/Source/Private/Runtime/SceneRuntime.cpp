@@ -13,6 +13,7 @@
 
 #include <optional>
 #include <exception>
+#include <atomic>
 
 namespace PulseForge
 {
@@ -24,6 +25,14 @@ namespace PulseForge
 			std::string Message)
 		{
 			return { Code, Subsystem, std::move(Message) };
+		}
+
+		uint64_t NextRuntimeSessionGeneration() noexcept
+		{
+			static std::atomic<uint64_t> Generation = 0;
+			uint64_t Value = Generation.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (Value == 0) Value = Generation.fetch_add(1, std::memory_order_relaxed) + 1;
+			return Value;
 		}
 	}
 
@@ -37,6 +46,13 @@ namespace PulseForge
 		std::unique_ptr<ScriptRuntime> Scripting;
 		Scene* Source = nullptr;
 		bool Paused = false;
+		enum class Lifecycle : uint8_t { Starting, Active, Stopping };
+		enum class RequestStatus : uint8_t { None, Pending, Committed, Rejected, Cancelled, Superseded };
+		Lifecycle State = Lifecycle::Starting;
+		RequestStatus BoundaryRequestStatus = RequestStatus::None;
+		std::optional<SceneRuntimeBoundaryRequest> BoundaryRequest;
+		uint64_t SessionGeneration = 0;
+		uint64_t NextBoundaryRequestGeneration = 0;
 	};
 
 	#if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -57,7 +73,10 @@ namespace PulseForge
 	{
 	}
 
-	SceneRuntime::~SceneRuntime() = default;
+	SceneRuntime::~SceneRuntime()
+	{
+		Stop();
+	}
 
 	std::expected<void, SceneRuntimeError> SceneRuntime::Start(Scene& Source)
 	{
@@ -69,10 +88,12 @@ namespace PulseForge
 
 		try
 		{
-			if (++m_NextSessionGeneration == 0) ++m_NextSessionGeneration;
-			m_Description.Scripting.SessionGeneration = m_NextSessionGeneration;
+			const uint64_t SessionGeneration = NextRuntimeSessionGeneration();
+			m_Description.Scripting.SessionGeneration = SessionGeneration;
+			m_Description.Physics.SessionGeneration = SessionGeneration;
 			auto Candidate = std::make_unique<Impl>();
 			Candidate->Source = &Source;
+			Candidate->SessionGeneration = SessionGeneration;
 
 			auto AudioDevice = AudioEngine::Create(m_Description.Audio);
 			if (!AudioDevice)
@@ -123,12 +144,55 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Audio,
 					"Could not start scene audio: " + Result.error().Message));
 
-			const ScriptRuntimeServices Services{
+			ScriptRuntimeServices Services{
 				.Physics = Candidate->Physics.get(),
 				.Audio = Candidate->Audio.get(),
 				.GameplayInput = m_Services.GameplayInput,
 				.InputState = m_Services.InputState,
 				.Observer = m_Services.ScriptObserver };
+			auto* CandidateOwner = Candidate.get();
+			if (m_Services.QueueSceneTransition)
+			{
+				Services.QueueSceneTransition = [CandidateOwner, Request = m_Services.QueueSceneTransition](const AssetID& Asset)
+				{
+					if (CandidateOwner->State != Impl::Lifecycle::Active ||
+						CandidateOwner->BoundaryRequestStatus == Impl::RequestStatus::Committed) return false;
+					if (CandidateOwner->BoundaryRequest &&
+						CandidateOwner->BoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop) return false;
+					if (CandidateOwner->BoundaryRequest) return false;
+					if (!Request(Asset)) return false;
+					if (++CandidateOwner->NextBoundaryRequestGeneration == 0)
+						++CandidateOwner->NextBoundaryRequestGeneration;
+					CandidateOwner->BoundaryRequest = SceneRuntimeBoundaryRequest{
+						.SessionGeneration = CandidateOwner->SessionGeneration,
+						.RequestGeneration = CandidateOwner->NextBoundaryRequestGeneration,
+						.Kind = SceneRuntimeBoundaryRequestKind::SceneTransition,
+						.Scene = Asset };
+					CandidateOwner->BoundaryRequestStatus = Impl::RequestStatus::Pending;
+					return true;
+				};
+			}
+			if (m_Services.QueueStop)
+			{
+				Services.QueueStop = [CandidateOwner, Request = m_Services.QueueStop]()
+				{
+					if (CandidateOwner->State != Impl::Lifecycle::Active ||
+						CandidateOwner->BoundaryRequestStatus == Impl::RequestStatus::Committed) return false;
+					if (CandidateOwner->BoundaryRequest &&
+						CandidateOwner->BoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop) return false;
+					if (!Request()) return false;
+					if (CandidateOwner->BoundaryRequest)
+						CandidateOwner->BoundaryRequestStatus = Impl::RequestStatus::Superseded;
+					if (++CandidateOwner->NextBoundaryRequestGeneration == 0)
+						++CandidateOwner->NextBoundaryRequestGeneration;
+					CandidateOwner->BoundaryRequest = SceneRuntimeBoundaryRequest{
+						.SessionGeneration = CandidateOwner->SessionGeneration,
+						.RequestGeneration = CandidateOwner->NextBoundaryRequestGeneration,
+						.Kind = SceneRuntimeBoundaryRequestKind::Stop };
+					CandidateOwner->BoundaryRequestStatus = Impl::RequestStatus::Pending;
+					return true;
+				};
+			}
 			if (m_CookedAssets)
 				Candidate->Scripting = std::make_unique<ScriptRuntime>(m_CookedAssets, m_Description.Scripting, Services);
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -141,6 +205,7 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Scripting,
 					"Could not start scene scripting: " + Result.error().Message));
 
+			Candidate->State = Impl::Lifecycle::Active;
 			m_Impl = std::move(Candidate);
 			return {};
 		}
@@ -155,6 +220,12 @@ namespace PulseForge
 
 	void SceneRuntime::Stop() noexcept
 	{
+		if (m_Impl)
+		{
+			m_Impl->State = Impl::Lifecycle::Stopping;
+			m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
+			m_Impl->BoundaryRequest.reset();
+		}
 		m_Impl.reset();
 	}
 
@@ -217,6 +288,40 @@ namespace PulseForge
 		return m_Impl ? m_Impl->Scripting->GetDiagnostics() : std::span<const ScriptDiagnostic>{};
 	}
 
+	std::optional<SceneRuntimeBoundaryRequest> SceneRuntime::GetPendingBoundaryRequest() const noexcept
+	{
+		if (!m_Impl || m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending) return std::nullopt;
+		return m_Impl->BoundaryRequest;
+	}
+
+	bool SceneRuntime::ResolveBoundaryRequest(
+		const SceneRuntimeBoundaryRequest& Request,
+		SceneRuntimeBoundaryResolution Resolution) noexcept
+	{
+		if (!m_Impl || m_Impl->State != Impl::Lifecycle::Active ||
+			m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending || !m_Impl->BoundaryRequest ||
+			m_Impl->BoundaryRequest->SessionGeneration != Request.SessionGeneration ||
+			m_Impl->BoundaryRequest->RequestGeneration != Request.RequestGeneration ||
+			m_Impl->BoundaryRequest->Kind != Request.Kind || m_Impl->BoundaryRequest->Scene != Request.Scene)
+			return false;
+
+		switch (Resolution)
+		{
+			case SceneRuntimeBoundaryResolution::Committed:
+				m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Committed;
+				return true;
+			case SceneRuntimeBoundaryResolution::Rejected:
+				m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Rejected;
+				m_Impl->BoundaryRequest.reset();
+				return true;
+			case SceneRuntimeBoundaryResolution::Cancelled:
+				m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
+				m_Impl->BoundaryRequest.reset();
+				return true;
+		}
+		return false;
+	}
+
 	std::expected<SceneRuntimeFrameResult, SceneRuntimeError> SceneRuntime::Advance(
 		Scene& Source,
 		Timestep FrameDelta)
@@ -237,6 +342,9 @@ namespace PulseForge
 				SceneRuntimeErrorCode::InvalidDeltaTime,
 				SceneRuntimeSubsystem::None,
 				"Scene runtime frame delta must be finite and non-negative"));
+		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
 		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
 				"Could not service queued script reloads: " + Result.error().Message));
@@ -250,6 +358,9 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Scripting,
 					"Could not update scene scripts: " + Result.error().Message));
 		}
+		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
 
 		auto PhysicsResult = [&]
 		{
@@ -262,6 +373,12 @@ namespace PulseForge
 				SceneRuntimeSubsystem::Physics,
 				"Could not advance scene physics: " + PhysicsResult.error().Message));
 
+		for (const PhysicsContactEvent& Event : m_Impl->Physics->TakeContactEvents())
+		{
+			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
+				return SceneRuntimeFrameResult{ .PhysicsSteps = *PhysicsResult, .PhysicsStats = m_Impl->Physics->GetStats() };
+		}
+
 		{
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "AudioSceneRuntime::Advance", "AudioSceneRuntime");
 			if (auto Result = m_Impl->Audio->Advance(Source); !Result)
@@ -271,6 +388,6 @@ namespace PulseForge
 					"Could not update scene audio: " + Result.error().Message));
 		}
 
-		return SceneRuntimeFrameResult{ *PhysicsResult };
+		return SceneRuntimeFrameResult{ *PhysicsResult, m_Impl->Physics->GetStats() };
 	}
 }

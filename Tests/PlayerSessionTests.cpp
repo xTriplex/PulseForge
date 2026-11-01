@@ -65,7 +65,7 @@ namespace
 
 	struct ScriptObservationBuffer
 	{
-		std::array<PulseForge::ScriptRuntimeObservation, 64> Events{};
+		std::array<PulseForge::ScriptRuntimeObservation, 512> Events{};
 		size_t Count = 0;
 		bool Overflowed = false;
 	};
@@ -144,6 +144,8 @@ namespace
 			std::as_bytes(std::span(TimeScaleScript.data(), TimeScaleScript.size())), "Assets/Scripts/time_scale.lua");
 		PF_CHECK(Tests, ScriptAsset.has_value());
 		if (!ScriptAsset) return;
+		const AssetID MissingTransitionAsset{ 0x7600000000000000ull, 0xdeadbeefull };
+		const std::string MissingTransitionText = MissingTransitionAsset.ToString();
 		const std::string TeardownScript = "function OnCreate()\n"
 			"  local marker, message = scene.create_entity('rejected candidate initialization marker')\n"
 			"  assert(marker, message)\n"
@@ -168,6 +170,26 @@ namespace
 			std::as_bytes(std::span(RetryScript.data(), RetryScript.size())), "Assets/Scripts/retry_teardown.lua");
 		PF_CHECK(Tests, RetryScriptAsset.has_value());
 		if (!RetryScriptAsset) return;
+		const std::string CandidateRequestScript = "function OnCreate()\n"
+			"  local queued, message = scene.request_transition('" + MissingTransitionText + "')\n"
+			"  assert(queued, message)\n"
+			"end\n";
+		const auto CandidateRequestScriptAsset = AssetOperations::CreateAssetFromBytes(
+			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			std::as_bytes(std::span(CandidateRequestScript.data(), CandidateRequestScript.size())),
+			"Assets/Scripts/candidate_request.lua");
+		PF_CHECK(Tests, CandidateRequestScriptAsset.has_value());
+		if (!CandidateRequestScriptAsset) return;
+		const std::string TeardownRequestScript = "function OnDestroy()\n"
+			"  local queued, message = scene.request_stop()\n"
+			"  assert(queued, message)\n"
+			"end\n";
+		const auto TeardownRequestScriptAsset = AssetOperations::CreateAssetFromBytes(
+			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			std::as_bytes(std::span(TeardownRequestScript.data(), TeardownRequestScript.size())),
+			"Assets/Scripts/teardown_request.lua");
+		PF_CHECK(Tests, TeardownRequestScriptAsset.has_value());
+		if (!TeardownRequestScriptAsset) return;
 
 		Scene StartupScene;
 		auto StartupEntity = StartupScene.CreateEntity("Startup Entity");
@@ -194,10 +216,66 @@ namespace
 		PF_CHECK(Tests, RetryEntity.has_value());
 		if (!RetryEntity) return;
 		PF_CHECK(Tests, RetryEntity->SetScript(ScriptComponent{ RetryScriptAsset->ID }).has_value());
+		auto CandidateRequestEntity = RetryScene.CreateEntity("Candidate request isolation probe");
+		PF_CHECK(Tests, CandidateRequestEntity.has_value());
+		if (!CandidateRequestEntity) return;
+		PF_CHECK(Tests, CandidateRequestEntity->SetScript(ScriptComponent{ CandidateRequestScriptAsset->ID }).has_value());
 		auto RetryAsset = SceneAssetService::Create(
 			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(), "Assets/Retry.scene", RetryScene);
 		PF_CHECK(Tests, RetryAsset.has_value());
 		if (!RetryAsset) return;
+		Scene InvalidPhysicsTransitionScene;
+		const auto InvalidPhysicsEntity = InvalidPhysicsTransitionScene.CreateEntity("Invalid destination body");
+		PF_CHECK(Tests, InvalidPhysicsEntity.has_value());
+		if (!InvalidPhysicsEntity) return;
+		PF_CHECK(Tests, InvalidPhysicsEntity->SetRigidbody(RigidbodyComponent{}).has_value());
+		auto InvalidPhysicsTransitionAsset = SceneAssetService::Create(
+			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			"Assets/InvalidPhysicsTransition.scene", InvalidPhysicsTransitionScene);
+		PF_CHECK(Tests, InvalidPhysicsTransitionAsset.has_value());
+		if (!InvalidPhysicsTransitionAsset) return;
+		const std::string InvalidPhysicsTransitionText = InvalidPhysicsTransitionAsset->ID.ToString();
+		const std::string DeferredTransitionScript = "local updates = 0\n"
+			"function OnUpdate()\n"
+			"  updates = updates + 1\n"
+			"  assert(entity:set_translation(updates, 10, 0))\n"
+			"  if updates == 1 then\n"
+			"    local queued, message = scene.request_transition('" + MissingTransitionText + "')\n"
+			"    assert(queued, message)\n"
+			"  elseif updates == 2 then\n"
+			"    local queued, message = scene.request_transition('" + InvalidPhysicsTransitionText + "')\n"
+			"    assert(queued, message)\n"
+			"  end\n"
+			"end\n";
+		const auto DeferredTransitionScriptAsset = AssetOperations::CreateAssetFromBytes(
+			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			std::as_bytes(std::span(DeferredTransitionScript.data(), DeferredTransitionScript.size())),
+			"Assets/Scripts/deferred_transition.lua");
+		PF_CHECK(Tests, DeferredTransitionScriptAsset.has_value());
+		if (!DeferredTransitionScriptAsset) return;
+		Scene DeferredTransitionScene;
+		auto DeferredTransitionEntity = DeferredTransitionScene.CreateEntity("Deferred transition source");
+		PF_CHECK(Tests, DeferredTransitionEntity.has_value());
+		if (!DeferredTransitionEntity) return;
+		PF_CHECK(Tests, DeferredTransitionEntity->SetScript(ScriptComponent{ DeferredTransitionScriptAsset->ID }).has_value());
+		auto TeardownRequestEntity = DeferredTransitionScene.CreateEntity("Old teardown request isolation probe");
+		PF_CHECK(Tests, TeardownRequestEntity.has_value());
+		if (!TeardownRequestEntity) return;
+		PF_CHECK(Tests, TeardownRequestEntity->SetScript(ScriptComponent{ TeardownRequestScriptAsset->ID }).has_value());
+		auto DeferredPhysicsEntity = DeferredTransitionScene.CreateEntity("Deferred transition physics witness");
+		PF_CHECK(Tests, DeferredPhysicsEntity.has_value());
+		if (!DeferredPhysicsEntity) return;
+		TransformComponent DeferredPhysicsTransform;
+		DeferredPhysicsTransform.Translation.y = 10.0f;
+		PF_CHECK(Tests, DeferredPhysicsEntity->SetTransform(DeferredPhysicsTransform).has_value());
+		PF_CHECK(Tests, DeferredPhysicsEntity->SetRigidbody(
+			{ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, DeferredPhysicsEntity->SetBoxCollider(BoxColliderComponent{}).has_value());
+		auto DeferredTransitionAsset = SceneAssetService::Create(
+			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			"Assets/DeferredTransition.scene", DeferredTransitionScene);
+		PF_CHECK(Tests, DeferredTransitionAsset.has_value());
+		if (!DeferredTransitionAsset) return;
 		const auto StartupBytes = ReadFile(Root / "Assets/Startup.scene");
 		const auto SecondBytes = ReadFile(Root / "Assets/Second.scene");
 		const auto RetryBytes = ReadFile(Root / "Assets/Retry.scene");
@@ -205,6 +283,7 @@ namespace
 
 		SceneRuntimeDesc RuntimeDescription;
 		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		RuntimeDescription.Physics.Gravity = glm::vec3(0.0f, -9.81f, 0.0f);
 		int PauseAttempts = 0;
 		ScriptObservationBuffer ScriptObservations;
 		SceneRuntimeServices RuntimeServices;
@@ -283,7 +362,7 @@ namespace
 		PF_CHECK(Tests, PausedAdvance && PausedAdvance->PhysicsSteps == 0);
 		PF_CHECK(Tests, Session.GetActiveSceneAsset() == RetryAsset->ID);
 		PF_CHECK(Tests, Session.GetActiveScene() != OriginalScene);
-		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 2);
+		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 3);
 		const auto RetryEntityID = RetryEntity->GetUUID();
 		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::ScriptAttached,
 			RetryScriptAsset->ID, RetryEntityID) == 1);
@@ -298,6 +377,11 @@ namespace
 		PF_CHECK(Tests, Session.Resume().has_value());
 		PF_CHECK(Tests, !Session.IsPaused());
 		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == RetryAsset->ID);
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == RetryAsset->ID);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::Diagnostic,
+			CandidateRequestScriptAsset->ID, CandidateRequestEntity->GetUUID()) > 0);
 
 		PF_CHECK(Tests, !StartupBytes.empty());
 		PF_CHECK(Tests, Session.GetActiveScene()->CreateEntity("Runtime Only Mutation").has_value());
@@ -327,6 +411,53 @@ namespace
 		PF_CHECK(Tests, !ScriptObservations.Overflowed);
 		const auto AdvanceAfterStop = Session.Advance(Timestep(0.01));
 		PF_CHECK(Tests, !AdvanceAfterStop && AdvanceAfterStop.error().Code == PlayerSessionErrorCode::NotStarted);
+
+		PlayerSession RejectedTransitionSession(ProjectFile, RuntimeDescription, RuntimeServices);
+		PF_CHECK(Tests, RejectedTransitionSession.Start(DeferredTransitionAsset->ID).has_value());
+		const Scene* DeferredSceneBeforeFailure = RejectedTransitionSession.GetActiveScene();
+		const auto DeferredEntityBefore = DeferredSceneBeforeFailure->FindEntity(DeferredTransitionEntity->GetUUID());
+		const auto DeferredPhysicsBefore = DeferredSceneBeforeFailure->FindEntity(DeferredPhysicsEntity->GetUUID());
+		PF_CHECK(Tests, DeferredEntityBefore.has_value() && DeferredPhysicsBefore.has_value());
+		if (!DeferredEntityBefore || !DeferredPhysicsBefore) return;
+		const auto DeferredTransformBefore = DeferredEntityBefore->GetTransform();
+		const auto DeferredPhysicsTransformBefore = DeferredPhysicsBefore->GetTransform();
+		PF_CHECK(Tests, DeferredTransformBefore.has_value() && DeferredPhysicsTransformBefore.has_value());
+		const auto RejectedDeferredLoad = RejectedTransitionSession.Advance(Timestep(0.1));
+		PF_CHECK(Tests, !RejectedDeferredLoad && RejectedDeferredLoad.error().Code == PlayerSessionErrorCode::SceneLoadFailed);
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveScene() == DeferredSceneBeforeFailure);
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveSceneAsset() == DeferredTransitionAsset->ID);
+		const auto QueuedRuntimeFailure = RejectedTransitionSession.Advance(Timestep(0.1));
+		PF_CHECK(Tests, QueuedRuntimeFailure.has_value());
+		if (!QueuedRuntimeFailure) return;
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveScene() == DeferredSceneBeforeFailure);
+		const auto CandidateRuntimeFailure = RejectedTransitionSession.Advance(Timestep(0.1));
+		PF_CHECK(Tests, !CandidateRuntimeFailure &&
+			CandidateRuntimeFailure.error().Code == PlayerSessionErrorCode::RuntimeStartFailed);
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveScene() == DeferredSceneBeforeFailure);
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveSceneAsset() == DeferredTransitionAsset->ID);
+		const auto ResumedDeferredFrame = RejectedTransitionSession.Advance(Timestep(0.1));
+		PF_CHECK(Tests, ResumedDeferredFrame.has_value());
+		if (!ResumedDeferredFrame) return;
+		const auto DeferredEntityAfter = RejectedTransitionSession.GetActiveScene()->FindEntity(DeferredTransitionEntity->GetUUID());
+		const auto DeferredPhysicsAfter = RejectedTransitionSession.GetActiveScene()->FindEntity(DeferredPhysicsEntity->GetUUID());
+		PF_CHECK(Tests, DeferredEntityAfter.has_value() && DeferredPhysicsAfter.has_value());
+		if (!DeferredEntityAfter || !DeferredPhysicsAfter) return;
+		const auto DeferredTransformAfter = DeferredEntityAfter->GetTransform();
+		const auto DeferredPhysicsTransformAfter = DeferredPhysicsAfter->GetTransform();
+		PF_CHECK(Tests, DeferredTransformAfter.has_value() && DeferredPhysicsTransformAfter.has_value());
+		if (DeferredTransformBefore && DeferredTransformAfter)
+			PF_CHECK(Tests, DeferredTransformAfter->Translation.x > DeferredTransformBefore->Translation.x);
+		if (DeferredPhysicsTransformBefore && DeferredPhysicsTransformAfter)
+			PF_CHECK(Tests, DeferredPhysicsTransformAfter->Translation.y < DeferredPhysicsTransformBefore->Translation.y);
+		PF_CHECK(Tests, RejectedTransitionSession.RequestSceneTransition(RetryAsset->ID).has_value());
+		PF_CHECK(Tests, RejectedTransitionSession.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveSceneAsset() == RetryAsset->ID);
+		PF_CHECK(Tests, RejectedTransitionSession.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, RejectedTransitionSession.GetActiveSceneAsset() == RetryAsset->ID);
+		PF_CHECK(Tests, RejectedTransitionSession.IsRunning());
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::Diagnostic,
+			TeardownRequestScriptAsset->ID, TeardownRequestEntity->GetUUID()) > 0);
+		RejectedTransitionSession.Stop();
 
 		const std::array Override = { SecondAsset->ID };
 		PlayerSession OverrideSession(ProjectFile, RuntimeDescription);

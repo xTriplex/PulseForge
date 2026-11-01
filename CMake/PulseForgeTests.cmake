@@ -83,7 +83,7 @@ if(BUILD_TESTING)
 		Tests/PropertyMetadataTests.cpp
 		Tests/ScriptPropertyMetadataTests.cpp
 	)
-	target_include_directories(PulseForgeSceneTests PRIVATE Tests)
+	target_include_directories(PulseForgeSceneTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeSceneTests PRIVATE
 		PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath PulseForgePhysics)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
@@ -116,7 +116,8 @@ if(BUILD_TESTING)
 	target_compile_definitions(PulseForgeAssetTests PRIVATE
 		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\""
 			"PF_PREFAB_LINKED_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PrefabLinkedInstances/PrefabLinkedInstances.pfproj\""
-			"PF_LUA_AUTHORING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/LuaAuthoring/PrefabLinkedInstances.pfproj\"")
+			"PF_LUA_AUTHORING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/LuaAuthoring/PrefabLinkedInstances.pfproj\""
+			"PF_PHYSICS_QUERIES_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PhysicsQueries/PhysicsQueries.pfproj\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)

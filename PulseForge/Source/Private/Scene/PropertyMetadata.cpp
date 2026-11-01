@@ -16,6 +16,7 @@ namespace PulseForge
 		constexpr std::string_view SpotLightId = PropertyComponentIds::SpotLight;
 		constexpr std::string_view MeshRendererId = PropertyComponentIds::MeshRenderer;
 		constexpr std::string_view ScriptId = PropertyComponentIds::Script;
+		constexpr std::string_view ColliderId = PropertyComponentIds::Collider;
 
 		const std::array Descriptors{ PropertyDescriptor{ TagId, "name", "Name", std::string("Entity") },
 			PropertyDescriptor{ TransformId, "translation", "Translation", glm::vec3(0.0f), "world units" },
@@ -55,7 +56,15 @@ namespace PulseForge
 				PropertyReferenceKind::MaterialAsset },
 			PropertyDescriptor{ MeshRendererId, "meshAsset", "Mesh", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::MeshAsset },
 			PropertyDescriptor{ ScriptId, "enabled", "Enabled", true, "" },
-			PropertyDescriptor{ ScriptId, "asset", "Script", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::ScriptAsset } };
+			PropertyDescriptor{ ScriptId, "asset", "Script", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::ScriptAsset },
+			PropertyDescriptor{ ColliderId, PropertyIds::Shape, "Shape", std::string("box") },
+			PropertyDescriptor{ ColliderId, PropertyIds::HalfExtents, "Half extents", glm::vec3(0.5f), "world units" },
+			PropertyDescriptor{ ColliderId, PropertyIds::SphereRadius, "Sphere radius", 0.5f, "world units", true, true, 0.001f },
+			PropertyDescriptor{ ColliderId, PropertyIds::CapsuleRadius, "Capsule radius", 0.35f, "world units", true, true, 0.001f },
+			PropertyDescriptor{ ColliderId, PropertyIds::CapsuleHeight, "Capsule total height", 1.8f, "world units", true, true, 0.001f },
+			PropertyDescriptor{ ColliderId, PropertyIds::IsSensor, "Sensor", false, "" },
+			PropertyDescriptor{ ColliderId, PropertyIds::CollisionCategory, "Collision category", uint32_t{ 1 }, "bit mask" },
+			PropertyDescriptor{ ColliderId, PropertyIds::CollisionMask, "Collision mask", uint32_t{ 0xffffffffu }, "bit mask" } };
 
 		PropertyAccessError MakeError(PropertyAccessErrorCode Code, std::string Message)
 		{
@@ -159,6 +168,24 @@ namespace PulseForge
 			if (PropertyId == "translation") return PropertyValue{ Transform->Translation };
 			if (PropertyId == "rotation") return PropertyValue{ Transform->Rotation };
 			return PropertyValue{ Transform->Scale };
+		}
+		if (ComponentId == ColliderId)
+		{
+			auto Collider = RequireComponent(Target.GetCollider(), ComponentId);
+			if (!Collider) return std::unexpected(Collider.error());
+			if (PropertyId == PropertyIds::Shape)
+			{
+				const char* Name = Collider->Shape == ColliderShape::Box ? "box" :
+					Collider->Shape == ColliderShape::Sphere ? "sphere" : "capsule";
+				return PropertyValue{ std::string(Name) };
+			}
+			if (PropertyId == PropertyIds::HalfExtents) return PropertyValue{ Collider->HalfExtents };
+			if (PropertyId == PropertyIds::SphereRadius) return PropertyValue{ Collider->SphereRadius };
+			if (PropertyId == PropertyIds::CapsuleRadius) return PropertyValue{ Collider->CapsuleRadius };
+			if (PropertyId == PropertyIds::CapsuleHeight) return PropertyValue{ Collider->CapsuleHeight };
+			if (PropertyId == PropertyIds::IsSensor) return PropertyValue{ Collider->IsSensor };
+			if (PropertyId == PropertyIds::CollisionCategory) return PropertyValue{ Collider->CollisionCategory };
+			return PropertyValue{ Collider->CollisionMask };
 		}
 		if (ComponentId == DirectionalLightId)
 		{
@@ -264,6 +291,65 @@ namespace PulseForge
 				Current->Scale = *Typed;
 			}
 			const auto Result = Target.SetTransform(*Current);
+			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());
+		}
+		if (ComponentId == ColliderId)
+		{
+			auto Current = RequireComponent(Target.GetCollider(), ComponentId);
+			if (!Current) return std::unexpected(Current.error());
+			if (PropertyId == PropertyIds::Shape)
+			{
+				auto Typed = RequireValue<std::string>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				if (*Typed == "box") Current->Shape = ColliderShape::Box;
+				else if (*Typed == "sphere") Current->Shape = ColliderShape::Sphere;
+				else if (*Typed == "capsule") Current->Shape = ColliderShape::Capsule;
+				else return std::unexpected(MakeError(PropertyAccessErrorCode::InvalidValue,
+					"Collider shape must be box, sphere, or capsule"));
+			}
+			else if (PropertyId == PropertyIds::HalfExtents)
+			{
+				auto Typed = RequireValue<glm::vec3>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->HalfExtents = *Typed;
+			}
+			else if (PropertyId == PropertyIds::SphereRadius)
+			{
+				auto Typed = RequireValue<float>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->SphereRadius = *Typed;
+			}
+			else if (PropertyId == PropertyIds::CapsuleRadius)
+			{
+				auto Typed = RequireValue<float>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->CapsuleRadius = *Typed;
+			}
+			else if (PropertyId == PropertyIds::CapsuleHeight)
+			{
+				auto Typed = RequireValue<float>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->CapsuleHeight = *Typed;
+			}
+			else if (PropertyId == PropertyIds::IsSensor)
+			{
+				auto Typed = RequireValue<bool>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->IsSensor = *Typed;
+			}
+			else if (PropertyId == PropertyIds::CollisionCategory)
+			{
+				auto Typed = RequireValue<uint32_t>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->CollisionCategory = *Typed;
+			}
+			else
+			{
+				auto Typed = RequireValue<uint32_t>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->CollisionMask = *Typed;
+			}
+			const auto Result = Target.SetCollider(*Current);
 			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());
 		}
 

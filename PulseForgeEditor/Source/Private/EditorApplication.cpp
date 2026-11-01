@@ -1129,12 +1129,19 @@ namespace
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
-				if (auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime); !Result)
+				auto* RuntimeBeforeAdvance = m_SceneRuntime.get();
+				auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime);
+				const bool HasDeferredBoundaryRequest = m_SceneRuntime->GetPendingBoundaryRequest().has_value();
+				if (HasDeferredBoundaryRequest || m_RuntimeStopRequested || m_QueuedRuntimeSceneTransition)
+					ServiceRuntimeBoundaryRequests();
+				if (!Result && !HasDeferredBoundaryRequest && m_SceneRuntime)
 				{
 					const std::string Message = "Runtime update failed: " + Result.error().Message;
 					StopRuntime();
 					SetError(Message);
 				}
+				else if (!Result && HasDeferredBoundaryRequest && m_SceneRuntime.get() == RuntimeBeforeAdvance)
+					SetError("Runtime update failed while a deferred transition was being processed: " + Result.error().Message);
 			}
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			AdvanceEditorRuntimePlayStopTest();
@@ -7577,6 +7584,7 @@ namespace
 				SelectSingleEntity(std::nullopt);
 				CancelGizmoInteraction();
 			}
+			DrawSelectedColliderOutline();
 
 			const glm::vec2 Mouse{ IO.MousePos.x, IO.MousePos.y };
 			if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
@@ -7736,6 +7744,119 @@ namespace
 			}
 			DrawList->AddCircleFilled(ImVec2(Geometry.PivotScreen.x, Geometry.PivotScreen.y), 5.0f,
 				ImGui::ColorConvertFloat4ToU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Text)));
+			DrawList->PopClipRect();
+		}
+
+		void DrawSelectedColliderOutline()
+		{
+			if (!m_Scene || !SelectedEntity() || !m_ViewportRenderView.IsViewProjectionValid()) return;
+			const auto Target = m_Scene->FindEntity(*SelectedEntity());
+			if (!Target) return;
+			const auto Collider = Target->GetCollider();
+			const auto Transform = Target->GetTransform();
+			const auto Parent = Target->GetParent();
+			const auto World = Target->GetWorldMatrix();
+			if (!Collider || !Collider->has_value() || !Transform || !Parent || Parent->has_value() || !World ||
+				!PulseForgeEditor::Detail::IsFinite(*World) || !(**Collider).Validate()) return;
+
+			const glm::vec3 Scale = glm::abs(Transform->Scale);
+			const PulseForge::BoxColliderComponent& Shape = **Collider;
+			if (!PulseForgeEditor::Detail::IsFinite(Scale) || Scale.x <= 0.00001f || Scale.y <= 0.00001f || Scale.z <= 0.00001f)
+				return;
+			if (Shape.Shape == PulseForge::ColliderShape::Sphere &&
+				(std::abs(Scale.x - Scale.y) > 0.0001f || std::abs(Scale.x - Scale.z) > 0.0001f)) return;
+			if (Shape.Shape == PulseForge::ColliderShape::Capsule &&
+				(std::abs(Scale.x - Scale.y) > 0.0001f || std::abs(Scale.x - Scale.z) > 0.0001f)) return;
+
+			const glm::mat4 ViewProjection = m_ViewportRenderView.GetViewProjection();
+			const glm::vec2 ImageSize = m_ViewportImageRect.Maximum - m_ViewportImageRect.Minimum;
+			if (ImageSize.x <= 0.0f || ImageSize.y <= 0.0f) return;
+			ImDrawList* DrawList = ImGui::GetWindowDrawList();
+			DrawList->PushClipRect(ImVec2(m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y),
+				ImVec2(m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y), true);
+			const ImU32 Color = ImGui::ColorConvertFloat4ToU32(Shape.IsSensor
+				? ImVec4(1.0f, 0.68f, 0.22f, 0.95f) : ImVec4(0.24f, 0.92f, 0.66f, 0.9f));
+			const auto Project = [&](const glm::vec3& Local) -> std::optional<ImVec2>
+			{
+				const glm::vec4 WorldPoint = *World * glm::vec4(Local, 1.0f);
+				const glm::vec4 Clip = ViewProjection * WorldPoint;
+				if (!std::isfinite(Clip.x) || !std::isfinite(Clip.y) || !std::isfinite(Clip.w) || Clip.w <= 0.0001f)
+					return std::nullopt;
+				const float X = Clip.x / Clip.w;
+				const float Y = Clip.y / Clip.w;
+				return ImVec2(m_ViewportImageRect.Minimum.x + (X + 1.0f) * 0.5f * ImageSize.x,
+					m_ViewportImageRect.Minimum.y + (1.0f - Y) * 0.5f * ImageSize.y);
+			};
+			const auto Segment = [&](const glm::vec3& First, const glm::vec3& Second)
+			{
+				const auto A = Project(First);
+				const auto B = Project(Second);
+				if (A && B) DrawList->AddLine(*A, *B, Color, 1.5f);
+			};
+
+			if (Shape.Shape == PulseForge::ColliderShape::Box)
+			{
+				const glm::vec3 H = Shape.HalfExtents;
+				const std::array<glm::vec3, 8> Corners{ glm::vec3(-H.x, -H.y, -H.z), glm::vec3(H.x, -H.y, -H.z),
+					glm::vec3(H.x, H.y, -H.z), glm::vec3(-H.x, H.y, -H.z), glm::vec3(-H.x, -H.y, H.z),
+					glm::vec3(H.x, -H.y, H.z), glm::vec3(H.x, H.y, H.z), glm::vec3(-H.x, H.y, H.z) };
+				constexpr std::array<std::array<uint8_t, 2>, 12> Edges{ { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
+					{ 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } } };
+				for (const auto& Edge : Edges) Segment(Corners[Edge[0]], Corners[Edge[1]]);
+			}
+			else if (Shape.Shape == PulseForge::ColliderShape::Sphere)
+			{
+				constexpr uint32_t Segments = 24;
+				const float Radius = Shape.SphereRadius;
+				for (uint32_t Plane = 0; Plane < 3; ++Plane)
+					for (uint32_t Index = 0; Index < Segments; ++Index)
+					{
+						const float A = 6.28318530718f * static_cast<float>(Index) / Segments;
+						const float B = 6.28318530718f * static_cast<float>(Index + 1) / Segments;
+						const float U0 = std::cos(A) * Radius, V0 = std::sin(A) * Radius;
+						const float U1 = std::cos(B) * Radius, V1 = std::sin(B) * Radius;
+						const glm::vec3 P0 = Plane == 0 ? glm::vec3(U0, V0, 0.0f) :
+							Plane == 1 ? glm::vec3(U0, 0.0f, V0) : glm::vec3(0.0f, U0, V0);
+						const glm::vec3 P1 = Plane == 0 ? glm::vec3(U1, V1, 0.0f) :
+							Plane == 1 ? glm::vec3(U1, 0.0f, V1) : glm::vec3(0.0f, U1, V1);
+						Segment(P0, P1);
+					}
+			}
+			else
+			{
+				constexpr uint32_t Segments = 24;
+				constexpr uint32_t ArcSegments = 8;
+				const float Radius = Shape.CapsuleRadius;
+				const float HalfCylinder = (Shape.CapsuleHeight - 2.0f * Radius) * 0.5f;
+				for (uint32_t Index = 0; Index < Segments; ++Index)
+				{
+					const float A = 6.28318530718f * static_cast<float>(Index) / Segments;
+					const float B = 6.28318530718f * static_cast<float>(Index + 1) / Segments;
+					const float X0 = std::cos(A) * Radius, Z0 = std::sin(A) * Radius;
+					const float X1 = std::cos(B) * Radius, Z1 = std::sin(B) * Radius;
+					Segment({ X0, HalfCylinder, Z0 }, { X1, HalfCylinder, Z1 });
+					Segment({ X0, -HalfCylinder, Z0 }, { X1, -HalfCylinder, Z1 });
+				}
+				for (uint32_t Meridian = 0; Meridian < 4; ++Meridian)
+				{
+					const float Angle = 1.57079632679f * static_cast<float>(Meridian);
+					const float X = std::cos(Angle) * Radius, Z = std::sin(Angle) * Radius;
+					Segment({ X, -HalfCylinder, Z }, { X, HalfCylinder, Z });
+					for (uint32_t Index = 0; Index < ArcSegments; ++Index)
+					{
+						const float A = 1.57079632679f * static_cast<float>(Index) / ArcSegments;
+						const float B = 1.57079632679f * static_cast<float>(Index + 1) / ArcSegments;
+						Segment({ std::cos(Angle) * std::cos(A) * Radius, HalfCylinder + std::sin(A) * Radius,
+							std::sin(Angle) * std::cos(A) * Radius },
+							{ std::cos(Angle) * std::cos(B) * Radius, HalfCylinder + std::sin(B) * Radius,
+								std::sin(Angle) * std::cos(B) * Radius });
+						Segment({ std::cos(Angle) * std::cos(A) * Radius, -HalfCylinder - std::sin(A) * Radius,
+							std::sin(Angle) * std::cos(A) * Radius },
+							{ std::cos(Angle) * std::cos(B) * Radius, -HalfCylinder - std::sin(B) * Radius,
+								std::sin(Angle) * std::cos(B) * Radius });
+					}
+				}
+			}
 			DrawList->PopClipRect();
 		}
 
@@ -8350,6 +8471,85 @@ namespace
 			m_InputMappingPanel.MarkInputPublished();
 		}
 
+		PulseForge::SceneRuntimeServices CreateSceneRuntimeServices()
+		{
+			PulseForge::SceneRuntimeServices Services;
+			Services.InputState = &PulseForge::Application::Get().GetInput();
+			Services.GameplayInput = &PulseForge::Application::Get().GetGameplayInput();
+			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
+			Services.QueueSceneTransition = [this](const PulseForge::AssetID& Asset)
+			{
+				if (!m_SceneRuntime || !m_Project || m_QueuedRuntimeSceneTransition) return false;
+				m_QueuedRuntimeSceneTransition = Asset;
+				return true;
+			};
+			Services.QueueStop = [this]()
+			{
+				if (!m_SceneRuntime) return false;
+				m_RuntimeStopRequested = true;
+				return true;
+			};
+			return Services;
+		}
+
+		void ServiceRuntimeBoundaryRequests()
+		{
+			if (m_RuntimeStopRequested)
+			{
+				m_RuntimeStopRequested = false;
+				m_QueuedRuntimeSceneTransition.reset();
+				StopRuntime();
+				SetStatus("Runtime stopped by a script request.");
+				return;
+			}
+			if (!m_QueuedRuntimeSceneTransition || !m_Project || !m_SceneRuntime) return;
+			const PulseForge::AssetID RequestedAsset = *m_QueuedRuntimeSceneTransition;
+			m_QueuedRuntimeSceneTransition.reset();
+			const auto BoundaryRequest = m_SceneRuntime->GetPendingBoundaryRequest();
+			if (!BoundaryRequest || BoundaryRequest->Kind != PulseForge::SceneRuntimeBoundaryRequestKind::SceneTransition ||
+				BoundaryRequest->Scene != RequestedAsset)
+			{
+				if (BoundaryRequest)
+					(void)m_SceneRuntime->ResolveBoundaryRequest(
+						*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Rejected);
+				SetError("Runtime scene transition request no longer matches its active runtime session.");
+				return;
+			}
+			auto RejectBoundaryRequest = [this, &BoundaryRequest]()
+			{
+				if (m_SceneRuntime && BoundaryRequest)
+					(void)m_SceneRuntime->ResolveBoundaryRequest(
+						*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Rejected);
+			};
+
+			auto CandidateScene = std::make_unique<PulseForge::Scene>();
+			if (auto Loaded = PulseForge::SceneAssetService::Load(RequestedAsset, m_Project->GetRootPath(),
+					m_Project->GetAssetRegistry(), *CandidateScene, PulseForge::Application::Get().GetDiagnosticsRecorder()); !Loaded)
+			{
+				RejectBoundaryRequest();
+				SetError("Runtime scene transition was rejected: " + Loaded.error().Message);
+				return;
+			}
+			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(
+				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
+			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
+			{
+				RejectBoundaryRequest();
+				SetError("Runtime scene transition could not start: " + Started.error().Message);
+				return;
+			}
+			(void)m_SceneRuntime->ResolveBoundaryRequest(
+				*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Committed);
+
+			auto RetiredScene = std::move(m_RuntimeScene);
+			auto RetiredRuntime = std::move(m_SceneRuntime);
+			m_RuntimeScene = std::move(CandidateScene);
+			m_SceneRuntime = std::move(CandidateRuntime);
+			RetiredRuntime.reset();
+			RetiredScene.reset();
+			SetStatus("Runtime scene transition completed.");
+		}
+
 		void StartRuntime()
 		{
 			PulseForge::ScopedDiagnosticTimer DiagnosticTimer(
@@ -8371,11 +8571,8 @@ namespace
 				return;
 			}
 
-			PulseForge::SceneRuntimeServices Services;
-			Services.InputState = &PulseForge::Application::Get().GetInput();
-			Services.GameplayInput = &PulseForge::Application::Get().GetGameplayInput();
-			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
-			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project, PulseForge::SceneRuntimeDesc{}, Services);
+			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(
+				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
 			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
 			{
 				SetError("Could not start the scene runtime: " + Result.error().Message);
@@ -8389,6 +8586,8 @@ namespace
 
 		void StopRuntime() noexcept
 		{
+			m_RuntimeStopRequested = false;
+			m_QueuedRuntimeSceneTransition.reset();
 			CancelGizmoInteraction();
 			EndEditorCameraNavigation();
 			if (m_SceneRuntime) m_SceneRuntime->Stop();
@@ -9135,6 +9334,8 @@ namespace
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
+		bool m_RuntimeStopRequested = false;
+		std::optional<PulseForge::AssetID> m_QueuedRuntimeSceneTransition;
 		PulseForgeEditor::ViewportImageRect m_ViewportImageRect;
 		PulseForgeEditor::EditorViewportGizmoInteraction m_ViewportGizmoInteraction;
 		PulseForgeEditor::EditorViewportToolState m_ViewportTools;

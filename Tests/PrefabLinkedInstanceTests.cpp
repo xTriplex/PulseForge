@@ -201,7 +201,7 @@ namespace
 			PF_CHECK(Tests, false);
 			return;
 		}
-		PF_CHECK(Tests, Document.value("version", 0) == 9);
+		PF_CHECK(Tests, Document.value("version", 0) == 10);
 		const nlohmann::json* RootRecord = FindSerializedEntity(Document, RootEntityID);
 		PF_CHECK(Tests, RootRecord != nullptr && RootRecord->contains("prefabInstance"));
 		if (!RootRecord || !RootRecord->contains("prefabInstance")) return;
@@ -729,6 +729,78 @@ namespace
 		PF_CHECK(Tests, FirstAfterConflictRenderer && FirstAfterConflictRenderer->has_value() &&
 					FirstAfterConflictRenderer->value().MaterialAsset == std::optional<AssetID>{ FirstOverrideMaterial });
 		PF_CHECK(Tests, FirstRoot.IsValid() && FirstChild.IsValid() && UnrelatedHandle.IsValid());
+	}
+
+	void TestColliderPropertiesRemainInstanceLocalThroughPrefabReconciliation(TestRunner& Tests)
+	{
+		LinkedPrefabFixture Fixture;
+		PF_CHECK(Tests, Fixture.Valid);
+		if (!Fixture.Valid) return;
+		auto SourceResult = PrefabAssetService::LoadSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry);
+		PF_CHECK(Tests, SourceResult.has_value());
+		if (!SourceResult) return;
+		auto SourceChild = SourceResult->GetScene().FindEntity(SourceChildKey);
+		PF_CHECK(Tests, SourceChild.has_value());
+		if (!SourceChild) return;
+		BoxColliderComponent SourceCollider;
+		SourceCollider.Shape = ColliderShape::Sphere;
+		SourceCollider.SphereRadius = 0.75f;
+		PF_CHECK(Tests, SourceChild->SetCollider(SourceCollider).has_value());
+		PF_CHECK(Tests, PrefabAssetService::SaveSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, *SourceResult).has_value());
+
+		Scene Destination;
+		const auto FirstRoot = PrefabAssetService::InstantiateLinked(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination);
+		const auto SecondRoot = PrefabAssetService::InstantiateLinked(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination);
+		PF_CHECK(Tests, FirstRoot.has_value() && SecondRoot.has_value());
+		if (!FirstRoot || !SecondRoot) return;
+		const auto FirstChildID = FindMappedEntity(*FirstRoot, SourceChildKey);
+		const auto SecondChildID = FindMappedEntity(*SecondRoot, SourceChildKey);
+		PF_CHECK(Tests, FirstChildID && SecondChildID && *FirstChildID != *SecondChildID);
+		if (!FirstChildID || !SecondChildID) return;
+		const auto FirstChild = Destination.FindEntity(*FirstChildID);
+		const auto SecondChild = Destination.FindEntity(*SecondChildID);
+		PF_CHECK(Tests, FirstChild && SecondChild);
+		if (!FirstChild || !SecondChild) return;
+
+		const std::string ColliderComponent(PropertyComponentIds::Collider);
+		const std::string RadiusProperty(PropertyIds::SphereRadius);
+		PF_CHECK(Tests, WriteProperty(*FirstChild, ColliderComponent, RadiusProperty, PropertyValue{ 2.0f }).has_value());
+		PF_CHECK(Tests, PrefabInstanceReconciler::RecordPropertyOverride(
+			*FirstRoot, *FirstChild, ColliderComponent, RadiusProperty, PropertyValue{ 2.0f }).has_value());
+		const auto FirstOverride = FirstChild->GetCollider();
+		const auto SecondDefault = SecondChild->GetCollider();
+		PF_CHECK(Tests, FirstOverride && FirstOverride->has_value() && (**FirstOverride).SphereRadius == 2.0f);
+		PF_CHECK(Tests, SecondDefault && SecondDefault->has_value() && (**SecondDefault).SphereRadius == 0.75f);
+
+		SourceCollider.SphereRadius = 1.25f;
+		PF_CHECK(Tests, SourceChild->SetCollider(SourceCollider).has_value());
+		PF_CHECK(Tests, PrefabAssetService::SaveSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, *SourceResult).has_value());
+		for (const Entity& Root : { *FirstRoot, *SecondRoot })
+		{
+			const auto Plan = PrefabAssetService::PlanReconcile(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination, Root);
+			PF_CHECK(Tests, Plan.has_value());
+			if (!Plan) continue;
+			PF_CHECK(Tests, PrefabAssetService::ApplyReconcile(
+				Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination, *Plan).has_value());
+		}
+		const auto UpdatedFirst = FirstChild->GetCollider();
+		const auto UpdatedSecond = SecondChild->GetCollider();
+		PF_CHECK(Tests, UpdatedFirst && UpdatedFirst->has_value() && (**UpdatedFirst).SphereRadius == 2.0f);
+		PF_CHECK(Tests, UpdatedSecond && UpdatedSecond->has_value() && (**UpdatedSecond).SphereRadius == 1.25f);
+
+		const auto Serialized = SceneSerializer::Serialize(Destination);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized) return;
+		Scene Reopened;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(*Serialized, Reopened).has_value());
+		const auto ReopenedRoot = Reopened.FindEntity(FirstRoot->GetUUID());
+		PF_CHECK(Tests, ReopenedRoot.has_value());
+		if (!ReopenedRoot) return;
+		const auto ReopenedMetadata = ReopenedRoot->GetPrefabInstance();
+		PF_CHECK(Tests, ReopenedMetadata && ReopenedMetadata->has_value() && (**ReopenedMetadata).Overrides.size() == 1 &&
+			(**ReopenedMetadata).Overrides.front().ComponentID == ColliderComponent &&
+			(**ReopenedMetadata).Overrides.front().PropertyID == RadiusProperty &&
+			std::get<float>((**ReopenedMetadata).Overrides.front().Value) == 2.0f);
 	}
 
 	void TestPrefabSourceSaveRejectsDetachedEntitiesWithoutDroppingThem(TestRunner& Tests)
@@ -2214,6 +2286,7 @@ void RunPrefabLinkedInstanceTests(TestRunner& Tests)
 	TestPrefabInstanceMappingsRemainStableAndDisjoint(Tests);
 	TestLegacyScenesLoadWithoutLinkedPrefabMetadata(Tests);
 	TestLinkedInstantiationReconcileOverridesAndStalePlans(Tests);
+	TestColliderPropertiesRemainInstanceLocalThroughPrefabReconciliation(Tests);
 	TestDuplicateMissingPrefabMappingTargetsRejected(Tests);
 	TestChangedPrefabOverrideTypePreservesMaterializedValue(Tests);
 	TestPrefabSourcePrimaryCameraAndListenerPolicy(Tests);

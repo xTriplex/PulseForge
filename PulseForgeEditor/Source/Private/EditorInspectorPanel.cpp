@@ -389,9 +389,9 @@ namespace PulseForgeEditor
 				RecordComponentOperation(
 					Inspector, [Entity] { return Entity.SetRigidbody(PulseForge::RigidbodyComponent{}); },
 					"Rigidbody component add failed");
-			if (Collider && !Collider->has_value() && ImGui::MenuItem("Box Collider"))
+			if (Collider && !Collider->has_value() && ImGui::MenuItem("Collider"))
 				RecordComponentOperation(
-					Inspector, [Entity] { return Entity.SetBoxCollider(PulseForge::BoxColliderComponent{}); }, "Box collider add failed");
+					Inspector, [Entity] { return Entity.SetCollider(PulseForge::BoxColliderComponent{}); }, "Collider add failed");
 			if (AudioListener && !AudioListener->has_value() && ImGui::MenuItem("Audio Listener"))
 				SetAudioListenerComponent(Inspector, Entity, PulseForge::AudioListenerComponent{});
 
@@ -891,32 +891,67 @@ namespace PulseForgeEditor
 		if (!Result || !Result->has_value()) return;
 
 		PulseForge::BoxColliderComponent Component = **Result;
-		const bool IsExpanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::Cube, "Box Collider");
+		const bool IsExpanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::Cube, "Collider");
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
 		if (Inspector.Style.IconButton(
-				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveBoxCollider", "Remove Box Collider component", true))
+				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveCollider", "Remove Collider component", true))
 		{
-			RecordComponentOperation(Inspector, [Entity] { return Entity.RemoveBoxCollider(); }, "Box collider removal failed");
+			RecordComponentOperation(Inspector, [Entity] { return Entity.RemoveCollider(); }, "Collider removal failed");
 			return;
 		}
 		if (!IsExpanded) return;
 		Inspector.Style.BeginComponentBody("BoxColliderComponentBody");
 
-		float HalfExtents[3]{ Component.HalfExtents.x, Component.HalfExtents.y, Component.HalfExtents.z };
-		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("BoxColliderProperties"))
 		{
-			if (Inspector.Style.BeginPropertyRow("Half Extents"))
-				Changed = ImGui::DragFloat3("##BoxColliderExtents", HalfExtents, 0.01f, 0.001f, 1000000.0f, "%.2f");
+			if (Inspector.Style.BeginPropertyRow("Shape"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::Shape,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto& Shape = std::get<std::string>(Value);
+						constexpr const char* Shapes[]{ "box", "sphere", "capsule" };
+						int Selected = Shape == "sphere" ? 1 : Shape == "capsule" ? 2 : 0;
+						if (!ImGui::Combo("##ColliderShape", &Selected, Shapes, 3)) return false;
+						Shape = Shapes[Selected];
+						return true;
+					});
+			if (Component.Shape == PulseForge::ColliderShape::Box && Inspector.Style.BeginPropertyRow("Half Extents"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::HalfExtents,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto& Extents = std::get<glm::vec3>(Value);
+						return ImGui::DragFloat3("##ColliderHalfExtents", &Extents.x, 0.01f, 0.001f, 1000000.0f, "%.2f");
+					});
+			if (Component.Shape == PulseForge::ColliderShape::Sphere && Inspector.Style.BeginPropertyRow("Radius"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::SphereRadius,
+					[](PulseForge::PropertyValue& Value)
+					{ return ImGui::DragFloat("##ColliderSphereRadius", &std::get<float>(Value), 0.01f, 0.001f, 1000000.0f, "%.2f"); });
+			if (Component.Shape == PulseForge::ColliderShape::Capsule)
+			{
+				if (Inspector.Style.BeginPropertyRow("Radius"))
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::CapsuleRadius,
+						[](PulseForge::PropertyValue& Value)
+						{ return ImGui::DragFloat("##ColliderCapsuleRadius", &std::get<float>(Value), 0.01f, 0.001f, 1000000.0f, "%.2f"); });
+				if (Inspector.Style.BeginPropertyRow("Total Height"))
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::CapsuleHeight,
+						[](PulseForge::PropertyValue& Value)
+						{ return ImGui::DragFloat("##ColliderCapsuleHeight", &std::get<float>(Value), 0.01f, 0.001f, 1000000.0f, "%.2f"); });
+			}
+			if (Inspector.Style.BeginPropertyRow("Sensor"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::IsSensor,
+					[](PulseForge::PropertyValue& Value) { return ImGui::Checkbox("##ColliderSensor", &std::get<bool>(Value)); });
+			if (Inspector.Style.BeginPropertyRow("Category"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::CollisionCategory,
+					[](PulseForge::PropertyValue& Value)
+					{ return ImGui::InputScalar("##ColliderCategory", ImGuiDataType_U32, &std::get<uint32_t>(Value)); });
+			if (Inspector.Style.BeginPropertyRow("Mask"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Collider, PulseForge::PropertyIds::CollisionMask,
+					[](PulseForge::PropertyValue& Value)
+					{ return ImGui::InputScalar("##ColliderMask", ImGuiDataType_U32, &std::get<uint32_t>(Value)); });
 			Inspector.Style.EndPropertyTable();
 		}
-		if (Changed)
-		{
-			Component.HalfExtents = { HalfExtents[0], HalfExtents[1], HalfExtents[2] };
-			RecordComponentOperation(
-				Inspector, [Entity, Component] { return Entity.SetBoxCollider(Component); }, "Box collider update failed");
-		}
+		(void)Component;
 		Inspector.Style.EndComponentBody();
 	}
 

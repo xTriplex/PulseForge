@@ -1040,6 +1040,262 @@ end
 							OnUpdatePose->Translation.y < 10.0f);
 		PhysicsPoseRuntime.Stop();
 
+		const auto PhysicsQueryAsset = CreateScriptAsset("physics_query.lua", "function OnUpdate() end\n");
+		PF_CHECK(Tests, PhysicsQueryAsset.has_value());
+		if (!PhysicsQueryAsset) return;
+		Scene PhysicsQueryScene;
+		const UUID PhysicsQueryTargetID{ 0x6600000000000000ull, 1 };
+		const auto PhysicsQueryTarget = PhysicsQueryScene.CreateEntityWithUUID(PhysicsQueryTargetID, "Query target");
+		const auto PhysicsQueryCaller = PhysicsQueryScene.CreateEntity("Query caller");
+		PF_CHECK(Tests, PhysicsQueryTarget && PhysicsQueryCaller);
+		if (!PhysicsQueryTarget || !PhysicsQueryCaller) return;
+		TransformComponent PhysicsQueryTargetTransform;
+		PhysicsQueryTargetTransform.Translation.x = 4.0f;
+		PF_CHECK(Tests, PhysicsQueryTarget->SetTransform(PhysicsQueryTargetTransform));
+		PF_CHECK(Tests, PhysicsQueryTarget->SetRigidbody({ RigidbodyMotionType::Static }));
+		PF_CHECK(Tests, PhysicsQueryTarget->SetCollider(BoxColliderComponent{}));
+		PF_CHECK(Tests, PhysicsQueryCaller->SetScript(ScriptComponent{ PhysicsQueryAsset->ID }));
+		const std::string PhysicsQuerySource =
+			"function OnUpdate()\n"
+			"  local hit = physics.raycast(0, 0, 0, 3, 0, 0, 20)\n"
+			"  assert(hit ~= nil and hit.uuid == '" + PhysicsQueryTargetID.ToString() + "')\n"
+			"  assert(hit.entity:uuid() == hit.uuid and hit.fraction > 0)\n"
+			"  local overlap = physics.overlap_sphere(0.75, 4, 0, 0, 8)\n"
+			"  assert(overlap ~= nil and #overlap.hits > 0 and overlap.truncated == false)\n"
+			"  local cast = physics.cast_box(0.25, 0.25, 0.25, 0, 0, 0, 1, 0, 0, 20)\n"
+			"  assert(cast ~= nil and cast.uuid == hit.uuid)\n"
+			"  assert(entity:set_translation(42, 0, 0))\n"
+			"end\n";
+		PF_CHECK(Tests, WriteScriptSource(PhysicsQueryAsset->ID, PhysicsQuerySource));
+		SceneRuntimeDesc PhysicsQueryDescription = RuntimeDescription;
+		PhysicsQueryDescription.Physics.Gravity = glm::vec3(0.0f);
+		SceneRuntime PhysicsQueryRuntime(*ProjectResult, PhysicsQueryDescription);
+		PF_CHECK(Tests, PhysicsQueryRuntime.Start(PhysicsQueryScene));
+		PF_CHECK(Tests, PhysicsQueryRuntime.Advance(PhysicsQueryScene, Timestep(0.1)));
+		const auto PhysicsQueryCallerTransform = PhysicsQueryCaller->GetTransform();
+		PF_CHECK(Tests, PhysicsQueryCallerTransform && PhysicsQueryCallerTransform->Translation.x == 42.0f);
+		PF_CHECK(Tests, PhysicsQueryRuntime.GetScriptDiagnostics().empty());
+		PhysicsQueryRuntime.Stop();
+
+		const UUID CollisionFloorID{ 0x6500000000004000ull, 0x8000000000000001ull };
+		const UUID CollisionActorID{ 0x6500000000004000ull, 0x8000000000000002ull };
+		const auto CollisionCallbackAsset = CreateScriptAsset("collision_callback.lua", "function OnCollisionBegin(other)\n"
+			"  assert(other:uuid() == '" + CollisionFloorID.ToString() + "')\n"
+			"  assert(entity:set_translation(11, 0, 0))\n"
+			"end\n");
+		PF_CHECK(Tests, CollisionCallbackAsset.has_value());
+		if (!CollisionCallbackAsset) return;
+		Scene CollisionCallbackScene;
+		const auto CollisionFloor = CollisionCallbackScene.CreateEntityWithUUID(CollisionFloorID, "Collision floor");
+		const auto CollisionActor = CollisionCallbackScene.CreateEntityWithUUID(CollisionActorID, "Collision callback actor");
+		PF_CHECK(Tests, CollisionFloor && CollisionActor);
+		if (!CollisionFloor || !CollisionActor) return;
+		PF_CHECK(Tests, CollisionFloor->SetRigidbody({ RigidbodyMotionType::Static }));
+		PF_CHECK(Tests, CollisionFloor->SetCollider(BoxColliderComponent{}));
+		PF_CHECK(Tests, CollisionActor->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, false }));
+		PF_CHECK(Tests, CollisionActor->SetCollider(BoxColliderComponent{}));
+		PF_CHECK(Tests, CollisionActor->SetScript(ScriptComponent{ CollisionCallbackAsset->ID }));
+		SceneRuntimeDesc CollisionDescription = PhysicsQueryDescription;
+		CollisionDescription.Physics.FixedStepSeconds = 1.0 / 60.0;
+		SceneRuntime CollisionRuntime(*ProjectResult, CollisionDescription);
+		PF_CHECK(Tests, CollisionRuntime.Start(CollisionCallbackScene));
+		PF_CHECK(Tests, CollisionRuntime.Advance(CollisionCallbackScene, Timestep(1.0 / 60.0)));
+		const auto CollisionCallbackTransform = CollisionActor->GetTransform();
+		PF_CHECK(Tests, CollisionCallbackTransform && CollisionCallbackTransform->Translation.x == 11.0f);
+		PF_CHECK(Tests, CollisionRuntime.GetScriptDiagnostics().empty());
+		CollisionRuntime.Stop();
+
+		constexpr AssetID DeferredContactSceneAsset{ 0x6800000000004000ull, 0x8000000000000001ull };
+		const auto DestroyingContactAsset = CreateScriptAsset("destroy_on_trigger.lua", "function OnTriggerEnter(other)\n"
+			"  assert(other:uuid() == '66000000-0000-4000-8000-000000000001')\n"
+			"  local x, message = other:get_translation()\n"
+			"  assert(x == nil and message ~= nil)\n"
+			"  assert(entity:destroy())\n"
+			"  assert(scene.request_transition('" + DeferredContactSceneAsset.ToString() + "'))\n"
+			"end\n");
+		const auto DestroyedOtherContactAsset = CreateScriptAsset("destroy_other_on_trigger.lua", "function OnTriggerEnter(other)\n"
+			"  assert(other:uuid() == '67000000-0000-4000-8000-000000000001')\n"
+			"  assert(entity:destroy())\n"
+			"end\n");
+		PF_CHECK(Tests, DestroyingContactAsset && DestroyedOtherContactAsset);
+		if (!DestroyingContactAsset || !DestroyedOtherContactAsset) return;
+		Scene ContactScene;
+		const UUID TriggerID{ 0x6700000000004000ull, 0x8000000000000001ull };
+		const UUID ContactBodyID{ 0x6600000000004000ull, 0x8000000000000001ull };
+		const auto ContactTrigger = ContactScene.CreateEntityWithUUID(TriggerID, "Trigger with callback");
+		const auto ContactBody = ContactScene.CreateEntityWithUUID(ContactBodyID, "Overlapping dynamic body");
+		PF_CHECK(Tests, ContactTrigger && ContactBody);
+		if (!ContactTrigger || !ContactBody) return;
+		BoxColliderComponent TriggerCollider;
+		TriggerCollider.Shape = ColliderShape::Sphere;
+		TriggerCollider.IsSensor = true;
+		PF_CHECK(Tests, ContactTrigger->SetRigidbody({ RigidbodyMotionType::Static }));
+		PF_CHECK(Tests, ContactTrigger->SetCollider(TriggerCollider));
+		PF_CHECK(Tests, ContactTrigger->SetScript(ScriptComponent{ DestroyingContactAsset->ID }));
+		PF_CHECK(Tests, ContactBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, false }));
+		PF_CHECK(Tests, ContactBody->SetCollider(BoxColliderComponent{}));
+		PF_CHECK(Tests, ContactBody->SetScript(ScriptComponent{ DestroyedOtherContactAsset->ID }));
+		std::optional<AssetID> QueuedContactTransition;
+		struct ContactObservation final
+		{
+			uint32_t TriggerCallbacks = 0;
+			uint32_t ActorCallbacks = 0;
+			uint32_t TriggerEntityCallbacks = 0;
+			static void Observe(void* Context, const ScriptRuntimeObservation& Observation) noexcept
+			{
+				auto& State = *static_cast<ContactObservation*>(Context);
+				if (Observation.Kind == ScriptRuntimeObservationKind::CallbackEntered &&
+					Observation.Callback == ScriptRuntimeCallback::OnTriggerEnter)
+				{
+					++State.TriggerCallbacks;
+					if (Observation.Entity == UUID{ 0x6600000000004000ull, 0x8000000000000001ull }) ++State.ActorCallbacks;
+					if (Observation.Entity == UUID{ 0x6700000000004000ull, 0x8000000000000001ull }) ++State.TriggerEntityCallbacks;
+				}
+			}
+		} ContactCallbacks;
+		SceneRuntimeServices ContactHostServices;
+		ContactHostServices.QueueSceneTransition = [&](const AssetID& Requested)
+		{
+			QueuedContactTransition = Requested;
+			return true;
+		};
+		ContactHostServices.ScriptObserver = { &ContactCallbacks, ContactObservation::Observe };
+		SceneRuntime ContactRuntime(*ProjectResult, PhysicsQueryDescription, ContactHostServices);
+		PF_CHECK(Tests, ContactRuntime.Start(ContactScene));
+		PF_CHECK(Tests, ContactRuntime.Advance(ContactScene, Timestep(0.1)));
+		PF_CHECK(Tests, !ContactTrigger->IsValid() && !ContactBody->IsValid());
+		if (ContactCallbacks.TriggerCallbacks != 2 || ContactCallbacks.ActorCallbacks != 1 ||
+			ContactCallbacks.TriggerEntityCallbacks != 1 || !QueuedContactTransition || ContactScene.GetEntityCount() != 0)
+			std::cerr << "G17_CONTACT_DISPATCH entered=" << ContactCallbacks.TriggerCallbacks << " actor=" <<
+				ContactCallbacks.ActorCallbacks << " trigger=" << ContactCallbacks.TriggerEntityCallbacks << " transition=" <<
+				QueuedContactTransition.has_value() << " entities=" << ContactScene.GetEntityCount() << std::endl;
+		PF_CHECK(Tests, QueuedContactTransition == DeferredContactSceneAsset && ContactRuntime.IsRunning());
+		PF_CHECK(Tests, ContactCallbacks.TriggerCallbacks == 2 && ContactCallbacks.ActorCallbacks == 1 &&
+			ContactCallbacks.TriggerEntityCallbacks == 1);
+		PF_CHECK(Tests, ContactRuntime.GetScriptDiagnostics().empty());
+		const auto ContactBoundaryRequest = ContactRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, ContactBoundaryRequest &&
+			ContactBoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::SceneTransition &&
+			ContactBoundaryRequest->Scene == DeferredContactSceneAsset);
+		if (ContactBoundaryRequest)
+		{
+			auto StaleBoundaryRequest = *ContactBoundaryRequest;
+			++StaleBoundaryRequest.SessionGeneration;
+			PF_CHECK(Tests, !ContactRuntime.ResolveBoundaryRequest(
+				StaleBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			const uint32_t CallbacksBeforeSuspendedFrame = ContactCallbacks.TriggerCallbacks;
+			const auto SuspendedContactFrame = ContactRuntime.Advance(ContactScene, Timestep(0.1));
+			PF_CHECK(Tests, SuspendedContactFrame && SuspendedContactFrame->PhysicsSteps == 0);
+			PF_CHECK(Tests, ContactCallbacks.TriggerCallbacks == CallbacksBeforeSuspendedFrame);
+			PF_CHECK(Tests, ContactRuntime.ResolveBoundaryRequest(
+				*ContactBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			PF_CHECK(Tests, !ContactRuntime.ResolveBoundaryRequest(
+				*ContactBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			PF_CHECK(Tests, !ContactRuntime.GetPendingBoundaryRequest());
+			PF_CHECK(Tests, ContactRuntime.Advance(ContactScene, Timestep(1.0 / 60.0)).has_value());
+		}
+		ContactRuntime.Stop();
+		PF_CHECK(Tests, ContactRuntime.Start(ContactScene).has_value());
+		if (ContactBoundaryRequest)
+			PF_CHECK(Tests, !ContactRuntime.ResolveBoundaryRequest(
+				*ContactBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+		ContactRuntime.Stop();
+
+		const auto FirstBoundaryRequestScript = CreateScriptAsset("first_boundary_request.lua",
+			"function OnUpdate()\n"
+			"  local queued, message = scene.request_transition('" + DeferredContactSceneAsset.ToString() + "')\n"
+			"  assert(queued, message)\n"
+			"end\n");
+		const auto SecondBoundaryRequestScript = CreateScriptAsset("second_boundary_request.lua",
+			"function OnUpdate()\n"
+			"  local queued, message = scene.request_transition('" + DeferredContactSceneAsset.ToString() + "')\n"
+			"  assert(queued, message)\n"
+			"end\n");
+		PF_CHECK(Tests, FirstBoundaryRequestScript.has_value() && SecondBoundaryRequestScript.has_value());
+		if (!FirstBoundaryRequestScript || !SecondBoundaryRequestScript) return;
+		Scene StaleAcknowledgementScene;
+		const auto StaleAcknowledgementEntity = StaleAcknowledgementScene.CreateEntity("Boundary acknowledgement identity");
+		PF_CHECK(Tests, StaleAcknowledgementEntity.has_value());
+		if (!StaleAcknowledgementEntity) return;
+		PF_CHECK(Tests, StaleAcknowledgementEntity->SetScript(ScriptComponent{ FirstBoundaryRequestScript->ID }).has_value());
+		SceneRuntimeServices StaleAcknowledgementServices;
+		StaleAcknowledgementServices.QueueSceneTransition = [](const AssetID&) { return true; };
+		SceneRuntime StaleAcknowledgementRuntime(*ProjectResult, PhysicsQueryDescription, StaleAcknowledgementServices);
+		PF_CHECK(Tests, StaleAcknowledgementRuntime.Start(StaleAcknowledgementScene).has_value());
+		const auto FirstRequestFrame = StaleAcknowledgementRuntime.Advance(StaleAcknowledgementScene, Timestep(0.0));
+		PF_CHECK(Tests, FirstRequestFrame && FirstRequestFrame->PhysicsSteps == 0);
+		const auto FirstBoundaryRequest = StaleAcknowledgementRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, FirstBoundaryRequest.has_value());
+		if (!FirstBoundaryRequest) return;
+		PF_CHECK(Tests, StaleAcknowledgementRuntime.ResolveBoundaryRequest(
+			*FirstBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+		PF_CHECK(Tests, StaleAcknowledgementEntity->SetScript(ScriptComponent{ SecondBoundaryRequestScript->ID }).has_value());
+		const auto SecondRequestFrame = StaleAcknowledgementRuntime.Advance(StaleAcknowledgementScene, Timestep(0.0));
+		PF_CHECK(Tests, SecondRequestFrame && SecondRequestFrame->PhysicsSteps == 0);
+		const auto SecondBoundaryRequest = StaleAcknowledgementRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, SecondBoundaryRequest && FirstBoundaryRequest->SessionGeneration == SecondBoundaryRequest->SessionGeneration &&
+			FirstBoundaryRequest->RequestGeneration != SecondBoundaryRequest->RequestGeneration);
+		if (SecondBoundaryRequest)
+		{
+			PF_CHECK(Tests, !StaleAcknowledgementRuntime.ResolveBoundaryRequest(
+				*FirstBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+			const auto StillPendingRequest = StaleAcknowledgementRuntime.GetPendingBoundaryRequest();
+			PF_CHECK(Tests, StillPendingRequest &&
+				StillPendingRequest->SessionGeneration == SecondBoundaryRequest->SessionGeneration &&
+				StillPendingRequest->RequestGeneration == SecondBoundaryRequest->RequestGeneration);
+			PF_CHECK(Tests, StaleAcknowledgementRuntime.ResolveBoundaryRequest(
+				*SecondBoundaryRequest, SceneRuntimeBoundaryResolution::Rejected));
+		}
+		StaleAcknowledgementRuntime.Stop();
+
+		const auto StopPriorityAsset = CreateScriptAsset("stop_priority.lua",
+			"local requested = false\n"
+			"function OnUpdate()\n"
+			"  if requested then return end\n"
+			"  requested = true\n"
+			"  assert(scene.request_transition('" + DeferredContactSceneAsset.ToString() + "'))\n"
+			"  assert(scene.request_stop())\n"
+			"end\n");
+		PF_CHECK(Tests, StopPriorityAsset.has_value());
+		if (!StopPriorityAsset) return;
+		Scene StopPriorityScene;
+		const auto StopPriorityEntity = StopPriorityScene.CreateEntity("Stop precedence script");
+		PF_CHECK(Tests, StopPriorityEntity && StopPriorityEntity->SetScript(ScriptComponent{ StopPriorityAsset->ID }));
+		if (!StopPriorityEntity) return;
+		std::optional<AssetID> StopPriorityTransition;
+		bool StopPriorityQueued = false;
+		SceneRuntimeServices StopPriorityServices;
+		StopPriorityServices.QueueSceneTransition = [&StopPriorityTransition](const AssetID& Requested)
+		{
+			StopPriorityTransition = Requested;
+			return true;
+		};
+		StopPriorityServices.QueueStop = [&StopPriorityQueued]()
+		{
+			StopPriorityQueued = true;
+			return true;
+		};
+		SceneRuntime StopPriorityRuntime(*ProjectResult, PhysicsQueryDescription, StopPriorityServices);
+		PF_CHECK(Tests, StopPriorityRuntime.Start(StopPriorityScene).has_value());
+		const auto StopPriorityFrame = StopPriorityRuntime.Advance(StopPriorityScene, Timestep(0.0));
+		PF_CHECK(Tests, StopPriorityFrame && StopPriorityFrame->PhysicsSteps == 0);
+		const auto StopPriorityRequest = StopPriorityRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, StopPriorityQueued && StopPriorityTransition == DeferredContactSceneAsset && StopPriorityRequest &&
+			StopPriorityRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop && !StopPriorityRequest->Scene);
+		if (StopPriorityRequest)
+		{
+			auto SupersededTransition = *StopPriorityRequest;
+			SupersededTransition.Kind = SceneRuntimeBoundaryRequestKind::SceneTransition;
+			SupersededTransition.Scene = DeferredContactSceneAsset;
+			--SupersededTransition.RequestGeneration;
+			PF_CHECK(Tests, !StopPriorityRuntime.ResolveBoundaryRequest(
+				SupersededTransition, SceneRuntimeBoundaryResolution::Rejected));
+			PF_CHECK(Tests, StopPriorityRuntime.ResolveBoundaryRequest(
+				*StopPriorityRequest, SceneRuntimeBoundaryResolution::Cancelled));
+			PF_CHECK(Tests, StopPriorityRuntime.Advance(StopPriorityScene, Timestep(1.0 / 60.0)).has_value());
+		}
+		StopPriorityRuntime.Stop();
+
 		constexpr std::string_view ForceScript = R"(
 function OnUpdate()
   local applied, message = entity:apply_force(0, 100, 0)

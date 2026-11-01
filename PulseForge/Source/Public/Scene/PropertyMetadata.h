@@ -21,7 +21,7 @@ namespace PulseForge
 {
 	class Entity;
 
-	using PropertyValue = std::variant<bool, float, glm::vec3, glm::quat, AssetID, std::optional<AssetID>, std::string>;
+	using PropertyValue = std::variant<bool, float, glm::vec3, glm::quat, AssetID, std::optional<AssetID>, std::string, uint32_t>;
 
 	enum class PropertyValueType : uint8_t
 	{
@@ -31,7 +31,8 @@ namespace PulseForge
 		Quaternion,
 		AssetId,
 		OptionalAssetId,
-		String
+		String,
+		UnsignedInteger
 	};
 
 	namespace PropertyComponentIds
@@ -44,6 +45,7 @@ namespace PulseForge
 		inline constexpr std::string_view MeshRenderer = "meshRenderer";
 		inline constexpr std::string_view Script = "script";
 		inline constexpr std::string_view ScriptFloat = "script.float";
+		inline constexpr std::string_view Collider = "physics.collider";
 	} // namespace PropertyComponentIds
 
 	namespace PropertyIds
@@ -66,6 +68,14 @@ namespace PulseForge
 		inline constexpr std::string_view MeshAsset = "meshAsset";
 		inline constexpr std::string_view Enabled = "enabled";
 		inline constexpr std::string_view Asset = "asset";
+		inline constexpr std::string_view Shape = "shape";
+		inline constexpr std::string_view HalfExtents = "halfExtents";
+		inline constexpr std::string_view SphereRadius = "sphereRadius";
+		inline constexpr std::string_view CapsuleRadius = "capsuleRadius";
+		inline constexpr std::string_view CapsuleHeight = "capsuleHeight";
+		inline constexpr std::string_view IsSensor = "isSensor";
+		inline constexpr std::string_view CollisionCategory = "collisionCategory";
+		inline constexpr std::string_view CollisionMask = "collisionMask";
 	} // namespace PropertyIds
 
 	enum class PropertyReferenceKind : uint8_t
@@ -125,6 +135,7 @@ namespace PulseForge
 			else if constexpr (std::is_same_v<Value, AssetID>) return PropertyValueType::AssetId;
 			else if constexpr (std::is_same_v<Value, std::optional<AssetID>>) return PropertyValueType::OptionalAssetId;
 			else if constexpr (std::is_same_v<Value, std::string>) return PropertyValueType::String;
+			else if constexpr (std::is_same_v<Value, uint32_t>) return PropertyValueType::UnsignedInteger;
 			else static_assert(!sizeof(Value), "Unsupported PropertyValue type");
 		}
 	};
