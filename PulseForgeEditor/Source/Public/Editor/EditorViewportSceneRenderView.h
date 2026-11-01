@@ -6,6 +6,7 @@
 #include "Scene/UUID.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorTextureRegistry.h"
+#include "UI/RuntimeUI.h"
 
 #include <expected>
 #include <filesystem>
@@ -38,7 +39,9 @@ namespace PulseForgeEditor
 			PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry);
 		void PrepareScene(PulseForge::RenderDevice& Runtime, const PulseForge::Project* Project, const PulseForge::Scene* EditScene,
 			const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
-			std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory);
+			std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory,
+			std::span<const PulseForge::RuntimeUIDrawCommand> RuntimeUIDrawCommands = {},
+			PulseForge::RuntimeUIViewport RuntimeUIView = {});
 		[[nodiscard]] bool Render(
 			PulseForge::RenderDevice& Runtime, bool PanelVisible, float ExposureEV, const PulseForge::RenderTargetClearValue& Background);
 

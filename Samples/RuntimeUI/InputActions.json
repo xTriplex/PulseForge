@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "id": "ui.navigate",
+      "type": "Axis2D",
+      "context": "RuntimeUI",
+      "bindings": [
+        { "id": "ui.keyboard.up", "kind": "Button", "primary": "Key.Up", "scaleX": 0.0, "scaleY": -1.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.keyboard.right", "kind": "Button", "primary": "Key.Right", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.keyboard.down", "kind": "Button", "primary": "Key.Down", "scaleX": 0.0, "scaleY": 1.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.keyboard.left", "kind": "Button", "primary": "Key.Left", "scaleX": -1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.gamepad.dpad", "kind": "Stick", "primary": "GamepadAxis.LeftX", "secondary": "GamepadAxis.LeftY", "scaleX": 1.0, "scaleY": 1.0, "deadZone": 0.2, "modifiers": [] },
+        { "id": "ui.gamepad.dpad.up", "kind": "Button", "primary": "GamepadButton.DpadUp", "scaleX": 0.0, "scaleY": -1.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.gamepad.dpad.right", "kind": "Button", "primary": "GamepadButton.DpadRight", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.gamepad.dpad.down", "kind": "Button", "primary": "GamepadButton.DpadDown", "scaleX": 0.0, "scaleY": 1.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.gamepad.dpad.left", "kind": "Button", "primary": "GamepadButton.DpadLeft", "scaleX": -1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    },
+    {
+      "id": "ui.activate",
+      "type": "Digital",
+      "context": "RuntimeUI",
+      "bindings": [
+        { "id": "ui.keyboard.activate", "kind": "Button", "primary": "Key.Enter", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.gamepad.activate", "kind": "Button", "primary": "GamepadButton.A", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    },
+    {
+      "id": "ui.cancel",
+      "type": "Digital",
+      "context": "RuntimeUI",
+      "bindings": [
+        { "id": "ui.keyboard.cancel", "kind": "Button", "primary": "Key.Escape", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "ui.gamepad.cancel", "kind": "Button", "primary": "GamepadButton.B", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    },
+    {
+      "id": "ui.pointer",
+      "type": "Digital",
+      "context": "RuntimeUI",
+      "bindings": [
+        { "id": "ui.pointer.left", "kind": "Button", "primary": "Mouse.Left", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    }
+  ]
+}

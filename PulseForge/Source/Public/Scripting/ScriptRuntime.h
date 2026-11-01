@@ -101,7 +101,8 @@ namespace PulseForge
 		OnCollisionEnd,
 		OnTriggerEnter,
 		OnTriggerStay,
-		OnTriggerExit
+	OnTriggerExit,
+	OnUIAction
 	};
 
 	enum class ScriptRuntimeObservationKind : uint8_t
@@ -141,6 +142,8 @@ namespace PulseForge
 		std::function<bool(const Entity&)> QueueEntityDestroy;
 		std::function<bool(const AssetID&)> QueueSceneTransition;
 		std::function<bool()> QueueStop;
+		std::function<bool(bool)> QueuePause;
+		std::function<bool(UUID, std::string)> SetRuntimeUIText;
 	};
 
 	enum class ScriptRuntimeErrorCode : uint8_t
@@ -191,6 +194,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, ScriptRuntimeError> Advance(Scene& Source, Timestep DeltaTime);
 		// Returns false when a host accepted a Stop/transition request and the current event batch must stop.
 		[[nodiscard]] bool DispatchPhysicsContact(Scene& Source, const PhysicsContactEvent& Event) noexcept;
+		[[nodiscard]] bool DispatchRuntimeUIAction(Scene& Source, const Entity& Recipient, std::string_view Action) noexcept;
 
 	private:
 		struct Impl;

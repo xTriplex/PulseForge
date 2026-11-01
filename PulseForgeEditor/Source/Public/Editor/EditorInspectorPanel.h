@@ -112,6 +112,7 @@ namespace PulseForgeEditor
 		void DrawRigidbodyComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawBoxColliderComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawAudioSourceComponent(Context& Inspector, const PulseForge::Entity& Entity);
+		void DrawRuntimeUICanvasComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawAudioListenerComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawScriptComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity);

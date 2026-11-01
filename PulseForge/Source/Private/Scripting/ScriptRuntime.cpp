@@ -391,6 +391,58 @@ namespace PulseForge
 			return true;
 		}
 
+		int InvokeUIActionTrampoline(lua_State* State)
+		{
+			const char* Action = static_cast<const char*>(lua_touserdata(State, 1));
+			const size_t ActionBytes = static_cast<size_t>(lua_tointeger(State, 2));
+			const int EnvironmentReference = static_cast<int>(lua_tointeger(State, 3));
+			const int CallbackNameReference = static_cast<int>(lua_tointeger(State, 4));
+			lua_rawgeti(State, LUA_REGISTRYINDEX, EnvironmentReference);
+			lua_rawgeti(State, LUA_REGISTRYINDEX, CallbackNameReference);
+			lua_rawget(State, -2);
+			lua_remove(State, -2);
+			if (lua_isnil(State, -1)) return 0;
+			if (!lua_isfunction(State, -1)) return luaL_error(State, "OnUIAction must be a function when defined");
+			lua_pushlstring(State, Action, ActionBytes);
+			lua_call(State, 1, 0);
+			return 0;
+		}
+
+		std::expected<bool, std::string> RunUIActionCallback(ScriptInstance& Instance, std::string_view Action)
+		{
+			lua_State* State = Instance.State;
+			constexpr size_t CallbackIndex = static_cast<size_t>(ScriptRuntimeCallback::OnUIAction);
+			const int StackBase = lua_gettop(State);
+			if (CallbackIndex >= Instance.CallbackNameReferences.size())
+				return std::unexpected(std::string("Invalid runtime UI callback index"));
+			if (!lua_checkstack(State, 5)) return std::unexpected(std::string("Lua stack limit reached before runtime UI callback"));
+			lua_pushcfunction(State, InvokeUIActionTrampoline);
+			lua_pushlightuserdata(State, const_cast<char*>(Action.data()));
+			lua_pushinteger(State, static_cast<lua_Integer>(Action.size()));
+			lua_pushinteger(State, static_cast<lua_Integer>(Instance.EnvironmentReference));
+			lua_pushinteger(State, static_cast<lua_Integer>(Instance.CallbackNameReferences[CallbackIndex]));
+			Instance.InstructionBudget = (Instance.MaximumInstructions / InstructionHookQuantum) * InstructionHookQuantum;
+			lua_sethook(State, InstructionBudgetHook, LUA_MASKCOUNT, InstructionHookQuantum);
+			Observe(Instance.Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::CallbackEntered,
+					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset,
+					.Callback = ScriptRuntimeCallback::OnUIAction });
+			const int Status = lua_pcall(State, 4, 0, 0);
+			lua_sethook(State, nullptr, 0, 0);
+			if (Status != LUA_OK)
+			{
+				std::string Message = LuaErrorMessage(State);
+				lua_settop(State, StackBase);
+				return std::unexpected(std::move(Message));
+			}
+			lua_settop(State, StackBase);
+			Observe(Instance.Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::CallbackCompleted,
+					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset,
+					.Callback = ScriptRuntimeCallback::OnUIAction });
+			return true;
+		}
+
 		std::string GenericPathString(const std::filesystem::path& Path)
 		{
 			const std::u8string Encoded = Path.generic_u8string();
@@ -1512,6 +1564,37 @@ namespace PulseForge
 
 			if (!DispatchTo(Event.First, Event.Second)) return false;
 			return DispatchTo(Event.Second, Event.First);
+		}
+		catch (...)
+		{
+			return false;
+		}
+	}
+
+	bool ScriptRuntime::DispatchRuntimeUIAction(Scene& Source, const Entity& Recipient, std::string_view Action) noexcept
+	{
+		if (!m_Impl || m_Impl->Source != &Source || Action.empty() || Action.size() > 128 ||
+			Action.find_first_of("\r\n") != std::string_view::npos || Action.find('\0') != std::string_view::npos)
+			return true;
+		try
+		{
+			const auto Current = Source.FindEntity(Recipient.GetUUID());
+			if (!Current || *Current != Recipient) return true;
+			const auto Found = m_Impl->Scripts.find(Recipient.GetUUID());
+			if (Found == m_Impl->Scripts.end()) return true;
+			ScriptInstance& Instance = *Found->second;
+			if (Instance.BoundEntity != Recipient || Instance.Faulted || Instance.Destroying || !Instance.SourceSnapshot) return true;
+			Instance.DeferredRuntimeTransitionRequested = false;
+			auto Result = RunUIActionCallback(Instance, Action);
+			if (!Result)
+			{
+				Instance.Faulted = true;
+				m_Impl->RecordDiagnostic(MakeScriptDiagnostic(Recipient.GetUUID(), Instance.Asset,
+					ScriptDiagnosticCode::UpdateFailed, std::move(Result.error()), *Instance.SourceSnapshot,
+					Instance.SourceSnapshot->MainSourcePath));
+			}
+			m_Impl->RecordPendingModuleFailure(Instance);
+			return !Instance.DeferredRuntimeTransitionRequested;
 		}
 		catch (...)
 		{

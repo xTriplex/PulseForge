@@ -22,8 +22,8 @@ extern "C"
 namespace PulseForge::ScriptRuntimeDetail
 {
 	inline constexpr int InstructionHookQuantum = 1000;
-	inline constexpr std::array<std::string_view, 9> CallbackNames = { "OnCreate", "OnUpdate", "OnDestroy",
-		"OnCollisionBegin", "OnCollisionStay", "OnCollisionEnd", "OnTriggerEnter", "OnTriggerStay", "OnTriggerExit" };
+	inline constexpr std::array<std::string_view, 10> CallbackNames = { "OnCreate", "OnUpdate", "OnDestroy",
+		"OnCollisionBegin", "OnCollisionStay", "OnCollisionEnd", "OnTriggerEnter", "OnTriggerStay", "OnTriggerExit", "OnUIAction" };
 
 	struct LuaMemoryPool final
 	{

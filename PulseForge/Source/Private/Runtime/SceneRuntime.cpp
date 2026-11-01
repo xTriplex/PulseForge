@@ -2,6 +2,8 @@
 #include "Runtime/CookedContentProvider.h"
 
 #include "Assets/AudioAssetCache.h"
+#include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
 #endif
@@ -10,10 +12,14 @@
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"
 #include "Scripting/ScriptRuntime.h"
+#include "UI/RuntimeUI.h"
 
 #include <optional>
+#include <algorithm>
 #include <exception>
 #include <atomic>
+#include <fstream>
+#include <iterator>
 
 namespace PulseForge
 {
@@ -34,16 +40,62 @@ namespace PulseForge
 			if (Value == 0) Value = Generation.fetch_add(1, std::memory_order_relaxed) + 1;
 			return Value;
 		}
+
+		std::expected<std::string, std::string> ReadRuntimeUIDocumentBytes(
+			const Project* SourceProject, const std::shared_ptr<const CookedContentProvider>& CookedAssets, const AssetID& Asset)
+		{
+			if (CookedAssets)
+			{
+				auto Bytes = CookedAssets->ReadRuntimeUI(Asset);
+				if (!Bytes) return std::unexpected(Bytes.error().Message);
+				return std::string(Bytes->empty() ? "" : reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
+			}
+			if (!SourceProject) return std::unexpected(std::string("Runtime UI requires a source project or cooked content provider"));
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			const auto Record = SourceProject->GetAssetRegistry().Find(Asset);
+			if (!Record || !HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::RuntimeUI))
+				return std::unexpected(std::string("Runtime UI document is missing from the managed project asset registry"));
+			auto Path = AssetPathResolver::ResolveManagedSourcePath(SourceProject->GetRootPath(), Record->ProjectRelativePath);
+			if (!Path) return std::unexpected(Path.error().Message);
+			std::error_code Error;
+			const uintmax_t Size = std::filesystem::file_size(*Path, Error);
+			if (Error || Size == 0 || Size > 2u * 1024u * 1024u)
+				return std::unexpected(std::string("Runtime UI document could not be read within the 2 MiB limit"));
+			std::ifstream Input(*Path, std::ios::binary);
+			if (!Input.is_open()) return std::unexpected(std::string("Runtime UI document could not be opened"));
+			std::string Text(static_cast<size_t>(Size), '\0');
+			Input.read(Text.data(), static_cast<std::streamsize>(Text.size()));
+			if (!Input || Input.bad() || static_cast<size_t>(Input.gcount()) != Text.size())
+				return std::unexpected(std::string("Runtime UI document could not be read completely"));
+			return Text;
+#else
+			return std::unexpected(std::string("Cooked runtime cannot resolve source project UI documents"));
+#endif
+		}
 	}
 
 	struct SceneRuntime::Impl final
 	{
+		struct RuntimeUICanvasState final
+		{
+			Entity Owner;
+			AssetID Asset;
+			RuntimeUIDocument Document;
+			RuntimeUIController Controller;
+			std::vector<RuntimeUILayoutEntry> Layout;
+			std::vector<RuntimeUIDrawCommand> DrawCommands;
+			uint64_t TreeGeneration = 0;
+		};
 		// Declaration order intentionally makes script callbacks stop before their services and dependencies.
 		std::optional<AudioEngine> AudioDevice;
 		std::unique_ptr<AudioAssetCache> AudioAssets;
 		std::unique_ptr<AudioSceneRuntime> Audio;
 		std::unique_ptr<PhysicsSceneRuntime> Physics;
 		std::unique_ptr<ScriptRuntime> Scripting;
+		std::optional<RuntimeUICanvasState> RuntimeUI;
+		RuntimeUIViewport RuntimeUIView{};
+		std::vector<RuntimeUIInputEvent> RuntimeUIEvents;
+		std::vector<RuntimeUIDrawCommand> RuntimeUIDrawCommands;
 		Scene* Source = nullptr;
 		bool Paused = false;
 		enum class Lifecycle : uint8_t { Starting, Active, Stopping };
@@ -51,6 +103,7 @@ namespace PulseForge
 		Lifecycle State = Lifecycle::Starting;
 		RequestStatus BoundaryRequestStatus = RequestStatus::None;
 		std::optional<SceneRuntimeBoundaryRequest> BoundaryRequest;
+		std::optional<bool> RequestedPause;
 		uint64_t SessionGeneration = 0;
 		uint64_t NextBoundaryRequestGeneration = 0;
 	};
@@ -94,6 +147,35 @@ namespace PulseForge
 			auto Candidate = std::make_unique<Impl>();
 			Candidate->Source = &Source;
 			Candidate->SessionGeneration = SessionGeneration;
+			const Project* SourceProject = nullptr;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			SourceProject = m_Project;
+#endif
+			for (const Entity& EntityValue : Source.GetEntities())
+			{
+				auto Canvas = EntityValue.GetRuntimeUICanvas();
+				if (!Canvas)
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
+						"Could not inspect runtime UI canvas: " + Canvas.error().Message));
+				if (!Canvas->has_value() || !(**Canvas).Enabled) continue;
+				if (Candidate->RuntimeUI)
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
+						"A scene may contain only one enabled screen-space Runtime UI Canvas"));
+				auto Text = ReadRuntimeUIDocumentBytes(SourceProject, m_CookedAssets, (**Canvas).DocumentAsset);
+				if (!Text)
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
+						"Could not load Runtime UI document " + (**Canvas).DocumentAsset.ToString() + ": " + Text.error()));
+				auto Document = ParseRuntimeUIDocument(*Text);
+				if (!Document)
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
+						"Runtime UI document failed validation: " + Document.error().Message));
+				Candidate->RuntimeUI.emplace(Impl::RuntimeUICanvasState{
+					.Owner = EntityValue, .Asset = (**Canvas).DocumentAsset, .Document = std::move(*Document),
+					.TreeGeneration = SessionGeneration });
+				Candidate->RuntimeUIView = { .LogicalSize = Candidate->RuntimeUI->Document.DesignSize,
+					.FramebufferWidth = static_cast<uint32_t>(Candidate->RuntimeUI->Document.DesignSize.x),
+					.FramebufferHeight = static_cast<uint32_t>(Candidate->RuntimeUI->Document.DesignSize.y) };
+			}
 
 			auto AudioDevice = AudioEngine::Create(m_Description.Audio);
 			if (!AudioDevice)
@@ -193,6 +275,30 @@ namespace PulseForge
 					return true;
 				};
 			}
+			Services.QueuePause = [CandidateOwner](bool Paused)
+			{
+				if (CandidateOwner->State != Impl::Lifecycle::Active || CandidateOwner->BoundaryRequest ||
+					CandidateOwner->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+					return false;
+				CandidateOwner->RequestedPause = Paused;
+				return true;
+			};
+			Services.SetRuntimeUIText = [CandidateOwner](UUID ElementID, std::string Text)
+			{
+				if (CandidateOwner->State != Impl::Lifecycle::Active || !CandidateOwner->RuntimeUI ||
+					Text.size() > RuntimeUIDocument::MaximumTextBytes)
+					return false;
+				RuntimeUIDocument CandidateDocument = CandidateOwner->RuntimeUI->Document;
+				const auto Element = std::find_if(CandidateDocument.Elements.begin(), CandidateDocument.Elements.end(),
+					[ElementID](const RuntimeUIElement& Value) { return Value.ID == ElementID; });
+				if (Element == CandidateDocument.Elements.end() ||
+					(Element->Kind != RuntimeUIElementKind::Text && Element->Kind != RuntimeUIElementKind::Button))
+					return false;
+				Element->Text = std::move(Text);
+				if (!ValidateRuntimeUIDocument(CandidateDocument)) return false;
+				CandidateOwner->RuntimeUI->Document = std::move(CandidateDocument);
+				return true;
+			};
 			if (m_CookedAssets)
 				Candidate->Scripting = std::make_unique<ScriptRuntime>(m_CookedAssets, m_Description.Scripting, Services);
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -269,6 +375,30 @@ namespace PulseForge
 	bool SceneRuntime::IsPaused() const noexcept
 	{
 		return m_Impl && m_Impl->Paused;
+	}
+
+	bool SceneRuntime::HasRuntimeUI() const noexcept
+	{
+		return m_Impl && m_Impl->RuntimeUI.has_value();
+	}
+
+	bool SceneRuntime::SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
+	{
+		if (!m_Impl || !m_Impl->RuntimeUI || Events.size() > 512) return false;
+		m_Impl->RuntimeUIView = Viewport;
+		m_Impl->RuntimeUIEvents.assign(Events.begin(), Events.end());
+		return true;
+	}
+
+	std::span<const RuntimeUIDrawCommand> SceneRuntime::GetRuntimeUIDrawCommands() const noexcept
+	{
+		return m_Impl ? std::span<const RuntimeUIDrawCommand>(m_Impl->RuntimeUIDrawCommands) :
+			std::span<const RuntimeUIDrawCommand>{};
+	}
+
+	RuntimeUIViewport SceneRuntime::GetRuntimeUIViewport() const noexcept
+	{
+		return m_Impl ? m_Impl->RuntimeUIView : RuntimeUIViewport{};
 	}
 
 	std::expected<uint64_t, SceneRuntimeError> SceneRuntime::RequestScriptReload(const Entity& Target)
@@ -348,6 +478,40 @@ namespace PulseForge
 		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
 				"Could not service queued script reloads: " + Result.error().Message));
+		if (m_Impl->RuntimeUI)
+		{
+			auto& Canvas = *m_Impl->RuntimeUI;
+			auto Layout = Canvas.Controller.Layout(Canvas.Document, m_Impl->RuntimeUIView, Canvas.TreeGeneration);
+			if (!Layout)
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::None,
+					"Could not lay out Runtime UI: " + Layout.error().Message));
+			Canvas.Layout = std::move(*Layout);
+			const std::vector<RuntimeUIAction> Actions = Canvas.Controller.ProcessInput(
+				Canvas.Document, Canvas.Layout, m_Impl->RuntimeUIEvents, Canvas.TreeGeneration);
+			Canvas.DrawCommands = BuildRuntimeUIDrawList(Canvas.Document, Canvas.Layout,
+				Canvas.Controller.GetFocusedElement(), Canvas.Controller.GetHoveredElement());
+			m_Impl->RuntimeUIEvents.clear();
+			m_Impl->RuntimeUIDrawCommands = Canvas.DrawCommands;
+			const auto CurrentOwner = Source.FindEntity(Canvas.Owner.GetUUID());
+			if (CurrentOwner && *CurrentOwner == Canvas.Owner)
+				for (const RuntimeUIAction& Action : Actions)
+				{
+					(void)m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name);
+					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+						return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+				}
+		}
+		else
+			m_Impl->RuntimeUIDrawCommands.clear();
+		if (m_Impl->RequestedPause && m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending &&
+			m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Committed)
+		{
+			const bool RequestedPause = *m_Impl->RequestedPause;
+			m_Impl->RequestedPause.reset();
+			if (auto Result = SetPaused(RequestedPause); !Result) return std::unexpected(Result.error());
+		}
+
 		if (m_Impl->Paused) return SceneRuntimeFrameResult{};
 
 		{
@@ -361,6 +525,13 @@ namespace PulseForge
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+		if (m_Impl->RequestedPause)
+		{
+			const bool RequestedPause = *m_Impl->RequestedPause;
+			m_Impl->RequestedPause.reset();
+			if (auto Result = SetPaused(RequestedPause); !Result) return std::unexpected(Result.error());
+			if (m_Impl->Paused) return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+		}
 
 		auto PhysicsResult = [&]
 		{

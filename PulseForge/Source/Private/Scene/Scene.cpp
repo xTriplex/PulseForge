@@ -7,6 +7,7 @@
 #include "Scene/Components/PointLightComponent.h"
 #include "Scene/Components/SpotLightComponent.h"
 #include "Scene/Components/ScriptComponent.h"
+#include "Scene/Components/RuntimeUICanvasComponent.h"
 
 #include <entt/entt.hpp>
 
@@ -252,8 +253,9 @@ namespace PulseForge
 		const auto AudioSource = Source.GetAudioSource();
 		const auto AudioListener = Source.GetAudioListener();
 		const auto Script = Source.GetScript();
+		const auto RuntimeUICanvas = Source.GetRuntimeUICanvas();
 		if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
-			!AudioSource || !AudioListener || !Script)
+			!AudioSource || !AudioListener || !Script || !RuntimeUICanvas)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
 		auto Duplicated = CreateEntity(Tag->Name + " Copy");
@@ -355,6 +357,14 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(ScriptResult.error());
+			}
+		}
+		if (RuntimeUICanvas->has_value())
+		{
+			if (auto CanvasResult = Duplicated->SetRuntimeUICanvas(RuntimeUICanvas->value()); !CanvasResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(CanvasResult.error());
 			}
 		}
 
@@ -941,6 +951,48 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have an audio source component"));
 
 		Storage->Registry.remove<AudioSourceComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<RuntimeUICanvasComponent>, SceneError> Entity::GetRuntimeUICanvas() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read runtime UI canvas from an invalid entity"));
+		if (!Storage->Registry.all_of<RuntimeUICanvasComponent>(*Native)) return std::optional<RuntimeUICanvasComponent>{};
+		return std::optional<RuntimeUICanvasComponent>{ Storage->Registry.get<RuntimeUICanvasComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetRuntimeUICanvas(const RuntimeUICanvasComponent& Canvas) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set runtime UI canvas on an invalid entity"));
+		if (Canvas.DocumentAsset.IsNil())
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Runtime UI canvas requires a managed UI document asset"));
+		try
+		{
+			Storage->Registry.emplace_or_replace<RuntimeUICanvasComponent>(*Native, Canvas);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{ SceneErrorCode::StorageFailure,
+				std::string("Could not set runtime UI canvas: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveRuntimeUICanvas() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove runtime UI canvas from an invalid entity"));
+		if (!Storage->Registry.all_of<RuntimeUICanvasComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a runtime UI canvas"));
+		Storage->Registry.remove<RuntimeUICanvasComponent>(*Native);
 		return {};
 	}
 

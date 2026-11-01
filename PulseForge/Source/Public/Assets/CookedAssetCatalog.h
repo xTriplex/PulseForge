@@ -47,7 +47,9 @@ namespace PulseForge
 		MeshPrimitive,
 		Texture,
 		Environment,
-		GameplayInput
+		GameplayInput,
+		RuntimeUI,
+		Font
 	};
 
 	struct CookedAssetDependency final

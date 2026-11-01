@@ -77,6 +77,11 @@ namespace PulseForge
 		[[nodiscard]] std::expected<GameplayActionMap, CookedAssetCatalogError> LoadGameplayInput(
 			const AssetID& Asset) const;
 
+		[[nodiscard]] const CookedAssetEntry* FindRuntimeUI(const AssetID& Asset) const noexcept;
+		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadRuntimeUI(const AssetID& Asset) const;
+		[[nodiscard]] const CookedAssetEntry* FindFont(const AssetID& Asset) const noexcept;
+		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadFont(const AssetID& Asset) const;
+
 	private:
 		explicit CookedContentProvider(std::shared_ptr<const CookedAssetCatalog> Catalog);
 

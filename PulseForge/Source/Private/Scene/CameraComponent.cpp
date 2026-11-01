@@ -10,13 +10,19 @@ namespace PulseForge
 	std::expected<void, CameraError> CameraComponent::Validate() const
 	{
 		constexpr float Pi = 3.14159265358979323846f;
-		if (!std::isfinite(VerticalFieldOfViewRadians) ||
-			VerticalFieldOfViewRadians <= 0.0f || VerticalFieldOfViewRadians >= Pi)
+		if (ProjectionType == CameraProjectionType::Perspective && (!std::isfinite(VerticalFieldOfViewRadians) ||
+			VerticalFieldOfViewRadians <= 0.0f || VerticalFieldOfViewRadians >= Pi))
 		{
 			return std::unexpected(CameraError{
 				CameraErrorCode::InvalidFieldOfView,
 				"Camera vertical field of view must be finite and between zero and pi radians" });
 		}
+		if (ProjectionType == CameraProjectionType::Orthographic &&
+			(!std::isfinite(OrthographicHeight) || OrthographicHeight <= std::numeric_limits<float>::epsilon()))
+			return std::unexpected(CameraError{ CameraErrorCode::InvalidOrthographicHeight,
+				"Orthographic camera height must be finite and greater than zero" });
+		if (ProjectionType != CameraProjectionType::Perspective && ProjectionType != CameraProjectionType::Orthographic)
+			return std::unexpected(CameraError{ CameraErrorCode::InvalidFieldOfView, "Camera projection type is unsupported" });
 
 		if (!std::isfinite(NearClipPlane) || !std::isfinite(FarClipPlane) ||
 			NearClipPlane <= 0.0f || FarClipPlane <= NearClipPlane)
@@ -39,11 +45,15 @@ namespace PulseForge
 				"Camera aspect ratio must be finite and greater than zero" });
 		}
 
-		glm::mat4 Projection = glm::perspectiveRH_ZO(
-			VerticalFieldOfViewRadians,
-			AspectRatio,
-			NearClipPlane,
-			FarClipPlane);
+		glm::mat4 Projection;
+		if (ProjectionType == CameraProjectionType::Orthographic)
+		{
+			const float HalfHeight = OrthographicHeight * 0.5f;
+			const float HalfWidth = HalfHeight * AspectRatio;
+			Projection = glm::orthoRH_ZO(-HalfWidth, HalfWidth, -HalfHeight, HalfHeight, NearClipPlane, FarClipPlane);
+		}
+		else
+			Projection = glm::perspectiveRH_ZO(VerticalFieldOfViewRadians, AspectRatio, NearClipPlane, FarClipPlane);
 		// NVRHI maps clip-space +Y to the framebuffer top using a negative-height Vulkan viewport.
 		for (int Column = 0; Column < 4; ++Column)
 		{

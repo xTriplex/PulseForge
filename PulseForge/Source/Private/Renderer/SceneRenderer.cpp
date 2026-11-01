@@ -8,8 +8,10 @@
 #include "Renderer/RenderTargetFrameScope.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
 #include "Renderer/SceneRendererMaterialBindingCache.h"
+#include "Renderer/Detail/RuntimeUIRenderPass.h"
 
 #include "Assets/MaterialAssetCache.h"
+#include "Assets/AssetPathResolver.h"
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPreparationService.h"
 #include "Assets/DerivedDataArtifactStore.h"
@@ -230,7 +232,8 @@ namespace PulseForge
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
 		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)), m_LocalLightingState(std::make_unique<LocalLightingState>()),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime)),
-		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime)), m_ShadowPass(std::make_unique<ShadowPass>())
+		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime)), m_ShadowPass(std::make_unique<ShadowPass>()),
+		  m_RuntimeUIRenderPass(std::make_unique<RuntimeUIRenderPass>(Runtime))
 	{
 	}
 #endif
@@ -241,7 +244,8 @@ namespace PulseForge
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
 		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)), m_LocalLightingState(std::make_unique<LocalLightingState>()),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime)),
-		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime)), m_ShadowPass(std::make_unique<ShadowPass>())
+		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime)), m_ShadowPass(std::make_unique<ShadowPass>()),
+		  m_RuntimeUIRenderPass(std::make_unique<RuntimeUIRenderPass>(Runtime))
 	{
 	}
 
@@ -480,6 +484,12 @@ namespace PulseForge
 		if (auto ToneMappingInitialized = m_ToneMappingStage->Initialize(*ToneMappingVertexBytecode, *ToneMappingFragmentBytecode);
 			!ToneMappingInitialized)
 			return std::unexpected(std::move(ToneMappingInitialized.error()));
+		auto RuntimeUIVertexBytecode = ReadShaderBytecode(CompiledShaderDirectory / "RuntimeUI.vs.spv");
+		if (!RuntimeUIVertexBytecode) return std::unexpected(std::move(RuntimeUIVertexBytecode.error()));
+		auto RuntimeUIFragmentBytecode = ReadShaderBytecode(CompiledShaderDirectory / "RuntimeUI.ps.spv");
+		if (!RuntimeUIFragmentBytecode) return std::unexpected(std::move(RuntimeUIFragmentBytecode.error()));
+		if (auto Initialized = m_RuntimeUIRenderPass->Initialize(*RuntimeUIVertexBytecode, *RuntimeUIFragmentBytecode); !Initialized)
+			return std::unexpected(MakeResourceError("Could not initialize runtime UI renderer: " + Initialized.error().Message));
 
 		BindingLayoutDesc BindingLayoutDescription;
 		BindingLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
@@ -724,6 +734,7 @@ namespace PulseForge
 		}
 		m_PreparedSnapshot.reset();
 		m_PreparedMeshResources.clear();
+		m_PreparedRuntimeUITextures.clear();
 		m_PreparedMaterialBindings.clear();
 		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
 		m_PreparedEnvironmentBinding = nullptr;
@@ -745,6 +756,55 @@ namespace PulseForge
 				Snapshot.error().Message
 			});
 		}
+		const auto ResolveImage = [this](AssetID Asset) -> const Texture*
+		{
+			if (Asset.IsNil()) return nullptr;
+			auto Loaded = m_ProjectAssetCaches->Textures.GetOrLoad(Asset, TextureFormat::RGBA8_Srgb);
+			if (!Loaded) return nullptr;
+			const Texture* Resource = &Loaded->get();
+			m_PreparedRuntimeUITextures.push_back(Resource);
+			return Resource;
+		};
+		const auto ResolveFont = [this](AssetID Asset) -> std::expected<std::vector<std::byte>, std::string>
+		{
+			constexpr uint64_t MaximumFontBytes = 32ull * 1024ull * 1024ull;
+			if (Asset.IsNil()) return std::unexpected("Font asset identity is missing");
+			if (m_ProjectAssetCaches->CookedContent)
+			{
+				auto Bytes = m_ProjectAssetCaches->CookedContent->ReadFont(Asset);
+				if (!Bytes) return std::unexpected(Bytes.error().Message);
+				if (Bytes->empty() || Bytes->size() > MaximumFontBytes)
+					return std::unexpected("Cooked font is empty or exceeds the 32 MiB runtime limit");
+				return std::move(*Bytes);
+			}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			if (!m_Project) return std::unexpected("No managed project is active for font resolution");
+			const auto Record = m_Project->GetAssetRegistry().Find(Asset);
+			if (!Record) return std::unexpected("Font asset is not present in the active project registry");
+			std::string Extension = Record->ProjectRelativePath.extension().string();
+			std::transform(Extension.begin(), Extension.end(), Extension.begin(),
+				[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
+			if (Extension != ".ttf" && Extension != ".otf")
+				return std::unexpected("Runtime fonts must be managed TrueType or OpenType assets");
+			auto Path = AssetPathResolver::ResolveManagedSourcePath(m_Project->GetRootPath(), Record->ProjectRelativePath);
+			if (!Path) return std::unexpected(Path.error().Message);
+			std::error_code FileError;
+			const uint64_t Size = std::filesystem::file_size(*Path, FileError);
+			if (FileError || Size == 0 || Size > MaximumFontBytes)
+				return std::unexpected("Managed font is empty, unreadable, or exceeds the 32 MiB runtime limit");
+			std::ifstream File(*Path, std::ios::binary);
+			if (!File) return std::unexpected("Could not open managed font asset");
+			std::vector<std::byte> Bytes(static_cast<size_t>(Size));
+			File.read(reinterpret_cast<char*>(Bytes.data()), static_cast<std::streamsize>(Bytes.size()));
+			if (!File) return std::unexpected("Could not read complete managed font asset");
+			return Bytes;
+#else
+			return std::unexpected("Cooked font provider is unavailable");
+#endif
+		};
+		if (auto Prepared = m_RuntimeUIRenderPass->Prepare(m_RuntimeUIDrawCommands, m_RuntimeUIView, ResolveImage, ResolveFont);
+			!Prepared)
+			return std::unexpected(MakeDrawError("Could not prepare runtime UI resources: " + Prepared.error().Message));
 		for (SceneMeshInstance& Instance : Snapshot->Meshes)
 		{
 			Instance.Orientation = ClassifyWorldTransform(Instance.WorldTransform);
@@ -973,6 +1033,7 @@ namespace PulseForge
 		m_TransparentDrawOrder.clear();
 		m_PreparedSnapshot.reset();
 		m_PreparedMeshResources.clear();
+		m_PreparedRuntimeUITextures.clear();
 		m_PreparedMaterialBindings.clear();
 		m_PreparedCascades.reset();
 		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
@@ -982,6 +1043,7 @@ namespace PulseForge
 		m_AssetPreparationPending = false;
 		m_PreparedEnvironmentReady = false;
 		m_MaterialBindingCache->RefreshProjectAssets();
+		m_RuntimeUIRenderPass->ResetAssetResources();
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		if (m_Project)
 			m_ProjectAssetCaches->Clear(m_Project->GetAssetRegistry());
@@ -1036,10 +1098,15 @@ namespace PulseForge
 				*Hdr->ColorTexture, Hdr->TargetGeneration, ColorTargetFormat::Swapchain, true, *m_BackgroundTriangleBuffer);
 			!Tonemapped)
 			return std::unexpected(std::move(Tonemapped.error()));
+		if (auto UI = m_RuntimeUIRenderPass->Draw(m_RuntimeUIDrawCommands, m_RuntimeUIView, Width, Height,
+			ColorTargetFormat::Swapchain, true); !UI)
+			return std::unexpected(MakeDrawError("Could not render runtime UI after tone mapping: " + UI.error().Message));
+		const RuntimeUIRenderStatistics UIStats = m_RuntimeUIRenderPass->GetStatistics();
 		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, ColorTargetFormat::Swapchain,
 			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount, Hdr->SpotlightShadowResourceGeneration, m_LocalLightingState->SpotlightSlotOwners(),
-			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners };
+			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners,
+			UIStats.QuadCount, UIStats.BatchCount, UIStats.TextureCount, UIStats.FontAtlasCount };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput(const RenderTarget& Target)
@@ -1066,6 +1133,10 @@ namespace PulseForge
 		RenderTargetFrameScope Scope(m_Runtime);
 		auto Draw = m_ToneMappingStage->Draw(*Hdr->ColorTexture, Hdr->TargetGeneration, Description.ColorFormat,
 			Description.DepthMode != DepthAttachmentMode::None, *m_BackgroundTriangleBuffer);
+		std::expected<size_t, GraphicsError> UIDraw = size_t{ 0 };
+		if (Draw)
+			UIDraw = m_RuntimeUIRenderPass->Draw(m_RuntimeUIDrawCommands, m_RuntimeUIView, Description.Width, Description.Height,
+				Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None);
 		const GraphicsResult End = Scope.End();
 		if (!Draw)
 		{
@@ -1073,12 +1144,25 @@ namespace PulseForge
 				PF_CORE_ERROR("Could not close tone-mapped output target after draw failure: {0}", End.error().Message);
 			return std::unexpected(std::move(Draw.error()));
 		}
+		if (!UIDraw)
+		{
+			if (!End) PF_CORE_ERROR("Could not close output target after runtime UI draw failure: {0}", End.error().Message);
+			return std::unexpected(MakeDrawError("Could not render runtime UI after tone mapping: " + UIDraw.error().Message));
+		}
 		if (!End)
 			return std::unexpected(MakeDrawError("Could not end tone-mapped output target: " + End.error().Message));
+		const RuntimeUIRenderStatistics UIStats = m_RuntimeUIRenderPass->GetStatistics();
 		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, Description.ColorFormat,
 			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount, Hdr->SpotlightShadowResourceGeneration, m_LocalLightingState->SpotlightSlotOwners(),
-			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners };
+			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners,
+			UIStats.QuadCount, UIStats.BatchCount, UIStats.TextureCount, UIStats.FontAtlasCount };
+	}
+
+	void SceneRenderer::SetRuntimeUIFrame(std::span<const RuntimeUIDrawCommand> Commands, const RuntimeUIViewport& Viewport)
+	{
+		m_RuntimeUIDrawCommands.assign(Commands.begin(), Commands.end());
+		m_RuntimeUIView = Viewport;
 	}
 
 	bool SceneRenderer::SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept

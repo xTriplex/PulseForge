@@ -409,7 +409,7 @@ namespace PulseForge::GpuValidation
 				return false;
 			}
 			m_CapturingPointShadowOverview = true;
-			m_ScenePrepared = true;
+			m_ScenePrepared = !m_SceneRenderer->IsAssetPreparationPending();
 			PF_INFO(
 				"POINT_SHADOW_OVERVIEW_CASE={0}; primary_position=({1},{2},{3}); cast_shadows={4}; secondary_shadow_owner_retained=true",
 				TestCase.Name, TestCase.LightPosition.x, TestCase.LightPosition.y, TestCase.LightPosition.z, TestCase.CastShadows);
@@ -533,7 +533,7 @@ namespace PulseForge::GpuValidation
 				Fail("Could not prepare point-shadow image case: " + Prepared.error().Message);
 				return false;
 			}
-			m_ScenePrepared = true;
+			m_ScenePrepared = !m_SceneRenderer->IsAssetPreparationPending();
 			PF_INFO("POINT_SHADOW_IMAGE_CASE={0}; light=({1},{2},{3}); cast_shadows={4}; rotation={5}", TestCase.Name,
 				TestCase.LightPosition.x, TestCase.LightPosition.y, TestCase.LightPosition.z, TestCase.CastShadows,
 				TestCase.PointLightRotated ? "rotated" : "identity");
@@ -722,7 +722,11 @@ namespace PulseForge::GpuValidation
 			if (!Rendered || Rendered->GeometryDrawCount != 2 || Rendered->PointShadowPassCount != (TestCase.CastShadows ? 6u : 0u) ||
 				Rendered->PointShadowCasterDrawCount != (TestCase.CastShadows ? 12u : 0u))
 			{
-				Fail(Rendered ? "Point-shadow image case did not render the expected six depth faces and two casters"
+				Fail(Rendered ? "Point-shadow image case had unexpected draw counts (geometry=" + std::to_string(Rendered->GeometryDrawCount) +
+					"; point passes=" + std::to_string(Rendered->PointShadowPassCount) + "; point caster draws=" +
+					std::to_string(Rendered->PointShadowCasterDrawCount) + "; expected geometry=2, passes=" +
+					std::to_string(TestCase.CastShadows ? 6u : 0u) + ", caster draws=" +
+					std::to_string(TestCase.CastShadows ? 12u : 0u) + ")"
 							  : "Point-shadow image scene render failed: " + Rendered.error().Message);
 				return;
 			}

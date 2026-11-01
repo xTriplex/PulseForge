@@ -18,6 +18,7 @@ namespace PulseForgeEditor
 	{
 		OpenScene,
 		OpenPrefab,
+		OpenRuntimeUI,
 		ShowMaterialDetails,
 		Move,
 		Duplicate,

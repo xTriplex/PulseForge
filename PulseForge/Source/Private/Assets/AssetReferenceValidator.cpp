@@ -77,6 +77,12 @@ namespace PulseForge
 			if (EnvironmentLight->has_value())
 				ValidateReference(Issues, Registry, CurrentEntity, EnvironmentLight->value().HdrImage, AssetReferenceKind::Environment,
 					AssetFileType::Environment);
+
+			const auto RuntimeUICanvas = CurrentEntity.GetRuntimeUICanvas();
+			if (!RuntimeUICanvas) return std::unexpected(RuntimeUICanvas.error());
+			if (RuntimeUICanvas->has_value())
+				ValidateReference(Issues, Registry, CurrentEntity, RuntimeUICanvas->value().DocumentAsset,
+					AssetReferenceKind::RuntimeUI, AssetFileType::RuntimeUI);
 		}
 		return Issues;
 	}

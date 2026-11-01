@@ -6,6 +6,7 @@
 #include "Input/GameplayInput.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scripting/ScriptRuntime.h"
+#include "UI/RuntimeUI.h"
 
 #include "Assets/AssetID.h"
 
@@ -121,6 +122,11 @@ namespace PulseForge
 		[[nodiscard]] bool IsRunning() const noexcept;
 		[[nodiscard]] std::expected<void, SceneRuntimeError> SetPaused(bool Paused);
 		[[nodiscard]] bool IsPaused() const noexcept;
+		[[nodiscard]] bool HasRuntimeUI() const noexcept;
+		// Owner/window code supplies viewport geometry and a bounded logical input batch before Advance.
+		[[nodiscard]] bool SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events);
+		[[nodiscard]] std::span<const RuntimeUIDrawCommand> GetRuntimeUIDrawCommands() const noexcept;
+		[[nodiscard]] RuntimeUIViewport GetRuntimeUIViewport() const noexcept;
 		// Queues an explicit state-reset reload for one attachment in the active Play/Player scene.
 		[[nodiscard]] std::expected<uint64_t, SceneRuntimeError> RequestScriptReload(const Entity& Target);
 		[[nodiscard]] std::span<const ScriptDiagnostic> GetScriptDiagnostics() const noexcept;

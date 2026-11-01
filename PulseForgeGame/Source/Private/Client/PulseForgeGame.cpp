@@ -242,6 +242,8 @@ public:
 #if defined(PF_DEBUG)
 		if (const char* Smoke = std::getenv("PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"))
 			m_PlayerSmokeExitAfterRender = std::string_view(Smoke) == "1";
+		if (const char* UISmoke = std::getenv("PULSEFORGE_RUNTIME_UI_PACKAGE_SMOKE"))
+			m_RuntimeUIPackageSmoke = std::string_view(UISmoke) == "1";
 		if (const char* Acceptance = std::getenv("PULSEFORGE_COOKED_PLAYER_ACCEPTANCE"))
 			m_CookedPlayerAcceptance = std::string_view(Acceptance) == "1";
 #endif
@@ -403,10 +405,48 @@ public:
 		Routing.FocusedWindow = Application.IsMainWindowFocused() ? Application.GetInputWindowID() : 0;
 		if (m_Session && Routing.FocusedWindow != 0)
 		{
+			if (m_Session->HasRuntimeUI())
+				Routing.Contexts[Routing.ContextCount++] = { .Context = PulseForge::InputContext::RuntimeUI,
+					.Consumes = PulseForge::InputDeviceMask::All, .OwnerWindow = Routing.FocusedWindow, .Active = true };
 			Routing.Contexts[Routing.ContextCount++] = { .Context = PulseForge::InputContext::Gameplay,
 				.Consumes = PulseForge::InputDeviceMask::None, .OwnerWindow = Routing.FocusedWindow, .Active = true };
 		}
 		Application.GetGameplayInput().PublishFrame(Routing);
+		if (m_Session && m_Session->HasRuntimeUI())
+		{
+			const auto [FramebufferWidth, FramebufferHeight] = Application.GetWindow().GetFramebufferSize();
+			const PulseForge::RuntimeUIViewport Viewport{
+				.LogicalSize = { static_cast<float>(Application.GetWindow().GetWidth()),
+					static_cast<float>(Application.GetWindow().GetHeight()) },
+				.FramebufferWidth = FramebufferWidth, .FramebufferHeight = FramebufferHeight };
+			std::vector<PulseForge::RuntimeUIInputEvent> Events;
+			Events.reserve(6);
+			const auto PointerPosition = Routing.FocusedWindow != 0
+				? Application.GetGameplayInput().GetPointerPosition(Routing.FocusedWindow) : std::nullopt;
+			if (Routing.FocusedWindow == 0)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::FocusLost });
+			else if (PointerPosition)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerMoved,
+					.Position = { PointerPosition->X, PointerPosition->Y } });
+			if (const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate"); Navigate &&
+				(Navigate->Pressed || std::abs(Navigate->X) > 0.55f || std::abs(Navigate->Y) > 0.55f))
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Navigate, .Direction = { Navigate->X, Navigate->Y } });
+			if (const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate"); Activate && Activate->Pressed)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Activate });
+			if (const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel"); Cancel && Cancel->Pressed)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Cancel });
+			if (const auto* Pointer = Application.GetGameplayInput().FindAction("ui.pointer"); Pointer && PointerPosition &&
+				Events.size() < 512)
+			{
+				if (Pointer->Pressed)
+					Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerPressed,
+						.Position = { PointerPosition->X, PointerPosition->Y } });
+				if (Pointer->Released)
+					Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerReleased,
+						.Position = { PointerPosition->X, PointerPosition->Y } });
+			}
+			(void)m_Session->SetRuntimeUIInputFrame(Viewport, Events);
+		}
 
 		if (m_EditorShutdownChannel.ConsumeRequest())
 		{
@@ -472,6 +512,10 @@ public:
 			}
 		}
 		if (!m_SceneRenderer || !m_Session || !m_Session->GetActiveScene()) return;
+		if (m_Session->HasRuntimeUI())
+			m_SceneRenderer->SetRuntimeUIFrame(m_Session->GetRuntimeUIDrawCommands(), m_Session->GetRuntimeUIViewport());
+		else
+			m_SceneRenderer->SetRuntimeUIFrame({}, {});
 
 		const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
 		if (FramebufferWidth == 0 || FramebufferHeight == 0) return;
@@ -518,6 +562,16 @@ public:
 			return;
 		}
 		m_LoggedRenderFailure = false;
+#if defined(PF_DEBUG)
+		if (m_RuntimeUIPackageSmoke && !m_RuntimeUIPackageSmokeShutdownRequested && Rendered->RuntimeUIQuadCount > 0)
+		{
+			m_RuntimeUIPackageSmokeShutdownRequested = true;
+			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE=PASS; quads={}; batches={}; textures={}; font_atlases={}; requesting orderly shutdown",
+				Rendered->RuntimeUIQuadCount, Rendered->RuntimeUIBatchCount, Rendered->RuntimeUITextureCount,
+				Rendered->RuntimeUIFontAtlasCount);
+			PulseForge::Application::Get().RequestClose();
+		}
+#endif
 		if (Rendered->GeometryDrawCount > 0)
 		{
 			if (!m_LoggedSceneDraw)
@@ -546,6 +600,7 @@ public:
 		if (m_PlayerSmokeShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
 #if defined(PF_DEBUG)
 		if (m_CookedAcceptanceShutdownRequested) PF_INFO("PULSEFORGE_COOKED_PLAYER_SHUTDOWN=PASS");
+		if (m_RuntimeUIPackageSmokeShutdownRequested) PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS");
 #endif
 		if (m_EditorShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_ORDERLY_STOP=PASS");
 	}
@@ -613,6 +668,8 @@ private:
 	bool m_PlayerSmokeShutdownRequested = false;
 	bool m_PlayerRuntimeSmokeLogged = false;
 #if defined(PF_DEBUG)
+	bool m_RuntimeUIPackageSmoke = false;
+	bool m_RuntimeUIPackageSmokeShutdownRequested = false;
 	bool m_CookedPlayerAcceptance = false;
 	bool m_CookedStartupSceneReady = false;
 	bool m_CookedInputMapReady = false;

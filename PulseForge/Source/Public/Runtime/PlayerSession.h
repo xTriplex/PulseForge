@@ -64,6 +64,19 @@ namespace PulseForge
 		[[nodiscard]] double GetTimeScale() const noexcept { return m_TimeScale; }
 		[[nodiscard]] bool IsPaused() const noexcept { return m_Paused; }
 		[[nodiscard]] bool IsRunning() const noexcept { return m_Runtime != nullptr; }
+		[[nodiscard]] bool HasRuntimeUI() const noexcept { return m_Runtime && m_Runtime->HasRuntimeUI(); }
+		[[nodiscard]] bool SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
+		{
+			return m_Runtime && m_Runtime->SetRuntimeUIInputFrame(Viewport, Events);
+		}
+		[[nodiscard]] std::span<const RuntimeUIDrawCommand> GetRuntimeUIDrawCommands() const noexcept
+		{
+			return m_Runtime ? m_Runtime->GetRuntimeUIDrawCommands() : std::span<const RuntimeUIDrawCommand>{};
+		}
+		[[nodiscard]] RuntimeUIViewport GetRuntimeUIViewport() const noexcept
+		{
+			return m_Runtime ? m_Runtime->GetRuntimeUIViewport() : RuntimeUIViewport{};
+		}
 		void Stop() noexcept;
 
 		[[nodiscard]] const Project* GetProject() const noexcept

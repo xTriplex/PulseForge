@@ -77,6 +77,15 @@ namespace
 		const auto OverflowingProjection = OverflowingProjectionCamera.GetProjectionMatrix(16.0f / 9.0f);
 		PF_CHECK(Tests, !OverflowingProjection.has_value());
 		PF_CHECK(Tests, !OverflowingProjection && OverflowingProjection.error().Code == CameraErrorCode::NonFiniteProjection);
+		CameraComponent OrthographicCamera = SourceCamera;
+		OrthographicCamera.ProjectionType = CameraProjectionType::Orthographic;
+		OrthographicCamera.OrthographicHeight = 8.0f;
+		const auto OrthographicProjection = OrthographicCamera.GetProjectionMatrix(2.0f);
+		PF_CHECK(Tests, OrthographicProjection.has_value());
+		PF_CHECK(Tests, OrthographicProjection && std::abs((*OrthographicProjection)[0][0] - 0.125f) < 0.0001f &&
+			std::abs((*OrthographicProjection)[1][1] - 0.25f) < 0.0001f);
+		OrthographicCamera.OrthographicHeight = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !OrthographicCamera.Validate());
 		CameraComponent InvalidCamera = SourceCamera;
 		InvalidCamera.VerticalFieldOfViewRadians = 0.0f;
 		const auto InvalidCameraSet = Child.SetCamera(InvalidCamera);
@@ -135,7 +144,7 @@ namespace
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 10") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 11") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"properties\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
@@ -304,19 +313,19 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 10");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 11");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 10").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 11").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(
 			Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
-		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "11", "1.5", "\"10\"" })
+		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "12", "1.5", "\"11\"" })
 		{
 			std::string UnsupportedDocument = *Serialized;
-			const size_t VersionValue = UnsupportedDocument.find("10", UnsupportedDocument.find("\"version\": "));
+			const size_t VersionValue = UnsupportedDocument.find("11", UnsupportedDocument.find("\"version\": "));
 			PF_CHECK(Tests, VersionValue != std::string::npos);
 			if (VersionValue == std::string::npos) continue;
 			UnsupportedDocument.replace(VersionValue, 2, UnsupportedSceneVersion);
@@ -404,10 +413,10 @@ namespace
 								MaximumCountScript->value().FloatProperties.size() == MaximumScriptFloatPropertyCount);
 		}
 		std::string LegacyScriptProperties = *Serialized;
-		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 10");
+		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 11");
 		PF_CHECK(Tests, ScriptPropertiesPosition != std::string::npos);
 		if (ScriptPropertiesPosition != std::string::npos)
-			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 10").size(), "\"version\": 7");
+			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 11").size(), "\"version\": 7");
 		const auto LegacyScriptPropertiesResult = SceneSerializer::Deserialize(LegacyScriptProperties, Destination);
 		PF_CHECK(Tests, !LegacyScriptPropertiesResult);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
@@ -430,28 +439,21 @@ namespace
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string LegacyVersionThree = *Serialized;
-		const size_t PrimaryFieldPosition = LegacyVersionThree.find("\"primary\": true");
-		PF_CHECK(Tests, PrimaryFieldPosition != std::string::npos);
-		if (PrimaryFieldPosition != std::string::npos)
-		{
-			const size_t PrimaryCommaPosition = LegacyVersionThree.rfind(',', PrimaryFieldPosition);
-			const size_t PrimaryLineEnd = LegacyVersionThree.find('\n', PrimaryFieldPosition);
-			PF_CHECK(Tests, PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos);
-			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
-				LegacyVersionThree.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
-		}
 		auto LegacyVersionThreeDocument = nlohmann::json::parse(LegacyVersionThree);
 		for (auto& EntityRecord : LegacyVersionThreeDocument["entities"])
 		{
+			if (EntityRecord.contains("camera"))
+			{
+				EntityRecord["camera"].erase("primary");
+				EntityRecord["camera"].erase("projection");
+				EntityRecord["camera"].erase("orthographicHeight");
+			}
 			for (const std::string_view Field : { "directionalLight", "environmentLight", "pointLight", "spotLight", "rigidbody",
 					 "boxCollider", "audioSource", "audioListener", "script" })
 				EntityRecord.erase(std::string(Field));
 		}
+		LegacyVersionThreeDocument["version"] = 3;
 		LegacyVersionThree = LegacyVersionThreeDocument.dump(2) + "\n";
-		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 10");
-		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
-		if (LegacyVersionThreePosition != std::string::npos)
-			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 10").size(), "\"version\": 3");
 		Scene LegacyVersionThreeDestination;
 		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
 		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());

@@ -19,6 +19,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentHostTestEditor.cpp
 		PulseForgeEditor/Source/Private/EditorPrefabDocumentEditor.cpp
+		PulseForgeEditor/Source/Private/EditorRuntimeUIDocumentEditor.cpp
 		PulseForgeEditor/Source/Private/EditorPrefabInstanceController.cpp
 		PulseForgeEditor/Source/Private/EditorPrefabInstancePanel.cpp
 		PulseForgeEditor/Source/Private/EditorPerformancePanel.cpp

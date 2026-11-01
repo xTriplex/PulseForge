@@ -17,6 +17,7 @@
 #include "Input/GameplayInputStore.h"
 #include "Renderer/EnvironmentLightingCache.h"
 #include "Scene/SceneSerializer.h"
+#include "UI/RuntimeUI.h"
 
 #include <algorithm>
 #include <array>
@@ -322,7 +323,8 @@ namespace PulseForge
 		std::optional<AssetFileType> GetCookAssetType(const std::filesystem::path& Path)
 		{
 			for (const AssetFileType Type : { AssetFileType::Scene, AssetFileType::Prefab, AssetFileType::Mesh, AssetFileType::Material,
-				AssetFileType::Script, AssetFileType::Audio, AssetFileType::Environment, AssetFileType::Image })
+				AssetFileType::Script, AssetFileType::Audio, AssetFileType::Environment, AssetFileType::Image,
+				AssetFileType::RuntimeUI, AssetFileType::Font })
 				if (HasAssetTypeExtension(Path, Type)) return Type;
 			return std::nullopt;
 		}
@@ -339,6 +341,8 @@ namespace PulseForge
 			case AssetFileType::Audio: return CookedAssetProductKind::Audio;
 			case AssetFileType::Environment: return CookedAssetProductKind::Environment;
 			case AssetFileType::Image: return CookedAssetProductKind::Texture;
+			case AssetFileType::RuntimeUI: return CookedAssetProductKind::RuntimeUI;
+			case AssetFileType::Font: return CookedAssetProductKind::Font;
 			default: return std::nullopt;
 			}
 		}
@@ -816,6 +820,13 @@ namespace PulseForge
 					const std::string Text(Bytes.empty() ? "" : reinterpret_cast<const char*>(Bytes.data()), Bytes.size());
 					auto Valid = PrefabSerializer::Parse(Text, Product.Asset);
 					if (!Valid) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Valid.error().Message, Product.SourcePath, Product.Asset));
+				}
+				else if (Product.Product == CookedAssetProductKind::RuntimeUI)
+				{
+					const std::string Text(Bytes.empty() ? "" : reinterpret_cast<const char*>(Bytes.data()), Bytes.size());
+					auto Valid = ParseRuntimeUIDocument(Text);
+					if (!Valid) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+						"Runtime UI document is invalid: " + Valid.error().Message, Product.SourcePath, Product.Asset));
 				}
 				else if (Product.Product == CookedAssetProductKind::Material)
 				{

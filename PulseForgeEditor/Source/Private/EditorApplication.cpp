@@ -77,6 +77,7 @@
 #include "Editor/EditorDocumentEditorRegistry.h"
 #include "Editor/EditorDocumentHostTestEditor.h"
 #include "Editor/EditorPrefabDocumentEditor.h"
+#include "Editor/EditorRuntimeUIDocumentEditor.h"
 #include "Editor/EditorPrefabInstanceController.h"
 #include "Editor/EditorPrefabInstancePanel.h"
 #if defined(_DEBUG) || defined(PF_DEBUG)
@@ -542,6 +543,10 @@ namespace
 				m_Documents, m_DocumentEditors, m_EditorStyle);
 			if (auto Result = m_PrefabDocumentEditor->Register(PulseForgeEditor::EditorDocumentKind::Prefab); !Result)
 				PF_ERROR("Could not register the prefab document editor: {}", Result.error());
+			m_RuntimeUIDocumentEditor = std::make_unique<PulseForgeEditor::EditorRuntimeUIDocumentEditor>(
+				m_Documents, m_DocumentEditors, m_EditorStyle);
+			if (auto Result = m_RuntimeUIDocumentEditor->Register(); !Result)
+				PF_ERROR("Could not register the Runtime UI document editor: {}", Result.error());
 			m_PrefabInstanceController = std::make_unique<PulseForgeEditor::EditorPrefabInstanceController>(*this);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DiagnosticsCaptureSmokeOutput) m_DiagnosticsSmokeStartedAt = std::chrono::steady_clock::now();
@@ -782,6 +787,9 @@ namespace
 				break;
 			case EditorContentBrowserAssetAction::OpenPrefab:
 				OpenPrefab(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::OpenRuntimeUI:
+				OpenRuntimeUI(Identifier);
 				break;
 			case EditorContentBrowserAssetAction::ShowMaterialDetails:
 				ShowMaterialDetails(Identifier);
@@ -1126,6 +1134,7 @@ namespace
 				}
 			}
 			PublishEditorGameplayInput();
+			SubmitRuntimeUIInput();
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
@@ -4677,6 +4686,39 @@ namespace
 			QueueAssetOperation([this, Identifier] { OpenPrefabNow(Identifier); });
 		}
 
+		void OpenRuntimeUI(const PulseForge::AssetID& Identifier)
+		{
+			QueueAssetOperation([this, Identifier] { OpenRuntimeUINow(Identifier); });
+		}
+
+		void OpenRuntimeUINow(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project || !m_RuntimeUIDocumentEditor) return;
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::RuntimeUI))
+			{
+				SetError("The selected asset is not a managed Runtime UI document.");
+				return;
+			}
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::RuntimeUI };
+			const std::string DisplayName = PathToUtf8(Asset->ProjectRelativePath.filename());
+			auto Opened = m_Documents.Open(Identity, Asset->ProjectRelativePath, DisplayName, m_Documents.GetOpeningPreference());
+			if (!Opened) { SetError("Runtime UI document could not be opened: " + Opened.error()); return; }
+			auto* Session = m_Documents.Find(Identity);
+			const auto Context = MakeDocumentEditorContext(Identity, Asset->ProjectRelativePath, DisplayName);
+			if (!Session || (!Session->EditorState && !m_RuntimeUIDocumentEditor->Open(*Session, Context)))
+			{
+				SetError("Runtime UI document could not load its managed source.");
+				if (Opened->Created)
+					(void)m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard, {}, {});
+				return;
+			}
+			if (!m_Documents.Activate(Identity)) { SetError("Runtime UI document loaded but could not be activated."); return; }
+			m_ContentBrowser.SelectAsset(Identifier);
+			SetStatus("Opened Runtime UI document " + PathToUtf8(Asset->ProjectRelativePath) + ".");
+		}
+
 		void OpenPrefabNow(const PulseForge::AssetID& Identifier)
 		{
 			if (!m_Project || !m_PrefabDocumentEditor) return;
@@ -8013,7 +8055,9 @@ namespace
 			std::vector<PulseForge::UUID> HiddenEntities;
 			if (!m_SceneRuntime) HiddenEntities = GetEffectivelyHiddenEntities();
 			m_ViewportRenderView.PrepareScene(PulseForge::Application::Get(), m_Project ? &*m_Project : nullptr, m_Scene.get(),
-				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities, m_EditorShaderDirectory);
+				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities, m_EditorShaderDirectory,
+				m_SceneRuntime ? m_SceneRuntime->GetRuntimeUIDrawCommands() : std::span<const PulseForge::RuntimeUIDrawCommand>{},
+				m_SceneRuntime ? m_SceneRuntime->GetRuntimeUIViewport() : PulseForge::RuntimeUIViewport{});
 			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared && m_ViewportRenderView.IsSceneReady())
 			{
 				m_LoggedFirstViewportPrepared = true;
@@ -8469,6 +8513,51 @@ namespace
 			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !ViewportNavigation;
 			Application.GetGameplayInput().PublishFrame(Routing);
 			m_InputMappingPanel.MarkInputPublished();
+		}
+
+		void SubmitRuntimeUIInput()
+		{
+			if (!m_SceneRuntime || !m_RuntimeScene || !m_SceneRuntime->HasRuntimeUI()) return;
+			auto& Application = PulseForge::Application::Get();
+			ImGuiViewport* Owner = ResolveSceneViewportOwner();
+			GLFWwindow* NativeWindow = Owner ? static_cast<GLFWwindow*>(Owner->PlatformHandle) : nullptr;
+			const uint64_t Window = Owner && NativeWindow ? m_ViewportScrollInput.GetInputWindowID(Owner->ID, NativeWindow) : 0;
+			const bool Focused = Window != 0 && Owner && NativeWindow &&
+				glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE && IsCursorOverViewportImage();
+			PulseForge::RuntimeUIViewport Viewport;
+			std::vector<PulseForge::RuntimeUIInputEvent> Events;
+			if (m_ViewportImageRect.Maximum.x > m_ViewportImageRect.Minimum.x &&
+				m_ViewportImageRect.Maximum.y > m_ViewportImageRect.Minimum.y)
+			{
+				Viewport.LogicalSize = { m_ViewportImageRect.Maximum.x - m_ViewportImageRect.Minimum.x,
+					m_ViewportImageRect.Maximum.y - m_ViewportImageRect.Minimum.y };
+				Viewport.FramebufferWidth = m_ViewportRenderView.GetWidth();
+				Viewport.FramebufferHeight = m_ViewportRenderView.GetHeight();
+			}
+			const auto Pointer = Focused ? Application.GetGameplayInput().GetPointerPosition(Window) : std::nullopt;
+			if (!Focused)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::FocusLost });
+			else if (Pointer && Owner)
+			{
+				const glm::vec2 Position{ Owner->Pos.x + Pointer->X - m_ViewportImageRect.Minimum.x,
+					Owner->Pos.y + Pointer->Y - m_ViewportImageRect.Minimum.y };
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerMoved, .Position = Position });
+				if (const auto* Click = Application.GetGameplayInput().FindAction("ui.pointer"))
+				{
+					if (Click->Pressed)
+						Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerPressed, .Position = Position });
+					if (Click->Released)
+						Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerReleased, .Position = Position });
+				}
+			}
+			if (const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate"); Navigate &&
+				(Navigate->Pressed || std::abs(Navigate->X) > 0.55f || std::abs(Navigate->Y) > 0.55f))
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Navigate, .Direction = { Navigate->X, Navigate->Y } });
+			if (const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate"); Activate && Activate->Pressed)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Activate });
+			if (const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel"); Cancel && Cancel->Pressed)
+				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Cancel });
+			(void)m_SceneRuntime->SetRuntimeUIInputFrame(Viewport, Events);
 		}
 
 		PulseForge::SceneRuntimeServices CreateSceneRuntimeServices()
@@ -9131,6 +9220,7 @@ namespace
 		PulseForgeEditor::EditorDeferredOperationQueue m_DeferredEditorOperations;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorPrefabDocumentEditor> m_PrefabDocumentEditor;
+		std::unique_ptr<PulseForgeEditor::EditorRuntimeUIDocumentEditor> m_RuntimeUIDocumentEditor;
 		std::unique_ptr<PulseForgeEditor::EditorPrefabInstanceController> m_PrefabInstanceController;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;

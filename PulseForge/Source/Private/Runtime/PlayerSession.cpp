@@ -232,9 +232,8 @@ namespace PulseForge
 			RetiredScene.reset();
 		}
 
-		if (m_Paused) return SceneRuntimeFrameResult{};
-
-		auto Result = m_Runtime->Advance(*m_Scene, Timestep(ScaledDeltaSeconds));
+		auto Result = m_Runtime->Advance(*m_Scene, Timestep(m_Paused ? 0.0 : ScaledDeltaSeconds));
+		m_Paused = m_Runtime->IsPaused();
 		const auto BoundaryRequest = m_Runtime->GetPendingBoundaryRequest();
 		if (m_StopRequested || (BoundaryRequest && BoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop))
 		{

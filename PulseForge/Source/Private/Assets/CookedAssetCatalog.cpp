@@ -92,6 +92,8 @@ namespace PulseForge
 			case CookedAssetProductKind::Texture: return "texture";
 			case CookedAssetProductKind::Environment: return "environment";
 			case CookedAssetProductKind::GameplayInput: return "gameplay-input";
+			case CookedAssetProductKind::RuntimeUI: return "runtime-ui";
+			case CookedAssetProductKind::Font: return "font";
 			}
 			return {};
 		}
@@ -101,7 +103,8 @@ namespace PulseForge
 			for (const CookedAssetProductKind Kind : { CookedAssetProductKind::Scene, CookedAssetProductKind::Prefab,
 				 CookedAssetProductKind::Material, CookedAssetProductKind::Script, CookedAssetProductKind::Audio,
 				 CookedAssetProductKind::MeshPrimitive, CookedAssetProductKind::Texture,
-				 CookedAssetProductKind::Environment, CookedAssetProductKind::GameplayInput })
+				 CookedAssetProductKind::Environment, CookedAssetProductKind::GameplayInput,
+				 CookedAssetProductKind::RuntimeUI, CookedAssetProductKind::Font })
 				if (ProductName(Kind) == Name) return Kind;
 			return std::nullopt;
 		}

@@ -11,6 +11,7 @@
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/SpotlightShadowMath.h"
 #include "Renderer/PointLightShadowMath.h"
+#include "UI/RuntimeUI.h"
 #include "Renderer/ToneMapping.h"
 #include "Renderer/LocalLighting.h"
 #include "Scene/SceneRenderSnapshot.h"
@@ -28,6 +29,7 @@
 
 namespace PulseForge
 {
+	class RuntimeUIRenderPass;
 	struct MaterialAssetDesc;
 	class Project;
 	class Scene;
@@ -93,6 +95,10 @@ namespace PulseForge
 		size_t PointShadowCasterDrawCount = 0;
 		uint64_t PointShadowResourceGeneration = 0;
 		::PulseForge::PointShadowSlotOwners PointShadowSlotOwners{};
+		size_t RuntimeUIQuadCount = 0;
+		size_t RuntimeUIBatchCount = 0;
+		size_t RuntimeUITextureCount = 0;
+		size_t RuntimeUIFontAtlasCount = 0;
 	};
 
 	struct AmbientOcclusionSettings
@@ -162,6 +168,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<SceneRenderOutputResult, SceneRendererError> RenderPreparedSceneToOutput();
 		// Renders once to HDR, then tone maps into the supplied SDR offscreen target.
 		[[nodiscard]] std::expected<SceneRenderOutputResult, SceneRendererError> RenderPreparedSceneToOutput(const RenderTarget& Target);
+		// Supplies an owned copy of the active screen-space UI frame for composition after tone mapping.
+		void SetRuntimeUIFrame(std::span<const RuntimeUIDrawCommand> Commands, const RuntimeUIViewport& Viewport);
 		[[nodiscard]] bool SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept;
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
@@ -294,5 +302,9 @@ namespace PulseForge
 #endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
+		std::unique_ptr<RuntimeUIRenderPass> m_RuntimeUIRenderPass;
+		std::vector<RuntimeUIDrawCommand> m_RuntimeUIDrawCommands;
+		std::vector<const Texture*> m_PreparedRuntimeUITextures;
+		RuntimeUIViewport m_RuntimeUIView{};
 	};
 }
