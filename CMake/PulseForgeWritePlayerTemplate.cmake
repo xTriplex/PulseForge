@@ -118,7 +118,7 @@ file(WRITE "${PF_DESCRIPTOR}"
 	"  \"configuration\": \"${PF_CONFIGURATION}\",\n"
 	"  \"renderer\": \"Vulkan\",\n"
 	"  \"runtimeABI\": \"pulseforge-runtime-v1\",\n"
-	"  \"cookManifestSchema\": 2,\n"
+	"  \"cookManifestSchema\": 3,\n"
 	"  \"entrypoint\": \"${PLAYER_RELATIVE}\",\n"
 	"  \"runtimeFiles\": ${JSON_FILES}\n"
 	"}\n")

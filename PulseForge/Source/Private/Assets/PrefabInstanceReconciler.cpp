@@ -477,6 +477,14 @@ namespace PulseForge
 				auto Current = ReadProperty(*Target, Override.ComponentID, Override.PropertyID);
 				if (!Current)
 				{
+					if (Current.error().Code == PropertyAccessErrorCode::UnknownProperty &&
+						Override.ComponentID == PropertyComponentIds::ScriptFloat && std::holds_alternative<float>(Override.Value))
+					{
+						if (auto Result = WriteProperty(*Target, Override.ComponentID, Override.PropertyID, Override.Value); !Result)
+							Conflicts.push_back(Conflict(Override.Entity, PrefabConflictKind::ChangedPropertyType,
+								Result.error().Message, Override.ComponentID, Override.PropertyID));
+						return {};
+					}
 					const bool Missing = Current.error().Code == PropertyAccessErrorCode::UnknownProperty ||
 						Current.error().Code == PropertyAccessErrorCode::UnknownComponent ||
 						Current.error().Code == PropertyAccessErrorCode::MissingComponent;
@@ -1367,6 +1375,14 @@ namespace PulseForge
 					return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride,
 						"The linked root transform is instance placement and cannot be applied to the source"));
 				const auto Current = ReadProperty(*Target, Override->ComponentID, Override->PropertyID);
+					if (!Current && Current.error().Code == PropertyAccessErrorCode::UnknownProperty &&
+						Override->ComponentID == PropertyComponentIds::ScriptFloat && std::holds_alternative<float>(Override->Value))
+					{
+						if (auto Written = WriteProperty(*Target, Override->ComponentID, Override->PropertyID, Override->Value); !Written)
+							return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, Written.error().Message));
+						++Summary.Applied;
+						continue;
+					}
 				if (!Current || Current->index() != Override->Value.index())
 					return std::unexpected(MakeError(PrefabReconcileErrorCode::ConflictsDetected,
 						Current ? "The source property type changed after the override was recorded" : Current.error().Message,
@@ -1585,6 +1601,17 @@ namespace PulseForge
 				Override->Operation == PrefabOverrideOperation::ResetProperty)
 			{
 				auto SourceValue = ReadProperty(SourceEntity, Override->ComponentID, Override->PropertyID);
+				if (!SourceValue && SourceValue.error().Code == PropertyAccessErrorCode::UnknownProperty &&
+					Override->ComponentID == PropertyComponentIds::ScriptFloat)
+				{
+					const auto Current = ReadProperty(*Live, Override->ComponentID, Override->PropertyID);
+					if (Current)
+					{
+						auto Removed = RemoveScriptFloatProperty(*Live, Override->PropertyID);
+						if (!Removed) return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, Removed.error().Message));
+					}
+					continue;
+				}
 				if (!SourceValue)
 					return std::unexpected(MakeError(PrefabReconcileErrorCode::ConflictsDetected, SourceValue.error().Message,
 						{ Conflict(Override->Entity, PrefabConflictKind::MissingProperty, SourceValue.error().Message,
@@ -2052,7 +2079,10 @@ namespace PulseForge
 		if (Address.Key == Metadata.SourceRootKey && ComponentID == PropertyComponentIds::Transform)
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, "Root transform is destination placement"));
 		auto SourceValue = ReadProperty(*SourceEntity, ComponentID, PropertyID);
-		if (!SourceValue) return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, SourceValue.error().Message));
+		const bool UsesScriptDefault = !SourceValue && SourceValue.error().Code == PropertyAccessErrorCode::UnknownProperty &&
+			ComponentID == PropertyComponentIds::ScriptFloat;
+		if (!SourceValue && !UsesScriptDefault)
+			return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, SourceValue.error().Message));
 		const auto Subtree = GetSubtree(LinkedRoot);
 		if (!Subtree) return std::unexpected(Subtree.error());
 		const auto LiveIt = std::find_if(Subtree->begin(), Subtree->end(), [SceneEntityID](const Entity& CurrentEntity)
@@ -2063,7 +2093,7 @@ namespace PulseForge
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance, "Mapped entity is outside its linked instance subtree"));
 		auto PreviousValue = ReadProperty(*LiveIt, ComponentID, PropertyID);
 		if (!PreviousValue) return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, PreviousValue.error().Message));
-		if (PreviousValue->index() != SourceValue->index())
+		if (SourceValue && PreviousValue->index() != SourceValue->index())
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, "Source and instance property types differ"));
 		const auto RemoveMatching = [&](const PrefabOverrideRecord& Override)
 		{
@@ -2078,7 +2108,12 @@ namespace PulseForge
 		});
 		if (auto Validation = Metadata.Validate(LinkedRoot.GetUUID()); !Validation)
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance, Validation.error()));
-		if (auto Result = WriteProperty(*LiveIt, ComponentID, PropertyID, *SourceValue); !Result)
+		if (UsesScriptDefault)
+		{
+			auto Removed = RemoveScriptFloatProperty(*LiveIt, PropertyID);
+			if (!Removed) return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, Removed.error().Message));
+		}
+		else if (auto Result = WriteProperty(*LiveIt, ComponentID, PropertyID, *SourceValue); !Result)
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, Result.error().Message));
 		if (auto Result = LinkedRoot.SetPrefabInstance(Metadata); !Result)
 		{

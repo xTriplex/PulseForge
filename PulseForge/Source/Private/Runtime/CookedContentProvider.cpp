@@ -169,6 +169,21 @@ namespace PulseForge
 		return Read(Asset, CookedAssetProductKind::Script);
 	}
 
+	const CookedAssetEntry* CookedContentProvider::FindScriptByProjectPath(std::string_view ProjectRelativePath) const noexcept
+	{
+		return m_Catalog->FindScriptByProjectPath(ProjectRelativePath);
+	}
+
+	std::expected<std::vector<std::byte>, CookedAssetCatalogError> CookedContentProvider::ReadScriptByProjectPath(
+		std::string_view ProjectRelativePath) const
+	{
+		const CookedAssetEntry* Entry = FindScriptByProjectPath(ProjectRelativePath);
+		if (!Entry)
+			return std::unexpected(CookedAssetCatalogError{ .Code = CookedAssetCatalogErrorCode::AssetNotFound,
+				.Path = m_Catalog->GetContentRoot(), .Message = "Cooked Lua module is not present by its managed project path" });
+		return m_Catalog->ReadPayload(*Entry);
+	}
+
 	const CookedAssetEntry* CookedContentProvider::FindAudio(const AssetID& Asset) const noexcept
 	{
 		return Find(Asset, CookedAssetProductKind::Audio);

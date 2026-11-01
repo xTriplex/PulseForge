@@ -19,6 +19,7 @@ void RunAssetCookServiceTests(TestRunner& Tests);
 void RunExportBuildProfileTests(TestRunner& Tests);
 void RunAssetExportServiceTests(TestRunner& Tests);
 void RunPrefabLinkedInstanceTests(TestRunner& Tests);
+void RunScriptSourceMetadataTests(TestRunner& Tests);
 void SetAssetEditTestExecutablePath(const std::filesystem::path& Executable);
 int RunAssetEditTransactionChildMode(int ArgumentCount, char** Arguments);
 
@@ -60,6 +61,11 @@ int main(int ArgumentCount, char** Arguments)
 			RunAssetEditTransactionTests(Tests);
 			return Tests.Finish();
 		}
+		if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--script-metadata-only")
+		{
+			RunScriptSourceMetadataTests(Tests);
+			return Tests.Finish();
+		}
 		if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--cook-only")
 		{
 			std::cerr << "ASSET_TEST_SUITE_BEGIN cook" << std::endl;
@@ -82,6 +88,7 @@ int main(int ArgumentCount, char** Arguments)
 		RunAssetOperationsTests(Tests);
 		RunSceneAssetTests(Tests);
 		RunPrefabLinkedInstanceTests(Tests);
+		RunScriptSourceMetadataTests(Tests);
 		RunAssetDependencyCatalogTests(Tests);
 		RunAssetDependencyCorrectionTests(Tests);
 		RunAssetDependencyPublicationTests(Tests);

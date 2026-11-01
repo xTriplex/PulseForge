@@ -85,6 +85,12 @@ target_include_directories(PulseForgeAssetCatalog
 )
 target_compile_definitions(PulseForgeAssetCatalog PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
+add_library(PulseForgeScriptAssets STATIC PulseForge/Source/Private/Assets/ScriptSourceMetadata.cpp)
+target_include_directories(PulseForgeScriptAssets
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include
+)
+target_link_libraries(PulseForgeScriptAssets PUBLIC PulseForgeAssetCatalog)
 add_library(PulseForgeCookedAssetCatalog STATIC PulseForge/Source/Private/Assets/CookedAssetCatalog.cpp)
 target_include_directories(PulseForgeCookedAssetCatalog
 	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
@@ -150,7 +156,7 @@ target_include_directories(PulseForgeScripting
 target_compile_definitions(PulseForgeScripting PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeScripting
 	PUBLIC PulseForgeAssetCatalog
-	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore PulseForgeLua
+	PRIVATE PulseForgeAssetServices PulseForgeScriptAssets PulseForgeAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore PulseForgeLua
 		PulseForgeCookedRuntimeProvider spdlog::spdlog
 )
 add_library(PulseForgeRuntime STATIC
@@ -186,7 +192,7 @@ target_include_directories(PulseForgeCookedScripting PUBLIC PulseForge/Source/Pu
 target_compile_definitions(PulseForgeCookedScripting PRIVATE PF_COOKED_RUNTIME_ONLY _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeCookedScripting
 	PUBLIC PulseForgeScene
-	PRIVATE PulseForgeCookedRuntimeProvider PulseForgeCookedAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore
+	PRIVATE PulseForgeScriptAssets PulseForgeCookedRuntimeProvider PulseForgeCookedAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore
 		PulseForgeLua spdlog::spdlog)
 set_property(TARGET PulseForgeCookedScripting PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
@@ -261,7 +267,7 @@ target_include_directories(PulseForgeAssetDependencyCatalog
 )
 target_link_libraries(PulseForgeAssetDependencyCatalog
 	PUBLIC PulseForgeAssetCatalog
-	PRIVATE PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization
+	PRIVATE PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeScriptAssets
 )
 target_precompile_headers(PulseForgeAssetDependencyCatalog PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeAssetPreparation STATIC PulseForge/Source/Private/Assets/AssetPreparationService.cpp)
@@ -334,7 +340,7 @@ add_library(PulseForgeAssetCookService STATIC PulseForge/Source/Private/Assets/A
 target_include_directories(PulseForgeAssetCookService PUBLIC PulseForge/Source/Public PRIVATE PulseForge/Vendor/json/include)
 target_link_libraries(PulseForgeAssetCookService
 	PUBLIC PulseForgeCookedAssetCatalog
-	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetDependencyCatalog PulseForgeAssetImporters
+	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetDependencyCatalog PulseForgeAssetImporters PulseForgeScriptAssets
 		PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeInput PulseForgeSceneRenderer)
 set_property(TARGET PulseForgeAssetCookService PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_executable(PulseForgeCook PulseForge/Source/Private/Assets/AssetCookCommand.cpp)

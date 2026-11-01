@@ -30,7 +30,15 @@ namespace PulseForgeEditor
 		[[nodiscard]] static std::expected<std::optional<std::filesystem::path>, std::string> ShowSaveFileDialog(GLFWwindow* Parent,
 			const EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath, std::string_view DefaultName);
 
+		[[nodiscard]] static std::expected<void, std::string> OpenFileWithDefaultApplication(const std::filesystem::path& AbsoluteFilePath);
+
 		[[nodiscard]] static bool CanPositionNativeWindows() noexcept;
 		static void ApplyMainWindowAppearance(GLFWwindow* Window) noexcept;
+
+	private:
+		[[nodiscard]] static std::expected<void, std::string> OpenFileWithDefaultApplicationNative(
+			const std::filesystem::path& AbsoluteFilePath);
+		[[nodiscard]] static std::expected<void, std::string> OpenFileWithDefaultApplicationPosix(
+			const char* Launcher, const std::filesystem::path& AbsoluteFilePath);
 	};
 } // namespace PulseForgeEditor

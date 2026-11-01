@@ -18,6 +18,16 @@
 #include <exception>
 #include <utility>
 
+#if !defined(_WIN32)
+#include <cerrno>
+#include <cstring>
+#include <spawn.h>
+#include <thread>
+#include <sys/wait.h>
+
+extern char** environ;
+#endif
+
 namespace PulseForgeEditor
 {
 	namespace
@@ -181,6 +191,47 @@ namespace PulseForgeEditor
 			return std::unexpected("Could not complete the save file dialog because of an unknown exception");
 		}
 	}
+
+	std::expected<void, std::string> EditorPlatformServices::OpenFileWithDefaultApplication(
+		const std::filesystem::path& AbsoluteFilePath)
+	{
+		if (AbsoluteFilePath.empty() || !AbsoluteFilePath.is_absolute())
+			return std::unexpected("The file-association target must be an absolute path");
+		if (AbsoluteFilePath.native().find(std::filesystem::path::value_type{}) != std::filesystem::path::string_type::npos)
+			return std::unexpected("The file-association target cannot contain a NUL character");
+
+		std::error_code Error;
+		if (!std::filesystem::is_regular_file(AbsoluteFilePath, Error) || Error)
+			return std::unexpected("The file-association target is not an accessible regular file");
+		return OpenFileWithDefaultApplicationNative(AbsoluteFilePath);
+	}
+
+#if !defined(_WIN32)
+	std::expected<void, std::string> EditorPlatformServices::OpenFileWithDefaultApplicationPosix(
+		const char* Launcher, const std::filesystem::path& AbsoluteFilePath)
+	{
+		const std::string Path = AbsoluteFilePath.string();
+		char* Arguments[]{ const_cast<char*>(Launcher), const_cast<char*>(Path.c_str()), nullptr };
+		pid_t Process = 0;
+		const int SpawnResult = posix_spawnp(&Process, Launcher, nullptr, nullptr, Arguments, environ);
+		if (SpawnResult != 0)
+			return std::unexpected(std::string("Could not start ") + Launcher + ": " + std::strerror(SpawnResult));
+
+		try
+		{
+			std::thread([Process]
+			{
+				int WaitStatus = 0;
+				while (waitpid(Process, &WaitStatus, 0) < 0 && errno == EINTR) {}
+			}).detach();
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(std::string(Launcher) + " started, but its process could not be monitored: " + Exception.what());
+		}
+		return {};
+	}
+#endif
 
 	bool EditorPlatformServices::CanPositionNativeWindows() noexcept
 	{

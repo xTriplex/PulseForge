@@ -8,6 +8,7 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -68,6 +69,8 @@ namespace PulseForge
 		std::string DigestAlgorithm;
 		std::string Digest;
 		std::vector<CookedAssetDependency> RuntimeDependencies;
+		// Managed project-relative source identity for Lua modules; empty on legacy and non-script entries.
+		std::string SourceRelativePath;
 		friend bool operator==(const CookedAssetEntry&, const CookedAssetEntry&) = default;
 	};
 
@@ -113,8 +116,8 @@ namespace PulseForge
 	class PULSEFORGE_API CookedAssetCatalog final
 	{
 	public:
-		// Version 2 adds required build-configuration provenance; version 1 is intentionally rejected.
-		static constexpr uint32_t ManifestVersion = 2;
+		// Version 2 added build-configuration provenance; version 3 adds managed Lua source identities.
+		static constexpr uint32_t ManifestVersion = 3;
 		static constexpr std::string_view ManifestFileName = "manifest.pfmanifest";
 		static constexpr size_t MaximumManifestBytes = 16u * 1024u * 1024u;
 		static constexpr size_t MaximumEntries = 250'000;
@@ -140,6 +143,7 @@ namespace PulseForge
 		[[nodiscard]] const std::vector<CookedAssetEntry>& GetEntries() const noexcept { return m_Entries; }
 		[[nodiscard]] const CookedAssetEntry* Find(
 			const AssetID& Asset, CookedAssetProductKind Product, std::string_view Subresource = {}) const noexcept;
+		[[nodiscard]] const CookedAssetEntry* FindScriptByProjectPath(std::string_view ProjectRelativePath) const noexcept;
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadPayload(
 			const CookedAssetEntry& Entry) const;
 		[[nodiscard]] const std::filesystem::path& GetContentRoot() const noexcept { return m_ContentRoot; }
@@ -154,5 +158,6 @@ namespace PulseForge
 		CookedAssetCompatibility m_Compatibility;
 		std::vector<AssetID> m_DynamicRoots;
 		std::vector<CookedAssetEntry> m_Entries;
+		std::map<std::string, size_t, std::less<>> m_ScriptsByProjectPath;
 	};
 } // namespace PulseForge

@@ -69,6 +69,8 @@ namespace PulseForge
 
 		try
 		{
+			if (++m_NextSessionGeneration == 0) ++m_NextSessionGeneration;
+			m_Description.Scripting.SessionGeneration = m_NextSessionGeneration;
 			auto Candidate = std::make_unique<Impl>();
 			Candidate->Source = &Source;
 
@@ -198,6 +200,23 @@ namespace PulseForge
 		return m_Impl && m_Impl->Paused;
 	}
 
+	std::expected<uint64_t, SceneRuntimeError> SceneRuntime::RequestScriptReload(const Entity& Target)
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::Scripting,
+				"Script reload requires an active Play or Player session"));
+		auto Queued = m_Impl->Scripting->RequestReload(Target);
+		if (!Queued)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
+				Queued.error().Message));
+		return *Queued;
+	}
+
+	std::span<const ScriptDiagnostic> SceneRuntime::GetScriptDiagnostics() const noexcept
+	{
+		return m_Impl ? m_Impl->Scripting->GetDiagnostics() : std::span<const ScriptDiagnostic>{};
+	}
+
 	std::expected<SceneRuntimeFrameResult, SceneRuntimeError> SceneRuntime::Advance(
 		Scene& Source,
 		Timestep FrameDelta)
@@ -218,6 +237,9 @@ namespace PulseForge
 				SceneRuntimeErrorCode::InvalidDeltaTime,
 				SceneRuntimeSubsystem::None,
 				"Scene runtime frame delta must be finite and non-negative"));
+		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
+				"Could not service queued script reloads: " + Result.error().Message));
 		if (m_Impl->Paused) return SceneRuntimeFrameResult{};
 
 		{

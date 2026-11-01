@@ -4,10 +4,34 @@
 #include "Scripting/Detail/ScriptFloatPropertyRead.h"
 
 #include <stdexcept>
+#include <fstream>
+#include <sstream>
 #include <string_view>
 
 namespace
 {
+#if defined(PF_DEBUG)
+	struct LuaAllocationFaultProbe final
+	{
+		PulseForge::ScriptRuntimeAllocationPointForTesting TargetPoint =
+			PulseForge::ScriptRuntimeAllocationPointForTesting::MainChunkReference;
+		size_t TargetModuleIndex = 0;
+		bool Armed = true;
+		size_t RejectedAllocationCount = 0;
+		size_t LastRequestedBytes = 0;
+	};
+
+	bool RejectLuaAllocation(void* Context, PulseForge::ScriptRuntimeAllocationPointForTesting Point,
+		size_t ModuleIndex, size_t RequestedBytes) noexcept
+	{
+		auto& Probe = *static_cast<LuaAllocationFaultProbe*>(Context);
+		if (!Probe.Armed || Probe.TargetPoint != Point || Probe.TargetModuleIndex != ModuleIndex) return false;
+		++Probe.RejectedAllocationCount;
+		Probe.LastRequestedBytes = RequestedBytes;
+		return true;
+	}
+#endif
+
 	std::vector<std::byte> MakeSilentScriptTestWave()
 	{
 		constexpr uint32_t SampleCount = 44100 * 5;
@@ -135,6 +159,415 @@ end
 		PF_CHECK(Tests, AuthoredPropertyTransform && AuthoredPropertyTransform->Translation.x == 4.5f);
 		PF_CHECK(Tests, AuthoredPropertyRuntime.GetDiagnostics().empty());
 		AuthoredPropertyRuntime.Stop();
+
+		const auto NonStringErrorAsset = CreateScriptAsset("non_string_error.lua", "function OnUpdate() error({}) end\n");
+		PF_CHECK(Tests, NonStringErrorAsset.has_value());
+		if (!NonStringErrorAsset) return;
+		Scene NonStringErrorScene;
+		const auto NonStringErrorEntity = NonStringErrorScene.CreateEntity("Non-string Lua error");
+		PF_CHECK(Tests, NonStringErrorEntity &&
+			NonStringErrorEntity->SetScript(ScriptComponent{ NonStringErrorAsset->ID }).has_value());
+		if (!NonStringErrorEntity) return;
+		ScriptRuntime NonStringErrorRuntime(*ProjectResult);
+		PF_CHECK(Tests, NonStringErrorRuntime.Start(NonStringErrorScene).has_value());
+		PF_CHECK(Tests, NonStringErrorRuntime.Advance(NonStringErrorScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, NonStringErrorRuntime.GetDiagnostics().size() == 1 &&
+			NonStringErrorRuntime.GetDiagnostics().front().Message == "Lua returned a non-string error object");
+		NonStringErrorRuntime.Stop();
+
+		const auto WriteScriptSource = [&](const AssetID& Asset, std::string_view Source)
+		{
+			const auto Record = ProjectResult->GetAssetRegistry().Find(Asset);
+			if (!Record) return false;
+			std::ofstream Output(ProjectRoot / Record->ProjectRelativePath, std::ios::binary | std::ios::trunc);
+			Output.write(Source.data(), static_cast<std::streamsize>(Source.size()));
+			return Output.good();
+		};
+
+#if defined(PF_DEBUG)
+		LuaAllocationFaultProbe MainReferenceFault;
+		const ScriptRuntimeAllocationFaultHooksForTesting MainReferenceHooks{ &MainReferenceFault, RejectLuaAllocation };
+		const auto MainReferenceAsset = CreateScriptAsset("main_reference_fault.lua",
+			"function OnUpdate() assert(entity:set_translation(11, 0, 0)) end\n");
+		PF_CHECK(Tests, MainReferenceAsset.has_value());
+		if (!MainReferenceAsset) return;
+		Scene MainReferenceFaultScene;
+		const auto MainReferenceEntity = MainReferenceFaultScene.CreateEntity("Main reference allocation failure");
+		PF_CHECK(Tests, MainReferenceEntity &&
+			MainReferenceEntity->SetScript(ScriptComponent{ MainReferenceAsset->ID }).has_value());
+		if (!MainReferenceEntity) return;
+		ScriptRuntimeDesc MainReferenceFaultDescription;
+		MainReferenceFaultDescription.AllocationFaultHooksForTesting = &MainReferenceHooks;
+		ScriptRuntime MainReferenceFaultRuntime(*ProjectResult, MainReferenceFaultDescription);
+		PF_CHECK(Tests, MainReferenceFaultRuntime.Start(MainReferenceFaultScene).has_value());
+		PF_CHECK(Tests, MainReferenceFault.RejectedAllocationCount > 0 && MainReferenceFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, MainReferenceFaultRuntime.GetScriptCount() == 0 && MainReferenceFaultRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, MainReferenceFaultRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::LuaInitializationFailed &&
+			MainReferenceFaultRuntime.GetDiagnostics().front().Message.find("Could not retain the compiled main script") != std::string::npos);
+		MainReferenceFaultRuntime.Stop();
+		MainReferenceFault.Armed = false;
+		PF_CHECK(Tests, MainReferenceFaultRuntime.Start(MainReferenceFaultScene).has_value());
+		PF_CHECK(Tests, MainReferenceFaultRuntime.GetScriptCount() == 1 && MainReferenceFaultRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, MainReferenceFaultRuntime.Advance(MainReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, MainReferenceEntity->GetTransform()->Translation.x == 11.0f);
+		MainReferenceFaultRuntime.Stop();
+
+		std::filesystem::create_directories(ProjectRoot / "Assets/Scripts/fault_modules");
+		std::ostringstream ModuleMetadata;
+		ModuleMetadata << "--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[";
+		AssetID ExpectedModuleDiagnosticAsset;
+		for (size_t ModuleIndex = 0; ModuleIndex < 64; ++ModuleIndex)
+		{
+			const std::string ModuleName = "fault_modules/module_" + std::to_string(ModuleIndex);
+			if (ModuleIndex != 0) ModuleMetadata << ',';
+			ModuleMetadata << '\"' << ModuleName << '\"';
+			const auto ModuleAsset = CreateScriptAsset(ModuleName + ".lua", "return {}\n");
+			PF_CHECK(Tests, ModuleAsset.has_value());
+			if (!ModuleAsset) return;
+			if (ModuleIndex == 9) ExpectedModuleDiagnosticAsset = ModuleAsset->ID;
+		}
+		ModuleMetadata << "]}\n]]\nfunction OnUpdate() end\n";
+		const auto ModuleReferenceAsset = CreateScriptAsset("module_reference_fault.lua", ModuleMetadata.str());
+		PF_CHECK(Tests, ModuleReferenceAsset.has_value());
+		if (!ModuleReferenceAsset) return;
+		LuaAllocationFaultProbe ModuleReferenceFault;
+		ModuleReferenceFault.TargetPoint = ScriptRuntimeAllocationPointForTesting::ModuleChunkReference;
+		ModuleReferenceFault.TargetModuleIndex = 63;
+		const ScriptRuntimeAllocationFaultHooksForTesting ModuleReferenceHooks{
+			&ModuleReferenceFault, RejectLuaAllocation, 62 };
+		ScriptRuntimeDesc ModuleReferenceFaultDescription;
+		ModuleReferenceFaultDescription.AllocationFaultHooksForTesting = &ModuleReferenceHooks;
+		Scene ModuleReferenceFaultScene;
+		const auto ModuleReferenceEntity = ModuleReferenceFaultScene.CreateEntity("Module reference allocation failure");
+		PF_CHECK(Tests, ModuleReferenceEntity &&
+			ModuleReferenceEntity->SetScript(ScriptComponent{ ModuleReferenceAsset->ID }).has_value());
+		if (!ModuleReferenceEntity) return;
+		ScriptRuntime ModuleReferenceFaultRuntime(*ProjectResult, ModuleReferenceFaultDescription);
+		PF_CHECK(Tests, ModuleReferenceFaultRuntime.Start(ModuleReferenceFaultScene).has_value());
+		PF_CHECK(Tests, ModuleReferenceFault.RejectedAllocationCount > 0 && ModuleReferenceFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, ModuleReferenceFaultRuntime.GetScriptCount() == 0 && ModuleReferenceFaultRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, ModuleReferenceFaultRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::LuaInitializationFailed &&
+			ModuleReferenceFaultRuntime.GetDiagnostics().front().Message.find("Could not retain compiled module") != std::string::npos &&
+			ModuleReferenceFaultRuntime.GetDiagnostics().front().SourceRelativePath == "Assets/Scripts/fault_modules/module_9.lua" &&
+			ModuleReferenceFaultRuntime.GetDiagnostics().front().SourceAsset == ExpectedModuleDiagnosticAsset);
+		ModuleReferenceFaultRuntime.Stop();
+
+		const auto ReloadReferenceAsset = CreateScriptAsset("reload_reference_fault.lua",
+			"local state = 10\nfunction OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n");
+		PF_CHECK(Tests, ReloadReferenceAsset.has_value());
+		if (!ReloadReferenceAsset) return;
+		Scene ReloadReferenceFaultScene;
+		const auto ReloadReferenceEntity = ReloadReferenceFaultScene.CreateEntity("Reload reference allocation failure");
+		PF_CHECK(Tests, ReloadReferenceEntity &&
+			ReloadReferenceEntity->SetScript(ScriptComponent{ ReloadReferenceAsset->ID }).has_value());
+		if (!ReloadReferenceEntity) return;
+		LuaAllocationFaultProbe ReloadReferenceFault;
+		ReloadReferenceFault.Armed = false;
+		const ScriptRuntimeAllocationFaultHooksForTesting ReloadReferenceHooks{ &ReloadReferenceFault, RejectLuaAllocation };
+		ScriptRuntimeDesc ReloadReferenceDescription;
+		ReloadReferenceDescription.AllocationFaultHooksForTesting = &ReloadReferenceHooks;
+		ScriptRuntime ReloadReferenceRuntime(*ProjectResult, ReloadReferenceDescription);
+		PF_CHECK(Tests, ReloadReferenceRuntime.Start(ReloadReferenceFaultScene).has_value());
+		PF_CHECK(Tests, ReloadReferenceRuntime.Advance(ReloadReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadReferenceEntity->GetTransform()->Translation.x == 11.0f);
+		PF_CHECK(Tests, WriteScriptSource(ReloadReferenceAsset->ID,
+			"local state = 100\nfunction OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"));
+		ReloadReferenceFault.Armed = true;
+		const auto FailedReferenceReload = ReloadReferenceRuntime.RequestReload(*ReloadReferenceEntity);
+		PF_CHECK(Tests, FailedReferenceReload.has_value());
+		if (!FailedReferenceReload) return;
+		const auto FailedReferenceReloadCount = ReloadReferenceRuntime.ServicePendingReloads(ReloadReferenceFaultScene);
+		PF_CHECK(Tests, FailedReferenceReloadCount && *FailedReferenceReloadCount == 0);
+		PF_CHECK(Tests, ReloadReferenceFault.RejectedAllocationCount > 0 && ReloadReferenceFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, ReloadReferenceRuntime.GetDiagnostics().size() == 1 &&
+			ReloadReferenceRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::LuaInitializationFailed &&
+			ReloadReferenceRuntime.GetDiagnostics().front().Message.find("Could not retain the compiled main script") != std::string::npos);
+		PF_CHECK(Tests, ReloadReferenceRuntime.Advance(ReloadReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadReferenceEntity->GetTransform()->Translation.x == 12.0f);
+		ReloadReferenceFault.Armed = false;
+		const auto RetriedReferenceReload = ReloadReferenceRuntime.RequestReload(*ReloadReferenceEntity);
+		PF_CHECK(Tests, RetriedReferenceReload.has_value());
+		if (!RetriedReferenceReload) return;
+		const auto RetriedReferenceReloadCount = ReloadReferenceRuntime.ServicePendingReloads(ReloadReferenceFaultScene);
+		PF_CHECK(Tests, RetriedReferenceReloadCount && *RetriedReferenceReloadCount == 1);
+		PF_CHECK(Tests, ReloadReferenceRuntime.Advance(ReloadReferenceFaultScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadReferenceEntity->GetTransform()->Translation.x == 101.0f);
+		ReloadReferenceRuntime.Stop();
+#endif
+
+		constexpr std::string_view DeclaredPropertySource =
+			"--[[PulseForgeScript:1\n"
+			"{\"version\":1,\"properties\":[{\"id\":\"movement.speed\",\"label\":\"Move speed\",\"type\":\"float\",\"default\":3.5,\"min\":0.0,\"max\":20.0}]}\n"
+			"]]\n"
+			"function OnUpdate()\n"
+			"  assert(entity:set_translation(entity:get_float_property('movement.speed'), 0, 0))\n"
+			"end\n";
+		const auto DeclaredPropertyAsset = CreateScriptAsset("declared_property.lua", DeclaredPropertySource);
+		PF_CHECK(Tests, DeclaredPropertyAsset.has_value());
+		if (!DeclaredPropertyAsset) return;
+		Scene DeclaredPropertyScene;
+		const auto DefaultPropertyEntity = DeclaredPropertyScene.CreateEntity("Default property");
+		const auto OverriddenPropertyEntity = DeclaredPropertyScene.CreateEntity("Overridden property");
+		PF_CHECK(Tests, DefaultPropertyEntity && OverriddenPropertyEntity);
+		if (!DefaultPropertyEntity || !OverriddenPropertyEntity) return;
+		PF_CHECK(Tests, DefaultPropertyEntity->SetScript(ScriptComponent{ DeclaredPropertyAsset->ID }).has_value());
+		ScriptComponent PropertyOverride{ DeclaredPropertyAsset->ID };
+		PropertyOverride.FloatProperties.emplace("movement.speed", 8.25f);
+		PF_CHECK(Tests, OverriddenPropertyEntity->SetScript(PropertyOverride).has_value());
+		ScriptRuntime DeclaredPropertyRuntime(*ProjectResult);
+		PF_CHECK(Tests, DeclaredPropertyRuntime.Start(DeclaredPropertyScene).has_value());
+		PF_CHECK(Tests, DeclaredPropertyRuntime.Advance(DeclaredPropertyScene, Timestep(1.0 / 60.0)).has_value());
+		const auto DefaultPropertyTransform = DefaultPropertyEntity->GetTransform();
+		const auto OverriddenPropertyTransform = OverriddenPropertyEntity->GetTransform();
+		PF_CHECK(Tests, DefaultPropertyTransform && DefaultPropertyTransform->Translation.x == 3.5f);
+		PF_CHECK(Tests, OverriddenPropertyTransform && OverriddenPropertyTransform->Translation.x == 8.25f);
+		const auto UnmaterializedDefault = DefaultPropertyEntity->GetScript();
+		PF_CHECK(Tests, UnmaterializedDefault && UnmaterializedDefault->has_value() && UnmaterializedDefault->value().FloatProperties.empty());
+		PF_CHECK(Tests, DeclaredPropertyRuntime.GetDiagnostics().empty());
+		DeclaredPropertyRuntime.Stop();
+
+		std::filesystem::create_directories(ProjectRoot / "Assets/Scripts/shared", FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		const auto ModuleAsset = CreateScriptAsset("shared/motion.lua",
+			"local motion = { speed = 0 }\n"
+			"function motion:next_speed() self.speed = self.speed + 1; return self.speed end\n"
+			"return motion\n");
+		PF_CHECK(Tests, ModuleAsset.has_value());
+		if (!ModuleAsset) return;
+		const auto ModuleConsumerAsset = CreateScriptAsset("module_consumer.lua",
+			"--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[\"shared/motion\"]}\n]]\n"
+			"local motion = require('shared/motion')\n"
+			"function OnUpdate() assert(entity:set_translation(motion:next_speed(), 0, 0)) end\n");
+		PF_CHECK(Tests, ModuleConsumerAsset.has_value());
+		if (!ModuleConsumerAsset) return;
+		Scene ModuleScene;
+		const auto ModuleEntityA = ModuleScene.CreateEntity("Module A");
+		const auto ModuleEntityB = ModuleScene.CreateEntity("Module B");
+		PF_CHECK(Tests, ModuleEntityA && ModuleEntityB);
+		if (!ModuleEntityA || !ModuleEntityB) return;
+		PF_CHECK(Tests, ModuleEntityA->SetScript(ScriptComponent{ ModuleConsumerAsset->ID }).has_value());
+		PF_CHECK(Tests, ModuleEntityB->SetScript(ScriptComponent{ ModuleConsumerAsset->ID }).has_value());
+		ScriptRuntime ModuleRuntime(*ProjectResult);
+		PF_CHECK(Tests, ModuleRuntime.Start(ModuleScene).has_value());
+		PF_CHECK(Tests, ModuleRuntime.Advance(ModuleScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ModuleEntityA->GetTransform()->Translation.x == 1.0f &&
+			ModuleEntityB->GetTransform()->Translation.x == 1.0f);
+		PF_CHECK(Tests, ModuleRuntime.GetDiagnostics().empty());
+		ModuleRuntime.Stop();
+
+		const auto MissingModuleConsumer = CreateScriptAsset("missing_module.lua",
+			"--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[\"shared/missing\"]}\n]]\n"
+			"function OnCreate() end\n");
+		PF_CHECK(Tests, MissingModuleConsumer.has_value());
+		if (!MissingModuleConsumer) return;
+		Scene MissingModuleScene;
+		const auto MissingModuleEntity = MissingModuleScene.CreateEntity("Missing script module");
+		PF_CHECK(Tests, MissingModuleEntity &&
+			MissingModuleEntity->SetScript(ScriptComponent{ MissingModuleConsumer->ID }).has_value());
+		if (!MissingModuleEntity) return;
+		ScriptRuntime MissingModuleRuntime(*ProjectResult);
+		PF_CHECK(Tests, MissingModuleRuntime.Start(MissingModuleScene).has_value());
+		PF_CHECK(Tests, MissingModuleRuntime.GetDiagnostics().size() == 1 &&
+			MissingModuleRuntime.GetDiagnostics().front().Message.find("not present in the source registry") != std::string::npos);
+		MissingModuleRuntime.Stop();
+
+		const auto CycleAAsset = CreateScriptAsset("shared/cycle_a.lua",
+			"--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[\"cycle_b\"]}\n]]\n"
+			"return require('cycle_b')\n");
+		const auto CycleBAsset = CreateScriptAsset("shared/cycle_b.lua",
+			"--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[\"cycle_a\"]}\n]]\n"
+			"return require('cycle_a')\n");
+		PF_CHECK(Tests, CycleAAsset.has_value() && CycleBAsset.has_value());
+		if (!CycleAAsset || !CycleBAsset) return;
+		const auto CycleConsumerAsset = CreateScriptAsset("cycle_consumer.lua",
+			"--[[PulseForgeScript:1\n{\"version\":1,\"modules\":[\"shared/cycle_a\"]}\n]]\n"
+			"function OnCreate() require('shared/cycle_a') end\n");
+		PF_CHECK(Tests, CycleConsumerAsset.has_value());
+		if (!CycleConsumerAsset) return;
+		Scene CycleScene;
+		const auto CycleEntity = CycleScene.CreateEntity("Cyclic script modules");
+		PF_CHECK(Tests, CycleEntity && CycleEntity->SetScript(ScriptComponent{ CycleConsumerAsset->ID }).has_value());
+		if (!CycleEntity) return;
+		ScriptRuntime CycleRuntime(*ProjectResult);
+		PF_CHECK(Tests, CycleRuntime.Start(CycleScene).has_value());
+		PF_CHECK(Tests, CycleRuntime.GetDiagnostics().size() == 1 &&
+			CycleRuntime.GetDiagnostics().front().Message.find("dependency cycle") != std::string::npos);
+		CycleRuntime.Stop();
+
+		Scene BoundedDiagnosticsScene;
+		for (size_t Index = 0; Index < 132; ++Index)
+		{
+			auto DiagnosticEntity = BoundedDiagnosticsScene.CreateEntity("Bounded diagnostic");
+			PF_CHECK(Tests, DiagnosticEntity.has_value());
+			if (!DiagnosticEntity) return;
+			PF_CHECK(Tests, DiagnosticEntity->SetScript(ScriptComponent{ MissingModuleConsumer->ID }).has_value());
+		}
+		ScriptRuntime BoundedDiagnosticsRuntime(*ProjectResult);
+		PF_CHECK(Tests, BoundedDiagnosticsRuntime.Start(BoundedDiagnosticsScene).has_value());
+		PF_CHECK(Tests, BoundedDiagnosticsRuntime.GetDiagnostics().size() == 128);
+		BoundedDiagnosticsRuntime.Stop();
+
+		const auto ReloadAsset = CreateScriptAsset("reloadable.lua",
+			"local state = 10\nfunction OnCreate() end\n"
+			"function OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"
+			"function OnDestroy() assert(entity:set_translation(0, 1, 0)) end\n");
+		PF_CHECK(Tests, ReloadAsset.has_value());
+		if (!ReloadAsset) return;
+		Scene ReloadScene;
+		const auto ReloadEntity = ReloadScene.CreateEntity("Reload target");
+		PF_CHECK(Tests, ReloadEntity && ReloadEntity->SetScript(ScriptComponent{ ReloadAsset->ID }).has_value());
+		if (!ReloadEntity) return;
+		SceneRuntime ReloadRuntime(*ProjectResult);
+		PF_CHECK(Tests, ReloadRuntime.Start(ReloadScene).has_value());
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 11.0f);
+		PF_CHECK(Tests, ReloadRuntime.SetPaused(true).has_value());
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID, "function OnCreate(\n"));
+		auto FailedReload = ReloadRuntime.RequestScriptReload(*ReloadEntity);
+		PF_CHECK(Tests, FailedReload.has_value());
+		if (!FailedReload) return;
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().size() == 1 &&
+			ReloadRuntime.GetScriptDiagnostics().front().Code == ScriptDiagnosticCode::CompileFailed);
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().front().SourceRelativePath == "Assets/Scripts/reloadable.lua" &&
+			ReloadRuntime.GetScriptDiagnostics().front().Line > 0);
+		auto RepeatedFailedReload = ReloadRuntime.RequestScriptReload(*ReloadEntity);
+		PF_CHECK(Tests, RepeatedFailedReload.has_value());
+		if (!RepeatedFailedReload) return;
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().size() == 1);
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID, "function OnCreate( -- another source generation\n"));
+		auto NewGenerationFailedReload = ReloadRuntime.RequestScriptReload(*ReloadEntity);
+		PF_CHECK(Tests, NewGenerationFailedReload.has_value());
+		if (!NewGenerationFailedReload) return;
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().size() == 2 &&
+			ReloadRuntime.GetScriptDiagnostics()[0].SourceFingerprint !=
+			ReloadRuntime.GetScriptDiagnostics()[1].SourceFingerprint);
+		const auto AfterRejectedReload = ReloadEntity->GetTransform();
+		PF_CHECK(Tests, AfterRejectedReload && AfterRejectedReload->Translation.x == 11.0f);
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID,
+			"local state = 100\nfunction OnCreate() end\n"
+			"function OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"
+			"function OnDestroy() assert(entity:set_translation(0, 2, 0)) end\n"));
+		auto SuccessfulReload = ReloadRuntime.RequestScriptReload(*ReloadEntity);
+		PF_CHECK(Tests, SuccessfulReload.has_value());
+		if (!SuccessfulReload) return;
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().size() == 2);
+		const auto ReloadedTransform = ReloadEntity->GetTransform();
+		PF_CHECK(Tests, ReloadedTransform && ReloadedTransform->Translation.x == 0.0f && ReloadedTransform->Translation.y == 1.0f);
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 0.0f);
+		PF_CHECK(Tests, ReloadRuntime.SetPaused(false).has_value());
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 101.0f);
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID,
+			"function OnCreate()\n"
+			"  assert(entity:set_translation(9, 9, 9))\n"
+			"  error('intentional activation failure')\n"
+			"end\n"));
+		auto ActivationFailureRequest = ReloadRuntime.RequestScriptReload(*ReloadEntity);
+		PF_CHECK(Tests, ActivationFailureRequest.has_value());
+		if (!ActivationFailureRequest) return;
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().size() == 3 &&
+			ReloadRuntime.GetScriptDiagnostics().back().Code == ScriptDiagnosticCode::ReloadActivationFailed);
+		const auto FailedActivationTransform = ReloadEntity->GetTransform();
+		PF_CHECK(Tests, FailedActivationTransform && FailedActivationTransform->Translation.x == 9.0f &&
+			FailedActivationTransform->Translation.y == 9.0f);
+		PF_CHECK(Tests, ReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadRuntime.GetScriptDiagnostics().size() == 3);
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 9.0f);
+		ReloadRuntime.Stop();
+
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID,
+			"local state = 200\nfunction OnCreate() end\n"
+			"function OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"
+			"function OnDestroy() end\n"));
+		ScriptRuntime QueuedReloadRuntime(*ProjectResult);
+		PF_CHECK(Tests, QueuedReloadRuntime.Start(ReloadScene).has_value());
+		PF_CHECK(Tests, QueuedReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 201.0f);
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID,
+			"local state = 300\nfunction OnCreate() end\n"
+			"function OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"
+			"function OnDestroy() end\n"));
+		const auto SupersededReload = QueuedReloadRuntime.RequestReload(*ReloadEntity);
+		const auto LatestReload = QueuedReloadRuntime.RequestReload(*ReloadEntity);
+		PF_CHECK(Tests, SupersededReload && LatestReload && *SupersededReload != *LatestReload);
+		const auto ActivatedReloads = QueuedReloadRuntime.ServicePendingReloads(ReloadScene);
+		PF_CHECK(Tests, ActivatedReloads && *ActivatedReloads == 1);
+		PF_CHECK(Tests, QueuedReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 301.0f);
+		PF_CHECK(Tests, WriteScriptSource(ReloadAsset->ID,
+			"local state = 400\nfunction OnCreate() end\n"
+			"function OnUpdate() state = state + 1; assert(entity:set_translation(state, 0, 0)) end\n"
+			"function OnDestroy() end\n"));
+		const auto CancelledReload = QueuedReloadRuntime.RequestReload(*ReloadEntity);
+		PF_CHECK(Tests, CancelledReload && QueuedReloadRuntime.CancelReload(*CancelledReload));
+		PF_CHECK(Tests, QueuedReloadRuntime.CancelReload(*CancelledReload));
+		const auto CancelledReloadCount = QueuedReloadRuntime.ServicePendingReloads(ReloadScene);
+		PF_CHECK(Tests, CancelledReloadCount && *CancelledReloadCount == 0);
+		PF_CHECK(Tests, QueuedReloadRuntime.Advance(ReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReloadEntity->GetTransform()->Translation.x == 302.0f);
+		QueuedReloadRuntime.Stop();
+
+		const auto StaleReloadAsset = CreateScriptAsset("stale_reload.lua",
+			"function OnCreate() assert(entity:set_translation(12, 0, 0)) end\nfunction OnUpdate() end\n");
+		PF_CHECK(Tests, StaleReloadAsset.has_value());
+		if (!StaleReloadAsset) return;
+		Scene StaleReloadScene;
+		const UUID ReusedReloadEntityID{ 0x4300000000004000ull, 0x8000000000000001ull };
+		const auto OldReloadEntity = StaleReloadScene.CreateEntityWithUUID(ReusedReloadEntityID, "Old reload incarnation");
+		PF_CHECK(Tests, OldReloadEntity && OldReloadEntity->SetScript(ScriptComponent{ StaleReloadAsset->ID }).has_value());
+		if (!OldReloadEntity) return;
+		ScriptRuntime StaleReloadRuntime(*ProjectResult);
+		PF_CHECK(Tests, StaleReloadRuntime.Start(StaleReloadScene).has_value());
+		const auto StaleReloadTicket = StaleReloadRuntime.RequestReload(*OldReloadEntity);
+		PF_CHECK(Tests, StaleReloadTicket.has_value());
+		if (!StaleReloadTicket) return;
+		PF_CHECK(Tests, StaleReloadScene.DestroyEntity(*OldReloadEntity).has_value());
+		const auto NewReloadEntity = StaleReloadScene.CreateEntityWithUUID(ReusedReloadEntityID, "New reload incarnation");
+		PF_CHECK(Tests, NewReloadEntity && NewReloadEntity->SetScript(ScriptComponent{ StaleReloadAsset->ID }).has_value());
+		if (!NewReloadEntity) return;
+		const auto StaleReloadCount = StaleReloadRuntime.ServicePendingReloads(StaleReloadScene);
+		PF_CHECK(Tests, StaleReloadCount && *StaleReloadCount == 0);
+		PF_CHECK(Tests, StaleReloadRuntime.GetDiagnostics().size() == 1 &&
+			StaleReloadRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::ReloadRejected);
+		PF_CHECK(Tests, StaleReloadRuntime.Advance(StaleReloadScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, NewReloadEntity->GetTransform()->Translation.x == 12.0f);
+		StaleReloadRuntime.Stop();
+
+		const auto TeardownFailureAsset = CreateScriptAsset("reload_teardown_failure.lua",
+			"function OnUpdate() assert(entity:set_translation(5, 0, 0)) end\n"
+			"function OnDestroy() error('intentional teardown failure') end\n");
+		PF_CHECK(Tests, TeardownFailureAsset.has_value());
+		if (!TeardownFailureAsset) return;
+		Scene TeardownFailureScene;
+		const auto TeardownFailureEntity = TeardownFailureScene.CreateEntity("Teardown failure reload");
+		PF_CHECK(Tests, TeardownFailureEntity &&
+			TeardownFailureEntity->SetScript(ScriptComponent{ TeardownFailureAsset->ID }).has_value());
+		if (!TeardownFailureEntity) return;
+		ScriptRuntime TeardownFailureRuntime(*ProjectResult);
+		PF_CHECK(Tests, TeardownFailureRuntime.Start(TeardownFailureScene).has_value());
+		PF_CHECK(Tests, TeardownFailureRuntime.Advance(TeardownFailureScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, TeardownFailureEntity->GetTransform()->Translation.x == 5.0f);
+		PF_CHECK(Tests, WriteScriptSource(TeardownFailureAsset->ID,
+			"function OnCreate() assert(entity:set_translation(0, 8, 0)) end\nfunction OnUpdate() end\n"));
+		const auto TeardownFailureTicket = TeardownFailureRuntime.RequestReload(*TeardownFailureEntity);
+		PF_CHECK(Tests, TeardownFailureTicket.has_value());
+		if (!TeardownFailureTicket) return;
+		const auto TeardownFailureCount = TeardownFailureRuntime.ServicePendingReloads(TeardownFailureScene);
+		PF_CHECK(Tests, TeardownFailureCount && *TeardownFailureCount == 0);
+		PF_CHECK(Tests, TeardownFailureRuntime.GetDiagnostics().size() == 2 &&
+			TeardownFailureRuntime.GetDiagnostics().back().Code == ScriptDiagnosticCode::ReloadActivationFailed);
+		PF_CHECK(Tests, TeardownFailureRuntime.Advance(TeardownFailureScene, Timestep(1.0 / 60.0)).has_value());
+		const auto TeardownFailureTransform = TeardownFailureEntity->GetTransform();
+		PF_CHECK(Tests, TeardownFailureTransform && TeardownFailureTransform->Translation.x == 5.0f &&
+			TeardownFailureTransform->Translation.y == 0.0f);
+		TeardownFailureRuntime.Stop();
 
 		const auto ThrownPropertyRead = ScriptRuntimeDetail::CaptureScriptFloatPropertyRead(
 			[]() -> std::expected<PropertyValue, PropertyAccessError> { throw std::runtime_error("deterministic host lookup failure"); });

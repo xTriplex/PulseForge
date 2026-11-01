@@ -94,6 +94,9 @@ namespace PulseForge
 		[[nodiscard]] bool IsRunning() const noexcept;
 		[[nodiscard]] std::expected<void, SceneRuntimeError> SetPaused(bool Paused);
 		[[nodiscard]] bool IsPaused() const noexcept;
+		// Queues an explicit state-reset reload for one attachment in the active Play/Player scene.
+		[[nodiscard]] std::expected<uint64_t, SceneRuntimeError> RequestScriptReload(const Entity& Target);
+		[[nodiscard]] std::span<const ScriptDiagnostic> GetScriptDiagnostics() const noexcept;
 		// Updates scripts, advances fixed-step physics, then synchronizes spatial audio before rendering.
 		[[nodiscard]] std::expected<SceneRuntimeFrameResult, SceneRuntimeError> Advance(
 			Scene& Source,
@@ -108,5 +111,6 @@ namespace PulseForge
 		SceneRuntimeDesc m_Description;
 		SceneRuntimeServices m_Services;
 		std::unique_ptr<Impl> m_Impl;
+		uint64_t m_NextSessionGeneration = 0;
 	};
 }

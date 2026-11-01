@@ -17,6 +17,12 @@
 
 namespace PulseForgeEditor
 {
+	void DispatchScriptDiagnosticOpen(EditorInspectorPanelActions& Actions, const PulseForge::ScriptDiagnostic& Diagnostic)
+	{
+		auto Opened = Actions.OpenScriptDiagnostic(Diagnostic);
+		if (!Opened) Actions.ReportInspectorError("Could not open diagnostic script source: " + Opened.error());
+	}
+
 	namespace
 	{
 		std::string PathToUtf8(const std::filesystem::path& Path)
@@ -31,6 +37,27 @@ namespace PulseForgeEditor
 														? PulseForge::SceneErrorCode::MissingComponent
 														: PulseForge::SceneErrorCode::StorageFailure;
 			return { Code, Error.Message };
+		}
+
+		const char* ScriptDiagnosticName(PulseForge::ScriptDiagnosticCode Code) noexcept
+		{
+			using PulseForge::ScriptDiagnosticCode;
+			switch (Code)
+			{
+			case ScriptDiagnosticCode::InvalidComponent: return "Invalid component";
+			case ScriptDiagnosticCode::AssetNotFound: return "Asset not found";
+			case ScriptDiagnosticCode::WrongAssetType: return "Wrong asset type";
+			case ScriptDiagnosticCode::FileReadFailed: return "File read failed";
+			case ScriptDiagnosticCode::LuaInitializationFailed: return "Lua initialization failed";
+			case ScriptDiagnosticCode::CompileFailed: return "Compile failed";
+			case ScriptDiagnosticCode::InitializationFailed: return "Initialization failed";
+			case ScriptDiagnosticCode::UpdateFailed: return "Update failed";
+			case ScriptDiagnosticCode::DestroyFailed: return "Destroy failed";
+			case ScriptDiagnosticCode::ReloadRejected: return "Reload rejected";
+			case ScriptDiagnosticCode::ReloadActivationFailed: return "Reload activation failed";
+			case ScriptDiagnosticCode::ModuleLoadFailed: return "Module load failed";
+			}
+			return "Script diagnostic";
 		}
 	} // namespace
 
@@ -997,81 +1024,194 @@ namespace PulseForgeEditor
 					});
 			Inspector.Style.EndPropertyTable();
 		}
+		const PulseForge::AssetID ScriptAsset = Result->value().ScriptAsset;
+		if (ImGui::SmallButton("Open Script Source"))
+		{
+			auto Opened = Inspector.Actions.OpenScriptAsset(ScriptAsset);
+			if (!Opened) Inspector.Actions.ReportInspectorError("Could not open script source: " + Opened.error());
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Reload Script"))
+		{
+			m_CachedScriptMetadata.reset();
+			auto Reloaded = Inspector.Actions.RequestScriptReload(Entity);
+			if (!Reloaded) Inspector.Actions.ReportInspectorError("Could not request script reload: " + Reloaded.error());
+		}
+		const auto Diagnostics = Inspector.Actions.GetScriptDiagnostics(Entity.GetUUID(), ScriptAsset);
+		for (size_t DiagnosticIndex = 0; DiagnosticIndex < Diagnostics.size(); ++DiagnosticIndex)
+		{
+			const PulseForge::ScriptDiagnostic& Diagnostic = Diagnostics[DiagnosticIndex];
+			if (Diagnostic.Entity != Entity.GetUUID() || Diagnostic.ScriptAsset != ScriptAsset) continue;
+			ImGui::PushID(static_cast<int>(DiagnosticIndex));
+			std::string Label = ScriptDiagnosticName(Diagnostic.Code);
+			if (!Diagnostic.SourceRelativePath.empty())
+			{
+				Label += " — " + Diagnostic.SourceRelativePath;
+				if (Diagnostic.Line > 0) Label += ":" + std::to_string(Diagnostic.Line);
+			}
+			ImGui::TextColored(ImVec4(0.96f, 0.53f, 0.31f, 1.0f), "%s", Label.c_str());
+			ImGui::TextWrapped("%s", Diagnostic.Message.c_str());
+			ImGui::TextDisabled("Opens the current file for this asset; it may differ from the diagnostic's captured source. Line navigation is unavailable.");
+			if (ImGui::SmallButton("Open script source for diagnostic"))
+			{
+				DispatchScriptDiagnosticOpen(Inspector.Actions, Diagnostic);
+			}
+			ImGui::PopID();
+		}
 		DrawScriptFloatProperties(Inspector, Entity);
 		Inspector.Style.EndComponentBody();
 	}
 
 	void EditorInspectorPanel::DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity)
 	{
-		const auto UpdateScript = [this, &Inspector](
-									  std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Update)
-		{ RecordComponentOperation(Inspector, std::move(Update), Description); };
-
 		ImGui::TextDisabled("Script Properties");
-		const auto Properties = PulseForge::GetDynamicPropertyDescriptors(Entity, PulseForge::PropertyComponentIds::ScriptFloat);
-		if (!Properties)
+		const auto ScriptResult = Entity.GetScript();
+		if (!ScriptResult || !ScriptResult->has_value())
 		{
-			Inspector.Actions.ReportInspectorError("Could not inspect script properties: " + Properties.error().Message);
+			Inspector.Style.TextMuted("The Script component is unavailable.");
 			return;
 		}
-		if (!Properties->empty() && Inspector.Style.BeginPropertyTable("ScriptFloatProperties"))
+
+		const PulseForge::ScriptComponent Script = **ScriptResult;
+		if (ImGui::SmallButton("Refresh Script Declarations"))
+			m_CachedScriptMetadata.reset();
+		const PulseForge::UUID ProjectIdentity = Inspector.Actions.GetScriptProjectIdentity();
+		if (!m_CachedScriptMetadata || !m_CachedScriptProject || *m_CachedScriptProject != ProjectIdentity ||
+			!m_CachedScriptAsset || *m_CachedScriptAsset != Script.ScriptAsset)
 		{
-			for (const PulseForge::DynamicPropertyDescriptor& Property : *Properties)
+			m_CachedScriptProject = ProjectIdentity;
+			m_CachedScriptAsset = Script.ScriptAsset;
+			m_CachedScriptMetadata = Inspector.Actions.ReadScriptSourceMetadata(Script.ScriptAsset);
+		}
+		const auto& Metadata = *m_CachedScriptMetadata;
+		if (!Metadata)
+			ImGui::TextWrapped("Script declarations are unavailable: %s", Metadata.error().c_str());
+		else if (!Metadata->HasDeclarations)
+			Inspector.Style.TextMuted("This script has no declared Inspector properties.");
+
+		std::vector<std::string> DeclaredIDs;
+		const bool HasDeclaredRows = Metadata && !Metadata->FloatProperties.empty();
+		if (HasDeclaredRows && Inspector.Style.BeginPropertyTable("ScriptFloatProperties"))
+		{
+			DeclaredIDs.reserve(Metadata->FloatProperties.size());
+			for (const PulseForge::ScriptFloatPropertyDeclaration& Declaration : Metadata->FloatProperties)
 			{
-				if (!Property.Editable) continue;
-				ImGui::PushID(Property.Id.c_str());
-				if (Inspector.Style.BeginPropertyRow(Property.Label))
+				DeclaredIDs.push_back(Declaration.ID);
+				const auto Stored = Script.FloatProperties.find(Declaration.ID);
+				const bool HasOverride = Stored != Script.FloatProperties.end();
+				float Value = HasOverride ? Stored->second : Declaration.DefaultValue;
+				const std::string Label = Declaration.Label + (HasOverride ? "  [Override]" : "  [Default]");
+				ImGui::PushID(Declaration.ID.c_str());
+				if (Inspector.Style.BeginPropertyRow(Label))
 				{
-					const float AvailableWidth = (std::max)(ImGui::GetContentRegionAvail().x, 1.0f);
-					const float RemoveWidth = (std::min)(31.0f, AvailableWidth * 0.35f);
-					ImGui::SetNextItemWidth((std::max)(AvailableWidth - RemoveWidth - ImGui::GetStyle().ItemInnerSpacing.x, 1.0f));
-					DrawProperty(Inspector, Entity, Property.ComponentId, Property.Id,
-						[](PulseForge::PropertyValue& Value)
-						{
-							auto* Number = std::get_if<float>(&Value);
-							return Number && ImGui::DragFloat("##ScriptFloatProperty", Number, 0.05f,
-												 -PulseForge::MaximumScriptFloatPropertyMagnitude,
-												 PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f");
-						});
-					ImGui::SameLine();
-					if (ImGui::SmallButton("X"))
-						UpdateScript("Remove script property " + Property.Id,
-							[Entity, Identifier = Property.Id]() -> std::expected<void, PulseForge::SceneError>
+					ImGui::SetNextItemWidth((std::max)(ImGui::GetContentRegionAvail().x, 1.0f));
+					if (ImGui::DragFloat("##ScriptFloatProperty", &Value, 0.05f, Declaration.Minimum,
+							Declaration.Maximum, "%.3f"))
+					{
+						auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit script property " + Declaration.ID,
+							[Entity, Identifier = Declaration.ID, Value, Actions = &Inspector.Actions]()
+								-> std::expected<void, PulseForge::SceneError>
 							{
-								const auto Removed = PulseForge::RemoveScriptFloatProperty(Entity, Identifier);
-								if (!Removed) return std::unexpected(ToSceneError(Removed.error()));
+								const auto Written = PulseForge::WriteProperty(Entity, PulseForge::PropertyComponentIds::ScriptFloat,
+									Identifier, PulseForge::PropertyValue{ Value });
+								if (!Written) return std::unexpected(ToSceneError(Written.error()));
+								if (Actions->IsLinkedPrefabEntity(Entity))
+									if (auto Recorded = Actions->RecordPrefabPropertyOverride(
+											Entity, PulseForge::PropertyComponentIds::ScriptFloat, Identifier);
+									!Recorded)
+									return std::unexpected(PulseForge::SceneError{
+										PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
 								return {};
 							});
+						if (!Updated) Inspector.Actions.ReportInspectorError("Script property update failed: " + Updated.error());
+					}
+					if (HasOverride && ImGui::SmallButton("Reset"))
+					{
+						if (Inspector.Actions.IsLinkedPrefabEntity(Entity))
+						{
+							auto Reset = Inspector.Actions.ResetPrefabPropertyOverride(
+								Entity, PulseForge::PropertyComponentIds::ScriptFloat, Declaration.ID);
+							if (!Reset) Inspector.Actions.ReportInspectorError("Script property reset failed: " + Reset.error());
+						}
+						else
+						{
+							auto Reset = Inspector.Actions.RunInspectorSceneEdit("Reset script property " + Declaration.ID,
+								[Entity, Identifier = Declaration.ID]() -> std::expected<void, PulseForge::SceneError>
+								{
+									const auto Removed = PulseForge::RemoveScriptFloatProperty(Entity, Identifier);
+									if (!Removed) return std::unexpected(ToSceneError(Removed.error()));
+									return {};
+								});
+							if (!Reset) Inspector.Actions.ReportInspectorError("Script property reset failed: " + Reset.error());
+						}
+					}
+					if (HasOverride && (Value < Declaration.Minimum || Value > Declaration.Maximum))
+						ImGui::TextColored(ImVec4(0.96f, 0.53f, 0.31f, 1.0f), "Stored value is outside the declared range.");
 				}
 				ImGui::PopID();
 			}
 			Inspector.Style.EndPropertyTable();
 		}
 
-		const float AddRowWidth = (std::max)(ImGui::GetContentRegionAvail().x, 1.0f);
-		ImGui::SetNextItemWidth((std::max)(AddRowWidth * 0.45f, 1.0f));
-		ImGui::InputText("##NewScriptPropertyIdentifier", &m_NewScriptPropertyIdentifier);
-		ImGui::SameLine();
-		ImGui::SetNextItemWidth((std::max)(AddRowWidth * 0.30f, 1.0f));
-		ImGui::DragFloat("##NewScriptPropertyValue", &m_NewScriptPropertyValue, 0.05f, -PulseForge::MaximumScriptFloatPropertyMagnitude,
-			PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f");
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Add"))
+		std::vector<std::pair<std::string, float>> LegacyValues;
+		for (const auto& [Identifier, Value] : Script.FloatProperties)
 		{
-			if (!PulseForge::IsValidScriptPropertyIdentifier(m_NewScriptPropertyIdentifier))
-				Inspector.Actions.ReportInspectorError("Script property IDs must use the supported ASCII identifier format.");
-			else if (std::any_of(Properties->begin(), Properties->end(), [this](const PulseForge::DynamicPropertyDescriptor& Property)
-						 { return Property.Id == m_NewScriptPropertyIdentifier; }))
-				Inspector.Actions.ReportInspectorError("A script property with that ID already exists.");
-			else
-				UpdateScript("Add script property " + m_NewScriptPropertyIdentifier,
-					[Entity, Identifier = m_NewScriptPropertyIdentifier,
-						Value = m_NewScriptPropertyValue]() -> std::expected<void, PulseForge::SceneError>
+			if (std::find(DeclaredIDs.begin(), DeclaredIDs.end(), Identifier) == DeclaredIDs.end())
+				LegacyValues.emplace_back(Identifier, Value);
+		}
+		if (!LegacyValues.empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextDisabled("Legacy values without declarations are preserved below.");
+			if (Inspector.Style.BeginPropertyTable(HasDeclaredRows ? "LegacyScriptFloatProperties" : "ScriptFloatProperties"))
+			{
+				for (const auto& [Identifier, StoredValue] : LegacyValues)
+				{
+					ImGui::PushID(Identifier.c_str());
+					if (Inspector.Style.BeginPropertyRow(Identifier + "  [Legacy]"))
 					{
-						const auto Added = PulseForge::AddScriptFloatProperty(Entity, Identifier, Value);
-						if (!Added) return std::unexpected(ToSceneError(Added.error()));
-						return {};
-					});
+						float Value = StoredValue;
+						ImGui::SetNextItemWidth((std::max)(ImGui::GetContentRegionAvail().x, 1.0f));
+						if (ImGui::DragFloat("##LegacyScriptFloat", &Value, 0.05f,
+								-PulseForge::MaximumScriptFloatPropertyMagnitude,
+								PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f"))
+						{
+							auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit legacy script property " + Identifier,
+								[Entity, Identifier, Value, Actions = &Inspector.Actions]() -> std::expected<void, PulseForge::SceneError>
+								{
+									const auto Written = PulseForge::WriteProperty(Entity, PulseForge::PropertyComponentIds::ScriptFloat,
+										Identifier, PulseForge::PropertyValue{ Value });
+									if (!Written) return std::unexpected(ToSceneError(Written.error()));
+									if (Actions->IsLinkedPrefabEntity(Entity))
+										if (auto Recorded = Actions->RecordPrefabPropertyOverride(
+												Entity, PulseForge::PropertyComponentIds::ScriptFloat, Identifier);
+										!Recorded)
+										return std::unexpected(PulseForge::SceneError{
+											PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
+									return {};
+								});
+							if (!Updated) Inspector.Actions.ReportInspectorError("Legacy script property update failed: " + Updated.error());
+						}
+						ImGui::SameLine();
+						if (Inspector.Actions.IsLinkedPrefabEntity(Entity)) ImGui::BeginDisabled();
+						const bool Remove = ImGui::SmallButton("Remove");
+						if (Inspector.Actions.IsLinkedPrefabEntity(Entity)) ImGui::EndDisabled();
+						if (Remove && !Inspector.Actions.IsLinkedPrefabEntity(Entity))
+						{
+							auto Removed = Inspector.Actions.RunInspectorSceneEdit("Remove legacy script property " + Identifier,
+								[Entity, Identifier]() -> std::expected<void, PulseForge::SceneError>
+								{
+									const auto Result = PulseForge::RemoveScriptFloatProperty(Entity, Identifier);
+									if (!Result) return std::unexpected(ToSceneError(Result.error()));
+									return {};
+								});
+							if (!Removed) Inspector.Actions.ReportInspectorError("Legacy script property removal failed: " + Removed.error());
+						}
+					}
+					ImGui::PopID();
+				}
+				Inspector.Style.EndPropertyTable();
+			}
 		}
 	}
 

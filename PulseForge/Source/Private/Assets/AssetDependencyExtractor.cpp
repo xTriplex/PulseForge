@@ -10,6 +10,7 @@
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/MaterialAsset.h"
 #include "Assets/PrefabSerializer.h"
+#include "Assets/ScriptSourceMetadata.h"
 #include "Scene/SceneSerializer.h"
 
 #include <nlohmann/json.hpp>
@@ -41,6 +42,7 @@ namespace PulseForge
 		constexpr uint64_t MaximumGltfBufferBytes = 512ull * 1024ull * 1024ull;
 		constexpr uint64_t MaximumPrefabBytes = 64ull * 1024ull * 1024ull;
 		constexpr uint64_t MaximumMetadataBytes = 1024ull * 1024ull;
+		constexpr uint64_t MaximumLuaSourceBytes = 2ull * 1024ull * 1024ull;
 		constexpr uint64_t MaximumProvenanceBytes = 1024ull * 1024ull;
 		constexpr size_t MaximumGltfCollectionEntries = 1'000'000;
 		constexpr size_t MaximumCycleNodes = 1'000'000;
@@ -82,6 +84,12 @@ namespace PulseForge
 			return { reinterpret_cast<const char*>(Value.data()), Value.size() };
 		}
 
+		std::string BytesAsString(const std::vector<std::byte>& Bytes)
+		{
+			if (Bytes.empty()) return {};
+			return { reinterpret_cast<const char*>(Bytes.data()), Bytes.size() };
+		}
+
 		std::string ProjectRelativeKey(const std::filesystem::path& ProjectRoot, const std::filesystem::path& Path)
 		{
 			const auto Relative = Path.lexically_relative(ProjectRoot).lexically_normal();
@@ -117,8 +125,7 @@ namespace PulseForge
 			auto Bytes = ReadBoundedBytes(Sidecar, MaximumMetadataBytes, CancellationToken);
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(Sidecar));
 			if (!Bytes) return std::unexpected(MakeError(Sidecar, "Asset metadata could not be read for dependency analysis: " + Bytes.error()));
-			const std::string Data(Bytes->empty() ? std::string{} :
-				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
+			const std::string Data = BytesAsString(*Bytes);
 			auto Metadata = AssetMetadataSerializer::Deserialize(Data, Sidecar);
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(Sidecar));
 			if (!Metadata) return std::unexpected(MakeError(Sidecar, "Asset metadata is invalid: " + Metadata.error().Message));
@@ -366,8 +373,7 @@ namespace PulseForge
 			if (auto Receipt = AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes, CancellationToken); !Receipt)
 				return std::unexpected(CancellationToken.stop_requested() ? MakeCancelledError(SourcePath)
 					: MakeError(SourcePath, "Scene input fingerprinting failed: " + Receipt.error()));
-			const std::string Data(Bytes->empty() ? std::string{} :
-				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
+			const std::string Data = BytesAsString(*Bytes);
 			Scene Source;
 			auto Loaded = SceneSerializer::Deserialize(Data, Source);
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
@@ -387,14 +393,93 @@ namespace PulseForge
 			if (auto Receipt = AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes, CancellationToken); !Receipt)
 				return std::unexpected(CancellationToken.stop_requested() ? MakeCancelledError(SourcePath)
 					: MakeError(SourcePath, "Prefab input fingerprinting failed: " + Receipt.error()));
-			const std::string Data(Bytes->empty() ? std::string{} :
-				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
+			const std::string Data = BytesAsString(*Bytes);
 
 			auto AuthoredDocument = PrefabSerializer::Parse(Data, Owner.ID);
 			if (!AuthoredDocument)
 				return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + AuthoredDocument.error().Message));
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			return ExtractSceneReferences(Output, Owner, Registry, AuthoredDocument->GetScene(), CancellationToken);
+		}
+
+		std::expected<void, AssetDependencyCatalogError> ExtractScriptModuleReferences(
+			AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath,
+			const AssetRecord& Owner, const std::vector<AssetRecord>& Records,
+			std::stop_token CancellationToken)
+		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
+			auto Bytes = ReadBoundedBytes(SourcePath, MaximumLuaSourceBytes, CancellationToken);
+			if (!Bytes)
+				return std::unexpected(MakeError(SourcePath, "Script module dependency analysis failed: " + Bytes.error()));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
+			if (auto Receipt = AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes, CancellationToken); !Receipt)
+				return std::unexpected(CancellationToken.stop_requested() ? MakeCancelledError(SourcePath)
+					: MakeError(SourcePath, "Script source fingerprinting failed: " + Receipt.error()));
+			std::string Source;
+			if (!Bytes->empty()) Source.assign(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
+			auto Metadata = ParseScriptSourceMetadata(Source);
+			if (!Metadata)
+				return std::unexpected(MakeError(SourcePath, "Script metadata error at line " + std::to_string(Metadata.error().Line) +
+					": " + Metadata.error().Message));
+
+			const AssetDependencyNode Referrer{ Owner.ID, {}, {} };
+			for (size_t ModuleIndex = 0; ModuleIndex < Metadata->Modules.size(); ++ModuleIndex)
+			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
+				const std::string ModuleLocation = "script/modules/" + std::to_string(ModuleIndex);
+				const std::string& DeclaredPath = Metadata->Modules[ModuleIndex];
+				auto ModulePath = ResolveScriptModuleAssetPath(PathToUtf8(Owner.ProjectRelativePath), DeclaredPath);
+				if (!ModulePath)
+					return std::unexpected(MakeError(SourcePath, "Invalid declared Lua module '" + DeclaredPath + "': " + ModulePath.error().Message));
+				const std::filesystem::path AbsoluteModulePath = ProjectRoot / *ModulePath;
+				const AssetRecord* Match = nullptr;
+				bool Ambiguous = false;
+				auto ManagedModulePath = AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, *ModulePath);
+				if (!ManagedModulePath && ManagedModulePath.error().Code != AssetPathErrorCode::MissingAssetEntry)
+					return std::unexpected(MakeError(AbsoluteModulePath,
+						"Could not safely inspect declared Lua module path: " + ManagedModulePath.error().Message));
+				const bool TargetExists = ManagedModulePath.has_value();
+				for (const AssetRecord& Candidate : Records)
+				{
+					if (!TargetExists) break;
+					std::error_code EquivalentError;
+					const bool SameFilesystemEntry = std::filesystem::equivalent(
+						*ManagedModulePath, ProjectRoot / Candidate.ProjectRelativePath, EquivalentError);
+					if (EquivalentError)
+						return std::unexpected(MakeError(ProjectRoot / Candidate.ProjectRelativePath,
+							"Could not compare declared Lua module with a managed asset path: " + EquivalentError.message()));
+					if (!SameFilesystemEntry) continue;
+					if (Match) { Ambiguous = true; break; }
+					Match = &Candidate;
+				}
+
+				AssetDependencyNode Target;
+				AssetDependencyStatus Status = AssetDependencyStatus::Resolved;
+				std::string Message;
+				if (Ambiguous)
+				{
+					Status = AssetDependencyStatus::Invalid;
+					Message = "Declared Lua module resolves to more than one managed asset under filesystem path semantics";
+				}
+				else if (!Match)
+				{
+					Status = AssetDependencyStatus::Missing;
+					Target.SourceFileKey = PathToUtf8(*ModulePath);
+					Message = "Declared Lua module is missing from the managed Assets/Scripts registry";
+				}
+				else if (!HasAssetTypeExtension(Match->ProjectRelativePath, AssetFileType::Script))
+				{
+					Status = AssetDependencyStatus::WrongType;
+					Target.Asset = Match->ID;
+					Message = "Declared Lua module path resolves to a managed asset that is not a script";
+				}
+				else Target.Asset = Match->ID;
+				Output.Edges.push_back({ Referrer, Target, AssetDependencyEdgeKind::RuntimeReference, Status,
+					ModuleLocation, DeclaredPath });
+				if (Status != AssetDependencyStatus::Resolved)
+					AppendIssue(Output, Referrer, Target, Status, ModuleLocation, std::move(Message));
+			}
+			return {};
 		}
 
 		struct BufferInput
@@ -919,8 +1004,7 @@ namespace PulseForge
 					if (auto Receipt = AddReadReceipt(Output, ProjectRoot, ProvenancePath, *ReceiptBytes, CancellationToken); !Receipt)
 						return std::unexpected(CancellationToken.stop_requested() ? MakeCancelledError(ProvenancePath)
 							: MakeError(ProvenancePath, "Import receipt fingerprinting failed: " + Receipt.error()));
-					const std::string ReceiptText(ReceiptBytes->empty() ? std::string{} :
-						std::string(reinterpret_cast<const char*>(ReceiptBytes->data()), ReceiptBytes->size()));
+					const std::string ReceiptText = BytesAsString(*ReceiptBytes);
 					auto Receipts = AssetImportProvenanceSerializer::DeserializeAll(ReceiptText, ProvenancePath);
 					const bool HasForeignSource = Receipts && std::any_of(Receipts->begin(), Receipts->end(),
 						[&Owner](const AssetImportSuccessReceipt& Receipt) { return Receipt.Recipe.SourceAsset != Owner.ID; });
@@ -1002,8 +1086,7 @@ namespace PulseForge
 			if (auto Receipt = AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes, CancellationToken); !Receipt)
 				return std::unexpected(CancellationToken.stop_requested() ? MakeCancelledError(SourcePath)
 					: MakeError(SourcePath, "Material input fingerprinting failed: " + Receipt.error()));
-			const std::string Data(Bytes->empty() ? std::string{} :
-				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
+			const std::string Data = BytesAsString(*Bytes);
 			auto Material = MaterialAssetSerializer::Deserialize(Data);
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			if (!Material)
@@ -1142,6 +1225,8 @@ namespace PulseForge
 				Result = ExtractSceneFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry, CancellationToken);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Prefab))
 				Result = ExtractPrefabFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry, CancellationToken);
+			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Script))
+				Result = ExtractScriptModuleReferences(Output, AbsoluteProjectRoot, *Resolved, Record, Records, CancellationToken);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Mesh))
 				Result = AnalyzeGltf(Output, AbsoluteProjectRoot, *Resolved, Record, *Metadata, CancellationToken);
 			else continue;

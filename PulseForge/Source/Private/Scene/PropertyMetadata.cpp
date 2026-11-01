@@ -221,8 +221,7 @@ namespace PulseForge
 			auto Current = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
 			if (!Current) return std::unexpected(Current.error());
 			if (!Current->FloatProperties.contains(PropertyId))
-				return std::unexpected(MakeError(
-					PropertyAccessErrorCode::UnknownProperty, "Script float property '" + std::string(PropertyId) + "' does not exist"));
+				return AddScriptFloatProperty(Target, PropertyId, *Typed);
 			if (auto Updated = Current->SetFloatProperty(PropertyId, *Typed); !Updated)
 				return std::unexpected(ScriptErrorToPropertyError(Updated.error()));
 			const auto Result = Target.SetScript(*Current);
