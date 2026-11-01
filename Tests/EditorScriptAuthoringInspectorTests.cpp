@@ -270,6 +270,10 @@ void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests)
 	PF_CHECK(Tests, FirstModulePath && *FirstModulePath ==
 		(ProjectRoot / std::filesystem::u8path("Assets/Scripts/shared/first module Ω.lua")).lexically_normal());
 	if (!MainSourcePath || !FirstModulePath) return;
+	const auto OriginalModuleRecord = Project->GetAssetRegistry().Find(ManagedFirstModuleDiagnostic.SourceAsset);
+	PF_CHECK(Tests, OriginalModuleRecord && OriginalModuleRecord->ID == FirstModule->ID &&
+		OriginalModuleRecord->ProjectRelativePath == std::filesystem::u8path(ManagedFirstModuleDiagnostic.SourceRelativePath));
+	if (!OriginalModuleRecord) return;
 	PulseForge::ScriptDiagnostic ManagedSecondModuleDiagnostic = ManagedFirstModuleDiagnostic;
 	ManagedSecondModuleDiagnostic.SourceAsset = SecondModule->ID;
 	ManagedSecondModuleDiagnostic.SourceRelativePath = "Assets/Scripts/shared/second.lua";
@@ -291,22 +295,45 @@ void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests)
 		OtherProject->GetAssetRegistry(), OtherProject->GetRootPath(),
 		std::as_bytes(std::span(EmptyModuleSource.data(), EmptyModuleSource.size())),
 		std::filesystem::u8path("Assets/Scripts/shared/first module Ω.lua"));
-	PF_CHECK(Tests, SameNamedOtherProjectAsset && SameNamedOtherProjectAsset->ID != FirstModule->ID);
+	PF_CHECK(Tests, OtherProject->GetDescription().ID != Project->GetDescription().ID);
+	PF_CHECK(Tests, SameNamedOtherProjectAsset && SameNamedOtherProjectAsset->ID != ManagedFirstModuleDiagnostic.SourceAsset &&
+		SameNamedOtherProjectAsset->ProjectRelativePath == OriginalModuleRecord->ProjectRelativePath);
 	if (!SameNamedOtherProjectAsset) return;
+	const auto OtherProjectRecord = OtherProject->GetAssetRegistry().Find(SameNamedOtherProjectAsset->ID);
+	PF_CHECK(Tests, OtherProjectRecord && OtherProjectRecord->ID != ManagedFirstModuleDiagnostic.SourceAsset &&
+		OtherProjectRecord->ProjectRelativePath == std::filesystem::u8path(ManagedFirstModuleDiagnostic.SourceRelativePath));
+	if (!OtherProjectRecord) return;
 	PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
-		OtherProject->GetRootPath(), OtherProject->GetAssetRegistry(), OtherProject->GetDescription().ID, FirstModuleDiagnostic));
+		OtherProject->GetRootPath(), OtherProject->GetAssetRegistry(), OtherProject->GetDescription().ID, ManagedFirstModuleDiagnostic));
 
 	auto MovedModule = PulseForge::AssetOperations::Move(Project->GetAssetRegistry(), ProjectRoot, FirstModule->ID,
 		"Assets/Scripts/shared/relocated Ω.lua");
-	PF_CHECK(Tests, MovedModule && MovedModule->ID == FirstModule->ID);
+	PF_CHECK(Tests, MovedModule && MovedModule->ID == ManagedFirstModuleDiagnostic.SourceAsset);
+	if (!MovedModule) return;
+	const auto MovedModuleRecord = Project->GetAssetRegistry().Find(ManagedFirstModuleDiagnostic.SourceAsset);
+	PF_CHECK(Tests, MovedModuleRecord && MovedModuleRecord->ID == ManagedFirstModuleDiagnostic.SourceAsset &&
+		MovedModuleRecord->ProjectRelativePath == MovedModule->ProjectRelativePath);
+	if (!MovedModuleRecord) return;
 	PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
-		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, FirstModuleDiagnostic));
-	if (MovedModule)
-	{
-		PF_CHECK(Tests, PulseForge::AssetOperations::Delete(Project->GetAssetRegistry(), ProjectRoot, MovedModule->ID));
-		const auto ReusedSpelling = MakeManagedSource("Assets/Scripts/shared/first module Ω.lua");
-		PF_CHECK(Tests, ReusedSpelling && ReusedSpelling->ID != FirstModule->ID);
-		PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
-			ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, FirstModuleDiagnostic));
-	}
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, ManagedFirstModuleDiagnostic));
+	const PulseForge::AssetID OriginalModuleID = ManagedFirstModuleDiagnostic.SourceAsset;
+	const auto DeletedMovedModule = PulseForge::AssetOperations::Delete(Project->GetAssetRegistry(), ProjectRoot, MovedModule->ID);
+	PF_CHECK(Tests, DeletedMovedModule.has_value());
+	if (!DeletedMovedModule) return;
+	PF_CHECK(Tests, !Project->GetAssetRegistry().Find(OriginalModuleID));
+	if (Project->GetAssetRegistry().Find(OriginalModuleID)) return;
+	const auto ReusedSpelling = MakeManagedSource(ManagedFirstModuleDiagnostic.SourceRelativePath);
+	PF_CHECK(Tests, ReusedSpelling && ReusedSpelling->ID != OriginalModuleID);
+	if (!ReusedSpelling || ReusedSpelling->ID == OriginalModuleID) return;
+	const auto ReplacementRecord = Project->GetAssetRegistry().Find(ReusedSpelling->ID);
+	PF_CHECK(Tests, ReplacementRecord && ReplacementRecord->ID != OriginalModuleID &&
+		ReplacementRecord->ProjectRelativePath == OriginalModuleRecord->ProjectRelativePath);
+	if (!ReplacementRecord) return;
+	PF_CHECK(Tests, !PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, ManagedFirstModuleDiagnostic));
+	PulseForge::ScriptDiagnostic ReplacementDiagnostic = ManagedFirstModuleDiagnostic;
+	ReplacementDiagnostic.SourceAsset = ReusedSpelling->ID;
+	const auto ReplacementPath = PulseForgeEditor::ResolveScriptDiagnosticSourcePath(
+		ProjectRoot, Project->GetAssetRegistry(), Project->GetDescription().ID, ReplacementDiagnostic);
+	PF_CHECK(Tests, ReplacementPath && *ReplacementPath == FirstModulePath.value());
 }
