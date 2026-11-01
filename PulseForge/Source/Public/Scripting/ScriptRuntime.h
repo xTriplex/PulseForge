@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -23,6 +24,7 @@ namespace PulseForge
 	class Project;
 	class Scene;
 	class CookedContentProvider;
+	struct PhysicsContactEvent;
 
 	enum class ScriptRuntimeAllocationPointForTesting : uint8_t
 	{
@@ -93,7 +95,13 @@ namespace PulseForge
 	{
 		OnCreate,
 		OnUpdate,
-		OnDestroy
+		OnDestroy,
+		OnCollisionBegin,
+		OnCollisionStay,
+		OnCollisionEnd,
+		OnTriggerEnter,
+		OnTriggerStay,
+		OnTriggerExit
 	};
 
 	enum class ScriptRuntimeObservationKind : uint8_t
@@ -130,6 +138,9 @@ namespace PulseForge
 		Input* InputState = nullptr;
 		ScriptRuntimeObserver Observer;
 		std::shared_ptr<const CookedContentProvider> CookedAssets;
+		std::function<bool(const Entity&)> QueueEntityDestroy;
+		std::function<bool(const AssetID&)> QueueSceneTransition;
+		std::function<bool()> QueueStop;
 	};
 
 	enum class ScriptRuntimeErrorCode : uint8_t
@@ -178,6 +189,8 @@ namespace PulseForge
 		[[nodiscard]] std::span<const ScriptDiagnostic> GetDiagnostics() const noexcept;
 		void ClearDiagnostics() noexcept;
 		[[nodiscard]] std::expected<void, ScriptRuntimeError> Advance(Scene& Source, Timestep DeltaTime);
+		// Returns false when a host accepted a Stop/transition request and the current event batch must stop.
+		[[nodiscard]] bool DispatchPhysicsContact(Scene& Source, const PhysicsContactEvent& Event) noexcept;
 
 	private:
 		struct Impl;

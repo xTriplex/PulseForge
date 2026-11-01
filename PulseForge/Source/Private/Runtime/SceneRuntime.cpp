@@ -37,6 +37,7 @@ namespace PulseForge
 		std::unique_ptr<ScriptRuntime> Scripting;
 		Scene* Source = nullptr;
 		bool Paused = false;
+		bool DeferredRuntimeTransitionRequested = false;
 	};
 
 	#if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -71,6 +72,7 @@ namespace PulseForge
 		{
 			if (++m_NextSessionGeneration == 0) ++m_NextSessionGeneration;
 			m_Description.Scripting.SessionGeneration = m_NextSessionGeneration;
+			m_Description.Physics.SessionGeneration = m_NextSessionGeneration;
 			auto Candidate = std::make_unique<Impl>();
 			Candidate->Source = &Source;
 
@@ -123,12 +125,31 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Audio,
 					"Could not start scene audio: " + Result.error().Message));
 
-			const ScriptRuntimeServices Services{
+			ScriptRuntimeServices Services{
 				.Physics = Candidate->Physics.get(),
 				.Audio = Candidate->Audio.get(),
 				.GameplayInput = m_Services.GameplayInput,
 				.InputState = m_Services.InputState,
 				.Observer = m_Services.ScriptObserver };
+			auto* CandidateOwner = Candidate.get();
+			if (m_Services.QueueSceneTransition)
+			{
+				Services.QueueSceneTransition = [CandidateOwner, Request = m_Services.QueueSceneTransition](const AssetID& Asset)
+				{
+					if (!Request(Asset)) return false;
+					CandidateOwner->DeferredRuntimeTransitionRequested = true;
+					return true;
+				};
+			}
+			if (m_Services.QueueStop)
+			{
+				Services.QueueStop = [CandidateOwner, Request = m_Services.QueueStop]()
+				{
+					if (!Request()) return false;
+					CandidateOwner->DeferredRuntimeTransitionRequested = true;
+					return true;
+				};
+			}
 			if (m_CookedAssets)
 				Candidate->Scripting = std::make_unique<ScriptRuntime>(m_CookedAssets, m_Description.Scripting, Services);
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -250,6 +271,8 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Scripting,
 					"Could not update scene scripts: " + Result.error().Message));
 		}
+		if (m_Impl->DeferredRuntimeTransitionRequested)
+			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
 
 		auto PhysicsResult = [&]
 		{
@@ -262,6 +285,12 @@ namespace PulseForge
 				SceneRuntimeSubsystem::Physics,
 				"Could not advance scene physics: " + PhysicsResult.error().Message));
 
+		for (const PhysicsContactEvent& Event : m_Impl->Physics->TakeContactEvents())
+		{
+			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
+				return SceneRuntimeFrameResult{ .PhysicsSteps = *PhysicsResult, .PhysicsStats = m_Impl->Physics->GetStats() };
+		}
+
 		{
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "AudioSceneRuntime::Advance", "AudioSceneRuntime");
 			if (auto Result = m_Impl->Audio->Advance(Source); !Result)
@@ -271,6 +300,6 @@ namespace PulseForge
 					"Could not update scene audio: " + Result.error().Message));
 		}
 
-		return SceneRuntimeFrameResult{ *PhysicsResult };
+		return SceneRuntimeFrameResult{ *PhysicsResult, m_Impl->Physics->GetStats() };
 	}
 }

@@ -31,6 +31,20 @@ namespace PulseForge
 		std::filesystem::path ProjectFile, SceneRuntimeDesc RuntimeDescription, SceneRuntimeServices RuntimeServices)
 		: m_ProjectFile(std::move(ProjectFile)), m_RuntimeDescription(std::move(RuntimeDescription)), m_RuntimeServices(RuntimeServices)
 	{
+		if (!m_RuntimeServices.QueueSceneTransition)
+			m_RuntimeServices.QueueSceneTransition = [this](const AssetID& Asset)
+			{
+				if (!IsRunning() || m_PendingScene || m_RequestedSceneTransition) return false;
+				m_RequestedSceneTransition = Asset;
+				return true;
+			};
+		if (!m_RuntimeServices.QueueStop)
+			m_RuntimeServices.QueueStop = [this]()
+			{
+				if (!IsRunning()) return false;
+				m_StopRequested = true;
+				return true;
+			};
 	}
 #endif
 
@@ -40,6 +54,20 @@ namespace PulseForge
 		SceneRuntimeServices RuntimeServices)
 		: m_CookedAssets(std::move(CookedAssets)), m_RuntimeDescription(std::move(RuntimeDescription)), m_RuntimeServices(RuntimeServices)
 	{
+		if (!m_RuntimeServices.QueueSceneTransition)
+			m_RuntimeServices.QueueSceneTransition = [this](const AssetID& Asset)
+			{
+				if (!IsRunning() || m_PendingScene || m_RequestedSceneTransition) return false;
+				m_RequestedSceneTransition = Asset;
+				return true;
+			};
+		if (!m_RuntimeServices.QueueStop)
+			m_RuntimeServices.QueueStop = [this]()
+			{
+				if (!IsRunning()) return false;
+				m_StopRequested = true;
+				return true;
+			};
 	}
 
 	PlayerSession::~PlayerSession()
@@ -199,6 +227,19 @@ namespace PulseForge
 		if (!Result)
 			return std::unexpected(MakeError(
 				PlayerSessionErrorCode::RuntimeOperationFailed, "Could not advance player scene runtime: " + Result.error().Message));
+		if (m_StopRequested)
+		{
+			Stop();
+			return *Result;
+		}
+		if (m_RequestedSceneTransition)
+		{
+			const AssetID RequestedScene = *m_RequestedSceneTransition;
+			m_RequestedSceneTransition.reset();
+			if (auto Queued = RequestSceneTransition(RequestedScene); !Queued)
+				return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
+					"Could not prepare requested scene transition: " + Queued.error().Message));
+		}
 		return *Result;
 	}
 
@@ -237,6 +278,8 @@ namespace PulseForge
 
 	void PlayerSession::Stop() noexcept
 	{
+		m_StopRequested = false;
+		m_RequestedSceneTransition.reset();
 		m_PendingScene.reset();
 		m_Runtime.reset();
 		m_Scene.reset();

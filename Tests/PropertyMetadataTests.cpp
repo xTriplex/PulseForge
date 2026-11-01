@@ -64,6 +64,34 @@ void RunPropertyMetadataTests(TestRunner& Tests)
 	Material = ReadProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
 	PF_CHECK(Tests, Material && std::get<std::optional<AssetID>>(*Material) == MaterialId);
 
+	BoxColliderComponent Collider;
+	Collider.Shape = ColliderShape::Sphere;
+	Collider.SphereRadius = 1.25f;
+	Collider.IsSensor = true;
+	Collider.CollisionCategory = 4;
+	Collider.CollisionMask = 0x21u;
+	PF_CHECK(Tests, Target.SetCollider(Collider).has_value());
+	PF_CHECK(Tests, FindPropertyDescriptor(PropertyComponentIds::Collider, PropertyIds::CollisionMask) != nullptr);
+	auto ColliderShapeValue = ReadProperty(Target, PropertyComponentIds::Collider, PropertyIds::Shape);
+	auto ColliderMask = ReadProperty(Target, PropertyComponentIds::Collider, PropertyIds::CollisionMask);
+	PF_CHECK(Tests, ColliderShapeValue && std::get<std::string>(*ColliderShapeValue) == "sphere");
+	PF_CHECK(Tests, ColliderMask && std::get<uint32_t>(*ColliderMask) == 0x21u);
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::Collider, PropertyIds::Shape, PropertyValue{ std::string("capsule") }));
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::Collider, PropertyIds::CapsuleRadius, PropertyValue{ 0.45f }));
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::Collider, PropertyIds::CapsuleHeight, PropertyValue{ 2.4f }));
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::Collider, PropertyIds::CollisionMask, PropertyValue{ uint32_t{ 0x40u } }));
+	const auto AuthoredCollider = Target.GetCollider();
+	PF_CHECK(Tests, AuthoredCollider && AuthoredCollider->has_value() &&
+		(**AuthoredCollider).Shape == ColliderShape::Capsule && (**AuthoredCollider).CapsuleRadius == 0.45f &&
+		(**AuthoredCollider).CapsuleHeight == 2.4f && (**AuthoredCollider).CollisionMask == 0x40u &&
+		(**AuthoredCollider).IsSensor);
+	PF_CHECK(Tests, !WriteProperty(Target, PropertyComponentIds::Collider, PropertyIds::CollisionCategory,
+		PropertyValue{ uint32_t{ 0 } }));
+	PF_CHECK(Tests, !WriteProperty(Target, PropertyComponentIds::Collider, PropertyIds::CapsuleHeight, PropertyValue{ 0.5f }));
+	const auto ColliderAfterRejectedEdit = Target.GetCollider();
+	PF_CHECK(Tests, ColliderAfterRejectedEdit && ColliderAfterRejectedEdit->has_value() &&
+		(**ColliderAfterRejectedEdit).CapsuleHeight == 2.4f && (**ColliderAfterRejectedEdit).CollisionCategory == 4);
+
 	const AssetID ScriptId{ 0x123456789abcdef0ull, 0x0fedcba987654321ull };
 	ScriptComponent Script{ ScriptId };
 	Script.FloatProperties.emplace("move.speed", 4.0f);

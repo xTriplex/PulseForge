@@ -2,6 +2,7 @@
 
 #include "Scripting/ScriptRuntime.h"
 #include "Assets/ScriptSourceMetadata.h"
+#include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Entity.h"
 
 extern "C"
@@ -13,6 +14,7 @@ extern "C"
 #include <array>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,7 +22,8 @@ extern "C"
 namespace PulseForge::ScriptRuntimeDetail
 {
 	inline constexpr int InstructionHookQuantum = 1000;
-	inline constexpr std::array<std::string_view, 3> CallbackNames = { "OnCreate", "OnUpdate", "OnDestroy" };
+	inline constexpr std::array<std::string_view, 9> CallbackNames = { "OnCreate", "OnUpdate", "OnDestroy",
+		"OnCollisionBegin", "OnCollisionStay", "OnCollisionEnd", "OnTriggerEnter", "OnTriggerStay", "OnTriggerExit" };
 
 	struct LuaMemoryPool final
 	{
@@ -101,6 +104,7 @@ namespace PulseForge::ScriptRuntimeDetail
 		std::vector<ScriptModuleRuntime> Modules;
 		int MainChunkReference = LUA_NOREF;
 		int ExecuteChunkCallbackReference = LUA_NOREF;
+		int ContactCallbackDispatcherReference = LUA_NOREF;
 		int ExecutingChunkReference = LUA_NOREF;
 		const char* ExecutingImporterPath = nullptr;
 		size_t ExecutingImporterPathLength = 0;
@@ -111,6 +115,10 @@ namespace PulseForge::ScriptRuntimeDetail
 		bool Destroying = false;
 		bool ModuleFailurePending = false;
 		std::array<char, 512> ModuleFailureMessage{};
+		std::array<char, 512> HostOperationError{};
+		std::optional<PhysicsQueryHit> QueryHitScratch;
+		PhysicsOverlapResult QueryOverlapScratch;
+		bool DeferredRuntimeTransitionRequested = false;
 
 		ScriptInstance() { CallbackNameReferences.fill(LUA_NOREF); }
 

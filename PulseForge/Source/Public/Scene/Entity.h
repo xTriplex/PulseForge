@@ -69,6 +69,10 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<BoxColliderComponent>, SceneError> GetBoxCollider() const;
 		[[nodiscard]] std::expected<void, SceneError> SetBoxCollider(const BoxColliderComponent& Collider) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveBoxCollider() const;
+		// Shape-tagged collider API. BoxCollider accessors remain compatibility aliases for older callers.
+		[[nodiscard]] std::expected<std::optional<BoxColliderComponent>, SceneError> GetCollider() const { return GetBoxCollider(); }
+		[[nodiscard]] std::expected<void, SceneError> SetCollider(const BoxColliderComponent& Collider) const { return SetBoxCollider(Collider); }
+		[[nodiscard]] std::expected<void, SceneError> RemoveCollider() const { return RemoveBoxCollider(); }
 		[[nodiscard]] std::expected<std::optional<AudioSourceComponent>, SceneError> GetAudioSource() const;
 		[[nodiscard]] std::expected<void, SceneError> SetAudioSource(const AudioSourceComponent& AudioSource) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveAudioSource() const;

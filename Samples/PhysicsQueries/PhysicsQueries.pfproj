@@ -1,0 +1,7 @@
+{
+  "format": "PulseForgeProject",
+  "version": 1,
+  "projectId": "b0170000-0000-4000-8000-000000000100",
+  "name": "Physics Queries and Contact Events",
+  "startScene": "b0170000-0000-4000-8000-000000000001"
+}

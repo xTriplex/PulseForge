@@ -38,6 +38,9 @@ namespace PulseForge
 		// Optional host policy check; an error rejects a pause change before audio state is modified.
 		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
 		ScriptRuntimeObserver ScriptObserver;
+		// Accepted requests are committed by the owning host after SceneRuntime::Advance returns.
+		std::function<bool(const AssetID&)> QueueSceneTransition;
+		std::function<bool()> QueueStop;
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t
@@ -69,6 +72,7 @@ namespace PulseForge
 	struct SceneRuntimeFrameResult
 	{
 		uint32_t PhysicsSteps = 0;
+		PhysicsSceneRuntimeStats PhysicsStats{};
 	};
 
 	// Project, optional host services, and started Scene must outlive this coordinator; keep the scene at the same address while running.
