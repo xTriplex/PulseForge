@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <cmath>
 #include <span>
 #include <iostream>
 #include <string>
@@ -605,7 +606,7 @@ namespace
 		const auto Pointer = [&](RuntimeUIInputKind Kind, glm::vec2 Position)
 		{
 			const RuntimeUIInputEvent Event{ Kind, Position, {} };
-			if (!Session.SetRuntimeUIInputFrame(Viewport, std::span(&Event, 1))) return false;
+			if (!Session.SubmitRuntimeUIFrame(Viewport, std::span(&Event, 1))) return false;
 			return Session.Advance(Timestep(1.0 / 60.0)).has_value();
 		};
 		PF_CHECK(Tests, Session.HasRuntimeUI());
@@ -627,6 +628,53 @@ namespace
 			return {};
 		};
 		PF_CHECK(Tests, FindScore().starts_with("Score: ") && FindScore() != "Score: 0");
+		RuntimeUIInputAdapter PassiveHostAdapter;
+		const auto SubmitPassiveViewport = [&](RuntimeUIViewport CurrentViewport)
+		{
+			RuntimeUIHostInputSample Sample{
+				.SessionGeneration = Session.GetRuntimeUISessionGeneration(),
+				.TreeGeneration = Session.GetRuntimeUIInputGeneration(), .InputOwner = 19,
+				.Viewport = CurrentViewport, .ViewportOrigin = { 23.0f, 41.0f }, .DeltaSeconds = 1.0 / 60.0,
+				.Focused = true, .PointerPosition = glm::vec2{ 180.0f, 55.0f }, .PointerPressed = true,
+				.PointerHeld = true, .Navigation = { 0.9f, 0.0f }, .ActivatePressed = true, .ActivateHeld = true };
+			const RuntimeUIHostFrame Frame = BuildRuntimeUIHostFrame(
+				PassiveHostAdapter, std::move(Sample), RuntimeUIInputPolicy::Passive);
+			PF_CHECK(Tests, Frame.Viewport.LogicalSize == CurrentViewport.LogicalSize);
+			PF_CHECK(Tests, Frame.Viewport.FramebufferWidth == CurrentViewport.FramebufferWidth &&
+				Frame.Viewport.FramebufferHeight == CurrentViewport.FramebufferHeight);
+			PF_CHECK(Tests, std::all_of(Frame.Events.begin(), Frame.Events.end(), [](const RuntimeUIInputEvent& Event)
+			{
+				return Event.Kind == RuntimeUIInputKind::CaptureCancelled || Event.Kind == RuntimeUIInputKind::FocusLost;
+			}));
+			if (!Session.SubmitRuntimeUIFrame(Frame.Viewport, Frame.Events)) return false;
+			return Session.Advance(Timestep(1.0 / 60.0)).has_value();
+		};
+		const RuntimeUIViewport WideViewport{ { 1279.0f, 721.0f }, 1919, 1081 };
+		PF_CHECK(Tests, SubmitPassiveViewport(WideViewport));
+		PF_CHECK(Tests, Session.GetRuntimeUIViewport().LogicalSize == WideViewport.LogicalSize &&
+			Session.GetRuntimeUIViewport().FramebufferWidth == WideViewport.FramebufferWidth &&
+			Session.GetRuntimeUIViewport().FramebufferHeight == WideViewport.FramebufferHeight);
+		const auto FindScoreCommand = [&]() -> const RuntimeUIDrawCommand*
+		{
+			for (const RuntimeUIDrawCommand& Command : Session.GetRuntimeUIDrawCommands())
+				if (Command.Element == ScoreText) return &Command;
+			return nullptr;
+		};
+		const RuntimeUIDrawCommand* ResizedScore = FindScoreCommand();
+		PF_CHECK(Tests, ResizedScore && std::abs(ResizedScore->Bounds.Left - (130.0f * 1279.0f / 960.0f)) < 0.01f &&
+			std::abs(ResizedScore->Bounds.Top - (30.0f * 721.0f / 540.0f)) < 0.01f &&
+			std::abs(ResizedScore->Bounds.Right - (480.0f * 1279.0f / 960.0f)) < 0.01f &&
+			std::abs(ResizedScore->Bounds.Bottom - (90.0f * 721.0f / 540.0f)) < 0.01f);
+		const RuntimeUIRect ResizedScoreBounds = ResizedScore ? ResizedScore->Bounds : RuntimeUIRect{};
+		const RuntimeUIViewport ScaledFramebufferViewport{ WideViewport.LogicalSize, 2558, 1442 };
+		PF_CHECK(Tests, SubmitPassiveViewport(ScaledFramebufferViewport));
+		PF_CHECK(Tests, Session.GetRuntimeUIViewport().FramebufferWidth == 2558 &&
+			Session.GetRuntimeUIViewport().FramebufferHeight == 1442);
+		const RuntimeUIDrawCommand* FramebufferScaledScore = FindScoreCommand();
+		PF_CHECK(Tests, FramebufferScaledScore && FramebufferScaledScore->Bounds.Left == ResizedScoreBounds.Left &&
+			FramebufferScaledScore->Bounds.Top == ResizedScoreBounds.Top &&
+			FramebufferScaledScore->Bounds.Right == ResizedScoreBounds.Right &&
+			FramebufferScaledScore->Bounds.Bottom == ResizedScoreBounds.Bottom);
 		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerPressed, { 840.0f, 58.0f }));
 		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerReleased, { 840.0f, 58.0f }));
 		PF_CHECK(Tests, Session.IsPaused());

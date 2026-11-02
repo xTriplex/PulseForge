@@ -169,6 +169,16 @@ namespace PulseForge
 		bool m_RearmRequired = false;
 	};
 
+	struct RuntimeUIHostFrame final
+	{
+		RuntimeUIViewport Viewport{};
+		std::vector<RuntimeUIInputEvent> Events;
+	};
+
+	// Always carries the current layout viewport. Policy and host focus only gate interaction events.
+	[[nodiscard]] PULSEFORGE_API RuntimeUIHostFrame BuildRuntimeUIHostFrame(
+		RuntimeUIInputAdapter& Adapter, RuntimeUIHostInputSample Sample, RuntimeUIInputPolicy Policy);
+
 	struct RuntimeUIAction final
 	{
 		UUID Element;

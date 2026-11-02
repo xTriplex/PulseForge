@@ -89,7 +89,8 @@ namespace PulseForgeEditor
 	void EditorViewportSceneRenderView::PrepareScene(PulseForge::RenderDevice& Runtime, const PulseForge::Project* SourceProject,
 		const PulseForge::Scene* EditScene, const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
 		std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory,
-		std::span<const PulseForge::RuntimeUIDrawCommand> RuntimeUIDrawCommands, PulseForge::RuntimeUIViewport RuntimeUIView)
+		std::span<const PulseForge::RuntimeUIDrawCommand> RuntimeUIDrawCommands, PulseForge::RuntimeUIViewport RuntimeUIView,
+		bool RuntimeUIHasCanvas)
 	{
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
@@ -105,6 +106,7 @@ namespace PulseForgeEditor
 		(void)CompiledShaderDirectory;
 		(void)RuntimeUIDrawCommands;
 		(void)RuntimeUIView;
+		(void)RuntimeUIHasCanvas;
 #else
 		if (!SourceProject || (!EditScene && !(RuntimeActive && RuntimeScene)) || m_Width == 0 || m_Height == 0) return;
 
@@ -133,9 +135,9 @@ namespace PulseForgeEditor
 		}
 		const float AspectRatio = static_cast<float>(m_Width) / static_cast<float>(m_Height);
 		if (SceneMode.UseRuntimeScene)
-			m_SceneRenderer->SetRuntimeUIFrame(RuntimeUIDrawCommands, RuntimeUIView);
+			m_SceneRenderer->SetRuntimeUIFrame(RuntimeUIDrawCommands, RuntimeUIView, RuntimeUIHasCanvas);
 		else
-			m_SceneRenderer->SetRuntimeUIFrame({}, {});
+			m_SceneRenderer->SetRuntimeUIFrame({}, {}, false);
 		std::expected<void, PulseForge::SceneRendererError> Prepared;
 		if (SceneMode.UseRuntimeScene) Prepared = m_SceneRenderer->PrepareScene(*ActiveScene, AspectRatio);
 		else

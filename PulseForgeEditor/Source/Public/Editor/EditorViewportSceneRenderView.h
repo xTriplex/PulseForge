@@ -41,7 +41,7 @@ namespace PulseForgeEditor
 			const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
 			std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory,
 			std::span<const PulseForge::RuntimeUIDrawCommand> RuntimeUIDrawCommands = {},
-			PulseForge::RuntimeUIViewport RuntimeUIView = {});
+			PulseForge::RuntimeUIViewport RuntimeUIView = {}, bool RuntimeUIHasCanvas = false);
 		[[nodiscard]] bool Render(
 			PulseForge::RenderDevice& Runtime, bool PanelVisible, float ExposureEV, const PulseForge::RenderTargetClearValue& Background);
 

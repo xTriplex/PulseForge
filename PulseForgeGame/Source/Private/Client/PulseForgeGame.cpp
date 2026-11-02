@@ -427,36 +427,41 @@ public:
 				.Consumes = PulseForge::InputDeviceMask::None, .OwnerWindow = Routing.FocusedWindow, .Active = true };
 		}
 		Application.GetGameplayInput().PublishFrame(Routing);
-		if (m_Session && m_Session->HasRuntimeUI() &&
-			m_Session->GetRuntimeUIInputPolicy() != PulseForge::RuntimeUIInputPolicy::Passive)
+		if (m_Session && m_Session->HasRuntimeUI())
 		{
+			const PulseForge::RuntimeUIInputPolicy Policy = m_Session->GetRuntimeUIInputPolicy();
 			const auto [FramebufferWidth, FramebufferHeight] = Application.GetWindow().GetFramebufferSize();
 			const PulseForge::RuntimeUIViewport Viewport{
 				.LogicalSize = { static_cast<float>(Application.GetWindow().GetWidth()),
 					static_cast<float>(Application.GetWindow().GetHeight()) },
 				.FramebufferWidth = FramebufferWidth, .FramebufferHeight = FramebufferHeight };
-			std::vector<PulseForge::RuntimeUIInputEvent> Events;
-			const auto PointerPosition = Routing.FocusedWindow != 0
-				? Application.GetGameplayInput().GetPointerPosition(Routing.FocusedWindow) : std::nullopt;
-			const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate");
-			const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate");
-			const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel");
-			const auto* Pointer = Application.GetGameplayInput().FindAction("ui.pointer");
 			PulseForge::RuntimeUIHostInputSample Sample{
 				.SessionGeneration = m_Session->GetRuntimeUISessionGeneration(),
 				.TreeGeneration = m_Session->GetRuntimeUIInputGeneration(), .InputOwner = Routing.FocusedWindow,
-				.Viewport = Viewport, .DeltaSeconds = DeltaTime.GetSeconds(), .Focused = Routing.FocusedWindow != 0,
-				.PointerPosition = PointerPosition ? std::optional<glm::vec2>{{ PointerPosition->X, PointerPosition->Y }} : std::nullopt,
-				.PointerPressed = Pointer && Pointer->Pressed, .PointerHeld = Pointer && Pointer->Held,
-				.PointerReleased = Pointer && Pointer->Released,
-				.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{},
-				.ActivatePressed = Activate && Activate->Pressed, .ActivateHeld = Activate && Activate->Held,
-				.CancelPressed = Cancel && Cancel->Pressed, .CancelHeld = Cancel && Cancel->Held };
-			Events = m_RuntimeUIInputAdapter.BuildEvents(Sample);
-			(void)m_Session->SetRuntimeUIInputFrame(Viewport, Events);
+				.Viewport = Viewport, .DeltaSeconds = DeltaTime.GetSeconds(), .Focused = Routing.FocusedWindow != 0 };
+			if (Policy != PulseForge::RuntimeUIInputPolicy::Passive)
+			{
+				const auto PointerPosition = Routing.FocusedWindow != 0
+					? Application.GetGameplayInput().GetPointerPosition(Routing.FocusedWindow) : std::nullopt;
+				const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate");
+				const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate");
+				const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel");
+				const auto* Pointer = Application.GetGameplayInput().FindAction("ui.pointer");
+				Sample.PointerPosition = PointerPosition
+					? std::optional<glm::vec2>{{ PointerPosition->X, PointerPosition->Y }} : std::nullopt;
+				Sample.PointerPressed = Pointer && Pointer->Pressed;
+				Sample.PointerHeld = Pointer && Pointer->Held;
+				Sample.PointerReleased = Pointer && Pointer->Released;
+				Sample.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{};
+				Sample.ActivatePressed = Activate && Activate->Pressed;
+				Sample.ActivateHeld = Activate && Activate->Held;
+				Sample.CancelPressed = Cancel && Cancel->Pressed;
+				Sample.CancelHeld = Cancel && Cancel->Held;
+			}
+			const PulseForge::RuntimeUIHostFrame Frame = PulseForge::BuildRuntimeUIHostFrame(
+				m_RuntimeUIInputAdapter, std::move(Sample), Policy);
+			(void)m_Session->SubmitRuntimeUIFrame(Frame.Viewport, Frame.Events);
 		}
-		else if (m_Session && m_Session->HasRuntimeUI())
-			m_RuntimeUIInputAdapter.Reset();
 
 		if (m_EditorShutdownChannel.ConsumeRequest())
 		{
@@ -525,9 +530,10 @@ public:
 		}
 		if (!m_SceneRenderer || !m_Session || !m_Session->GetActiveScene()) return;
 		if (m_Session->HasRuntimeUI())
-			m_SceneRenderer->SetRuntimeUIFrame(m_Session->GetRuntimeUIDrawCommands(), m_Session->GetRuntimeUIViewport());
+			m_SceneRenderer->SetRuntimeUIFrame(
+				m_Session->GetRuntimeUIDrawCommands(), m_Session->GetRuntimeUIViewport(), true);
 		else
-			m_SceneRenderer->SetRuntimeUIFrame({}, {});
+			m_SceneRenderer->SetRuntimeUIFrame({}, {}, false);
 
 		const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
 		if (FramebufferWidth == 0 || FramebufferHeight == 0) return;

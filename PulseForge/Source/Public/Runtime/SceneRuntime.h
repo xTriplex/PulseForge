@@ -127,7 +127,8 @@ namespace PulseForge
 		[[nodiscard]] RuntimeUIInputPolicy GetRuntimeUIInputPolicy() const noexcept;
 		[[nodiscard]] uint64_t GetRuntimeUIInputGeneration() const noexcept;
 		// Owner/window code supplies viewport geometry and a bounded logical input batch before Advance.
-		[[nodiscard]] bool SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events);
+		// Submit once per host frame while a canvas exists, including passive frames with no input events.
+		[[nodiscard]] bool SubmitRuntimeUIFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events);
 		[[nodiscard]] std::span<const RuntimeUIDrawCommand> GetRuntimeUIDrawCommands() const noexcept;
 		[[nodiscard]] RuntimeUIViewport GetRuntimeUIViewport() const noexcept;
 		// Queues an explicit state-reset reload for one attachment in the active Play/Player scene.

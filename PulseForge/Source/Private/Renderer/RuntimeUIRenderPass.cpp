@@ -111,7 +111,7 @@ namespace PulseForge
 	{
 		return { .QuadCount = m_PreparedQuads.size(), .BatchCount = m_LastDrawCount,
 			.TextureCount = m_TextureBindings.empty() ? 0 : m_TextureBindings.size() - 1,
-			.FontAtlasCount = m_Fonts.size() };
+			.FontAtlasCount = m_Fonts.size(), .TextureBindingCreationCount = m_TextureBindingCreationCount };
 	}
 
 	std::expected<void, GraphicsError> RuntimeUIRenderPass::Initialize(
@@ -319,6 +319,7 @@ namespace PulseForge
 		auto Set = m_Runtime.CreateBindingSet(Description);
 		if (!Set) return std::unexpected(BackendError(Set.error().Message));
 		m_TextureBindings.emplace(&TextureValue, std::move(*Set));
+		++m_TextureBindingCreationCount;
 		return {};
 	}
 
@@ -327,6 +328,7 @@ namespace PulseForge
 		const ImageResolver& ResolveImage, const FontResolver& ResolveFont)
 	{
 		m_PreparedQuads.clear();
+		m_LastDrawCount = 0;
 		if (Commands.size() > MaximumCommands)
 			return std::unexpected(GraphicsError{ GraphicsErrorCode::InvalidDrawArguments, "Runtime UI draw list exceeds 2048 items" });
 		if (Viewport.LogicalSize.x <= 0.0f || Viewport.LogicalSize.y <= 0.0f) return {};

@@ -3,6 +3,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
 
 #include <array>
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <vector>
 
 namespace PulseForge
 {
@@ -44,6 +46,9 @@ namespace PulseForge::GpuValidation
 		[[nodiscard]] Scene& GetScenarioScene(size_t Index);
 		[[nodiscard]] std::expected<void, std::string> RenderHdrFrame();
 		[[nodiscard]] std::expected<void, std::string> RenderToneMappingFrame();
+		[[nodiscard]] std::expected<bool, std::string> UpdateRuntimeUIOverlayFrame();
+		[[nodiscard]] std::expected<void, std::string> RenderRuntimeUIOverlayFrame();
+		[[nodiscard]] std::expected<void, std::string> ValidateRuntimeUIOverlayReadback();
 		[[nodiscard]] std::expected<void, std::string> EnsureSdrValidationTarget(ColorTargetFormat Format, uint32_t Width, uint32_t Height);
 
 		Application& m_Runtime;
@@ -71,6 +76,12 @@ namespace PulseForge::GpuValidation
 		uint64_t m_SwapchainHdrGeneration = 0;
 		uint64_t m_SrgbHdrGeneration = 0;
 		uint64_t m_ResizedHdrGeneration = 0;
+		std::vector<std::byte> m_RuntimeUIBaseline64;
+		std::vector<std::byte> m_RuntimeUIBaseline96;
+		std::vector<std::byte> m_RuntimeUIVisibleFrame;
+		RuntimeUIOverlayFrameStats m_LastRuntimeUIOverlayStats{};
+		uint32_t m_RuntimeUIOverlayFrame = 0;
+		bool m_RuntimeUIOverlayReadbackPending = false;
 		const std::array<const char*, 4> m_ScenarioNames = { "empty", "environment-only", "geometry-only", "directional-only" };
 		bool m_ScenePrepared = false;
 	};

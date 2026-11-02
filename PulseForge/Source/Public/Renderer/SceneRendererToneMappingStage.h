@@ -21,6 +21,7 @@ namespace PulseForge
 			const Texture& UiOverlay, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled,
 			const Buffer& FullscreenTriangle);
 		void InvalidateBindings() noexcept;
+		[[nodiscard]] uint64_t BindingSetCreationCount() const noexcept { return m_BindingSetCreationCount; }
 		[[nodiscard]] bool SetSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetSettings() const noexcept;
 
@@ -48,6 +49,7 @@ namespace PulseForge
 		ToneMappingSettings m_Settings;
 		Constants m_UploadedConstants{};
 		uint64_t m_BindingGeneration = 0;
+		uint64_t m_BindingSetCreationCount = 0;
 		const Texture* m_BoundUiOverlay = nullptr;
 		bool m_HasUploadedConstants = false;
 	};

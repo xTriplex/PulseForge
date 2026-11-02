@@ -742,6 +742,17 @@ namespace PulseForge
 		m_RearmRequired = false;
 	}
 
+	RuntimeUIHostFrame BuildRuntimeUIHostFrame(
+		RuntimeUIInputAdapter& Adapter, RuntimeUIHostInputSample Sample, RuntimeUIInputPolicy Policy)
+	{
+		const bool ViewportAvailable = IsFinite(Sample.Viewport.LogicalSize) &&
+			Sample.Viewport.LogicalSize.x > 0.0f && Sample.Viewport.LogicalSize.y > 0.0f &&
+			Sample.Viewport.FramebufferWidth > 0 && Sample.Viewport.FramebufferHeight > 0;
+		if (Policy == RuntimeUIInputPolicy::Passive || !ViewportAvailable)
+			Sample.Focused = false;
+		return { .Viewport = Sample.Viewport, .Events = Adapter.BuildEvents(Sample) };
+	}
+
 	void RuntimeUIController::Reset(uint64_t TreeGeneration) noexcept
 	{
 		m_TreeGeneration = TreeGeneration;

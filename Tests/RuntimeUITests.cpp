@@ -286,6 +286,108 @@ void RunRuntimeUITests(TestRunner& Tests)
 	QuarantineInput.PublishFrame(MakeRouting(RuntimeUIInputPolicy::NonModal));
 	PF_CHECK(Tests, QuarantineInput.FindAction("game.fire") && QuarantineInput.FindAction("game.fire")->Pressed);
 
+	RuntimeUIDocument HostDocument;
+	HostDocument.Elements.push_back(MakeButton(3200, 0, { 0.0f, 0.0f }, { 80.0f, 80.0f }, "first"));
+	HostDocument.Elements.push_back(MakeButton(3201, 1, { 100.0f, 0.0f }, { 180.0f, 80.0f }, "second"));
+	RuntimeUIController HostController;
+	RuntimeUIInputAdapter HostAdapter;
+	RuntimeUIViewport HostViewport{ { 320.0f, 200.0f }, 640, 400 };
+	auto HostLayout = HostController.Layout(HostDocument, HostViewport, 51);
+	PF_CHECK(Tests, HostLayout && HostController.GetFocusedElement() == UUID(0, 3200));
+	RuntimeUIHostInputSample HostSample{ .SessionGeneration = 71, .TreeGeneration = 51, .InputOwner = 501,
+		.Viewport = HostViewport, .ViewportOrigin = { 143.0f, 79.0f }, .Focused = true };
+	const auto SubmitHostFrame = [&](RuntimeUIInputPolicy Policy)
+	{
+		const RuntimeUIHostFrame Frame = BuildRuntimeUIHostFrame(HostAdapter, HostSample, Policy);
+		PF_CHECK(Tests, Frame.Viewport.LogicalSize == HostSample.Viewport.LogicalSize &&
+			Frame.Viewport.FramebufferWidth == HostSample.Viewport.FramebufferWidth &&
+			Frame.Viewport.FramebufferHeight == HostSample.Viewport.FramebufferHeight);
+		const std::vector<RuntimeUIAction> Result = HostController.ProcessInput(
+			HostDocument, *HostLayout, Frame.Events, HostSample.TreeGeneration);
+		return std::pair{ Frame, Result };
+	};
+	(void)SubmitHostFrame(RuntimeUIInputPolicy::NonModal);
+	HostSample.PointerPosition = glm::vec2{ 20.0f, 20.0f };
+	HostSample.PointerPressed = true;
+	HostSample.PointerHeld = true;
+	(void)SubmitHostFrame(RuntimeUIInputPolicy::NonModal);
+	HostSample.PointerPressed = false;
+	HostSample.PointerHeld = false;
+	HostSample.PointerReleased = true;
+	const auto [ActiveReleaseFrame, ActiveReleaseActions] = SubmitHostFrame(RuntimeUIInputPolicy::NonModal);
+	PF_CHECK(Tests, ActiveReleaseActions.size() == 1 && ActiveReleaseActions[0].Element == UUID(0, 3200));
+	(void)ActiveReleaseFrame;
+	HostSample.PointerReleased = false;
+	HostSample.PointerPressed = true;
+	HostSample.PointerHeld = true;
+	(void)SubmitHostFrame(RuntimeUIInputPolicy::NonModal);
+	HostSample.PointerPressed = false;
+	HostSample.PointerReleased = true;
+	const auto [PassiveCaptureFrame, PassiveCaptureActions] = SubmitHostFrame(RuntimeUIInputPolicy::Passive);
+	PF_CHECK(Tests, std::any_of(PassiveCaptureFrame.Events.begin(), PassiveCaptureFrame.Events.end(),
+		[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::FocusLost; }));
+	PF_CHECK(Tests, PassiveCaptureActions.empty());
+	HostSample.PointerHeld = false;
+	HostSample.PointerReleased = true;
+	const auto [ReactivatedReleaseFrame, ReactivatedReleaseActions] = SubmitHostFrame(RuntimeUIInputPolicy::NonModal);
+	(void)ReactivatedReleaseFrame;
+	PF_CHECK(Tests, ReactivatedReleaseActions.empty());
+	HostSample.PointerReleased = false;
+	HostSample.Navigation = { 1.0f, 0.0f };
+	const auto [InitialNavigationFrame, InitialNavigationActions] = SubmitHostFrame(RuntimeUIInputPolicy::NonModal);
+	PF_CHECK(Tests, std::count_if(InitialNavigationFrame.Events.begin(), InitialNavigationFrame.Events.end(),
+		[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::Navigate; }) == 1);
+	(void)InitialNavigationActions;
+	const auto [NavigationLostFrame, NavigationLostActions] = SubmitHostFrame(RuntimeUIInputPolicy::Passive);
+	PF_CHECK(Tests, std::any_of(NavigationLostFrame.Events.begin(), NavigationLostFrame.Events.end(),
+		[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::FocusLost; }));
+	PF_CHECK(Tests, NavigationLostActions.empty());
+	const auto [HeldAfterReactivationFrame, HeldAfterReactivationActions] = SubmitHostFrame(RuntimeUIInputPolicy::Modal);
+	PF_CHECK(Tests, std::none_of(HeldAfterReactivationFrame.Events.begin(), HeldAfterReactivationFrame.Events.end(),
+		[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::Navigate; }));
+	PF_CHECK(Tests, HeldAfterReactivationActions.empty());
+	HostSample.Navigation = {};
+	(void)SubmitHostFrame(RuntimeUIInputPolicy::Modal);
+	HostSample.Navigation = { 1.0f, 0.0f };
+	const auto [RearmedNavigationFrame, RearmedNavigationActions] = SubmitHostFrame(RuntimeUIInputPolicy::Modal);
+	PF_CHECK(Tests, std::count_if(RearmedNavigationFrame.Events.begin(), RearmedNavigationFrame.Events.end(),
+		[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::Navigate; }) == 1);
+	(void)RearmedNavigationActions;
+
+	RuntimeUIInputAdapter UnfocusedViewportAdapter;
+	RuntimeUIHostInputSample DetachedEditorViewport{ .SessionGeneration = 81, .TreeGeneration = 61, .InputOwner = 701,
+		.Viewport = { { 913.0f, 577.0f }, 1826, 1154 }, .ViewportOrigin = { 287.0f, 163.0f },
+		.Focused = false, .TextInputBlocked = true, .ActivatePressed = true };
+	const RuntimeUIHostFrame UnfocusedEditorFrame = BuildRuntimeUIHostFrame(
+		UnfocusedViewportAdapter, DetachedEditorViewport, RuntimeUIInputPolicy::NonModal);
+	PF_CHECK(Tests, UnfocusedEditorFrame.Viewport.LogicalSize == glm::vec2(913.0f, 577.0f) &&
+		UnfocusedEditorFrame.Viewport.FramebufferWidth == 1826 && UnfocusedEditorFrame.Viewport.FramebufferHeight == 1154);
+	PF_CHECK(Tests, UnfocusedEditorFrame.Events.empty());
+	DetachedEditorViewport.InputOwner = 702;
+	DetachedEditorViewport.Viewport = { { 1103.0f, 619.0f }, 2206, 1238 };
+	const RuntimeUIHostFrame ChangedEditorOwnerFrame = BuildRuntimeUIHostFrame(
+		UnfocusedViewportAdapter, DetachedEditorViewport, RuntimeUIInputPolicy::NonModal);
+	PF_CHECK(Tests, ChangedEditorOwnerFrame.Viewport.LogicalSize == glm::vec2(1103.0f, 619.0f) &&
+		ChangedEditorOwnerFrame.Viewport.FramebufferWidth == 2206 &&
+		std::all_of(ChangedEditorOwnerFrame.Events.begin(), ChangedEditorOwnerFrame.Events.end(),
+			[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::CaptureCancelled; }));
+
+	RuntimeUIInputAdapter MinimizedViewportAdapter;
+	RuntimeUIHostInputSample MinimizedViewport{ .SessionGeneration = 91, .TreeGeneration = 71, .InputOwner = 901,
+		.Viewport = { { 0.0f, 0.0f }, 0, 0 }, .Focused = true, .ActivatePressed = true, .ActivateHeld = true };
+	const RuntimeUIHostFrame MinimizedFrame = BuildRuntimeUIHostFrame(
+		MinimizedViewportAdapter, MinimizedViewport, RuntimeUIInputPolicy::Modal);
+	PF_CHECK(Tests, MinimizedFrame.Viewport.LogicalSize == glm::vec2(0.0f) && MinimizedFrame.Events.empty());
+	MinimizedViewport.Viewport = HostViewport;
+	const RuntimeUIHostFrame RestoredHeldFrame = BuildRuntimeUIHostFrame(
+		MinimizedViewportAdapter, MinimizedViewport, RuntimeUIInputPolicy::Modal);
+	PF_CHECK(Tests, RestoredHeldFrame.Viewport.LogicalSize == HostViewport.LogicalSize &&
+		std::none_of(RestoredHeldFrame.Events.begin(), RestoredHeldFrame.Events.end(),
+			[](const RuntimeUIInputEvent& Event) { return Event.Kind == RuntimeUIInputKind::Activate; }));
+	const auto MinimizedLayout = ComputeRuntimeUILayout(HostDocument, MinimizedFrame.Viewport);
+	PF_CHECK(Tests, MinimizedLayout && std::none_of(MinimizedLayout->begin(), MinimizedLayout->end(),
+		[](const RuntimeUILayoutEntry& Entry) { return Entry.Visible; }));
+
 	RuntimeUIDocument Clipped;
 	RuntimeUIElement Parent;
 	Parent.ID = UUID{ 0, 20 };

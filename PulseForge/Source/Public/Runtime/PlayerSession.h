@@ -74,9 +74,9 @@ namespace PulseForge
 			return m_Runtime ? m_Runtime->GetRuntimeUIInputGeneration() : 0;
 		}
 		[[nodiscard]] uint64_t GetRuntimeUISessionGeneration() const noexcept { return m_RuntimeUISessionGeneration; }
-		[[nodiscard]] bool SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
+		[[nodiscard]] bool SubmitRuntimeUIFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
 		{
-			return m_Runtime && m_Runtime->SetRuntimeUIInputFrame(Viewport, Events);
+			return m_Runtime && m_Runtime->SubmitRuntimeUIFrame(Viewport, Events);
 		}
 		[[nodiscard]] std::span<const RuntimeUIDrawCommand> GetRuntimeUIDrawCommands() const noexcept
 		{

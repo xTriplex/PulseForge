@@ -395,7 +395,7 @@ namespace PulseForge
 		return m_Impl && m_Impl->RuntimeUI ? m_Impl->RuntimeUI->TreeGeneration : 0;
 	}
 
-	bool SceneRuntime::SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
+	bool SceneRuntime::SubmitRuntimeUIFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
 	{
 		if (!m_Impl || !m_Impl->RuntimeUI || Events.size() > 512) return false;
 		m_Impl->RuntimeUIView = Viewport;

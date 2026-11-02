@@ -169,6 +169,7 @@ namespace PulseForge
 			return std::unexpected(
 				MakeToneMappingResourceError("Could not bind HDR scene texture for tone mapping: " + Binding.error().Message));
 		m_BindingSet = std::move(*Binding);
+		++m_BindingSetCreationCount;
 		m_BindingGeneration = Generation;
 		m_BoundUiOverlay = &UiOverlay;
 		return {};

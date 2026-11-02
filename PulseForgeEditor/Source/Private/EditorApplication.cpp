@@ -8057,7 +8057,8 @@ namespace
 			m_ViewportRenderView.PrepareScene(PulseForge::Application::Get(), m_Project ? &*m_Project : nullptr, m_Scene.get(),
 				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities, m_EditorShaderDirectory,
 				m_SceneRuntime ? m_SceneRuntime->GetRuntimeUIDrawCommands() : std::span<const PulseForge::RuntimeUIDrawCommand>{},
-				m_SceneRuntime ? m_SceneRuntime->GetRuntimeUIViewport() : PulseForge::RuntimeUIViewport{});
+				m_SceneRuntime ? m_SceneRuntime->GetRuntimeUIViewport() : PulseForge::RuntimeUIViewport{},
+				m_SceneRuntime && m_SceneRuntime->HasRuntimeUI());
 			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared && m_ViewportRenderView.IsSceneReady())
 			{
 				m_LoggedFirstViewportPrepared = true;
@@ -8522,11 +8523,7 @@ namespace
 		void SubmitRuntimeUIInput(PulseForge::Timestep DeltaTime)
 		{
 			if (!m_SceneRuntime || !m_RuntimeScene || !m_SceneRuntime->HasRuntimeUI()) return;
-			if (m_SceneRuntime->GetRuntimeUIInputPolicy() == PulseForge::RuntimeUIInputPolicy::Passive)
-			{
-				m_RuntimeUIInputAdapter.Reset();
-				return;
-			}
+			const PulseForge::RuntimeUIInputPolicy Policy = m_SceneRuntime->GetRuntimeUIInputPolicy();
 			auto& Application = PulseForge::Application::Get();
 			ImGuiViewport* Owner = ResolveSceneViewportOwner();
 			GLFWwindow* NativeWindow = Owner ? static_cast<GLFWwindow*>(Owner->PlatformHandle) : nullptr;
@@ -8543,26 +8540,33 @@ namespace
 				Viewport.FramebufferWidth = m_ViewportRenderView.GetWidth();
 				Viewport.FramebufferHeight = m_ViewportRenderView.GetHeight();
 			}
-			const auto Pointer = Focused ? Application.GetGameplayInput().GetPointerPosition(Window) : std::nullopt;
-			const std::optional<glm::vec2> Position = Pointer && Owner
-				? std::optional<glm::vec2>{{ Owner->Pos.x + Pointer->X - m_ViewportImageRect.Minimum.x,
-					Owner->Pos.y + Pointer->Y - m_ViewportImageRect.Minimum.y }} : std::nullopt;
-			const auto* Click = Application.GetGameplayInput().FindAction("ui.pointer");
-			const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate");
-			const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate");
-			const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel");
 			PulseForge::RuntimeUIHostInputSample Sample{
 				.SessionGeneration = m_RuntimeUISessionGeneration,
 				.TreeGeneration = m_SceneRuntime->GetRuntimeUIInputGeneration(), .InputOwner = Window,
 				.Viewport = Viewport, .ViewportOrigin = m_ViewportImageRect.Minimum, .DeltaSeconds = DeltaTime.GetSeconds(),
-				.Focused = Focused, .TextInputBlocked = m_RuntimeUITextInputBlocked || m_ViewportMouseCapture.OwnsMouse(),
-				.PointerPosition = Position, .PointerPressed = Click && Click->Pressed, .PointerHeld = Click && Click->Held,
-				.PointerReleased = Click && Click->Released,
-				.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{},
-				.ActivatePressed = Activate && Activate->Pressed, .ActivateHeld = Activate && Activate->Held,
-				.CancelPressed = Cancel && Cancel->Pressed, .CancelHeld = Cancel && Cancel->Held };
-			auto Events = m_RuntimeUIInputAdapter.BuildEvents(Sample);
-			(void)m_SceneRuntime->SetRuntimeUIInputFrame(Viewport, Events);
+				.Focused = Focused, .TextInputBlocked = m_RuntimeUITextInputBlocked || m_ViewportMouseCapture.OwnsMouse() };
+			if (Policy != PulseForge::RuntimeUIInputPolicy::Passive)
+			{
+				const auto Pointer = Focused ? Application.GetGameplayInput().GetPointerPosition(Window) : std::nullopt;
+				if (Pointer && Owner)
+					Sample.PointerPosition = glm::vec2{ Owner->Pos.x + Pointer->X - m_ViewportImageRect.Minimum.x,
+						Owner->Pos.y + Pointer->Y - m_ViewportImageRect.Minimum.y };
+				const auto* Click = Application.GetGameplayInput().FindAction("ui.pointer");
+				const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate");
+				const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate");
+				const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel");
+				Sample.PointerPressed = Click && Click->Pressed;
+				Sample.PointerHeld = Click && Click->Held;
+				Sample.PointerReleased = Click && Click->Released;
+				Sample.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{};
+				Sample.ActivatePressed = Activate && Activate->Pressed;
+				Sample.ActivateHeld = Activate && Activate->Held;
+				Sample.CancelPressed = Cancel && Cancel->Pressed;
+				Sample.CancelHeld = Cancel && Cancel->Held;
+			}
+			const PulseForge::RuntimeUIHostFrame Frame = PulseForge::BuildRuntimeUIHostFrame(
+				m_RuntimeUIInputAdapter, std::move(Sample), Policy);
+			(void)m_SceneRuntime->SubmitRuntimeUIFrame(Frame.Viewport, Frame.Events);
 		}
 
 		PulseForge::SceneRuntimeServices CreateSceneRuntimeServices()

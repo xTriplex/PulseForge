@@ -31,6 +31,7 @@
 #include <atomic>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <span>
 #include <exception>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -490,6 +491,16 @@ namespace PulseForge
 		if (!RuntimeUIFragmentBytecode) return std::unexpected(std::move(RuntimeUIFragmentBytecode.error()));
 		if (auto Initialized = m_RuntimeUIRenderPass->Initialize(*RuntimeUIVertexBytecode, *RuntimeUIFragmentBytecode); !Initialized)
 			return std::unexpected(MakeResourceError("Could not initialize runtime UI renderer: " + Initialized.error().Message));
+		const std::array<uint8_t, 4> TransparentUiPixel{ 0, 0, 0, 0 };
+		TextureDesc TransparentUiDescription;
+		TransparentUiDescription.Width = 1;
+		TransparentUiDescription.Height = 1;
+		TransparentUiDescription.Format = TextureFormat::RGBA8_UNorm;
+		TransparentUiDescription.DebugName = "PulseForge transparent runtime UI fallback";
+		auto TransparentUi = m_Runtime.CreateTexture(TransparentUiDescription, std::as_bytes(std::span(TransparentUiPixel)));
+		if (!TransparentUi)
+			return std::unexpected(MakeResourceError("Could not create transparent runtime UI fallback: " + TransparentUi.error().Message));
+		m_TransparentRuntimeUITexture = std::move(*TransparentUi);
 
 		BindingLayoutDesc BindingLayoutDescription;
 		BindingLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
@@ -1090,6 +1101,10 @@ namespace PulseForge
 	{
 		if (Width == 0 || Height == 0)
 			return std::unexpected(MakeResourceError("Runtime UI overlay requires a non-zero output size"));
+		if (!m_RuntimeUIRenderPass || !m_TransparentRuntimeUITexture)
+			return std::unexpected(MakeResourceError("Runtime UI overlay resources are not initialized"));
+		if (m_RuntimeUIRenderPass->GetStatistics().QuadCount == 0)
+			return m_TransparentRuntimeUITexture.get();
 		if (!m_RuntimeUIOverlayTarget || m_RuntimeUIOverlayWidth != Width || m_RuntimeUIOverlayHeight != Height)
 		{
 			RenderTargetDesc Description;
@@ -1101,9 +1116,11 @@ namespace PulseForge
 			auto Target = m_Runtime.CreateRenderTarget(Description);
 			if (!Target)
 				return std::unexpected(MakeDrawError("Could not create linear runtime UI overlay: " + Target.error().Message));
+			m_ToneMappingStage->InvalidateBindings();
 			m_RuntimeUIOverlayTarget = std::move(*Target);
 			m_RuntimeUIOverlayWidth = Width;
 			m_RuntimeUIOverlayHeight = Height;
+			++m_RuntimeUIOverlayTargetCreationCount;
 		}
 		const Texture* Overlay = m_RuntimeUIOverlayTarget->GetColorTexture();
 		if (!Overlay) return std::unexpected(MakeResourceError("Runtime UI overlay has no color texture"));
@@ -1113,6 +1130,7 @@ namespace PulseForge
 		Clear.Depth = 1.0f;
 		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_RuntimeUIOverlayTarget, Clear); !Begin)
 			return std::unexpected(MakeDrawError("Could not begin linear runtime UI overlay: " + Begin.error().Message));
+		++m_RuntimeUIOverlayClearCount;
 		RenderTargetFrameScope Scope(m_Runtime);
 		auto Draw = m_RuntimeUIRenderPass->Draw(m_RuntimeUIDrawCommands, m_RuntimeUIView, Width, Height,
 			ColorTargetFormat::RGBA16_Float, false);
@@ -1124,6 +1142,29 @@ namespace PulseForge
 		}
 		if (!End) return std::unexpected(MakeDrawError("Could not end linear runtime UI overlay: " + End.error().Message));
 		return Overlay;
+	}
+
+	RuntimeUIOverlayFrameStats SceneRenderer::GetRuntimeUIOverlayFrame(const Texture& BoundTexture) const noexcept
+	{
+		const TextureDesc& Description = BoundTexture.GetDescription();
+		const uint64_t PixelCount = static_cast<uint64_t>(Description.Width) * Description.Height;
+		const uint64_t BytesPerPixel = GetTextureFormatBytesPerPixel(Description.Format).value_or(0);
+		const uint64_t PayloadBytes = BytesPerPixel != 0 && PixelCount <= (std::numeric_limits<uint64_t>::max)() / BytesPerPixel
+			? PixelCount * BytesPerPixel : 0;
+		const uint64_t OverlayPixelCount = static_cast<uint64_t>(m_RuntimeUIOverlayWidth) * m_RuntimeUIOverlayHeight;
+		constexpr uint64_t OverlayBytesPerPixel = sizeof(uint16_t) * 4;
+		const uint64_t OverlayPayloadBytes = OverlayPixelCount <=
+			(std::numeric_limits<uint64_t>::max)() / OverlayBytesPerPixel ? OverlayPixelCount * OverlayBytesPerPixel : 0;
+		return { .CanvasPresent = m_RuntimeUICanvasPresent,
+			.TransparentFallbackBound = &BoundTexture == m_TransparentRuntimeUITexture.get(),
+			.BoundTextureWidth = Description.Width, .BoundTextureHeight = Description.Height,
+			.BoundTextureLogicalPayloadBytes = PayloadBytes,
+			.RetainedOverlayWidth = m_RuntimeUIOverlayWidth, .RetainedOverlayHeight = m_RuntimeUIOverlayHeight,
+			.RetainedOverlayLogicalPayloadBytes = OverlayPayloadBytes,
+			.OverlayTargetCreationCount = m_RuntimeUIOverlayTargetCreationCount,
+			.OverlayClearCount = m_RuntimeUIOverlayClearCount,
+			.ToneMappingBindingCreationCount = m_ToneMappingStage->BindingSetCreationCount(),
+			.RuntimeUITextureBindingCreationCount = m_RuntimeUIRenderPass->GetStatistics().TextureBindingCreationCount };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
@@ -1141,11 +1182,13 @@ namespace PulseForge
 			!Tonemapped)
 			return std::unexpected(std::move(Tonemapped.error()));
 		const RuntimeUIRenderStatistics UIStats = m_RuntimeUIRenderPass->GetStatistics();
-		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, ColorTargetFormat::Swapchain,
+		SceneRenderOutputResult Result{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, ColorTargetFormat::Swapchain,
 			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount, Hdr->SpotlightShadowResourceGeneration, m_LocalLightingState->SpotlightSlotOwners(),
 			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners,
 			UIStats.QuadCount, UIStats.BatchCount, UIStats.TextureCount, UIStats.FontAtlasCount };
+		Result.RuntimeUIOverlay = GetRuntimeUIOverlayFrame(**Overlay);
+		return Result;
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput(const RenderTarget& Target)
@@ -1185,17 +1228,21 @@ namespace PulseForge
 		if (!End)
 			return std::unexpected(MakeDrawError("Could not end tone-mapped output target: " + End.error().Message));
 		const RuntimeUIRenderStatistics UIStats = m_RuntimeUIRenderPass->GetStatistics();
-		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, Description.ColorFormat,
+		SceneRenderOutputResult Result{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, Description.ColorFormat,
 			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount, Hdr->SpotlightShadowResourceGeneration, m_LocalLightingState->SpotlightSlotOwners(),
 			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners,
 			UIStats.QuadCount, UIStats.BatchCount, UIStats.TextureCount, UIStats.FontAtlasCount };
+		Result.RuntimeUIOverlay = GetRuntimeUIOverlayFrame(**Overlay);
+		return Result;
 	}
 
-	void SceneRenderer::SetRuntimeUIFrame(std::span<const RuntimeUIDrawCommand> Commands, const RuntimeUIViewport& Viewport)
+	void SceneRenderer::SetRuntimeUIFrame(
+		std::span<const RuntimeUIDrawCommand> Commands, const RuntimeUIViewport& Viewport, bool CanvasPresent)
 	{
 		m_RuntimeUIDrawCommands.assign(Commands.begin(), Commands.end());
 		m_RuntimeUIView = Viewport;
+		m_RuntimeUICanvasPresent = CanvasPresent;
 	}
 
 	bool SceneRenderer::SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept

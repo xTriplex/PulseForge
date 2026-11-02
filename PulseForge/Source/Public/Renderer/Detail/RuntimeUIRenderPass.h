@@ -20,6 +20,7 @@ namespace PulseForge
 		size_t BatchCount = 0;
 		size_t TextureCount = 0;
 		size_t FontAtlasCount = 0;
+		uint64_t TextureBindingCreationCount = 0;
 	};
 
 	class RuntimeUIRenderPass final
@@ -89,6 +90,7 @@ namespace PulseForge
 		std::unordered_map<const Texture*, BindingSetHandle> m_TextureBindings;
 		std::vector<PreparedQuad> m_PreparedQuads;
 		size_t m_LastDrawCount = 0;
+		uint64_t m_TextureBindingCreationCount = 0;
 		Constants m_Constants{};
 	};
 }
