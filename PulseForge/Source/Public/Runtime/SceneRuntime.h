@@ -6,6 +6,7 @@
 #include "Input/GameplayInput.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scripting/ScriptRuntime.h"
+#include "Scene/Components/RuntimeUICanvasComponent.h"
 #include "UI/RuntimeUI.h"
 
 #include "Assets/AssetID.h"
@@ -123,6 +124,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRuntimeError> SetPaused(bool Paused);
 		[[nodiscard]] bool IsPaused() const noexcept;
 		[[nodiscard]] bool HasRuntimeUI() const noexcept;
+		[[nodiscard]] RuntimeUIInputPolicy GetRuntimeUIInputPolicy() const noexcept;
+		[[nodiscard]] uint64_t GetRuntimeUIInputGeneration() const noexcept;
 		// Owner/window code supplies viewport geometry and a bounded logical input batch before Advance.
 		[[nodiscard]] bool SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events);
 		[[nodiscard]] std::span<const RuntimeUIDrawCommand> GetRuntimeUIDrawCommands() const noexcept;

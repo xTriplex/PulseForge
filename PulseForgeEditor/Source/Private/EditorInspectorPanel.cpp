@@ -1034,6 +1034,8 @@ namespace PulseForgeEditor
 		if (!Expanded) return;
 		Inspector.Style.BeginComponentBody("RuntimeUICanvasComponentBody");
 		std::optional<PulseForge::AssetID> Document = Component.DocumentAsset;
+		int InputPolicy = static_cast<int>(Component.InputPolicy);
+		const char* InputPolicies[]{ "Passive HUD", "Non-modal UI", "Modal menu" };
 		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("RuntimeUICanvasProperties"))
 		{
@@ -1041,6 +1043,12 @@ namespace PulseForgeEditor
 				Changed |= DrawAssetSelector(Inspector, "##RuntimeUIDocument", Document, { ".pfui" }, false);
 			if (Inspector.Style.BeginPropertyRow("Enabled"))
 				Changed |= ImGui::Checkbox("##RuntimeUICanvasEnabled", &Component.Enabled);
+			if (Inspector.Style.BeginPropertyRow("Input Policy") && ImGui::Combo(
+				"##RuntimeUICanvasInputPolicy", &InputPolicy, InputPolicies, 3))
+			{
+				Component.InputPolicy = static_cast<PulseForge::RuntimeUIInputPolicy>(InputPolicy);
+				Changed = true;
+			}
 			Inspector.Style.EndPropertyTable();
 		}
 		if (Document) Component.DocumentAsset = *Document;

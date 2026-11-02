@@ -144,7 +144,7 @@ namespace
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 11") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 12") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"properties\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
@@ -313,19 +313,19 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 11");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 12");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 11").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 12").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(
 			Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
-		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "12", "1.5", "\"11\"" })
+		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "13", "1.5", "\"12\"" })
 		{
 			std::string UnsupportedDocument = *Serialized;
-			const size_t VersionValue = UnsupportedDocument.find("11", UnsupportedDocument.find("\"version\": "));
+			const size_t VersionValue = UnsupportedDocument.find("12", UnsupportedDocument.find("\"version\": "));
 			PF_CHECK(Tests, VersionValue != std::string::npos);
 			if (VersionValue == std::string::npos) continue;
 			UnsupportedDocument.replace(VersionValue, 2, UnsupportedSceneVersion);
@@ -413,10 +413,10 @@ namespace
 								MaximumCountScript->value().FloatProperties.size() == MaximumScriptFloatPropertyCount);
 		}
 		std::string LegacyScriptProperties = *Serialized;
-		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 11");
+		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 12");
 		PF_CHECK(Tests, ScriptPropertiesPosition != std::string::npos);
 		if (ScriptPropertiesPosition != std::string::npos)
-			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 11").size(), "\"version\": 7");
+			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 12").size(), "\"version\": 7");
 		const auto LegacyScriptPropertiesResult = SceneSerializer::Deserialize(LegacyScriptProperties, Destination);
 		PF_CHECK(Tests, !LegacyScriptPropertiesResult);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);

@@ -31,7 +31,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 11;
+		constexpr int64_t SceneFormatVersion = 12;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -621,7 +621,9 @@ namespace PulseForge
 				if (RuntimeUICanvas->has_value())
 					Record["runtimeUICanvas"] = Json::object({
 						{ "documentAsset", RuntimeUICanvas->value().DocumentAsset.ToString() },
-						{ "enabled", RuntimeUICanvas->value().Enabled }
+						{ "enabled", RuntimeUICanvas->value().Enabled },
+						{ "inputPolicy", RuntimeUICanvas->value().InputPolicy == RuntimeUIInputPolicy::Passive ? "passive" :
+							RuntimeUICanvas->value().InputPolicy == RuntimeUIInputPolicy::NonModal ? "nonModal" : "modal" }
 					});
 				if (Script->has_value())
 				{
@@ -1233,20 +1235,32 @@ namespace PulseForge
 					if (!SerializedRuntimeUICanvas->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 							"Entity runtimeUICanvas must be an object"));
-					if (auto Fields = ValidateKnownFields(*SerializedRuntimeUICanvas, { "documentAsset", "enabled" },
+					if (auto Fields = ValidateKnownFields(*SerializedRuntimeUICanvas, { "documentAsset", "enabled", "inputPolicy" },
 							"Runtime UI canvas component", SceneSerializationErrorCode::InvalidEntityData); !Fields)
 						return std::unexpected(Fields.error());
 					const auto Asset = SerializedRuntimeUICanvas->find("documentAsset");
 					const auto Enabled = SerializedRuntimeUICanvas->find("enabled");
+					const auto InputPolicy = SerializedRuntimeUICanvas->find("inputPolicy");
 					if (Asset == SerializedRuntimeUICanvas->end() || !Asset->is_string() ||
-						Enabled == SerializedRuntimeUICanvas->end() || !Enabled->is_boolean())
+						Enabled == SerializedRuntimeUICanvas->end() || !Enabled->is_boolean() ||
+						(DocumentVersion >= 12 && (InputPolicy == SerializedRuntimeUICanvas->end() || !InputPolicy->is_string())))
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
-							"Runtime UI canvas requires a documentAsset UUID and boolean enabled field"));
+							"Runtime UI canvas requires a documentAsset UUID, boolean enabled field, and versioned input policy"));
+					RuntimeUIInputPolicy ParsedPolicy = RuntimeUIInputPolicy::Modal;
+					if (InputPolicy != SerializedRuntimeUICanvas->end())
+					{
+						const std::string& Policy = InputPolicy->get_ref<const std::string&>();
+						if (Policy == "passive") ParsedPolicy = RuntimeUIInputPolicy::Passive;
+						else if (Policy == "nonModal") ParsedPolicy = RuntimeUIInputPolicy::NonModal;
+						else if (Policy == "modal") ParsedPolicy = RuntimeUIInputPolicy::Modal;
+						else return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Runtime UI canvas inputPolicy must be passive, nonModal, or modal"));
+					}
 					auto ParsedAsset = UUID::Parse(Asset->get<std::string>());
 					if (!ParsedAsset || ParsedAsset->IsNil())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 							"Runtime UI document asset UUID is invalid or nil"));
-					RuntimeUICanvasData = RuntimeUICanvasComponent{ *ParsedAsset, Enabled->get<bool>() };
+					RuntimeUICanvasData = RuntimeUICanvasComponent{ *ParsedAsset, Enabled->get<bool>(), ParsedPolicy };
 				}
 
 				std::optional<ScriptComponent> ScriptData;

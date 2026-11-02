@@ -1,4 +1,5 @@
 Texture2D<float4> SceneLinearHdr : register(t0);
+Texture2D<float4> RuntimeUIOverlay : register(t1);
 SamplerState SceneSampler : register(s0);
 
 cbuffer ToneMapping : register(b0)
@@ -58,7 +59,11 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 {
 	const float3 SceneLinear = SceneLinearHdr.SampleLevel(SceneSampler, Input.Uv, 0.0f).rgb;
 	const float Exposure = exp2(ExposureEV);
-	const float3 DisplayLinear = AcesFitted(SceneLinear * Exposure);
+	const float3 ToneMappedLinear = AcesFitted(SceneLinear * Exposure);
+	// Runtime UI is composited in linear RGBA16F. Its RGB is premultiplied by alpha
+	// by the overlay pass's straight-alpha blend state.
+	const float4 Overlay = RuntimeUIOverlay.SampleLevel(SceneSampler, Input.Uv, 0.0f);
+	const float3 DisplayLinear = Overlay.rgb + ToneMappedLinear * (1.0f - Overlay.a);
 	const float3 OutputColor = EncodeSrgbForUnorm != 0 ? LinearToSrgb(DisplayLinear) : DisplayLinear;
 	return float4(OutputColor, 1.0f);
 }

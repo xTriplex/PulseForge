@@ -274,7 +274,7 @@ namespace
 		CapsuleCollider.CollisionCategory = 4;
 		PF_CHECK(Tests, SphereBody->SetCollider(SphereCollider).has_value());
 		PF_CHECK(Tests, CapsuleBody->SetCollider(CapsuleCollider).has_value());
-		const RuntimeUICanvasComponent Canvas{ UUID{ 22, 17 }, false };
+		const RuntimeUICanvasComponent Canvas{ UUID{ 22, 17 }, false, RuntimeUIInputPolicy::NonModal };
 		PF_CHECK(Tests, Body->SetRuntimeUICanvas(Canvas).has_value());
 		const auto CameraEntity = Source.CreateEntity("Orthographic UI camera");
 		PF_CHECK(Tests, CameraEntity.has_value());
@@ -304,7 +304,7 @@ namespace
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 11") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 12") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"projection\": \"orthographic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("runtimeUICanvas") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
@@ -324,7 +324,30 @@ namespace
 								!LoadedRigidbody->value().AllowSleeping);
 			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() && LoadedCollider->value().HalfExtents == Collider.HalfExtents);
 			PF_CHECK(Tests, LoadedCanvas && LoadedCanvas->has_value() && LoadedCanvas->value().DocumentAsset == Canvas.DocumentAsset &&
-				!LoadedCanvas->value().Enabled);
+				!LoadedCanvas->value().Enabled && LoadedCanvas->value().InputPolicy == RuntimeUIInputPolicy::NonModal);
+		}
+		nlohmann::json LegacyCanvasDocument = nlohmann::json::parse(*Serialized);
+		LegacyCanvasDocument["version"] = 11;
+		bool RemovedLegacyInputPolicy = false;
+		for (auto& EntityRecord : LegacyCanvasDocument["entities"])
+		{
+			if (EntityRecord.value("uuid", std::string{}) != Body->GetUUID().ToString()) continue;
+			auto CanvasRecord = EntityRecord.find("runtimeUICanvas");
+			if (CanvasRecord == EntityRecord.end() || !CanvasRecord->is_object()) break;
+			RemovedLegacyInputPolicy = CanvasRecord->erase("inputPolicy") == 1;
+			break;
+		}
+		PF_CHECK(Tests, RemovedLegacyInputPolicy);
+		std::string LegacyCanvas = LegacyCanvasDocument.dump(2);
+		Scene LegacyDestination;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(LegacyCanvas, LegacyDestination).has_value());
+		const auto LegacyCanvasEntity = LegacyDestination.FindEntity(Body->GetUUID());
+		PF_CHECK(Tests, LegacyCanvasEntity.has_value());
+		if (LegacyCanvasEntity)
+		{
+			const auto LegacyComponent = LegacyCanvasEntity->GetRuntimeUICanvas();
+			PF_CHECK(Tests, LegacyComponent && LegacyComponent->has_value() &&
+				LegacyComponent->value().InputPolicy == RuntimeUIInputPolicy::Modal);
 		}
 		if (CameraEntity)
 		{

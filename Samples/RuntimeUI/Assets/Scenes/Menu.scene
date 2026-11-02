@@ -1,12 +1,12 @@
 {
   "format": "PulseForgeScene",
-  "version": 11,
+  "version": 12,
   "entities": [
     {
       "uuid": "b0180000-0000-4000-8000-000000000020",
       "tag": { "name": "Runtime UI Canvas" },
       "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
-      "runtimeUICanvas": { "documentAsset": "b0180000-0000-4000-8000-000000000030", "enabled": true },
+      "runtimeUICanvas": { "documentAsset": "b0180000-0000-4000-8000-000000000030", "enabled": true, "inputPolicy": "modal" },
       "script": { "asset": "b0180000-0000-4000-8000-000000000050", "enabled": true },
       "parent": null
     },

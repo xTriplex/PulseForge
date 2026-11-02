@@ -82,6 +82,7 @@ namespace PulseForge
 		TextureHandle Atlas;
 		std::unordered_map<uint32_t, Glyph> Glyphs;
 		bool WarnedUnsupportedText = false;
+		bool WarnedMissingGlyph = false;
 		float Ascender = 0.0f;
 		float LineHeight = static_cast<float>(RasterPixelSize);
 
@@ -228,18 +229,27 @@ namespace PulseForge
 		State->Ascender = static_cast<float>(State->Face->size->metrics.ascender) / 64.0f;
 		State->LineHeight = (std::max)(1.0f, static_cast<float>(State->Face->size->metrics.height) / 64.0f);
 
-		std::vector<uint8_t> Pixels(static_cast<size_t>(AtlasExtent) * AtlasExtent * 4, 255);
-		uint32_t X = 1;
-		uint32_t Y = 1;
+		std::vector<uint8_t> Pixels(static_cast<size_t>(AtlasExtent) * AtlasExtent * 4, 0);
+		for (size_t Pixel = 0; Pixel < static_cast<size_t>(AtlasExtent) * AtlasExtent; ++Pixel)
+		{
+			Pixels[Pixel * 4] = 255;
+			Pixels[Pixel * 4 + 1] = 255;
+			Pixels[Pixel * 4 + 2] = 255;
+		}
+		uint32_t X = 2;
+		uint32_t Y = 2;
 		uint32_t RowHeight = 0;
 		for (uint32_t Codepoint = 32; Codepoint <= 255; ++Codepoint)
 		{
-			if (FT_Load_Char(State->Face, Codepoint, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) continue;
+			const FT_UInt GlyphIndex = FT_Get_Char_Index(State->Face, Codepoint);
+			if (GlyphIndex == 0 || FT_Load_Glyph(State->Face, GlyphIndex, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0) continue;
 			const FT_GlyphSlot Slot = State->Face->glyph;
 			const uint32_t Width = Slot->bitmap.width;
 			const uint32_t Height = Slot->bitmap.rows;
-			if (X + Width + 1 >= AtlasExtent) { X = 1; Y += RowHeight + 1; RowHeight = 0; }
-			if (Y + Height + 1 >= AtlasExtent) return Failed("the bounded glyph atlas is full");
+			if (Width >= AtlasExtent - 4 || Height >= AtlasExtent - 4)
+				return Failed("a glyph exceeds the bounded atlas dimensions");
+			if (X + Width + 2 >= AtlasExtent) { X = 2; Y += RowHeight + 2; RowHeight = 0; }
+			if (Y + Height + 2 >= AtlasExtent) return Failed("the bounded glyph atlas is full");
 			FontState::Glyph Glyph;
 			Glyph.U0 = static_cast<float>(X) / AtlasExtent;
 			Glyph.V0 = static_cast<float>(Y) / AtlasExtent;
@@ -250,23 +260,36 @@ namespace PulseForge
 			Glyph.Left = Slot->bitmap_left;
 			Glyph.Top = Slot->bitmap_top;
 			Glyph.Advance = static_cast<int32_t>(Slot->advance.x >> 6);
-			Glyph.Index = FT_Get_Char_Index(State->Face, Codepoint);
-			for (uint32_t Row = 0; Row < Height; ++Row)
+			Glyph.Index = GlyphIndex;
+			if (Width > 0 && Height > 0)
 			{
-				const int Pitch = Slot->bitmap.pitch;
-				const uint8_t* Source = Slot->bitmap.buffer + static_cast<ptrdiff_t>(Pitch >= 0 ? Row : Height - Row - 1) * std::abs(Pitch);
-				for (uint32_t Column = 0; Column < Width; ++Column)
+				const int64_t SignedPitch = Slot->bitmap.pitch;
+				const size_t Pitch = static_cast<size_t>(SignedPitch < 0 ? -SignedPitch : SignedPitch);
+				const size_t RequiredPitch = Slot->bitmap.pixel_mode == FT_PIXEL_MODE_MONO ? (Width + 7u) / 8u : Width;
+				if (!Slot->bitmap.buffer || Pitch < RequiredPitch)
+					return Failed("FreeType returned an incomplete glyph bitmap");
+				if (Slot->bitmap.pixel_mode != FT_PIXEL_MODE_GRAY && Slot->bitmap.pixel_mode != FT_PIXEL_MODE_MONO)
+					return Failed("FreeType returned an unsupported glyph bitmap pixel mode");
+				if (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_GRAY && Slot->bitmap.num_grays < 2)
+					return Failed("FreeType returned an invalid grayscale coverage range");
+				for (uint32_t Row = 0; Row < Height; ++Row)
 				{
-					uint8_t Coverage = 0;
-					if (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_GRAY)
-						Coverage = Source[Column];
-					else if (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_MONO)
-						Coverage = (Source[Column >> 3] & (0x80u >> (Column & 7u))) ? 255 : 0;
-					Pixels[(static_cast<size_t>(Y + Row) * AtlasExtent + X + Column) * 4 + 3] = Coverage;
+					const uint32_t SourceRow = SignedPitch >= 0 ? Row : Height - Row - 1;
+					const uint8_t* Source = Slot->bitmap.buffer + static_cast<size_t>(SourceRow) * Pitch;
+					for (uint32_t Column = 0; Column < Width; ++Column)
+					{
+						uint8_t Coverage = 0;
+						if (Slot->bitmap.pixel_mode == FT_PIXEL_MODE_GRAY)
+							Coverage = static_cast<uint8_t>(static_cast<uint32_t>(Source[Column]) * 255u /
+								(static_cast<uint32_t>(Slot->bitmap.num_grays) - 1u));
+						else
+							Coverage = (Source[Column >> 3] & (0x80u >> (Column & 7u))) ? 255 : 0;
+						Pixels[(static_cast<size_t>(Y + Row) * AtlasExtent + X + Column) * 4 + 3] = Coverage;
+					}
 				}
 			}
 			State->Glyphs.emplace(Codepoint, Glyph);
-			X += Width + 1;
+			X += (std::max)(Width, 1u) + 2;
 			RowHeight = (std::max)(RowHeight, Height);
 		}
 		if (!State->Glyphs.contains('?')) return Failed("the font does not provide a replacement glyph");
@@ -363,7 +386,15 @@ namespace PulseForge
 					Codepoint = '?';
 				}
 				auto GlyphIt = Font->Glyphs.find(Codepoint);
-				if (GlyphIt == Font->Glyphs.end()) GlyphIt = Font->Glyphs.find('?');
+				if (GlyphIt == Font->Glyphs.end())
+				{
+					if (!Font->WarnedMissingGlyph)
+					{
+						PF_CORE_WARN("Runtime UI font is missing glyph U+{0:04X}; the replacement glyph is shown", Codepoint);
+						Font->WarnedMissingGlyph = true;
+					}
+					GlyphIt = Font->Glyphs.find('?');
+				}
 				if (GlyphIt == Font->Glyphs.end()) continue;
 				const FontState::Glyph& Glyph = GlyphIt->second;
 				if (PreviousGlyph != 0 && Glyph.Index != 0 && FT_HAS_KERNING(Font->Face))

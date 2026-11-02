@@ -2,6 +2,7 @@
 
 #include "Assets/AssetID.h"
 #include "Core/Core.h"
+#include "Input/GameplayInput.h"
 
 #include <expected>
 #include <glm/glm.hpp>
@@ -13,6 +14,16 @@
 
 namespace PulseForge
 {
+	enum class RuntimeUIInputPolicy : uint8_t
+	{
+		Passive,
+		NonModal,
+		Modal
+	};
+
+	[[nodiscard]] PULSEFORGE_API bool AppendRuntimeUIInputContext(
+		InputRoutingState& Routing, RuntimeUIInputPolicy Policy, InputWindowID OwnerWindow) noexcept;
+
 	enum class RuntimeUIElementKind : uint8_t
 	{
 		Image,
@@ -95,6 +106,7 @@ namespace PulseForge
 
 	enum class RuntimeUIInputKind : uint8_t
 	{
+		PointerPosition,
 		PointerMoved,
 		PointerPressed,
 		PointerReleased,
@@ -110,6 +122,51 @@ namespace PulseForge
 		RuntimeUIInputKind Kind = RuntimeUIInputKind::PointerMoved;
 		glm::vec2 Position{ 0.0f };
 		glm::vec2 Direction{ 0.0f };
+	};
+
+	// Host samples are normalized once for Player and Editor. Pointer hover is continuous;
+	// pointer motion never steals keyboard/controller focus, while a click may do so.
+	struct RuntimeUIHostInputSample final
+	{
+		uint64_t SessionGeneration = 0;
+		uint64_t TreeGeneration = 0;
+		uint64_t InputOwner = 0;
+		RuntimeUIViewport Viewport{};
+		glm::vec2 ViewportOrigin{};
+		double DeltaSeconds = 0.0;
+		bool Focused = false;
+		bool TextInputBlocked = false;
+		std::optional<glm::vec2> PointerPosition;
+		bool PointerPressed = false;
+		bool PointerHeld = false;
+		bool PointerReleased = false;
+		bool CaptureCancelled = false;
+		glm::vec2 Navigation{};
+		bool ActivatePressed = false;
+		bool ActivateHeld = false;
+		bool CancelPressed = false;
+		bool CancelHeld = false;
+	};
+
+	class PULSEFORGE_API RuntimeUIInputAdapter final
+	{
+	public:
+		[[nodiscard]] std::vector<RuntimeUIInputEvent> BuildEvents(const RuntimeUIHostInputSample& Sample);
+		void Reset() noexcept;
+
+	private:
+		uint64_t m_SessionGeneration = 0;
+		uint64_t m_TreeGeneration = 0;
+		uint64_t m_InputOwner = 0;
+		RuntimeUIViewport m_Viewport{};
+		glm::vec2 m_ViewportOrigin{};
+		std::optional<glm::vec2> m_LastPointer;
+		glm::vec2 m_NavigationDirection{};
+		double m_NavigationHeldSeconds = 0.0;
+		double m_NavigationRepeatSeconds = 0.0;
+		bool m_Initialized = false;
+		bool m_WasFocused = false;
+		bool m_RearmRequired = false;
 	};
 
 	struct RuntimeUIAction final

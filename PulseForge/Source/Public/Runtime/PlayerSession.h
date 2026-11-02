@@ -65,6 +65,15 @@ namespace PulseForge
 		[[nodiscard]] bool IsPaused() const noexcept { return m_Paused; }
 		[[nodiscard]] bool IsRunning() const noexcept { return m_Runtime != nullptr; }
 		[[nodiscard]] bool HasRuntimeUI() const noexcept { return m_Runtime && m_Runtime->HasRuntimeUI(); }
+		[[nodiscard]] RuntimeUIInputPolicy GetRuntimeUIInputPolicy() const noexcept
+		{
+			return m_Runtime ? m_Runtime->GetRuntimeUIInputPolicy() : RuntimeUIInputPolicy::Passive;
+		}
+		[[nodiscard]] uint64_t GetRuntimeUIInputGeneration() const noexcept
+		{
+			return m_Runtime ? m_Runtime->GetRuntimeUIInputGeneration() : 0;
+		}
+		[[nodiscard]] uint64_t GetRuntimeUISessionGeneration() const noexcept { return m_RuntimeUISessionGeneration; }
 		[[nodiscard]] bool SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)
 		{
 			return m_Runtime && m_Runtime->SetRuntimeUIInputFrame(Viewport, Events);
@@ -111,6 +120,7 @@ namespace PulseForge
 		std::optional<AssetID> m_SceneAsset;
 		bool m_Paused = false;
 		bool m_StopRequested = false;
+		uint64_t m_RuntimeUISessionGeneration = 0;
 		std::optional<AssetID> m_RequestedSceneTransition;
 		double m_TimeScale = 1.0;
 	};

@@ -1134,7 +1134,7 @@ namespace
 				}
 			}
 			PublishEditorGameplayInput();
-			SubmitRuntimeUIInput();
+			SubmitRuntimeUIInput(DeltaTime);
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
@@ -8502,7 +8502,7 @@ namespace
 					m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::OtherEditorPanelClicked);
 
 			const bool ViewportNavigation = m_ViewportMouseCapture.OwnsMouse() && SceneViewportOwner != nullptr;
-			const auto Routing = PulseForgeEditor::BuildEditorGameplayInputRouting({ .ViewportWindow = SceneViewportInputWindow,
+			auto Routing = PulseForgeEditor::BuildEditorGameplayInputRouting({ .ViewportWindow = SceneViewportInputWindow,
 				.ViewportAvailable = SceneViewportOwner && m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport),
 				.NativeOwnerFocused = SceneViewportFocused,
 				.ImGuiOwnerFocused = ImGuiOwnerFocused,
@@ -8510,22 +8510,31 @@ namespace
 				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
 				.TextOrModalInput = TextOrModalInput,
 				.ViewportNavigation = ViewportNavigation });
+			m_RuntimeUITextInputBlocked = TextOrModalInput;
+			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI() && !TextOrModalInput && Routing.FocusedWindow != 0)
+				(void)PulseForge::AppendRuntimeUIInputContext(
+					Routing, m_SceneRuntime->GetRuntimeUIInputPolicy(), Routing.FocusedWindow);
 			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !ViewportNavigation;
 			Application.GetGameplayInput().PublishFrame(Routing);
 			m_InputMappingPanel.MarkInputPublished();
 		}
 
-		void SubmitRuntimeUIInput()
+		void SubmitRuntimeUIInput(PulseForge::Timestep DeltaTime)
 		{
 			if (!m_SceneRuntime || !m_RuntimeScene || !m_SceneRuntime->HasRuntimeUI()) return;
+			if (m_SceneRuntime->GetRuntimeUIInputPolicy() == PulseForge::RuntimeUIInputPolicy::Passive)
+			{
+				m_RuntimeUIInputAdapter.Reset();
+				return;
+			}
 			auto& Application = PulseForge::Application::Get();
 			ImGuiViewport* Owner = ResolveSceneViewportOwner();
 			GLFWwindow* NativeWindow = Owner ? static_cast<GLFWwindow*>(Owner->PlatformHandle) : nullptr;
 			const uint64_t Window = Owner && NativeWindow ? m_ViewportScrollInput.GetInputWindowID(Owner->ID, NativeWindow) : 0;
 			const bool Focused = Window != 0 && Owner && NativeWindow &&
-				glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE && IsCursorOverViewportImage();
+				glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE &&
+				(m_ViewportKeyboardFocused || IsCursorOverViewportImage());
 			PulseForge::RuntimeUIViewport Viewport;
-			std::vector<PulseForge::RuntimeUIInputEvent> Events;
 			if (m_ViewportImageRect.Maximum.x > m_ViewportImageRect.Minimum.x &&
 				m_ViewportImageRect.Maximum.y > m_ViewportImageRect.Minimum.y)
 			{
@@ -8535,28 +8544,24 @@ namespace
 				Viewport.FramebufferHeight = m_ViewportRenderView.GetHeight();
 			}
 			const auto Pointer = Focused ? Application.GetGameplayInput().GetPointerPosition(Window) : std::nullopt;
-			if (!Focused)
-				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::FocusLost });
-			else if (Pointer && Owner)
-			{
-				const glm::vec2 Position{ Owner->Pos.x + Pointer->X - m_ViewportImageRect.Minimum.x,
-					Owner->Pos.y + Pointer->Y - m_ViewportImageRect.Minimum.y };
-				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerMoved, .Position = Position });
-				if (const auto* Click = Application.GetGameplayInput().FindAction("ui.pointer"))
-				{
-					if (Click->Pressed)
-						Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerPressed, .Position = Position });
-					if (Click->Released)
-						Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::PointerReleased, .Position = Position });
-				}
-			}
-			if (const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate"); Navigate &&
-				(Navigate->Pressed || std::abs(Navigate->X) > 0.55f || std::abs(Navigate->Y) > 0.55f))
-				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Navigate, .Direction = { Navigate->X, Navigate->Y } });
-			if (const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate"); Activate && Activate->Pressed)
-				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Activate });
-			if (const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel"); Cancel && Cancel->Pressed)
-				Events.push_back({ .Kind = PulseForge::RuntimeUIInputKind::Cancel });
+			const std::optional<glm::vec2> Position = Pointer && Owner
+				? std::optional<glm::vec2>{{ Owner->Pos.x + Pointer->X - m_ViewportImageRect.Minimum.x,
+					Owner->Pos.y + Pointer->Y - m_ViewportImageRect.Minimum.y }} : std::nullopt;
+			const auto* Click = Application.GetGameplayInput().FindAction("ui.pointer");
+			const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate");
+			const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate");
+			const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel");
+			PulseForge::RuntimeUIHostInputSample Sample{
+				.SessionGeneration = m_RuntimeUISessionGeneration,
+				.TreeGeneration = m_SceneRuntime->GetRuntimeUIInputGeneration(), .InputOwner = Window,
+				.Viewport = Viewport, .ViewportOrigin = m_ViewportImageRect.Minimum, .DeltaSeconds = DeltaTime.GetSeconds(),
+				.Focused = Focused, .TextInputBlocked = m_RuntimeUITextInputBlocked || m_ViewportMouseCapture.OwnsMouse(),
+				.PointerPosition = Position, .PointerPressed = Click && Click->Pressed, .PointerHeld = Click && Click->Held,
+				.PointerReleased = Click && Click->Released,
+				.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{},
+				.ActivatePressed = Activate && Activate->Pressed, .ActivateHeld = Activate && Activate->Held,
+				.CancelPressed = Cancel && Cancel->Pressed, .CancelHeld = Cancel && Cancel->Held };
+			auto Events = m_RuntimeUIInputAdapter.BuildEvents(Sample);
 			(void)m_SceneRuntime->SetRuntimeUIInputFrame(Viewport, Events);
 		}
 
@@ -8634,6 +8639,7 @@ namespace
 			auto RetiredRuntime = std::move(m_SceneRuntime);
 			m_RuntimeScene = std::move(CandidateScene);
 			m_SceneRuntime = std::move(CandidateRuntime);
+			AdvanceRuntimeUISessionGeneration();
 			RetiredRuntime.reset();
 			RetiredScene.reset();
 			SetStatus("Runtime scene transition completed.");
@@ -8670,11 +8676,13 @@ namespace
 
 			m_RuntimeScene = std::move(*CandidateScene);
 			m_SceneRuntime = std::move(CandidateRuntime);
+			AdvanceRuntimeUISessionGeneration();
 			SetStatus("Runtime started on an isolated scene copy. The viewport now displays the runtime scene.");
 		}
 
 		void StopRuntime() noexcept
 		{
+			const bool HadRuntime = static_cast<bool>(m_SceneRuntime);
 			m_RuntimeStopRequested = false;
 			m_QueuedRuntimeSceneTransition.reset();
 			CancelGizmoInteraction();
@@ -8682,6 +8690,13 @@ namespace
 			if (m_SceneRuntime) m_SceneRuntime->Stop();
 			m_SceneRuntime.reset();
 			m_RuntimeScene.reset();
+			if (HadRuntime) AdvanceRuntimeUISessionGeneration();
+		}
+
+		void AdvanceRuntimeUISessionGeneration() noexcept
+		{
+			++m_RuntimeUISessionGeneration;
+			if (m_RuntimeUISessionGeneration == 0) ++m_RuntimeUISessionGeneration;
 		}
 
 		void LaunchPlayerProcess()
@@ -9269,6 +9284,8 @@ namespace
 		PulseForgeEditor::Detail::EditorInputMappingPanel m_InputMappingPanel;
 		PulseForgeEditor::Detail::EditorViewportMouseCapture m_ViewportMouseCapture;
 		PulseForgeEditor::Detail::EditorViewportScrollInput m_ViewportScrollInput;
+		PulseForge::RuntimeUIInputAdapter m_RuntimeUIInputAdapter;
+		bool m_RuntimeUITextInputBlocked = false;
 		float m_SceneViewportOwnerScrollDelta = 0.0f;
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
@@ -9424,6 +9441,7 @@ namespace
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
+		uint64_t m_RuntimeUISessionGeneration = 0;
 		bool m_RuntimeStopRequested = false;
 		std::optional<PulseForge::AssetID> m_QueuedRuntimeSceneTransition;
 		PulseForgeEditor::ViewportImageRect m_ViewportImageRect;

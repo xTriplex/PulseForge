@@ -209,7 +209,7 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		OPTIONS -fvk-b-shift 256 0)
 	pulseforge_add_spirv_shader("${PULSEFORGE_RUNTIME_UI_FRAGMENT_SPIRV}" "${PULSEFORGE_RUNTIME_UI_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge runtime UI fragment shader to SPIR-V"
-		OPTIONS -fvk-b-shift 256 0)
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 	set(PULSEFORGE_SCENE_SHADER_OUTPUTS
 		"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}"
 		"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"

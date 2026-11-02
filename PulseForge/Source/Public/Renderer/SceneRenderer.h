@@ -220,6 +220,7 @@ namespace PulseForge
 		[[nodiscard]] const BindingSet* FindPreparedMaterialBinding(UUID Entity) const noexcept;
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
+		[[nodiscard]] std::expected<const Texture*, SceneRendererError> PrepareRuntimeUIOverlay(uint32_t Width, uint32_t Height);
 
 		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(const SceneMeshInstance& Instance);
 
@@ -303,6 +304,9 @@ namespace PulseForge
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
 		std::unique_ptr<RuntimeUIRenderPass> m_RuntimeUIRenderPass;
+		RenderTargetHandle m_RuntimeUIOverlayTarget;
+		uint32_t m_RuntimeUIOverlayWidth = 0;
+		uint32_t m_RuntimeUIOverlayHeight = 0;
 		std::vector<RuntimeUIDrawCommand> m_RuntimeUIDrawCommands;
 		std::vector<const Texture*> m_PreparedRuntimeUITextures;
 		RuntimeUIViewport m_RuntimeUIView{};

@@ -80,6 +80,7 @@ namespace PulseForge
 		{
 			Entity Owner;
 			AssetID Asset;
+			RuntimeUIInputPolicy InputPolicy = RuntimeUIInputPolicy::Passive;
 			RuntimeUIDocument Document;
 			RuntimeUIController Controller;
 			std::vector<RuntimeUILayoutEntry> Layout;
@@ -170,7 +171,8 @@ namespace PulseForge
 					return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
 						"Runtime UI document failed validation: " + Document.error().Message));
 				Candidate->RuntimeUI.emplace(Impl::RuntimeUICanvasState{
-					.Owner = EntityValue, .Asset = (**Canvas).DocumentAsset, .Document = std::move(*Document),
+					.Owner = EntityValue, .Asset = (**Canvas).DocumentAsset, .InputPolicy = (**Canvas).InputPolicy,
+					.Document = std::move(*Document),
 					.TreeGeneration = SessionGeneration });
 				Candidate->RuntimeUIView = { .LogicalSize = Candidate->RuntimeUI->Document.DesignSize,
 					.FramebufferWidth = static_cast<uint32_t>(Candidate->RuntimeUI->Document.DesignSize.x),
@@ -380,6 +382,17 @@ namespace PulseForge
 	bool SceneRuntime::HasRuntimeUI() const noexcept
 	{
 		return m_Impl && m_Impl->RuntimeUI.has_value();
+	}
+
+	RuntimeUIInputPolicy SceneRuntime::GetRuntimeUIInputPolicy() const noexcept
+	{
+		if (!m_Impl || !m_Impl->RuntimeUI) return RuntimeUIInputPolicy::Passive;
+		return m_Impl->Paused ? RuntimeUIInputPolicy::Modal : m_Impl->RuntimeUI->InputPolicy;
+	}
+
+	uint64_t SceneRuntime::GetRuntimeUIInputGeneration() const noexcept
+	{
+		return m_Impl && m_Impl->RuntimeUI ? m_Impl->RuntimeUI->TreeGeneration : 0;
 	}
 
 	bool SceneRuntime::SetRuntimeUIInputFrame(RuntimeUIViewport Viewport, std::span<const RuntimeUIInputEvent> Events)

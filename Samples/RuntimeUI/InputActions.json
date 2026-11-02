@@ -2,6 +2,14 @@
   "version": 1,
   "actions": [
     {
+      "id": "game.interact",
+      "type": "Digital",
+      "context": "Gameplay",
+      "bindings": [
+        { "id": "game.interact.keyboard", "kind": "Button", "primary": "Key.Space", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    },
+    {
       "id": "ui.navigate",
       "type": "Axis2D",
       "context": "RuntimeUI",

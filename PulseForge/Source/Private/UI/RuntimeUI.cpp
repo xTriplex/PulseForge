@@ -142,6 +142,24 @@ namespace PulseForge
 
 	} // namespace
 
+	bool AppendRuntimeUIInputContext(InputRoutingState& Routing, RuntimeUIInputPolicy Policy, InputWindowID OwnerWindow) noexcept
+	{
+		if (Policy == RuntimeUIInputPolicy::Passive || OwnerWindow == 0) return false;
+		for (size_t Index = 0; Index < Routing.ContextCount; ++Index)
+		{
+			if (Routing.Contexts[Index].Context != InputContext::RuntimeUI) continue;
+			Routing.Contexts[Index] = { .Context = InputContext::RuntimeUI,
+				.Consumes = Policy == RuntimeUIInputPolicy::Modal ? InputDeviceMask::All : InputDeviceMask::None,
+				.OwnerWindow = OwnerWindow, .Active = true };
+			return true;
+		}
+		if (Routing.ContextCount >= Routing.Contexts.size()) return false;
+		Routing.Contexts[Routing.ContextCount++] = { .Context = InputContext::RuntimeUI,
+			.Consumes = Policy == RuntimeUIInputPolicy::Modal ? InputDeviceMask::All : InputDeviceMask::None,
+			.OwnerWindow = OwnerWindow, .Active = true };
+		return true;
+	}
+
 	std::expected<void, RuntimeUIError> ValidateRuntimeUIDocument(const RuntimeUIDocument& Document)
 	{
 		if (Document.Version != RuntimeUIDocument::CurrentVersion)
@@ -193,28 +211,44 @@ namespace PulseForge
 		}
 
 		std::vector<uint8_t> Marks(Document.Elements.size());
-		std::function<std::expected<size_t, RuntimeUIError>(size_t)> Visit = [&](size_t Index) -> std::expected<size_t, RuntimeUIError>
-		{
-			if (Marks[Index] == 1) return std::unexpected(MakeError("UI hierarchy contains a parent cycle"));
-			if (Marks[Index] == 2) return size_t{ 1 };
-			Marks[Index] = 1;
-			const UUID Parent = Document.Elements[Index].Parent;
-			size_t Depth = 1;
-			if (!Parent.IsNil())
-			{
-				const auto ParentIt = Indices.find(Parent);
-				if (ParentIt == Indices.end()) return std::unexpected(MakeError("UI element references a missing parent"));
-				auto ParentDepth = Visit(ParentIt->second);
-				if (!ParentDepth) return std::unexpected(ParentDepth.error());
-				Depth = *ParentDepth + 1;
-			}
-			if (Depth > RuntimeUIDocument::MaximumHierarchyDepth)
-				return std::unexpected(MakeError("UI hierarchy exceeds the 32 level depth limit"));
-			Marks[Index] = 2;
-			return Depth;
-		};
+		std::vector<size_t> Depths(Document.Elements.size());
+		std::vector<size_t> Chain;
+		Chain.reserve(RuntimeUIDocument::MaximumHierarchyDepth);
 		for (size_t Index = 0; Index < Document.Elements.size(); ++Index)
-			if (auto Depth = Visit(Index); !Depth) return std::unexpected(Depth.error());
+		{
+			if (Marks[Index] == 2) continue;
+			Chain.clear();
+			size_t Current = Index;
+			size_t ParentDepth = 0;
+			for (;;)
+			{
+				if (Marks[Current] == 1)
+					return std::unexpected(MakeError("UI hierarchy contains a parent cycle"));
+				if (Marks[Current] == 2)
+				{
+					ParentDepth = Depths[Current];
+					break;
+				}
+				if (Chain.size() >= RuntimeUIDocument::MaximumHierarchyDepth)
+					return std::unexpected(MakeError("UI hierarchy exceeds the 32 level depth limit"));
+				Marks[Current] = 1;
+				Chain.push_back(Current);
+				const UUID Parent = Document.Elements[Current].Parent;
+				if (Parent.IsNil()) break;
+				const auto ParentIt = Indices.find(Parent);
+				if (ParentIt == Indices.end())
+					return std::unexpected(MakeError("UI element references a missing parent"));
+				Current = ParentIt->second;
+			}
+			for (auto It = Chain.rbegin(); It != Chain.rend(); ++It)
+			{
+				const size_t Depth = ++ParentDepth;
+				if (Depth > RuntimeUIDocument::MaximumHierarchyDepth)
+					return std::unexpected(MakeError("UI hierarchy exceeds the 32 level depth limit"));
+				Depths[*It] = Depth;
+				Marks[*It] = 2;
+			}
+		}
 		return {};
 	}
 
@@ -495,9 +529,11 @@ namespace PulseForge
 		{
 			switch (Event.Kind)
 			{
+			case RuntimeUIInputKind::PointerPosition:
+				m_Hovered = HitTestRuntimeUI(Document, Layout, Event.Position);
+				break;
 			case RuntimeUIInputKind::PointerMoved:
 				m_Hovered = HitTestRuntimeUI(Document, Layout, Event.Position);
-				if (m_Hovered) m_Focused = m_Hovered;
 				break;
 			case RuntimeUIInputKind::PointerPressed:
 				m_Captured = HitTestRuntimeUI(Document, Layout, Event.Position);
@@ -557,6 +593,153 @@ namespace PulseForge
 			}
 		}
 		return Actions;
+	}
+
+	std::vector<RuntimeUIInputEvent> RuntimeUIInputAdapter::BuildEvents(const RuntimeUIHostInputSample& Sample)
+	{
+		std::vector<RuntimeUIInputEvent> Events;
+		Events.reserve(8);
+		const bool ViewportChanged = m_Viewport.LogicalSize.x != Sample.Viewport.LogicalSize.x ||
+			m_Viewport.LogicalSize.y != Sample.Viewport.LogicalSize.y ||
+			m_Viewport.FramebufferWidth != Sample.Viewport.FramebufferWidth ||
+			m_Viewport.FramebufferHeight != Sample.Viewport.FramebufferHeight ||
+			m_ViewportOrigin.x != Sample.ViewportOrigin.x || m_ViewportOrigin.y != Sample.ViewportOrigin.y;
+		const bool IdentityChanged = m_Initialized &&
+			(m_SessionGeneration != Sample.SessionGeneration || m_TreeGeneration != Sample.TreeGeneration ||
+				m_InputOwner != Sample.InputOwner || ViewportChanged);
+		if (IdentityChanged)
+		{
+			Events.push_back({ .Kind = RuntimeUIInputKind::CaptureCancelled });
+			m_LastPointer.reset();
+			m_NavigationDirection = {};
+			m_NavigationHeldSeconds = 0.0;
+			m_NavigationRepeatSeconds = 0.0;
+			m_RearmRequired = true;
+		}
+		m_Initialized = true;
+		m_SessionGeneration = Sample.SessionGeneration;
+		m_TreeGeneration = Sample.TreeGeneration;
+		m_InputOwner = Sample.InputOwner;
+		m_Viewport = Sample.Viewport;
+		m_ViewportOrigin = Sample.ViewportOrigin;
+
+		if (!Sample.Focused)
+		{
+			if (m_WasFocused) Events.push_back({ .Kind = RuntimeUIInputKind::FocusLost });
+			m_WasFocused = false;
+			m_LastPointer.reset();
+			m_NavigationDirection = {};
+			m_NavigationHeldSeconds = 0.0;
+			m_NavigationRepeatSeconds = 0.0;
+			m_RearmRequired = true;
+			return Events;
+		}
+
+		const bool Reacquired = !m_WasFocused;
+		m_WasFocused = true;
+		if (Sample.CaptureCancelled) Events.push_back({ .Kind = RuntimeUIInputKind::CaptureCancelled });
+		if (Sample.TextInputBlocked)
+		{
+			Events.push_back({ .Kind = RuntimeUIInputKind::CaptureCancelled });
+			m_NavigationDirection = {};
+			m_NavigationHeldSeconds = 0.0;
+			m_NavigationRepeatSeconds = 0.0;
+			m_RearmRequired = true;
+			return Events;
+		}
+
+		if (Sample.PointerPosition && IsFinite(*Sample.PointerPosition))
+		{
+			const glm::vec2 Position = *Sample.PointerPosition;
+			Events.push_back({ .Kind = RuntimeUIInputKind::PointerPosition, .Position = Position });
+			if (m_LastPointer && (m_LastPointer->x != Position.x || m_LastPointer->y != Position.y))
+				Events.push_back({ .Kind = RuntimeUIInputKind::PointerMoved, .Position = Position });
+			m_LastPointer = Position;
+		}
+		else
+			m_LastPointer.reset();
+
+		const glm::vec2 Navigation = IsFinite(Sample.Navigation) ? Sample.Navigation : glm::vec2{};
+		const float Magnitude = (std::max)(std::abs(Navigation.x), std::abs(Navigation.y));
+		const bool Neutral = Magnitude <= 0.35f && !Sample.PointerHeld && !Sample.ActivateHeld && !Sample.CancelHeld;
+		if (m_RearmRequired)
+		{
+			if (Neutral) m_RearmRequired = false;
+			else return Events;
+		}
+		if (Reacquired && !Neutral) return Events;
+
+		if (Sample.PointerPosition && Sample.PointerPressed)
+			Events.push_back({ .Kind = RuntimeUIInputKind::PointerPressed, .Position = *Sample.PointerPosition });
+		if (Sample.PointerPosition && Sample.PointerReleased)
+			Events.push_back({ .Kind = RuntimeUIInputKind::PointerReleased, .Position = *Sample.PointerPosition });
+		if (Sample.CaptureCancelled)
+			m_RearmRequired = !Neutral;
+
+		glm::vec2 Direction{};
+		if (Magnitude >= ((m_NavigationDirection.x == 0.0f && m_NavigationDirection.y == 0.0f) ? 0.55f : 0.35f))
+		{
+			if (std::abs(Navigation.x) >= std::abs(Navigation.y))
+				Direction.x = std::copysign(1.0f, Navigation.x);
+			else
+				Direction.y = std::copysign(1.0f, Navigation.y);
+		}
+		const auto EmitNavigation = [&]
+		{
+			Events.push_back({ .Kind = RuntimeUIInputKind::Navigate, .Direction = Direction });
+		};
+		const double Delta = std::clamp(Sample.DeltaSeconds, 0.0, 0.25);
+		if (Direction.x == 0.0f && Direction.y == 0.0f)
+		{
+			m_NavigationDirection = {};
+			m_NavigationHeldSeconds = 0.0;
+			m_NavigationRepeatSeconds = 0.0;
+		}
+		else if (Direction.x != m_NavigationDirection.x || Direction.y != m_NavigationDirection.y)
+		{
+			m_NavigationDirection = Direction;
+			m_NavigationHeldSeconds = 0.0;
+			m_NavigationRepeatSeconds = 0.0;
+			EmitNavigation();
+		}
+		else
+		{
+			const double PreviousHeld = m_NavigationHeldSeconds;
+			m_NavigationHeldSeconds += Delta;
+			if (PreviousHeld < 0.4 && m_NavigationHeldSeconds >= 0.4)
+			{
+				m_NavigationRepeatSeconds = 0.0;
+				EmitNavigation();
+			}
+			else if (m_NavigationHeldSeconds >= 0.4)
+			{
+				m_NavigationRepeatSeconds += Delta;
+				if (m_NavigationRepeatSeconds >= 0.14)
+				{
+					m_NavigationRepeatSeconds = std::fmod(m_NavigationRepeatSeconds, 0.14);
+					EmitNavigation();
+				}
+			}
+		}
+		if (Sample.ActivatePressed) Events.push_back({ .Kind = RuntimeUIInputKind::Activate });
+		if (Sample.CancelPressed) Events.push_back({ .Kind = RuntimeUIInputKind::Cancel });
+		return Events;
+	}
+
+	void RuntimeUIInputAdapter::Reset() noexcept
+	{
+		m_SessionGeneration = 0;
+		m_TreeGeneration = 0;
+		m_InputOwner = 0;
+		m_Viewport = {};
+		m_ViewportOrigin = {};
+		m_LastPointer.reset();
+		m_NavigationDirection = {};
+		m_NavigationHeldSeconds = 0.0;
+		m_NavigationRepeatSeconds = 0.0;
+		m_Initialized = false;
+		m_WasFocused = false;
+		m_RearmRequired = false;
 	}
 
 	void RuntimeUIController::Reset(uint64_t TreeGeneration) noexcept

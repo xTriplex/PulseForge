@@ -972,6 +972,9 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set runtime UI canvas on an invalid entity"));
 		if (Canvas.DocumentAsset.IsNil())
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Runtime UI canvas requires a managed UI document asset"));
+		if (Canvas.InputPolicy != RuntimeUIInputPolicy::Passive && Canvas.InputPolicy != RuntimeUIInputPolicy::NonModal &&
+			Canvas.InputPolicy != RuntimeUIInputPolicy::Modal)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Runtime UI canvas input policy is invalid"));
 		try
 		{
 			Storage->Registry.emplace_or_replace<RuntimeUICanvasComponent>(*Native, Canvas);

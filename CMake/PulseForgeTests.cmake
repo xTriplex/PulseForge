@@ -86,7 +86,7 @@ if(BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeSceneTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeSceneTests PRIVATE
-		PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath PulseForgePhysics)
+		PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath PulseForgePhysics PulseForgeInput)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeSceneTests PulseForgePublicHeaderChecks)
 	endif()
@@ -466,5 +466,21 @@ if(BUILD_TESTING)
 	add_dependencies(PulseForgeTests ${PULSEFORGE_TEST_EXECUTABLE_TARGETS} PulseForgeCook)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
+	endif()
+	if(WIN32 AND PULSEFORGE_BUILD_EDITOR AND TARGET PulseForgeExport AND TARGET PulseForgeCookedGame AND
+		TARGET PulseForgeCookedPlayerTemplate)
+		find_package(Python3 COMPONENTS Interpreter QUIET)
+		if(Python3_Interpreter_FOUND)
+			add_test(NAME PulseForge.RuntimeUI.ExportedPackageInteraction
+				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
+					--export "$<TARGET_FILE:PulseForgeExport>"
+					--template-root "$<TARGET_FILE_DIR:PulseForgeCookedGame>"
+					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
+					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
+			set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+			add_dependencies(PulseForgeTests PulseForgeExport PulseForgeCookedPlayerTemplate)
+		else()
+			message(STATUS "Runtime UI exported-package acceptance requires a runnable Python 3 interpreter; test is not registered")
+		endif()
 	endif()
 endif()

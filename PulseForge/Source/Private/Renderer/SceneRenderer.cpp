@@ -1086,6 +1086,46 @@ namespace PulseForge
 			m_LocalLightingState->PointSlotOwners() };
 	}
 
+	std::expected<const Texture*, SceneRendererError> SceneRenderer::PrepareRuntimeUIOverlay(uint32_t Width, uint32_t Height)
+	{
+		if (Width == 0 || Height == 0)
+			return std::unexpected(MakeResourceError("Runtime UI overlay requires a non-zero output size"));
+		if (!m_RuntimeUIOverlayTarget || m_RuntimeUIOverlayWidth != Width || m_RuntimeUIOverlayHeight != Height)
+		{
+			RenderTargetDesc Description;
+			Description.Width = Width;
+			Description.Height = Height;
+			Description.ColorFormat = ColorTargetFormat::RGBA16_Float;
+			Description.DepthMode = DepthAttachmentMode::None;
+			Description.DebugName = "PulseForge prepared linear runtime UI overlay";
+			auto Target = m_Runtime.CreateRenderTarget(Description);
+			if (!Target)
+				return std::unexpected(MakeDrawError("Could not create linear runtime UI overlay: " + Target.error().Message));
+			m_RuntimeUIOverlayTarget = std::move(*Target);
+			m_RuntimeUIOverlayWidth = Width;
+			m_RuntimeUIOverlayHeight = Height;
+		}
+		const Texture* Overlay = m_RuntimeUIOverlayTarget->GetColorTexture();
+		if (!Overlay) return std::unexpected(MakeResourceError("Runtime UI overlay has no color texture"));
+
+		RenderTargetClearValue Clear;
+		Clear.Color = { 0.0f, 0.0f, 0.0f, 0.0f };
+		Clear.Depth = 1.0f;
+		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_RuntimeUIOverlayTarget, Clear); !Begin)
+			return std::unexpected(MakeDrawError("Could not begin linear runtime UI overlay: " + Begin.error().Message));
+		RenderTargetFrameScope Scope(m_Runtime);
+		auto Draw = m_RuntimeUIRenderPass->Draw(m_RuntimeUIDrawCommands, m_RuntimeUIView, Width, Height,
+			ColorTargetFormat::RGBA16_Float, false);
+		const GraphicsResult End = Scope.End();
+		if (!Draw)
+		{
+			if (!End) PF_CORE_ERROR("Could not close runtime UI overlay after draw failure: {0}", End.error().Message);
+			return std::unexpected(MakeDrawError("Could not render linear runtime UI overlay: " + Draw.error().Message));
+		}
+		if (!End) return std::unexpected(MakeDrawError("Could not end linear runtime UI overlay: " + End.error().Message));
+		return Overlay;
+	}
+
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
 	{
 		const auto [Width, Height] = m_Runtime.GetOutputFramebufferSize();
@@ -1094,13 +1134,12 @@ namespace PulseForge
 		auto Hdr = RenderPreparedSceneToHdr(Width, Height);
 		if (!Hdr)
 			return std::unexpected(std::move(Hdr.error()));
+		auto Overlay = PrepareRuntimeUIOverlay(Width, Height);
+		if (!Overlay) return std::unexpected(std::move(Overlay.error()));
 		if (auto Tonemapped = m_ToneMappingStage->Draw(
-				*Hdr->ColorTexture, Hdr->TargetGeneration, ColorTargetFormat::Swapchain, true, *m_BackgroundTriangleBuffer);
+				*Hdr->ColorTexture, Hdr->TargetGeneration, **Overlay, ColorTargetFormat::Swapchain, true, *m_BackgroundTriangleBuffer);
 			!Tonemapped)
 			return std::unexpected(std::move(Tonemapped.error()));
-		if (auto UI = m_RuntimeUIRenderPass->Draw(m_RuntimeUIDrawCommands, m_RuntimeUIView, Width, Height,
-			ColorTargetFormat::Swapchain, true); !UI)
-			return std::unexpected(MakeDrawError("Could not render runtime UI after tone mapping: " + UI.error().Message));
 		const RuntimeUIRenderStatistics UIStats = m_RuntimeUIRenderPass->GetStatistics();
 		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, ColorTargetFormat::Swapchain,
 			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
@@ -1120,8 +1159,11 @@ namespace PulseForge
 		auto Hdr = RenderPreparedSceneToHdr(Description.Width, Description.Height);
 		if (!Hdr)
 			return std::unexpected(std::move(Hdr.error()));
+		auto Overlay = PrepareRuntimeUIOverlay(Description.Width, Description.Height);
+		if (!Overlay) return std::unexpected(std::move(Overlay.error()));
 		if (auto Prepared = m_ToneMappingStage->Prepare(
-				*Hdr->ColorTexture, Hdr->TargetGeneration, Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None);
+				*Hdr->ColorTexture, Hdr->TargetGeneration, **Overlay, Description.ColorFormat,
+				Description.DepthMode != DepthAttachmentMode::None);
 			!Prepared)
 			return std::unexpected(std::move(Prepared.error()));
 
@@ -1131,23 +1173,14 @@ namespace PulseForge
 		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, Clear); !Begin)
 			return std::unexpected(MakeDrawError("Could not begin tone-mapped output target: " + Begin.error().Message));
 		RenderTargetFrameScope Scope(m_Runtime);
-		auto Draw = m_ToneMappingStage->Draw(*Hdr->ColorTexture, Hdr->TargetGeneration, Description.ColorFormat,
+		auto Draw = m_ToneMappingStage->Draw(*Hdr->ColorTexture, Hdr->TargetGeneration, **Overlay, Description.ColorFormat,
 			Description.DepthMode != DepthAttachmentMode::None, *m_BackgroundTriangleBuffer);
-		std::expected<size_t, GraphicsError> UIDraw = size_t{ 0 };
-		if (Draw)
-			UIDraw = m_RuntimeUIRenderPass->Draw(m_RuntimeUIDrawCommands, m_RuntimeUIView, Description.Width, Description.Height,
-				Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None);
 		const GraphicsResult End = Scope.End();
 		if (!Draw)
 		{
 			if (!End)
 				PF_CORE_ERROR("Could not close tone-mapped output target after draw failure: {0}", End.error().Message);
 			return std::unexpected(std::move(Draw.error()));
-		}
-		if (!UIDraw)
-		{
-			if (!End) PF_CORE_ERROR("Could not close output target after runtime UI draw failure: {0}", End.error().Message);
-			return std::unexpected(MakeDrawError("Could not render runtime UI after tone mapping: " + UIDraw.error().Message));
 		}
 		if (!End)
 			return std::unexpected(MakeDrawError("Could not end tone-mapped output target: " + End.error().Message));

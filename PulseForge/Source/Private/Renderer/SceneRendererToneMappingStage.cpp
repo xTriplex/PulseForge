@@ -43,7 +43,8 @@ namespace PulseForge
 
 		BindingLayoutDesc LayoutDescription;
 		LayoutDescription.Visibility = ShaderVisibility::Fragment;
-		LayoutDescription.Items = { { BindingResourceType::Texture2D, 0 }, { BindingResourceType::Sampler, 0 },
+		LayoutDescription.Items = { { BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
+			{ BindingResourceType::Sampler, 0 },
 			{ BindingResourceType::ConstantBuffer, 0 } };
 		LayoutDescription.DebugName = "PulseForge tone mapping input and parameters";
 		auto Layout = m_Runtime.CreateBindingLayout(LayoutDescription);
@@ -75,17 +76,19 @@ namespace PulseForge
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::Prepare(
-		const Texture& HdrTexture, uint64_t Generation, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled)
+		const Texture& HdrTexture, uint64_t Generation, const Texture& UiOverlay,
+		ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled)
 	{
 		if (auto Pipeline = EnsurePipeline(DestinationFormat, DepthAttachmentEnabled); !Pipeline)
 			return std::unexpected(std::move(Pipeline.error()));
-		return EnsureBindings(HdrTexture, Generation);
+		return EnsureBindings(HdrTexture, Generation, UiOverlay);
 	}
 
 	std::expected<size_t, SceneRendererError> SceneRenderer::ToneMappingStage::Draw(const Texture& HdrTexture, uint64_t Generation,
-		ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled, const Buffer& FullscreenTriangle)
+		const Texture& UiOverlay, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled,
+		const Buffer& FullscreenTriangle)
 	{
-		if (auto Ready = Prepare(HdrTexture, Generation, DestinationFormat, DepthAttachmentEnabled); !Ready)
+		if (auto Ready = Prepare(HdrTexture, Generation, UiOverlay, DestinationFormat, DepthAttachmentEnabled); !Ready)
 			return std::unexpected(std::move(Ready.error()));
 
 		const Constants ConstantsToUpload{ m_Settings.ExposureEV,
@@ -111,6 +114,7 @@ namespace PulseForge
 	{
 		m_BindingSet.reset();
 		m_BindingGeneration = 0;
+		m_BoundUiOverlay = nullptr;
 	}
 
 	bool SceneRenderer::ToneMappingStage::SetSettings(const ToneMappingSettings& Settings) noexcept
@@ -147,14 +151,17 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::EnsureBindings(const Texture& HdrTexture, uint64_t Generation)
+	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::EnsureBindings(
+		const Texture& HdrTexture, uint64_t Generation, const Texture& UiOverlay)
 	{
-		if (IsToneMappingBindingCurrent(m_BindingGeneration, Generation) && m_BindingSet) return {};
+		if (IsToneMappingBindingCurrent(m_BindingGeneration, Generation) && m_BindingSet && m_BoundUiOverlay == &UiOverlay)
+			return {};
 		InvalidateBindings();
 
 		BindingSetDesc Description;
 		Description.Layout = m_BindingLayout;
-		Description.Textures = { { 0, std::cref(HdrTexture), BindingResourceType::Texture2D } };
+		Description.Textures = { { 0, std::cref(HdrTexture), BindingResourceType::Texture2D },
+			{ 1, std::cref(UiOverlay), BindingResourceType::Texture2D } };
 		Description.Samplers = { { 0, std::cref(*m_Sampler) } };
 		Description.Buffers = { { 0, std::cref(*m_ConstantsBuffer) } };
 		auto Binding = m_Runtime.CreateBindingSet(Description);
@@ -163,6 +170,7 @@ namespace PulseForge
 				MakeToneMappingResourceError("Could not bind HDR scene texture for tone mapping: " + Binding.error().Message));
 		m_BindingSet = std::move(*Binding);
 		m_BindingGeneration = Generation;
+		m_BoundUiOverlay = &UiOverlay;
 		return {};
 	}
 } // namespace PulseForge
