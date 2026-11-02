@@ -8,16 +8,22 @@ void RunEditorBuildProfileControllerTests(TestRunner& Tests);
 void RunEditorAssetEditSchedulingTests(TestRunner& Tests);
 void RunEditorInspectorRegressionTests(TestRunner& Tests);
 void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests);
+void RunEditorRuntimeUIDocumentEditorTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
 #endif
 
-int main()
+int main(int ArgumentCount, char** Arguments)
 {
 	PulseForge::Log::Init();
 	TestRunner Tests;
 	PF_CHECK(Tests, spdlog::get("PULSEFORGE") != nullptr);
 	PF_CHECK(Tests, spdlog::get("APP") != nullptr);
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--runtime-ui-document")
+	{
+		RunEditorRuntimeUIDocumentEditorTests(Tests);
+		return Tests.Finish();
+	}
 	RunEditorHistoryTests(Tests);
 	RunEditorViewportTests(Tests);
 	RunEditorBuildProfileControllerTests(Tests);
@@ -38,6 +44,7 @@ int main()
 	RunEditorAssetImportOperationTests(Tests);
 	RunEditorInspectorRegressionTests(Tests);
 	RunEditorScriptAuthoringInspectorTests(Tests);
+	RunEditorRuntimeUIDocumentEditorTests(Tests);
 	RunProjectRuntimeTests(Tests);
 	return Tests.Finish();
 }

@@ -341,6 +341,7 @@ if(BUILD_TESTING)
 			Tests/EditorAssetImportOperationTests.cpp
 			Tests/EditorInspectorRegressionTests.cpp
 			Tests/EditorScriptAuthoringInspectorTests.cpp
+			Tests/EditorRuntimeUIDocumentEditorTests.cpp
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp
