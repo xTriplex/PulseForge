@@ -12,6 +12,7 @@
 #include "Assets/PrefabSerializer.h"
 #include "Assets/ScriptSourceMetadata.h"
 #include "Scene/SceneSerializer.h"
+#include "UI/RuntimeUI.h"
 
 #include <nlohmann/json.hpp>
 
@@ -298,8 +299,9 @@ namespace PulseForge
 				const auto Environment = EntityValue.GetEnvironmentLight();
 				const auto Audio = EntityValue.GetAudioSource();
 				const auto Script = EntityValue.GetScript();
+				const auto RuntimeUICanvas = EntityValue.GetRuntimeUICanvas();
 				const auto PrefabInstance = EntityValue.GetPrefabInstance();
-				if (!Mesh || !Environment || !Audio || !Script || !PrefabInstance)
+				if (!Mesh || !Environment || !Audio || !Script || !RuntimeUICanvas || !PrefabInstance)
 					return std::unexpected(
 						MakeError(Owner.ProjectRelativePath, "Validated scene entity could not be read through its scene accessors"));
 
@@ -326,6 +328,11 @@ namespace PulseForge
 					AddRuntimeReference(Output, Registry, Referrer, Script->value().ScriptAsset, AssetFileType::Script,
 						"entities/" + EntityKey.substr(7) + "/script.asset", false, Script->value().ScriptAsset.ToString(),
 						FindValidationStatus(EntityValue.GetUUID(), Script->value().ScriptAsset, AssetReferenceKind::Script));
+				if (RuntimeUICanvas->has_value())
+					AddRuntimeReference(Output, Registry, Referrer, RuntimeUICanvas->value().DocumentAsset, AssetFileType::RuntimeUI,
+						"entities/" + EntityKey.substr(7) + "/runtimeUICanvas.documentAsset", false,
+						RuntimeUICanvas->value().DocumentAsset.ToString(),
+						FindValidationStatus(EntityValue.GetUUID(), RuntimeUICanvas->value().DocumentAsset, AssetReferenceKind::RuntimeUI));
 				if (PrefabInstance->has_value())
 				{
 					AddRuntimeReference(Output, Registry, Referrer, (**PrefabInstance).SourceAsset, AssetFileType::Prefab,
@@ -1104,6 +1111,34 @@ namespace PulseForge
 			return {};
 		}
 
+		std::expected<void, AssetDependencyCatalogError> AnalyzeRuntimeUIDocument(AssetDependencyExtraction& Output,
+			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
+			const AssetRegistry& Registry, std::stop_token CancellationToken = {})
+		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
+			auto Bytes = ReadBoundedBytes(SourcePath, 2ull * 1024ull * 1024ull, CancellationToken);
+			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Runtime UI dependency analysis failed: " + Bytes.error()));
+			if (auto Receipt = AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes, CancellationToken); !Receipt)
+				return std::unexpected(CancellationToken.stop_requested() ? MakeCancelledError(SourcePath)
+					: MakeError(SourcePath, "Runtime UI input fingerprinting failed: " + Receipt.error()));
+			auto Document = ParseRuntimeUIDocument(BytesAsString(*Bytes));
+			if (!Document)
+				return std::unexpected(MakeError(SourcePath, "Runtime UI dependency analysis failed: " + Document.error().Message));
+			const AssetDependencyNode Referrer = RootNode(Owner);
+			for (const RuntimeUIElement& Element : Document->Elements)
+			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
+				const std::string ElementPath = "elements/" + Element.ID.ToString();
+				if (!Element.Image.IsNil())
+					AddRuntimeReference(Output, Registry, Referrer, Element.Image, AssetFileType::Image,
+						ElementPath + ".image", false, Element.Image.ToString());
+				if (!Element.Font.IsNil())
+					AddRuntimeReference(Output, Registry, Referrer, Element.Font, AssetFileType::Font,
+						ElementPath + ".font", false, Element.Font.ToString());
+			}
+			return {};
+		}
+
 		std::expected<void, AssetDependencyCatalogError> AppendRuntimeCycles(
 			AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot, const std::vector<AssetRecord>& Records,
 			std::stop_token CancellationToken = {})
@@ -1229,6 +1264,8 @@ namespace PulseForge
 				Result = ExtractScriptModuleReferences(Output, AbsoluteProjectRoot, *Resolved, Record, Records, CancellationToken);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Mesh))
 				Result = AnalyzeGltf(Output, AbsoluteProjectRoot, *Resolved, Record, *Metadata, CancellationToken);
+			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::RuntimeUI))
+				Result = AnalyzeRuntimeUIDocument(Output, AbsoluteProjectRoot, *Resolved, Record, Registry, CancellationToken);
 			else continue;
 			if (!Result) return std::unexpected(std::move(Result.error()));
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(*Resolved));

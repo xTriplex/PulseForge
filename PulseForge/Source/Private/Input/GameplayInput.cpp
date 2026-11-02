@@ -1481,6 +1481,14 @@ namespace PulseForge
 		}
 	}
 
+	std::optional<GameplayPointerPosition> GameplayInputService::GetPointerPosition(InputWindowID Window) const noexcept
+	{
+		if (!m_Impl || Window == 0) return std::nullopt;
+		const auto Position = m_Impl->PointerPositions.find(Window);
+		if (Position == m_Impl->PointerPositions.end()) return std::nullopt;
+		return GameplayPointerPosition{ Position->second.first, Position->second.second };
+	}
+
 	SimulationActionSnapshot GameplayInputService::BeginSimulationStep()
 	{
 		SimulationActionSnapshot Result;

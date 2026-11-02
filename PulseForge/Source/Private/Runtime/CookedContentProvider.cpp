@@ -302,4 +302,24 @@ namespace PulseForge
 				.Message = "Cooked gameplay input map failed runtime validation: " + Parsed.error().Message });
 		return std::move(*Parsed);
 	}
+
+	const CookedAssetEntry* CookedContentProvider::FindRuntimeUI(const AssetID& Asset) const noexcept
+	{
+		return Find(Asset, CookedAssetProductKind::RuntimeUI);
+	}
+
+	std::expected<std::vector<std::byte>, CookedAssetCatalogError> CookedContentProvider::ReadRuntimeUI(const AssetID& Asset) const
+	{
+		return Read(Asset, CookedAssetProductKind::RuntimeUI);
+	}
+
+	const CookedAssetEntry* CookedContentProvider::FindFont(const AssetID& Asset) const noexcept
+	{
+		return Find(Asset, CookedAssetProductKind::Font);
+	}
+
+	std::expected<std::vector<std::byte>, CookedAssetCatalogError> CookedContentProvider::ReadFont(const AssetID& Asset) const
+	{
+		return Read(Asset, CookedAssetProductKind::Font);
+	}
 } // namespace PulseForge

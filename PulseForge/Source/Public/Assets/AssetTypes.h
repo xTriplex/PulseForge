@@ -19,6 +19,8 @@ namespace PulseForge
 		Audio,
 		Environment,
 		Image,
+		RuntimeUI,
+		Font,
 		PreviewImage,
 		ShaderSource,
 		Project
@@ -76,6 +78,10 @@ namespace PulseForge
 		case AssetFileType::Image:
 			return HasAssetExtension(
 				Path, { ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".psd", ".gif", ".pic", ".ppm", ".pnm", ".pgm", ".pbm", ".hdr" });
+		case AssetFileType::RuntimeUI:
+			return HasAssetExtension(Path, { ".pfui" });
+		case AssetFileType::Font:
+			return HasAssetExtension(Path, { ".ttf", ".otf" });
 		case AssetFileType::PreviewImage:
 			return HasAssetExtension(
 				Path, { ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".psd", ".gif", ".pic", ".ppm", ".pnm", ".pgm", ".pbm" });

@@ -25,6 +25,12 @@ namespace PulseForge
 		{
 			return { Code, std::move(Message) };
 		}
+
+		void AdvanceGeneration(uint64_t& Generation) noexcept
+		{
+			++Generation;
+			if (Generation == 0) ++Generation;
+		}
 	} // namespace
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -98,6 +104,7 @@ namespace PulseForge
 			m_SceneAsset = StartupScene;
 			m_PendingScene.reset();
 			m_Paused = false;
+			AdvanceGeneration(m_RuntimeUISessionGeneration);
 			return {};
 		}
 
@@ -134,6 +141,7 @@ namespace PulseForge
 		m_SceneAsset = *StartupScene;
 		m_PendingScene.reset();
 		m_Paused = false;
+		AdvanceGeneration(m_RuntimeUISessionGeneration);
 		return {};
 #else
 		return std::unexpected(MakeError(PlayerSessionErrorCode::ProjectOpenFailed,
@@ -228,13 +236,13 @@ namespace PulseForge
 			m_Scene = std::move(CandidateScene);
 			m_SceneAsset = CandidateAsset;
 			m_Runtime = std::move(CandidateRuntime);
+			AdvanceGeneration(m_RuntimeUISessionGeneration);
 			RetiredRuntime.reset();
 			RetiredScene.reset();
 		}
 
-		if (m_Paused) return SceneRuntimeFrameResult{};
-
-		auto Result = m_Runtime->Advance(*m_Scene, Timestep(ScaledDeltaSeconds));
+		auto Result = m_Runtime->Advance(*m_Scene, Timestep(m_Paused ? 0.0 : ScaledDeltaSeconds));
+		m_Paused = m_Runtime->IsPaused();
 		const auto BoundaryRequest = m_Runtime->GetPendingBoundaryRequest();
 		if (m_StopRequested || (BoundaryRequest && BoundaryRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop))
 		{
@@ -297,10 +305,12 @@ namespace PulseForge
 
 	void PlayerSession::Stop() noexcept
 	{
+		const bool HadRuntime = static_cast<bool>(m_Runtime);
 		m_StopRequested = false;
 		m_RequestedSceneTransition.reset();
 		m_PendingScene.reset();
 		m_Runtime.reset();
+		if (HadRuntime) AdvanceGeneration(m_RuntimeUISessionGeneration);
 		m_Scene.reset();
 		m_SceneAsset.reset();
 #if !defined(PF_COOKED_RUNTIME_ONLY)

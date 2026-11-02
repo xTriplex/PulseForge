@@ -201,7 +201,7 @@ namespace
 			PF_CHECK(Tests, false);
 			return;
 		}
-		PF_CHECK(Tests, Document.value("version", 0) == 10);
+		PF_CHECK(Tests, Document.value("version", 0) == 12);
 		const nlohmann::json* RootRecord = FindSerializedEntity(Document, RootEntityID);
 		PF_CHECK(Tests, RootRecord != nullptr && RootRecord->contains("prefabInstance"));
 		if (!RootRecord || !RootRecord->contains("prefabInstance")) return;

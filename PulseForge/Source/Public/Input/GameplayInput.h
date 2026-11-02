@@ -241,6 +241,12 @@ namespace PulseForge
 		uint16_t Modifiers = 0;
 	};
 
+	struct GameplayPointerPosition final
+	{
+		float X = 0.0f;
+		float Y = 0.0f;
+	};
+
 	enum class InputContext : uint8_t
 	{
 		Gameplay,
@@ -395,6 +401,7 @@ namespace PulseForge
 		// Fixed-step consumers receive pending edges at most once. With zero simulation steps, edges remain pending.
 		[[nodiscard]] SimulationActionSnapshot BeginSimulationStep();
 		[[nodiscard]] bool DidOverflowEvents() const noexcept { return m_EventOverflowed; }
+		[[nodiscard]] std::optional<GameplayPointerPosition> GetPointerPosition(InputWindowID Window) const noexcept;
 
 	private:
 		struct Impl;

@@ -10,6 +10,14 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		Tests/GpuValidation/EditorUiUnormValidation.cpp
 		Tests/GpuValidation/MirroredWindingValidation.cpp
 		Tests/GpuValidation/ValidationShader.cpp)
+	add_executable(PulseForgeRuntimeUIGpuValidation Tests/GpuValidation/RuntimeUIGpuValidation.cpp)
+	target_include_directories(PulseForgeRuntimeUIGpuValidation PRIVATE Tests)
+	target_compile_definitions(PulseForgeRuntimeUIGpuValidation PRIVATE
+		PF_RUNTIME_UI_GPU_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}"
+		PF_RUNTIME_UI_GPU_FONT="${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/Assets/Fonts/Inter-Regular.ttf")
+	target_link_libraries(PulseForgeRuntimeUIGpuValidation PRIVATE PulseForge)
+	add_dependencies(PulseForgeRuntimeUIGpuValidation PulseForgeSceneShaderAssets)
+	pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeRuntimeUIGpuValidation)
 	target_include_directories(PulseForgeGpuValidation PRIVATE Tests)
 	target_compile_definitions(PulseForgeGpuValidation PRIVATE
 		PF_GPU_VALIDATION_SHADER_DIRECTORY="${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
@@ -56,6 +64,13 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	endif()
 	if(BUILD_TESTING)
 		add_test(NAME PulseForge.GPU.RGBA16F COMMAND PulseForgeGpuValidation)
+		add_test(NAME PulseForge.GPU.RuntimeUI COMMAND PulseForgeRuntimeUIGpuValidation)
+		if(PULSEFORGE_BUILD_MACOS_DESKTOP AND TARGET PulseForgeMacOSRendererValidation)
+			add_dependencies(PulseForgeMacOSRendererValidation PulseForgeRuntimeUIGpuValidation)
+			add_test(NAME PulseForge.GPU.MacOSRenderer.RuntimeUI COMMAND PulseForgeRuntimeUIGpuValidation)
+			set_tests_properties(PulseForge.GPU.MacOSRenderer.RuntimeUI PROPERTIES
+				RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer;macos;moltenvk")
+		endif()
 		add_test(NAME PulseForge.GPU.SceneHDR COMMAND PulseForgeGpuValidation --scene-hdr)
 		add_test(NAME PulseForge.GPU.SceneToneMapping COMMAND PulseForgeGpuValidation --scene-tonemap)
 		add_test(NAME PulseForge.GPU.EditorUIUnorm COMMAND PulseForgeGpuValidation --editor-ui-unorm)
@@ -125,6 +140,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 				LABELS "gpu;renderer;linux-window")
 		endif()
 		set_tests_properties(
+			PulseForge.GPU.RuntimeUI
 			PulseForge.GPU.RGBA16F
 			PulseForge.GPU.SceneHDR
 			PulseForge.GPU.SceneToneMapping

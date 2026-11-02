@@ -341,8 +341,9 @@ namespace PulseForgeEditor
 			const auto AudioSource = Entity.GetAudioSource();
 			const auto AudioListener = Entity.GetAudioListener();
 			const auto Script = Entity.GetScript();
+			const auto RuntimeUICanvas = Entity.GetRuntimeUICanvas();
 			if (!Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !Mesh || !Rigidbody || !Collider ||
-				!AudioSource || !AudioListener || !Script)
+				!AudioSource || !AudioListener || !Script || !RuntimeUICanvas)
 				Inspector.Actions.ReportInspectorError("Could not inspect entity components.");
 
 			if (Camera && !Camera->has_value() && Inspector.Style.MenuItem(PulseForgeEditor::EditorIcon::Camera, "Camera"))
@@ -457,6 +458,26 @@ namespace PulseForgeEditor
 				if (!HasScripts) ImGui::MenuItem("Import a Lua script first", nullptr, false, false);
 				ImGui::EndMenu();
 			}
+
+			if (RuntimeUICanvas && !RuntimeUICanvas->has_value() && ImGui::BeginMenu("Runtime UI Canvas"))
+			{
+				bool HasDocuments = false;
+				for (const PulseForge::AssetRecord& Asset : Inspector.Assets)
+				{
+					if (!IsAssetExtension(Asset, { ".pfui" })) continue;
+					HasDocuments = true;
+					const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+					if (ImGui::MenuItem(Path.c_str()))
+					{
+						const PulseForge::RuntimeUICanvasComponent Component{ Asset.ID, true };
+						RecordComponentOperation(Inspector, [Entity, Component] { return Entity.SetRuntimeUICanvas(Component); },
+							"Runtime UI canvas assignment failed");
+						break;
+					}
+				}
+				if (!HasDocuments) ImGui::MenuItem("Create a .pfui asset first", nullptr, false, false);
+				ImGui::EndMenu();
+			}
 			ImGui::EndPopup();
 		}
 	}
@@ -472,6 +493,7 @@ namespace PulseForgeEditor
 		DrawRigidbodyComponent(Inspector, Entity);
 		DrawBoxColliderComponent(Inspector, Entity);
 		DrawAudioSourceComponent(Inspector, Entity);
+		DrawRuntimeUICanvasComponent(Inspector, Entity);
 		DrawAudioListenerComponent(Inspector, Entity);
 		DrawScriptComponent(Inspector, Entity);
 	}
@@ -992,6 +1014,47 @@ namespace PulseForgeEditor
 			RecordComponentOperation(
 				Inspector, [Entity, Component] { return Entity.SetAudioSource(Component); }, "Audio source update failed");
 		}
+		Inspector.Style.EndComponentBody();
+	}
+
+	void EditorInspectorPanel::DrawRuntimeUICanvasComponent(Context& Inspector, const PulseForge::Entity& Entity)
+	{
+		const auto Result = Entity.GetRuntimeUICanvas();
+		if (!Result || !Result->has_value()) return;
+		PulseForge::RuntimeUICanvasComponent Component = **Result;
+		const bool Expanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::Image, "Runtime UI Canvas");
+		ImGui::SameLine();
+		ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
+		if (Inspector.Style.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveRuntimeUICanvas",
+				"Remove Runtime UI Canvas component", true))
+		{
+			RecordComponentOperation(Inspector, [Entity] { return Entity.RemoveRuntimeUICanvas(); }, "Runtime UI canvas removal failed");
+			return;
+		}
+		if (!Expanded) return;
+		Inspector.Style.BeginComponentBody("RuntimeUICanvasComponentBody");
+		std::optional<PulseForge::AssetID> Document = Component.DocumentAsset;
+		int InputPolicy = static_cast<int>(Component.InputPolicy);
+		const char* InputPolicies[]{ "Passive HUD", "Non-modal UI", "Modal menu" };
+		bool Changed = false;
+		if (Inspector.Style.BeginPropertyTable("RuntimeUICanvasProperties"))
+		{
+			if (Inspector.Style.BeginPropertyRow("UI Document"))
+				Changed |= DrawAssetSelector(Inspector, "##RuntimeUIDocument", Document, { ".pfui" }, false);
+			if (Inspector.Style.BeginPropertyRow("Enabled"))
+				Changed |= ImGui::Checkbox("##RuntimeUICanvasEnabled", &Component.Enabled);
+			if (Inspector.Style.BeginPropertyRow("Input Policy") && ImGui::Combo(
+				"##RuntimeUICanvasInputPolicy", &InputPolicy, InputPolicies, 3))
+			{
+				Component.InputPolicy = static_cast<PulseForge::RuntimeUIInputPolicy>(InputPolicy);
+				Changed = true;
+			}
+			Inspector.Style.EndPropertyTable();
+		}
+		if (Document) Component.DocumentAsset = *Document;
+		if (Changed && Document)
+			RecordComponentOperation(Inspector, [Entity, Component] { return Entity.SetRuntimeUICanvas(Component); },
+				"Runtime UI canvas update failed");
 		Inspector.Style.EndComponentBody();
 	}
 

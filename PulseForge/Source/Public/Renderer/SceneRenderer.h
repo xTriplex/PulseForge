@@ -11,6 +11,7 @@
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/SpotlightShadowMath.h"
 #include "Renderer/PointLightShadowMath.h"
+#include "UI/RuntimeUI.h"
 #include "Renderer/ToneMapping.h"
 #include "Renderer/LocalLighting.h"
 #include "Scene/SceneRenderSnapshot.h"
@@ -28,6 +29,7 @@
 
 namespace PulseForge
 {
+	class RuntimeUIRenderPass;
 	struct MaterialAssetDesc;
 	class Project;
 	class Scene;
@@ -78,6 +80,22 @@ namespace PulseForge
 		::PulseForge::PointShadowSlotOwners PointShadowSlotOwners{};
 	};
 
+	struct RuntimeUIOverlayFrameStats final
+	{
+		bool CanvasPresent = false;
+		bool TransparentFallbackBound = true;
+		uint32_t BoundTextureWidth = 0;
+		uint32_t BoundTextureHeight = 0;
+		uint64_t BoundTextureLogicalPayloadBytes = 0;
+		uint32_t RetainedOverlayWidth = 0;
+		uint32_t RetainedOverlayHeight = 0;
+		uint64_t RetainedOverlayLogicalPayloadBytes = 0;
+		uint64_t OverlayTargetCreationCount = 0;
+		uint64_t OverlayClearCount = 0;
+		uint64_t ToneMappingBindingCreationCount = 0;
+		uint64_t RuntimeUITextureBindingCreationCount = 0;
+	};
+
 	struct SceneRenderOutputResult
 	{
 		size_t GeometryDrawCount = 0;
@@ -93,6 +111,11 @@ namespace PulseForge
 		size_t PointShadowCasterDrawCount = 0;
 		uint64_t PointShadowResourceGeneration = 0;
 		::PulseForge::PointShadowSlotOwners PointShadowSlotOwners{};
+		size_t RuntimeUIQuadCount = 0;
+		size_t RuntimeUIBatchCount = 0;
+		size_t RuntimeUITextureCount = 0;
+		size_t RuntimeUIFontAtlasCount = 0;
+		RuntimeUIOverlayFrameStats RuntimeUIOverlay{};
 	};
 
 	struct AmbientOcclusionSettings
@@ -162,6 +185,10 @@ namespace PulseForge
 		[[nodiscard]] std::expected<SceneRenderOutputResult, SceneRendererError> RenderPreparedSceneToOutput();
 		// Renders once to HDR, then tone maps into the supplied SDR offscreen target.
 		[[nodiscard]] std::expected<SceneRenderOutputResult, SceneRendererError> RenderPreparedSceneToOutput(const RenderTarget& Target);
+		// Supplies an owned copy of the active screen-space UI frame for composition after tone mapping.
+		// Supplies an owned frame snapshot. Canvas presence is separate from its prepared draw-list size.
+		void SetRuntimeUIFrame(
+			std::span<const RuntimeUIDrawCommand> Commands, const RuntimeUIViewport& Viewport, bool CanvasPresent = true);
 		[[nodiscard]] bool SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept;
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
@@ -212,6 +239,8 @@ namespace PulseForge
 		[[nodiscard]] const BindingSet* FindPreparedMaterialBinding(UUID Entity) const noexcept;
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
+		[[nodiscard]] std::expected<const Texture*, SceneRendererError> PrepareRuntimeUIOverlay(uint32_t Width, uint32_t Height);
+		[[nodiscard]] RuntimeUIOverlayFrameStats GetRuntimeUIOverlayFrame(const Texture& BoundTexture) const noexcept;
 
 		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(const SceneMeshInstance& Instance);
 
@@ -294,5 +323,16 @@ namespace PulseForge
 #endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
+		std::unique_ptr<RuntimeUIRenderPass> m_RuntimeUIRenderPass;
+		TextureHandle m_TransparentRuntimeUITexture;
+		RenderTargetHandle m_RuntimeUIOverlayTarget;
+		uint32_t m_RuntimeUIOverlayWidth = 0;
+		uint32_t m_RuntimeUIOverlayHeight = 0;
+		uint64_t m_RuntimeUIOverlayTargetCreationCount = 0;
+		uint64_t m_RuntimeUIOverlayClearCount = 0;
+		std::vector<RuntimeUIDrawCommand> m_RuntimeUIDrawCommands;
+		std::vector<const Texture*> m_PreparedRuntimeUITextures;
+		RuntimeUIViewport m_RuntimeUIView{};
+		bool m_RuntimeUICanvasPresent = false;
 	};
 }

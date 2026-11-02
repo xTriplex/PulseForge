@@ -2,6 +2,7 @@
 #include "Core/BoundedInput.h"
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
+#include "Scene/Components/RuntimeUICanvasComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/PointLightComponent.h"
@@ -30,7 +31,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 10;
+		constexpr int64_t SceneFormatVersion = 12;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -492,10 +493,11 @@ namespace PulseForge
 				const auto AudioSource = Current.GetAudioSource();
 				const auto AudioListener = Current.GetAudioListener();
 				const auto Script = Current.GetScript();
+				const auto RuntimeUICanvas = Current.GetRuntimeUICanvas();
 				const auto PrefabInstance = Current.GetPrefabInstance();
 				const auto Parent = Current.GetParent();
 				if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
-					!AudioSource || !AudioListener || !Script || !PrefabInstance || !Parent)
+					!AudioSource || !AudioListener || !Script || !RuntimeUICanvas || !PrefabInstance || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -515,7 +517,9 @@ namespace PulseForge
 						{ "verticalFovRadians", CameraData.VerticalFieldOfViewRadians },
 						{ "nearClipPlane", CameraData.NearClipPlane },
 						{ "farClipPlane", CameraData.FarClipPlane },
-						{ "primary", CameraData.IsPrimary }
+						{ "primary", CameraData.IsPrimary },
+						{ "projection", CameraData.ProjectionType == CameraProjectionType::Orthographic ? "orthographic" : "perspective" },
+						{ "orthographicHeight", CameraData.OrthographicHeight }
 					});
 				}
 				if (DirectionalLight->has_value())
@@ -614,6 +618,13 @@ namespace PulseForge
 				}
 				if (AudioListener->has_value())
 					Record["audioListener"] = Json::object({ { "primary", AudioListener->value().IsPrimary } });
+				if (RuntimeUICanvas->has_value())
+					Record["runtimeUICanvas"] = Json::object({
+						{ "documentAsset", RuntimeUICanvas->value().DocumentAsset.ToString() },
+						{ "enabled", RuntimeUICanvas->value().Enabled },
+						{ "inputPolicy", RuntimeUICanvas->value().InputPolicy == RuntimeUIInputPolicy::Passive ? "passive" :
+							RuntimeUICanvas->value().InputPolicy == RuntimeUIInputPolicy::NonModal ? "nonModal" : "modal" }
+					});
 				if (Script->has_value())
 				{
 					if (auto Validation = Script->value().Validate(); !Validation)
@@ -712,7 +723,8 @@ namespace PulseForge
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Each scene entity must be an object"));
 				if (auto Fields = ValidateKnownFields(SerializedEntity,
 						{ "uuid", "tag", "transform", "camera", "directionalLight", "environmentLight", "pointLight", "spotLight",
-							"meshRenderer", "rigidbody", "boxCollider", "collider", "audioSource", "audioListener", "script", "parent", "prefabInstance" },
+							"meshRenderer", "rigidbody", "boxCollider", "collider", "audioSource", "audioListener", "script",
+							"runtimeUICanvas", "parent", "prefabInstance" },
 						"Scene entity");
 					!Fields)
 					return std::unexpected(Fields.error());
@@ -790,7 +802,7 @@ namespace PulseForge
 					if (!SerializedCamera->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity camera must be an object"));
 					if (auto Fields =
-							ValidateKnownFields(*SerializedCamera, { "verticalFovRadians", "nearClipPlane", "farClipPlane", "primary" },
+							ValidateKnownFields(*SerializedCamera, { "verticalFovRadians", "nearClipPlane", "farClipPlane", "primary", "projection", "orthographicHeight" },
 								"Camera component", SceneSerializationErrorCode::InvalidEntityData);
 						!Fields)
 						return std::unexpected(Fields.error());
@@ -814,6 +826,21 @@ namespace PulseForge
 						NearClip->get<float>(),
 						FarClip->get<float>(),
 						Primary != SerializedCamera->end() && Primary->get<bool>() };
+					const auto ProjectionType = SerializedCamera->find("projection");
+					const auto OrthographicHeight = SerializedCamera->find("orthographicHeight");
+					if ((ProjectionType != SerializedCamera->end() && !ProjectionType->is_string()) ||
+						(OrthographicHeight != SerializedCamera->end() && !OrthographicHeight->is_number()))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Camera projection and orthographic height fields have invalid types"));
+					if (ProjectionType != SerializedCamera->end())
+					{
+						const std::string ProjectionName = ProjectionType->get<std::string>();
+						if (ProjectionName == "orthographic") CameraData->ProjectionType = CameraProjectionType::Orthographic;
+						else if (ProjectionName != "perspective")
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Camera projection type is unsupported"));
+					}
+					if (OrthographicHeight != SerializedCamera->end())
+						CameraData->OrthographicHeight = OrthographicHeight->get<float>();
 					if (auto CameraValidation = CameraData->Validate(); !CameraValidation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, CameraValidation.error().Message));
 				}
@@ -1201,6 +1228,41 @@ namespace PulseForge
 					AudioListenerData = AudioListenerComponent{ Primary->get<bool>() };
 				}
 
+				std::optional<RuntimeUICanvasComponent> RuntimeUICanvasData;
+				const auto SerializedRuntimeUICanvas = SerializedEntity.find("runtimeUICanvas");
+				if (SerializedRuntimeUICanvas != SerializedEntity.end())
+				{
+					if (!SerializedRuntimeUICanvas->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Entity runtimeUICanvas must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedRuntimeUICanvas, { "documentAsset", "enabled", "inputPolicy" },
+							"Runtime UI canvas component", SceneSerializationErrorCode::InvalidEntityData); !Fields)
+						return std::unexpected(Fields.error());
+					const auto Asset = SerializedRuntimeUICanvas->find("documentAsset");
+					const auto Enabled = SerializedRuntimeUICanvas->find("enabled");
+					const auto InputPolicy = SerializedRuntimeUICanvas->find("inputPolicy");
+					if (Asset == SerializedRuntimeUICanvas->end() || !Asset->is_string() ||
+						Enabled == SerializedRuntimeUICanvas->end() || !Enabled->is_boolean() ||
+						(DocumentVersion >= 12 && (InputPolicy == SerializedRuntimeUICanvas->end() || !InputPolicy->is_string())))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Runtime UI canvas requires a documentAsset UUID, boolean enabled field, and versioned input policy"));
+					RuntimeUIInputPolicy ParsedPolicy = RuntimeUIInputPolicy::Modal;
+					if (InputPolicy != SerializedRuntimeUICanvas->end())
+					{
+						const std::string& Policy = InputPolicy->get_ref<const std::string&>();
+						if (Policy == "passive") ParsedPolicy = RuntimeUIInputPolicy::Passive;
+						else if (Policy == "nonModal") ParsedPolicy = RuntimeUIInputPolicy::NonModal;
+						else if (Policy == "modal") ParsedPolicy = RuntimeUIInputPolicy::Modal;
+						else return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Runtime UI canvas inputPolicy must be passive, nonModal, or modal"));
+					}
+					auto ParsedAsset = UUID::Parse(Asset->get<std::string>());
+					if (!ParsedAsset || ParsedAsset->IsNil())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Runtime UI document asset UUID is invalid or nil"));
+					RuntimeUICanvasData = RuntimeUICanvasComponent{ *ParsedAsset, Enabled->get<bool>(), ParsedPolicy };
+				}
+
 				std::optional<ScriptComponent> ScriptData;
 				const auto SerializedScript = SerializedEntity.find("script");
 				if (SerializedScript != SerializedEntity.end())
@@ -1320,6 +1382,11 @@ namespace PulseForge
 				{
 					if (auto AudioListenerResult = Created->SetAudioListener(*AudioListenerData); !AudioListenerResult)
 						return std::unexpected(SceneOperationError(AudioListenerResult.error()));
+				}
+				if (RuntimeUICanvasData)
+				{
+					if (auto CanvasResult = Created->SetRuntimeUICanvas(*RuntimeUICanvasData); !CanvasResult)
+						return std::unexpected(SceneOperationError(CanvasResult.error()));
 				}
 				if (ScriptData)
 				{

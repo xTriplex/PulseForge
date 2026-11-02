@@ -15,10 +15,13 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			std::span<const std::byte> VertexBytecode, std::span<const std::byte> FragmentBytecode);
 		[[nodiscard]] std::expected<void, SceneRendererError> Prepare(
-			const Texture& HdrTexture, uint64_t Generation, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled);
+			const Texture& HdrTexture, uint64_t Generation, const Texture& UiOverlay,
+			ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> Draw(const Texture& HdrTexture, uint64_t Generation,
-			ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled, const Buffer& FullscreenTriangle);
+			const Texture& UiOverlay, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled,
+			const Buffer& FullscreenTriangle);
 		void InvalidateBindings() noexcept;
+		[[nodiscard]] uint64_t BindingSetCreationCount() const noexcept { return m_BindingSetCreationCount; }
 		[[nodiscard]] bool SetSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetSettings() const noexcept;
 
@@ -32,7 +35,8 @@ namespace PulseForge
 		static_assert(sizeof(Constants) == 16);
 
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat, bool DepthAttachmentEnabled);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBindings(const Texture& HdrTexture, uint64_t Generation);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBindings(
+			const Texture& HdrTexture, uint64_t Generation, const Texture& UiOverlay);
 
 		RenderDevice& m_Runtime;
 		ShaderHandle m_VertexShader;
@@ -45,6 +49,8 @@ namespace PulseForge
 		ToneMappingSettings m_Settings;
 		Constants m_UploadedConstants{};
 		uint64_t m_BindingGeneration = 0;
+		uint64_t m_BindingSetCreationCount = 0;
+		const Texture* m_BoundUiOverlay = nullptr;
 		bool m_HasUploadedConstants = false;
 	};
 } // namespace PulseForge

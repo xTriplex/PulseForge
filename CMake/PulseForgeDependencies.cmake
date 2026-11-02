@@ -5,6 +5,15 @@ set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(PulseForge/Vendor/Glfw)
 find_package(OpenGL REQUIRED)
 
+# FreeType is a runtime rasterizer dependency for packaged UI text. Keep it
+# separate from Editor-only ImGui and retain the repository's pinned source.
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+add_subdirectory(PulseForge/Vendor/freetype "${CMAKE_BINARY_DIR}/_deps/freetype-build" EXCLUDE_FROM_ALL)
+
 # Build only Jolt's CPU physics library. PulseForge owns the engine-facing
 # integration; Jolt remains a private implementation dependency.
 set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
@@ -102,15 +111,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 	set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
 	add_subdirectory(PulseForge/Vendor/nativefiledialog)
 
-	# The current Font Awesome Free desktop font uses CFF outlines in an OTF.
-	# Reuse the repository's pinned FreeType copy for the editor's font atlas;
-	# compressed-font features are disabled because bundled assets are plain local TTF/OTF files.
-	set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
-	set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
-	set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
-	set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
-	set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
-	add_subdirectory(PulseForge/Vendor/freetype "${CMAKE_BINARY_DIR}/_deps/freetype-build" EXCLUDE_FROM_ALL)
 endif()
 
 if(PULSEFORGE_BUILD_EDITOR OR PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)

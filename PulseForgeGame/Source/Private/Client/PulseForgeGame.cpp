@@ -14,7 +14,9 @@
 #include "Scene/Scene.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -242,6 +244,10 @@ public:
 #if defined(PF_DEBUG)
 		if (const char* Smoke = std::getenv("PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"))
 			m_PlayerSmokeExitAfterRender = std::string_view(Smoke) == "1";
+		if (const char* UISmoke = std::getenv("PULSEFORGE_RUNTIME_UI_PACKAGE_SMOKE"))
+			m_RuntimeUIPackageSmoke = std::string_view(UISmoke) == "1";
+		if (const char* UIAcceptance = std::getenv("PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE"))
+			m_RuntimeUIPackageAcceptance = std::string_view(UIAcceptance) == "1";
 		if (const char* Acceptance = std::getenv("PULSEFORGE_COOKED_PLAYER_ACCEPTANCE"))
 			m_CookedPlayerAcceptance = std::string_view(Acceptance) == "1";
 #endif
@@ -251,10 +257,13 @@ public:
 		auto& Application = PulseForge::Application::Get();
 		PulseForge::SceneRuntimeDesc RuntimeDescription{};
 #if defined(PF_DEBUG)
-		if (m_CookedPlayerAcceptance)
+		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance)
 		{
 			RuntimeDescription.Audio.OutputBackend = PulseForge::AudioOutputBackend::Null;
-			PF_INFO("PULSEFORGE_COOKED_AUDIO_BACKEND=NULL; deterministic output selected for process acceptance");
+			if (m_CookedPlayerAcceptance)
+				PF_INFO("PULSEFORGE_COOKED_AUDIO_BACKEND=NULL; deterministic output selected for process acceptance");
+			if (m_RuntimeUIPackageAcceptance)
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_AUDIO_BACKEND=NULL; deterministic output selected for G18 package acceptance");
 		}
 #endif
 		if (!m_Configuration.CookedContentRoot.empty())
@@ -287,11 +296,14 @@ public:
 		}
 		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
 #if defined(PF_DEBUG)
-		if (m_CookedPlayerAcceptance)
+		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance)
 		{
 			if (!UserDataRoot)
-				throw std::runtime_error("Cooked Player acceptance could not resolve its isolated user-data directory");
-			PF_INFO("PULSEFORGE_COOKED_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
+				throw std::runtime_error("Player package acceptance could not resolve its isolated user-data directory");
+			if (m_CookedPlayerAcceptance)
+				PF_INFO("PULSEFORGE_COOKED_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
+			if (m_RuntimeUIPackageAcceptance)
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
 		}
 #endif
 		if (m_CookedContent)
@@ -401,12 +413,55 @@ public:
 #endif
 		PulseForge::InputRoutingState Routing;
 		Routing.FocusedWindow = Application.IsMainWindowFocused() ? Application.GetInputWindowID() : 0;
+#if defined(PF_DEBUG)
+		if (m_RuntimeUIPackageAcceptance && Application.GetInputWindowID() != 0)
+			Routing.FocusedWindow = Application.GetInputWindowID();
+		AdvanceRuntimeUIPackageAcceptanceInput(Application, DeltaTime, Routing.FocusedWindow);
+#endif
 		if (m_Session && Routing.FocusedWindow != 0)
 		{
+			if (m_Session->HasRuntimeUI())
+				(void)PulseForge::AppendRuntimeUIInputContext(
+					Routing, m_Session->GetRuntimeUIInputPolicy(), Routing.FocusedWindow);
 			Routing.Contexts[Routing.ContextCount++] = { .Context = PulseForge::InputContext::Gameplay,
 				.Consumes = PulseForge::InputDeviceMask::None, .OwnerWindow = Routing.FocusedWindow, .Active = true };
 		}
 		Application.GetGameplayInput().PublishFrame(Routing);
+		if (m_Session && m_Session->HasRuntimeUI())
+		{
+			const PulseForge::RuntimeUIInputPolicy Policy = m_Session->GetRuntimeUIInputPolicy();
+			const auto [FramebufferWidth, FramebufferHeight] = Application.GetWindow().GetFramebufferSize();
+			const PulseForge::RuntimeUIViewport Viewport{
+				.LogicalSize = { static_cast<float>(Application.GetWindow().GetWidth()),
+					static_cast<float>(Application.GetWindow().GetHeight()) },
+				.FramebufferWidth = FramebufferWidth, .FramebufferHeight = FramebufferHeight };
+			PulseForge::RuntimeUIHostInputSample Sample{
+				.SessionGeneration = m_Session->GetRuntimeUISessionGeneration(),
+				.TreeGeneration = m_Session->GetRuntimeUIInputGeneration(), .InputOwner = Routing.FocusedWindow,
+				.Viewport = Viewport, .DeltaSeconds = DeltaTime.GetSeconds(), .Focused = Routing.FocusedWindow != 0 };
+			if (Policy != PulseForge::RuntimeUIInputPolicy::Passive)
+			{
+				const auto PointerPosition = Routing.FocusedWindow != 0
+					? Application.GetGameplayInput().GetPointerPosition(Routing.FocusedWindow) : std::nullopt;
+				const auto* Navigate = Application.GetGameplayInput().FindAction("ui.navigate");
+				const auto* Activate = Application.GetGameplayInput().FindAction("ui.activate");
+				const auto* Cancel = Application.GetGameplayInput().FindAction("ui.cancel");
+				const auto* Pointer = Application.GetGameplayInput().FindAction("ui.pointer");
+				Sample.PointerPosition = PointerPosition
+					? std::optional<glm::vec2>{{ PointerPosition->X, PointerPosition->Y }} : std::nullopt;
+				Sample.PointerPressed = Pointer && Pointer->Pressed;
+				Sample.PointerHeld = Pointer && Pointer->Held;
+				Sample.PointerReleased = Pointer && Pointer->Released;
+				Sample.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{};
+				Sample.ActivatePressed = Activate && Activate->Pressed;
+				Sample.ActivateHeld = Activate && Activate->Held;
+				Sample.CancelPressed = Cancel && Cancel->Pressed;
+				Sample.CancelHeld = Cancel && Cancel->Held;
+			}
+			const PulseForge::RuntimeUIHostFrame Frame = PulseForge::BuildRuntimeUIHostFrame(
+				m_RuntimeUIInputAdapter, std::move(Sample), Policy);
+			(void)m_Session->SubmitRuntimeUIFrame(Frame.Viewport, Frame.Events);
+		}
 
 		if (m_EditorShutdownChannel.ConsumeRequest())
 		{
@@ -463,6 +518,8 @@ public:
 					}
 				}
 			}
+			if (m_RuntimeUIPackageAcceptance)
+				AdvanceRuntimeUIPackageAcceptanceChecks(Application);
 #endif
 			if (Advanced && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged && Advanced->PhysicsSteps > 0)
 			{
@@ -472,6 +529,11 @@ public:
 			}
 		}
 		if (!m_SceneRenderer || !m_Session || !m_Session->GetActiveScene()) return;
+		if (m_Session->HasRuntimeUI())
+			m_SceneRenderer->SetRuntimeUIFrame(
+				m_Session->GetRuntimeUIDrawCommands(), m_Session->GetRuntimeUIViewport(), true);
+		else
+			m_SceneRenderer->SetRuntimeUIFrame({}, {}, false);
 
 		const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
 		if (FramebufferWidth == 0 || FramebufferHeight == 0) return;
@@ -518,6 +580,43 @@ public:
 			return;
 		}
 		m_LoggedRenderFailure = false;
+#if defined(PF_DEBUG)
+		if (m_RuntimeUIPackageAcceptance && !m_RuntimeUIPackageMenuRendered && m_Session && m_Session->HasRuntimeUI())
+		{
+			const auto Commands = m_Session->GetRuntimeUIDrawCommands();
+			const bool HasTitle = std::any_of(Commands.begin(), Commands.end(),
+				[](const PulseForge::RuntimeUIDrawCommand& Command) { return Command.Text.find("Café PulseForge") != std::string::npos; });
+			const bool HasStartButton = std::any_of(Commands.begin(), Commands.end(),
+				[](const PulseForge::RuntimeUIDrawCommand& Command)
+				{ return Command.Kind == PulseForge::RuntimeUIElementKind::Button && Command.Text == "Start"; });
+			const bool HasImage = std::any_of(Commands.begin(), Commands.end(),
+				[](const PulseForge::RuntimeUIDrawCommand& Command)
+				{ return Command.Kind == PulseForge::RuntimeUIElementKind::Image && !Command.Image.IsNil(); });
+			if (HasTitle && HasStartButton && HasImage && Rendered->RuntimeUIQuadCount > 0 &&
+				Rendered->RuntimeUITextureCount >= 2 && Rendered->RuntimeUIFontAtlasCount > 0)
+			{
+				m_RuntimeUIPackageMenuRendered = true;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_MENU=PASS; rendered sampled image and Café PulseForge/Start glyphs; "
+					"quads={}; batches={}; textures={}; font_atlases={}; input=synthetic-mapped",
+					Rendered->RuntimeUIQuadCount, Rendered->RuntimeUIBatchCount, Rendered->RuntimeUITextureCount,
+					Rendered->RuntimeUIFontAtlasCount);
+			}
+		}
+		if (m_RuntimeUIPackageAcceptance && m_RuntimeUIPackageAcceptanceComplete && !m_RuntimeUIPackageAcceptanceShutdownRequested)
+		{
+			m_RuntimeUIPackageAcceptanceShutdownRequested = true;
+			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE=PASS; normal shutdown requested");
+			PulseForge::Application::Get().RequestClose();
+		}
+		if (m_RuntimeUIPackageSmoke && !m_RuntimeUIPackageSmokeShutdownRequested && Rendered->RuntimeUIQuadCount > 0)
+		{
+			m_RuntimeUIPackageSmokeShutdownRequested = true;
+			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE=PASS; quads={}; batches={}; textures={}; font_atlases={}; requesting orderly shutdown",
+				Rendered->RuntimeUIQuadCount, Rendered->RuntimeUIBatchCount, Rendered->RuntimeUITextureCount,
+				Rendered->RuntimeUIFontAtlasCount);
+			PulseForge::Application::Get().RequestClose();
+		}
+#endif
 		if (Rendered->GeometryDrawCount > 0)
 		{
 			if (!m_LoggedSceneDraw)
@@ -546,12 +645,261 @@ public:
 		if (m_PlayerSmokeShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
 #if defined(PF_DEBUG)
 		if (m_CookedAcceptanceShutdownRequested) PF_INFO("PULSEFORGE_COOKED_PLAYER_SHUTDOWN=PASS");
+		if (m_RuntimeUIPackageSmokeShutdownRequested) PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS");
+		if (m_RuntimeUIPackageAcceptanceComplete && !m_RuntimeUIPackageAcceptanceFailed)
+			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS; Player exited normally after menu/gameplay/pause/resume interaction");
 #endif
 		if (m_EditorShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_ORDERLY_STOP=PASS");
 	}
 
 private:
 #if defined(PF_DEBUG)
+	enum class RuntimeUIPackageAcceptanceStage : uint8_t
+	{
+		ObserveMenu,
+		StartPressed,
+		StartReleased,
+		AwaitGameplay,
+		GameplayActionPressed,
+		GameplayActionReleased,
+		AwaitGameplayAction,
+		MovePausePointer,
+		PausePressed,
+		PauseReleased,
+		AwaitPaused,
+		BlockedActionPressed,
+		BlockedActionReleased,
+		AwaitBlockedAction,
+		MoveResumePointer,
+		ResumePressed,
+		ResumeReleased,
+		AwaitResumed,
+		ResumedActionPressed,
+		ResumedActionReleased,
+		AwaitResumedAction,
+		Complete,
+		Failed
+	};
+
+	void AdvanceRuntimeUIPackageAcceptanceInput(
+		PulseForge::Application& Application, PulseForge::Timestep DeltaTime, PulseForge::InputWindowID Window)
+	{
+		if (!m_RuntimeUIPackageAcceptance || m_RuntimeUIPackageAcceptanceComplete || m_RuntimeUIPackageAcceptanceFailed) return;
+		m_RuntimeUIPackageAcceptanceElapsed += std::clamp(DeltaTime.GetSeconds(), 0.0, 0.25);
+		if (m_RuntimeUIPackageAcceptanceElapsed > 30.0)
+		{
+			FailRuntimeUIPackageAcceptance(Application, "the bounded interaction sequence exceeded 30 seconds");
+			return;
+		}
+		if (Window == 0) return;
+		switch (m_RuntimeUIPackageAcceptanceStage)
+		{
+		case RuntimeUIPackageAcceptanceStage::ObserveMenu:
+			if (m_RuntimeUIPackageMenuRendered) m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::StartPressed;
+			break;
+		case RuntimeUIPackageAcceptanceStage::StartPressed:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Enter, PulseForge::InputEventKind::Pressed))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::StartReleased;
+			break;
+		case RuntimeUIPackageAcceptanceStage::StartReleased:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Enter, PulseForge::InputEventKind::Released))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::AwaitGameplay;
+			break;
+		case RuntimeUIPackageAcceptanceStage::GameplayActionPressed:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Pressed))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::GameplayActionReleased;
+			break;
+		case RuntimeUIPackageAcceptanceStage::GameplayActionReleased:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Released))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::AwaitGameplayAction;
+			break;
+		case RuntimeUIPackageAcceptanceStage::MovePausePointer:
+			if (QueueRuntimeUIPackagePointer(Application, Window, 840.0f, 58.0f))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::PausePressed;
+			break;
+		case RuntimeUIPackageAcceptanceStage::PausePressed:
+			if (QueueRuntimeUIPackagePointerButton(Application, Window, PulseForge::InputEventKind::Pressed))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::PauseReleased;
+			break;
+		case RuntimeUIPackageAcceptanceStage::PauseReleased:
+			if (QueueRuntimeUIPackagePointerButton(Application, Window, PulseForge::InputEventKind::Released))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::AwaitPaused;
+			break;
+		case RuntimeUIPackageAcceptanceStage::BlockedActionPressed:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Pressed))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::BlockedActionReleased;
+			break;
+		case RuntimeUIPackageAcceptanceStage::BlockedActionReleased:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Released))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::AwaitBlockedAction;
+			break;
+		case RuntimeUIPackageAcceptanceStage::MoveResumePointer:
+			if (QueueRuntimeUIPackagePointer(Application, Window, 480.0f, 251.0f))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::ResumePressed;
+			break;
+		case RuntimeUIPackageAcceptanceStage::ResumePressed:
+			if (QueueRuntimeUIPackagePointerButton(Application, Window, PulseForge::InputEventKind::Pressed))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::ResumeReleased;
+			break;
+		case RuntimeUIPackageAcceptanceStage::ResumeReleased:
+			if (QueueRuntimeUIPackagePointerButton(Application, Window, PulseForge::InputEventKind::Released))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::AwaitResumed;
+			break;
+		case RuntimeUIPackageAcceptanceStage::ResumedActionPressed:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Pressed))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::ResumedActionReleased;
+			break;
+		case RuntimeUIPackageAcceptanceStage::ResumedActionReleased:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Released))
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::AwaitResumedAction;
+			break;
+		case RuntimeUIPackageAcceptanceStage::AwaitGameplay:
+		case RuntimeUIPackageAcceptanceStage::AwaitGameplayAction:
+		case RuntimeUIPackageAcceptanceStage::AwaitPaused:
+		case RuntimeUIPackageAcceptanceStage::AwaitBlockedAction:
+		case RuntimeUIPackageAcceptanceStage::AwaitResumed:
+		case RuntimeUIPackageAcceptanceStage::AwaitResumedAction:
+		case RuntimeUIPackageAcceptanceStage::Complete:
+		case RuntimeUIPackageAcceptanceStage::Failed:
+			break;
+		}
+	}
+
+	void AdvanceRuntimeUIPackageAcceptanceChecks(PulseForge::Application& Application)
+	{
+		if (!m_RuntimeUIPackageAcceptance || m_RuntimeUIPackageAcceptanceComplete || m_RuntimeUIPackageAcceptanceFailed || !m_Session)
+			return;
+		const auto Score = ReadRuntimeUIPackageScore();
+		switch (m_RuntimeUIPackageAcceptanceStage)
+		{
+		case RuntimeUIPackageAcceptanceStage::AwaitGameplay:
+			if (Score && HasRuntimeUIPackageText("Pause"))
+			{
+				m_RuntimeUIPackageScoreBeforeAction = *Score;
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::GameplayActionPressed;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_GAMEPLAY=PASS; menu activation loaded the cooked gameplay UI and image");
+			}
+			break;
+		case RuntimeUIPackageAcceptanceStage::AwaitGameplayAction:
+			if (Score && *Score >= m_RuntimeUIPackageScoreBeforeAction + 10)
+			{
+				m_RuntimeUIPackageScoreBeforeAction = *Score;
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::MovePausePointer;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_HUD=PASS; mapped gameplay action changed the visible HUD score from {0} to {1}",
+					m_RuntimeUIPackageScoreBeforeAction - 10, *Score);
+			}
+			break;
+		case RuntimeUIPackageAcceptanceStage::AwaitPaused:
+			if (m_Session->IsPaused() && Score)
+			{
+				m_RuntimeUIPackagePausedScore = *Score;
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::BlockedActionPressed;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_PAUSE=PASS; pause action left the runtime UI live and modal");
+			}
+			break;
+		case RuntimeUIPackageAcceptanceStage::AwaitBlockedAction:
+			if (m_Session->IsPaused() && Score && *Score == m_RuntimeUIPackagePausedScore)
+			{
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::MoveResumePointer;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_MODAL_INPUT=PASS; Space did not advance gameplay while paused");
+			}
+			break;
+		case RuntimeUIPackageAcceptanceStage::AwaitResumed:
+			if (!m_Session->IsPaused() && Score)
+			{
+				m_RuntimeUIPackageScoreBeforeAction = *Score;
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::ResumedActionPressed;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_RESUME=PASS; pointer activation resumed gameplay");
+			}
+			break;
+		case RuntimeUIPackageAcceptanceStage::AwaitResumedAction:
+			if (Score && *Score >= m_RuntimeUIPackageScoreBeforeAction + 10)
+			{
+				m_RuntimeUIPackageAcceptanceComplete = true;
+				m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::Complete;
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_RESUMED_GAMEPLAY=PASS; mapped gameplay input advanced after resume");
+				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE=PASS; normal shutdown requested");
+				m_RuntimeUIPackageAcceptanceShutdownRequested = true;
+				Application.RequestClose();
+			}
+			break;
+		default:
+			break;
+		}
+		if (m_RuntimeUIPackageAcceptanceFailed) return;
+		if (m_RuntimeUIPackageAcceptanceComplete) Application.RequestClose();
+	}
+
+	bool QueueRuntimeUIPackageKey(PulseForge::Application& Application, PulseForge::InputWindowID Window,
+		PulseForge::InputKey Key, PulseForge::InputEventKind Kind)
+	{
+		if (!Application.GetGameplayInput().QueueEvent({ .Kind = Kind,
+			.Control = { .Device = PulseForge::InputDevice::Keyboard, .Code = static_cast<uint16_t>(Key) }, .Window = Window }))
+		{
+			FailRuntimeUIPackageAcceptance(Application, "could not queue a synthetic mapped keyboard event");
+			return false;
+		}
+		return true;
+	}
+
+	bool QueueRuntimeUIPackagePointer(PulseForge::Application& Application, PulseForge::InputWindowID Window, float X, float Y)
+	{
+		if (!Application.GetGameplayInput().QueueEvent({ .Kind = PulseForge::InputEventKind::PointerMoved,
+			.Control = { .Device = PulseForge::InputDevice::MouseMotion,
+				.Code = static_cast<uint16_t>(PulseForge::MouseControl::MotionX) }, .Window = Window, .X = X, .Y = Y }))
+		{
+			FailRuntimeUIPackageAcceptance(Application, "could not queue a synthetic mapped pointer position");
+			return false;
+		}
+		return true;
+	}
+
+	bool QueueRuntimeUIPackagePointerButton(PulseForge::Application& Application, PulseForge::InputWindowID Window,
+		PulseForge::InputEventKind Kind)
+	{
+		if (!Application.GetGameplayInput().QueueEvent({ .Kind = Kind,
+			.Control = { .Device = PulseForge::InputDevice::MouseButton,
+				.Code = static_cast<uint16_t>(PulseForge::MouseControl::Left) }, .Window = Window }))
+		{
+			FailRuntimeUIPackageAcceptance(Application, "could not queue a synthetic mapped pointer-button event");
+			return false;
+		}
+		return true;
+	}
+
+	void FailRuntimeUIPackageAcceptance(PulseForge::Application& Application, std::string_view Reason)
+	{
+		if (m_RuntimeUIPackageAcceptanceFailed) return;
+		m_RuntimeUIPackageAcceptanceFailed = true;
+		PF_ERROR("PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE=FAIL; {0}", Reason);
+		Application.RequestClose();
+	}
+
+	bool HasRuntimeUIPackageText(std::string_view Text)
+	{
+		if (!m_Session) return false;
+		const auto Commands = m_Session->GetRuntimeUIDrawCommands();
+		return std::any_of(Commands.begin(), Commands.end(), [Text](const PulseForge::RuntimeUIDrawCommand& Command)
+			{ return Command.Text.find(Text) != std::string::npos; });
+	}
+
+	std::optional<int> ReadRuntimeUIPackageScore()
+	{
+		if (!m_Session) return std::nullopt;
+		const auto Commands = m_Session->GetRuntimeUIDrawCommands();
+		for (const PulseForge::RuntimeUIDrawCommand& Command : Commands)
+		{
+			constexpr std::string_view Prefix = "Score: ";
+			if (!Command.Text.starts_with(Prefix)) continue;
+			int Value = 0;
+			const char* Begin = Command.Text.data() + Prefix.size();
+			const char* End = Command.Text.data() + Command.Text.size();
+			const auto Parsed = std::from_chars(Begin, End, Value);
+			if (Parsed.ec == std::errc{} && Parsed.ptr == End) return Value;
+		}
+		return std::nullopt;
+	}
+
 	void ValidateCookedFrameReadback()
 	{
 		m_CookedReadbackPending = false;
@@ -604,6 +952,7 @@ private:
 	PulseForgeGame::PlayerLaunchConfiguration m_Configuration;
 	std::shared_ptr<const PulseForge::CookedContentProvider> m_CookedContent;
 	std::unique_ptr<PulseForge::PlayerSession> m_Session;
+	PulseForge::RuntimeUIInputAdapter m_RuntimeUIInputAdapter;
 	std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 	bool m_LoggedPrepareFailure = false;
 	bool m_LoggedRenderFailure = false;
@@ -613,6 +962,8 @@ private:
 	bool m_PlayerSmokeShutdownRequested = false;
 	bool m_PlayerRuntimeSmokeLogged = false;
 #if defined(PF_DEBUG)
+	bool m_RuntimeUIPackageSmoke = false;
+	bool m_RuntimeUIPackageSmokeShutdownRequested = false;
 	bool m_CookedPlayerAcceptance = false;
 	bool m_CookedStartupSceneReady = false;
 	bool m_CookedInputMapReady = false;
@@ -623,6 +974,15 @@ private:
 	bool m_CookedReadbackPending = false;
 	bool m_CookedReadbackPassed = false;
 	bool m_CookedAcceptanceShutdownRequested = false;
+	bool m_RuntimeUIPackageAcceptance = false;
+	bool m_RuntimeUIPackageMenuRendered = false;
+	bool m_RuntimeUIPackageAcceptanceComplete = false;
+	bool m_RuntimeUIPackageAcceptanceFailed = false;
+	bool m_RuntimeUIPackageAcceptanceShutdownRequested = false;
+	RuntimeUIPackageAcceptanceStage m_RuntimeUIPackageAcceptanceStage = RuntimeUIPackageAcceptanceStage::ObserveMenu;
+	double m_RuntimeUIPackageAcceptanceElapsed = 0.0;
+	int m_RuntimeUIPackageScoreBeforeAction = 0;
+	int m_RuntimeUIPackagePausedScore = 0;
 #endif
 	EditorShutdownChannel m_EditorShutdownChannel;
 	bool m_EditorShutdownRequested = false;

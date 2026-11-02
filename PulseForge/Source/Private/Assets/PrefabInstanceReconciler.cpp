@@ -139,6 +139,8 @@ namespace PulseForge
 				&Entity::GetBoxCollider, &Entity::SetBoxCollider, &Entity::RemoveBoxCollider); !Result) return Result;
 			if (auto Result = SyncOptional<AudioSourceComponent>(Source, Destination,
 				&Entity::GetAudioSource, &Entity::SetAudioSource, &Entity::RemoveAudioSource); !Result) return Result;
+			if (auto Result = SyncOptional<RuntimeUICanvasComponent>(Source, Destination,
+				&Entity::GetRuntimeUICanvas, &Entity::SetRuntimeUICanvas, &Entity::RemoveRuntimeUICanvas); !Result) return Result;
 
 			const auto SourceListener = Source.GetAudioListener();
 			const auto DestinationListener = Destination.GetAudioListener();
@@ -190,6 +192,8 @@ namespace PulseForge
 			Remember(SyncOptional<RigidbodyComponent>(Source, Destination, &Entity::GetRigidbody, &Entity::SetRigidbody, &Entity::RemoveRigidbody));
 			Remember(SyncOptional<BoxColliderComponent>(Source, Destination, &Entity::GetBoxCollider, &Entity::SetBoxCollider, &Entity::RemoveBoxCollider));
 			Remember(SyncOptional<AudioSourceComponent>(Source, Destination, &Entity::GetAudioSource, &Entity::SetAudioSource, &Entity::RemoveAudioSource));
+			Remember(SyncOptional<RuntimeUICanvasComponent>(Source, Destination, &Entity::GetRuntimeUICanvas,
+				&Entity::SetRuntimeUICanvas, &Entity::RemoveRuntimeUICanvas));
 			Remember(SyncOptional<AudioListenerComponent>(Source, Destination, &Entity::GetAudioListener, &Entity::SetAudioListener, &Entity::RemoveAudioListener));
 			Remember(SyncOptional<ScriptComponent>(Source, Destination, &Entity::GetScript, &Entity::SetScript, &Entity::RemoveScript));
 

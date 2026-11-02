@@ -322,7 +322,7 @@ namespace PulseForge::GpuValidation
 				if (!Prepared)
 					return std::unexpected(
 						std::string("Could not prepare ") + PreviousCase.Name + " single-sided shadow probe: " + Prepared.error().Message);
-				m_ScenePrepared = true;
+				m_ScenePrepared = !m_Renderer->IsAssetPreparationPending();
 				m_ReadbackPending = false;
 				return false;
 			}
@@ -390,7 +390,7 @@ namespace PulseForge::GpuValidation
 
 		const auto Prepared = m_Renderer->PrepareScene(*m_Scene, m_Camera->GetUUID(), 1.0f);
 		if (!Prepared) return std::unexpected(std::string("Could not prepare ") + Case.Name + " scene: " + Prepared.error().Message);
-		m_ScenePrepared = true;
+		m_ScenePrepared = !m_Renderer->IsAssetPreparationPending();
 		return false;
 	}
 
@@ -403,7 +403,8 @@ namespace PulseForge::GpuValidation
 		if (!m_ShadowProbe)
 		{
 			if (Rendered->GeometryDrawCount != 2)
-				return std::unexpected(std::string(Case.Name) + " did not submit both single- and double-sided triangle draws");
+				return std::unexpected(std::string(Case.Name) + " did not submit both single- and double-sided triangle draws (actual geometry draws=" +
+					std::to_string(Rendered->GeometryDrawCount) + ", expected=2)");
 			if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount != 2)
 				return std::unexpected(std::string(Case.Name) + " did not submit both materials to the spotlight shadow pass");
 			if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 12)
@@ -412,7 +413,8 @@ namespace PulseForge::GpuValidation
 		else
 		{
 			if (Rendered->GeometryDrawCount != 1)
-				return std::unexpected(std::string(Case.Name) + " single-sided shadow probe rendered an unexpected geometry count");
+				return std::unexpected(std::string(Case.Name) + " single-sided shadow probe rendered an unexpected geometry count (actual=" +
+					std::to_string(Rendered->GeometryDrawCount) + ", expected=1)");
 			if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount != 1)
 				return std::unexpected(std::string(Case.Name) + " did not submit the single-sided caster to the spotlight pass");
 			if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 6)

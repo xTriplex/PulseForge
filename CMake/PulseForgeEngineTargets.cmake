@@ -35,6 +35,7 @@ add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/Scene.cpp
 	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp
+	PulseForge/Source/Private/UI/RuntimeUI.cpp
 )
 target_include_directories(PulseForgeScene
 	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
@@ -298,6 +299,7 @@ add_library(PulseForgeSceneRenderer STATIC
 	PulseForge/Source/Private/Renderer/SceneRendererShadowPass.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererShadowTargetCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
+	PulseForge/Source/Private/Renderer/RuntimeUIRenderPass.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererToneMappingStage.cpp
 )
 target_include_directories(PulseForgeSceneRenderer
@@ -307,7 +309,7 @@ target_include_directories(PulseForgeSceneRenderer
 target_compile_definitions(PulseForgeSceneRenderer PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeSceneRenderer
 	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer PulseForgeAssetPreparation PulseForgeDerivedData
-	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetImporters PulseForgeAssetServices PulseForgeCookedProductCodecs
+	PRIVATE freetype PulseForgeAssetCpuProducts PulseForgeAssetImporters PulseForgeAssetServices PulseForgeCookedProductCodecs
 		PulseForgeCookedRuntimeProvider
 )
 target_precompile_headers(PulseForgeSceneRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")
@@ -327,13 +329,14 @@ add_library(PulseForgeCookedSceneRenderer STATIC
 	PulseForge/Source/Private/Renderer/SceneRendererShadowPass.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererShadowTargetCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
+	PulseForge/Source/Private/Renderer/RuntimeUIRenderPass.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererToneMappingStage.cpp
 )
 target_include_directories(PulseForgeCookedSceneRenderer PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm)
 target_compile_definitions(PulseForgeCookedSceneRenderer PUBLIC PF_COOKED_RUNTIME_ONLY _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeCookedSceneRenderer
 	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer PulseForgeAssetPreparation
-	PRIVATE PulseForgeCookedRuntimeProvider PulseForgeCookedProductCodecs)
+	PRIVATE freetype PulseForgeCookedRuntimeProvider PulseForgeCookedProductCodecs)
 set_property(TARGET PulseForgeCookedSceneRenderer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
 add_library(PulseForgeAssetCookService STATIC PulseForge/Source/Private/Assets/AssetCookService.cpp)

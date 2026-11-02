@@ -5,6 +5,7 @@
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/RuntimeUICanvasComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/SceneSerializer.h"
 
@@ -54,8 +55,9 @@ namespace PulseForge
 			const auto AudioSource = Source.GetAudioSource();
 			const auto AudioListener = Source.GetAudioListener();
 			const auto Script = Source.GetScript();
+			const auto RuntimeUICanvas = Source.GetRuntimeUICanvas();
 			if (!Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
-				!AudioSource || !AudioListener || !Script)
+				!AudioSource || !AudioListener || !Script || !RuntimeUICanvas)
 				return std::unexpected(MakeError(
 					PrefabErrorCode::SceneOperationFailed,
 					"Could not read supported entity components for prefab operation"));
@@ -113,6 +115,9 @@ namespace PulseForge
 				if (auto Result = Destination.SetScript(Script->value()); !Result)
 					return std::unexpected(SceneOperationError(Result.error()));
 			}
+			if (RuntimeUICanvas->has_value())
+				if (auto Result = Destination.SetRuntimeUICanvas(RuntimeUICanvas->value()); !Result)
+					return std::unexpected(SceneOperationError(Result.error()));
 			return {};
 		}
 

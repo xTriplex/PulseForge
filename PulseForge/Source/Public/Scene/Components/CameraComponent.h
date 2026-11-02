@@ -13,9 +13,16 @@ namespace PulseForge
 	enum class CameraErrorCode : uint8_t
 	{
 		InvalidFieldOfView,
+		InvalidOrthographicHeight,
 		InvalidClipPlanes,
 		InvalidAspectRatio,
 		NonFiniteProjection
+	};
+
+	enum class CameraProjectionType : uint8_t
+	{
+		Perspective,
+		Orthographic
 	};
 
 	struct CameraError
@@ -31,6 +38,8 @@ namespace PulseForge
 		float NearClipPlane = 0.1f;
 		float FarClipPlane = 1000.0f;
 		bool IsPrimary = false;
+		CameraProjectionType ProjectionType = CameraProjectionType::Perspective;
+		float OrthographicHeight = 10.0f;
 
 		[[nodiscard]] PULSEFORGE_API std::expected<void, CameraError> Validate() const;
 		[[nodiscard]] PULSEFORGE_API std::expected<glm::mat4, CameraError> GetProjectionMatrix(float AspectRatio) const;

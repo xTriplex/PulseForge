@@ -82,14 +82,19 @@ if(BUILD_TESTING)
 		Tests/SceneTests.cpp
 		Tests/PropertyMetadataTests.cpp
 		Tests/ScriptPropertyMetadataTests.cpp
+		Tests/RuntimeUITests.cpp
 	)
 	target_include_directories(PulseForgeSceneTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeSceneTests PRIVATE
-		PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath PulseForgePhysics)
+		PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath PulseForgePhysics PulseForgeInput)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeSceneTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.Scene COMMAND PulseForgeSceneTests)
+	add_executable(PulseForgeRuntimeUIConsumer Tests/ModuleConsumers/RuntimeUIConsumer.cpp)
+	target_link_libraries(PulseForgeRuntimeUIConsumer PRIVATE PulseForgeScene)
+	set_property(TARGET PulseForgeRuntimeUIConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.RuntimeUIConsumer COMMAND PulseForgeRuntimeUIConsumer)
 
 	add_executable(PulseForgePropertyMetadataConsumer Tests/ModuleConsumers/PropertyMetadataConsumer.cpp)
 	target_link_libraries(PulseForgePropertyMetadataConsumer PRIVATE PulseForgeScene)
@@ -117,7 +122,8 @@ if(BUILD_TESTING)
 		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\""
 			"PF_PREFAB_LINKED_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PrefabLinkedInstances/PrefabLinkedInstances.pfproj\""
 			"PF_LUA_AUTHORING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/LuaAuthoring/PrefabLinkedInstances.pfproj\""
-			"PF_PHYSICS_QUERIES_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PhysicsQueries/PhysicsQueries.pfproj\"")
+			"PF_PHYSICS_QUERIES_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PhysicsQueries/PhysicsQueries.pfproj\""
+			"PF_RUNTIME_UI_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
@@ -335,6 +341,7 @@ if(BUILD_TESTING)
 			Tests/EditorAssetImportOperationTests.cpp
 			Tests/EditorInspectorRegressionTests.cpp
 			Tests/EditorScriptAuthoringInspectorTests.cpp
+			Tests/EditorRuntimeUIDocumentEditorTests.cpp
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp
@@ -388,6 +395,7 @@ if(BUILD_TESTING)
 		PulseForgeCoreTests
 		PulseForgeCoreConsumer
 		PulseForgeSceneTests
+		PulseForgeRuntimeUIConsumer
 		PulseForgePropertyMetadataConsumer
 		PulseForgeAssetTests
 		PulseForgeAssetImportTests
@@ -459,5 +467,21 @@ if(BUILD_TESTING)
 	add_dependencies(PulseForgeTests ${PULSEFORGE_TEST_EXECUTABLE_TARGETS} PulseForgeCook)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
+	endif()
+	if(WIN32 AND PULSEFORGE_BUILD_EDITOR AND TARGET PulseForgeExport AND TARGET PulseForgeCookedGame AND
+		TARGET PulseForgeCookedPlayerTemplate)
+		find_package(Python3 COMPONENTS Interpreter QUIET)
+		if(Python3_Interpreter_FOUND)
+			add_test(NAME PulseForge.RuntimeUI.ExportedPackageInteraction
+				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
+					--export "$<TARGET_FILE:PulseForgeExport>"
+					--template-root "$<TARGET_FILE_DIR:PulseForgeCookedGame>"
+					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
+					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
+			set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+			add_dependencies(PulseForgeTests PulseForgeExport PulseForgeCookedPlayerTemplate)
+		else()
+			message(STATUS "Runtime UI exported-package acceptance requires a runnable Python 3 interpreter; test is not registered")
+		endif()
 	endif()
 endif()

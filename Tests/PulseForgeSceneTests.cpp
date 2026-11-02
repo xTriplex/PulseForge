@@ -2,6 +2,7 @@
 
 void RunPropertyMetadataTests(TestRunner& Tests);
 void RunScriptPropertyMetadataTests(TestRunner& Tests);
+void RunRuntimeUITests(TestRunner& Tests);
 
 int main()
 {
@@ -10,5 +11,6 @@ int main()
 	RunSceneTests(Tests);
 	RunPropertyMetadataTests(Tests);
 	RunScriptPropertyMetadataTests(Tests);
+	RunRuntimeUITests(Tests);
 	return Tests.Finish();
 }

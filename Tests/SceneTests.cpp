@@ -274,6 +274,14 @@ namespace
 		CapsuleCollider.CollisionCategory = 4;
 		PF_CHECK(Tests, SphereBody->SetCollider(SphereCollider).has_value());
 		PF_CHECK(Tests, CapsuleBody->SetCollider(CapsuleCollider).has_value());
+		const RuntimeUICanvasComponent Canvas{ UUID{ 22, 17 }, false, RuntimeUIInputPolicy::NonModal };
+		PF_CHECK(Tests, Body->SetRuntimeUICanvas(Canvas).has_value());
+		const auto CameraEntity = Source.CreateEntity("Orthographic UI camera");
+		PF_CHECK(Tests, CameraEntity.has_value());
+		CameraComponent OrthographicCamera;
+		OrthographicCamera.ProjectionType = CameraProjectionType::Orthographic;
+		OrthographicCamera.OrthographicHeight = 7.5f;
+		PF_CHECK(Tests, CameraEntity && CameraEntity->SetCamera(OrthographicCamera).has_value());
 		Rigidbody.Mass = std::numeric_limits<float>::quiet_NaN();
 		const auto InvalidRigidbodySet = Body->SetRigidbody(Rigidbody);
 		PF_CHECK(Tests, !InvalidRigidbodySet && InvalidRigidbodySet.error().Code == SceneErrorCode::InvalidPhysicsComponent);
@@ -296,7 +304,9 @@ namespace
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 10") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 12") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"projection\": \"orthographic\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("runtimeUICanvas") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
 
@@ -308,10 +318,48 @@ namespace
 		{
 			const auto LoadedRigidbody = LoadedBody->GetRigidbody();
 			const auto LoadedCollider = LoadedBody->GetBoxCollider();
+			const auto LoadedCanvas = LoadedBody->GetRuntimeUICanvas();
 			PF_CHECK(Tests, LoadedRigidbody && LoadedRigidbody->has_value() && LoadedRigidbody->value().Mass == 3.0f &&
 								LoadedRigidbody->value().Friction == 0.6f && LoadedRigidbody->value().Restitution == 0.15f &&
 								!LoadedRigidbody->value().AllowSleeping);
 			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() && LoadedCollider->value().HalfExtents == Collider.HalfExtents);
+			PF_CHECK(Tests, LoadedCanvas && LoadedCanvas->has_value() && LoadedCanvas->value().DocumentAsset == Canvas.DocumentAsset &&
+				!LoadedCanvas->value().Enabled && LoadedCanvas->value().InputPolicy == RuntimeUIInputPolicy::NonModal);
+		}
+		nlohmann::json LegacyCanvasDocument = nlohmann::json::parse(*Serialized);
+		LegacyCanvasDocument["version"] = 11;
+		bool RemovedLegacyInputPolicy = false;
+		for (auto& EntityRecord : LegacyCanvasDocument["entities"])
+		{
+			if (EntityRecord.value("uuid", std::string{}) != Body->GetUUID().ToString()) continue;
+			auto CanvasRecord = EntityRecord.find("runtimeUICanvas");
+			if (CanvasRecord == EntityRecord.end() || !CanvasRecord->is_object()) break;
+			RemovedLegacyInputPolicy = CanvasRecord->erase("inputPolicy") == 1;
+			break;
+		}
+		PF_CHECK(Tests, RemovedLegacyInputPolicy);
+		std::string LegacyCanvas = LegacyCanvasDocument.dump(2);
+		Scene LegacyDestination;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(LegacyCanvas, LegacyDestination).has_value());
+		const auto LegacyCanvasEntity = LegacyDestination.FindEntity(Body->GetUUID());
+		PF_CHECK(Tests, LegacyCanvasEntity.has_value());
+		if (LegacyCanvasEntity)
+		{
+			const auto LegacyComponent = LegacyCanvasEntity->GetRuntimeUICanvas();
+			PF_CHECK(Tests, LegacyComponent && LegacyComponent->has_value() &&
+				LegacyComponent->value().InputPolicy == RuntimeUIInputPolicy::Modal);
+		}
+		if (CameraEntity)
+		{
+			const auto LoadedCameraEntity = Destination.FindEntity(CameraEntity->GetUUID());
+			PF_CHECK(Tests, LoadedCameraEntity.has_value());
+			if (LoadedCameraEntity)
+			{
+				const auto LoadedCamera = LoadedCameraEntity->GetCamera();
+				PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() &&
+					LoadedCamera->value().ProjectionType == CameraProjectionType::Orthographic &&
+					LoadedCamera->value().OrthographicHeight == 7.5f);
+			}
 		}
 		const auto LoadedSphere = Destination.FindEntity(SphereBody->GetUUID());
 		const auto LoadedCapsule = Destination.FindEntity(CapsuleBody->GetUUID());

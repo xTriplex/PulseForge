@@ -16,7 +16,8 @@ namespace PulseForge
 		Material,
 		Script,
 		Audio,
-		Environment
+		Environment,
+		RuntimeUI
 	};
 
 	enum class AssetReferenceIssueCode : uint8_t

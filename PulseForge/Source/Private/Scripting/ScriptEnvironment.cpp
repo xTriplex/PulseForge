@@ -12,6 +12,7 @@
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"
 #include "Scripting/Detail/ScriptFloatPropertyRead.h"
+#include "UI/RuntimeUI.h"
 
 #include <algorithm>
 #include <array>
@@ -835,6 +836,53 @@ namespace PulseForge::ScriptEnvironment
 			return 1;
 		}
 
+		int LuaSceneRequestPause(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || lua_type(State, 1) != LUA_TBOOLEAN)
+				return ReturnHostError(State, "scene.request_pause requires a boolean paused value");
+			if (!Instance->Services.QueuePause)
+				return ReturnHostError(State, "runtime pause requests are unavailable in this runtime host");
+			const bool Paused = lua_toboolean(State, 1) != 0;
+			bool Queued = false;
+			try { Queued = Instance->Services.QueuePause(Paused); }
+			catch (...) { Queued = false; }
+			if (!Queued) return ReturnHostError(State, "the runtime host rejected the pause request");
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		int LuaUISetText(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.SetRuntimeUIText || lua_type(State, 1) != LUA_TSTRING ||
+				lua_type(State, 2) != LUA_TSTRING)
+			{
+				lua_pushboolean(State, false);
+				return 1;
+			}
+			size_t IdentifierBytes = 0;
+			size_t TextBytes = 0;
+			const char* IdentifierText = lua_tolstring(State, 1, &IdentifierBytes);
+			const char* Text = lua_tolstring(State, 2, &TextBytes);
+			if (TextBytes > RuntimeUIDocument::MaximumTextBytes)
+			{
+				lua_pushboolean(State, false);
+				return 1;
+			}
+			const auto Identifier = UUID::Parse(std::string_view(IdentifierText, IdentifierBytes));
+			if (!Identifier)
+			{
+				lua_pushboolean(State, false);
+				return 1;
+			}
+			bool Updated = false;
+			try { Updated = Instance->Services.SetRuntimeUIText(*Identifier, std::string(Text, TextBytes)); }
+			catch (...) { Updated = false; }
+			lua_pushboolean(State, Updated);
+			return 1;
+		}
+
 		std::optional<UUID> ReadUUIDArgument(lua_State* State, int Index)
 		{
 			if (lua_type(State, Index) != LUA_TSTRING) return std::nullopt;
@@ -1045,7 +1093,14 @@ namespace PulseForge::ScriptEnvironment
 		lua_setfield(State, -2, "request_transition");
 		lua_pushcfunction(State, LuaSceneRequestStop);
 		lua_setfield(State, -2, "request_stop");
+		lua_pushcfunction(State, LuaSceneRequestPause);
+		lua_setfield(State, -2, "request_pause");
 		lua_setglobal(State, "scene");
+
+		lua_newtable(State);
+		lua_pushcfunction(State, LuaUISetText);
+		lua_setfield(State, -2, "set_text");
+		lua_setglobal(State, "ui");
 
 		lua_newtable(State);
 		lua_pushcfunction(State, LuaPhysicsRaycast);

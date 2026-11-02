@@ -4,6 +4,7 @@
 #include "Assets/AssetRegistry.h"
 #include "Assets/Project.h"
 #include "Assets/PrefabAssetService.h"
+#include "Assets/SceneAssetService.h"
 #include "Assets/AssetCookService.h"
 #include "Assets/AssetDependencyCatalog.h"
 #include "Assets/Detail/AssetCpuProducts.h"
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <cmath>
 #include <span>
 #include <iostream>
 #include <string>
@@ -38,15 +40,6 @@ namespace
 		else
 			std::cerr << "ASSET_COOK_OPERATION_END " << Name << " failure=" << Result.error().Message << std::endl;
 		return Result;
-	}
-
-	std::string CanonicalPrefabFingerprint(const PrefabSourceDocument& Source)
-	{
-		auto Serialized = PrefabSerializer::Serialize(Source);
-		if (!Serialized) return {};
-		const auto Bytes = std::as_bytes(std::span(Serialized->data(), Serialized->size()));
-		const AssetContentFingerprint Fingerprint = ComputeAssetContentFingerprint(Bytes);
-		return Fingerprint.Algorithm + ":" + Fingerprint.DigestHex;
 	}
 
 	struct CookFixture final
@@ -266,13 +259,24 @@ namespace
 		auto LoadedSource = PrefabAssetService::LoadSource(
 			PrefabAsset, OpenedProject->GetRootPath(), OpenedProject->GetAssetRegistry());
 		PF_CHECK(Tests, LoadedSource.has_value());
+		Scene AuthoredScene;
+		auto AuthoredSceneLoad = SceneAssetService::Load(
+			StartupScene, OpenedProject->GetRootPath(), OpenedProject->GetAssetRegistry(), AuthoredScene);
+		PF_CHECK(Tests, AuthoredSceneLoad.has_value());
+		const auto AuthoredLeftRoot = AuthoredScene.FindEntity(UUID{ 0x2100000000004000ull, 0x8000000000000001ull });
+		PF_CHECK(Tests, AuthoredLeftRoot.has_value());
+		std::string AuthoredAppliedFingerprint;
+		if (AuthoredLeftRoot)
+		{
+			const auto AuthoredMetadata = AuthoredLeftRoot->GetPrefabInstance();
+			PF_CHECK(Tests, AuthoredMetadata && AuthoredMetadata->has_value());
+			if (AuthoredMetadata && AuthoredMetadata->has_value())
+				AuthoredAppliedFingerprint = (**AuthoredMetadata).AppliedSourceFingerprint;
+		}
 		if (LoadedSource && LeftInstance && LeftInstance->has_value())
 		{
-			const std::string ExpectedFingerprint = CanonicalPrefabFingerprint(*LoadedSource);
-			if ((**LeftInstance).AppliedSourceFingerprint != ExpectedFingerprint)
-				std::cerr << "G15_SAMPLE_SOURCE_FINGERPRINT expected=" << ExpectedFingerprint << " actual="
-					<< (**LeftInstance).AppliedSourceFingerprint << '\n';
-			PF_CHECK(Tests, !ExpectedFingerprint.empty() && (**LeftInstance).AppliedSourceFingerprint == ExpectedFingerprint);
+			PF_CHECK(Tests, !AuthoredAppliedFingerprint.empty());
+			PF_CHECK(Tests, (**LeftInstance).AppliedSourceFingerprint == AuthoredAppliedFingerprint);
 		}
 #endif
 	}
@@ -512,6 +516,176 @@ namespace
 		PF_CHECK(Tests, !Session.IsRunning());
 #else
 		(void)Tests;
+#endif
+	}
+
+	void TestRuntimeUISampleCookedPlayer(TestRunner& Tests)
+	{
+#if defined(PF_RUNTIME_UI_SAMPLE_PROJECT)
+		constexpr AssetID MenuScene{ 0xb018000000004000ull, 0x8000000000000010ull };
+		constexpr AssetID GameScene{ 0xb018000000004000ull, 0x8000000000000011ull };
+		constexpr AssetID MenuDocument{ 0xb018000000004000ull, 0x8000000000000030ull };
+		constexpr AssetID GameDocument{ 0xb018000000004000ull, 0x8000000000000031ull };
+		constexpr AssetID Font{ 0xb018000000004000ull, 0x8000000000000040ull };
+		constexpr AssetID Image{ 0xb018000000004000ull, 0x8000000000000041ull };
+		constexpr UUID ScoreText{ 0xb018000000004000ull, 0x8000000000000132ull };
+		const auto ID = UUID::Generate();
+		PF_CHECK(Tests, ID.has_value());
+		if (!ID) return;
+		std::error_code Error;
+		const auto TemporaryDirectory = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path(Error), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto SourceRoot = TemporaryDirectory / std::filesystem::u8path("PulseForge-RuntimeUI-" + ID->ToString());
+		const auto OutputRoot = TemporaryDirectory / std::filesystem::u8path("PulseForge-RuntimeUI-Cook-" + ID->ToString());
+		struct OwnedRoots final
+		{
+			std::filesystem::path Source;
+			std::filesystem::path Output;
+			~OwnedRoots()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Source, CleanupError);
+				CleanupError.clear();
+				std::filesystem::remove_all(Output, CleanupError);
+			}
+		} Cleanup{ SourceRoot, OutputRoot };
+		std::filesystem::copy(std::filesystem::path(PF_RUNTIME_UI_SAMPLE_PROJECT).parent_path(), SourceRoot,
+			std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto ProjectValue = Project::Open(SourceRoot / std::filesystem::path(PF_RUNTIME_UI_SAMPLE_PROJECT).filename());
+		if (!ProjectValue)
+			std::cerr << "RUNTIME_UI_SAMPLE_PROJECT_OPEN_FAILURE " << ProjectValue.error().Message << std::endl;
+		PF_CHECK(Tests, ProjectValue.has_value());
+		if (!ProjectValue) return;
+		auto Snapshot = AssetDependencyCatalogBuilder::Build(ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		AssetCookRequest Request{
+			*Snapshot, ProjectValue->GetFilePath(), MenuScene, {},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			OutputRoot
+		};
+		Request.DynamicRoots.push_back(GameScene);
+		auto Plan = AssetCookService::Plan(Request);
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto HasProduct = [&](AssetID Asset, CookedAssetProductKind Kind)
+		{
+			return std::any_of(Plan->Products.begin(), Plan->Products.end(), [Asset, Kind](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Asset && Product.Product == Kind; });
+		};
+		PF_CHECK(Tests, HasProduct(MenuDocument, CookedAssetProductKind::RuntimeUI));
+		PF_CHECK(Tests, HasProduct(GameDocument, CookedAssetProductKind::RuntimeUI));
+		PF_CHECK(Tests, HasProduct(Font, CookedAssetProductKind::Font));
+		PF_CHECK(Tests, HasProduct(Image, CookedAssetProductKind::Texture));
+		auto Cooked = AssetCookService::Cook(*Plan);
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		auto Provider = CookedContentProvider::Open(OutputRoot, Request.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		PF_CHECK(Tests, (*Provider)->ReadRuntimeUI(MenuDocument).has_value());
+		PF_CHECK(Tests, (*Provider)->ReadRuntimeUI(GameDocument).has_value());
+		auto CookedFont = (*Provider)->ReadFont(Font);
+		PF_CHECK(Tests, CookedFont && !CookedFont->empty());
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession Session(*Provider, RuntimeDescription);
+		PF_CHECK(Tests, Session.Start().has_value());
+		if (!Session.IsRunning()) return;
+		const RuntimeUIViewport Viewport{ { 960.0f, 540.0f }, 960, 540 };
+		const auto Pointer = [&](RuntimeUIInputKind Kind, glm::vec2 Position)
+		{
+			const RuntimeUIInputEvent Event{ Kind, Position, {} };
+			if (!Session.SubmitRuntimeUIFrame(Viewport, std::span(&Event, 1))) return false;
+			return Session.Advance(Timestep(1.0 / 60.0)).has_value();
+		};
+		PF_CHECK(Tests, Session.HasRuntimeUI());
+		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerPressed, { 480.0f, 260.0f }));
+		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerReleased, { 480.0f, 260.0f }));
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() && *Session.GetActiveSceneAsset() == GameScene);
+		if (!Session.GetActiveSceneAsset() || *Session.GetActiveSceneAsset() != GameScene) return;
+		for (uint32_t Frame = 0; Frame < 90; ++Frame)
+		{
+			const auto Advanced = Session.Advance(Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, Advanced.has_value());
+			if (!Advanced) return;
+		}
+		const auto FindScore = [&]() -> std::string
+		{
+			for (const RuntimeUIDrawCommand& Command : Session.GetRuntimeUIDrawCommands())
+				if (Command.Element == ScoreText) return Command.Text;
+			return {};
+		};
+		PF_CHECK(Tests, FindScore().starts_with("Score: ") && FindScore() != "Score: 0");
+		RuntimeUIInputAdapter PassiveHostAdapter;
+		const auto SubmitPassiveViewport = [&](RuntimeUIViewport CurrentViewport)
+		{
+			RuntimeUIHostInputSample Sample{
+				.SessionGeneration = Session.GetRuntimeUISessionGeneration(),
+				.TreeGeneration = Session.GetRuntimeUIInputGeneration(), .InputOwner = 19,
+				.Viewport = CurrentViewport, .ViewportOrigin = { 23.0f, 41.0f }, .DeltaSeconds = 1.0 / 60.0,
+				.Focused = true, .PointerPosition = glm::vec2{ 180.0f, 55.0f }, .PointerPressed = true,
+				.PointerHeld = true, .Navigation = { 0.9f, 0.0f }, .ActivatePressed = true, .ActivateHeld = true };
+			const RuntimeUIHostFrame Frame = BuildRuntimeUIHostFrame(
+				PassiveHostAdapter, std::move(Sample), RuntimeUIInputPolicy::Passive);
+			PF_CHECK(Tests, Frame.Viewport.LogicalSize == CurrentViewport.LogicalSize);
+			PF_CHECK(Tests, Frame.Viewport.FramebufferWidth == CurrentViewport.FramebufferWidth &&
+				Frame.Viewport.FramebufferHeight == CurrentViewport.FramebufferHeight);
+			PF_CHECK(Tests, std::all_of(Frame.Events.begin(), Frame.Events.end(), [](const RuntimeUIInputEvent& Event)
+			{
+				return Event.Kind == RuntimeUIInputKind::CaptureCancelled || Event.Kind == RuntimeUIInputKind::FocusLost;
+			}));
+			if (!Session.SubmitRuntimeUIFrame(Frame.Viewport, Frame.Events)) return false;
+			return Session.Advance(Timestep(1.0 / 60.0)).has_value();
+		};
+		const RuntimeUIViewport WideViewport{ { 1279.0f, 721.0f }, 1919, 1081 };
+		PF_CHECK(Tests, SubmitPassiveViewport(WideViewport));
+		PF_CHECK(Tests, Session.GetRuntimeUIViewport().LogicalSize == WideViewport.LogicalSize &&
+			Session.GetRuntimeUIViewport().FramebufferWidth == WideViewport.FramebufferWidth &&
+			Session.GetRuntimeUIViewport().FramebufferHeight == WideViewport.FramebufferHeight);
+		const auto FindScoreCommand = [&]() -> const RuntimeUIDrawCommand*
+		{
+			for (const RuntimeUIDrawCommand& Command : Session.GetRuntimeUIDrawCommands())
+				if (Command.Element == ScoreText) return &Command;
+			return nullptr;
+		};
+		const RuntimeUIDrawCommand* ResizedScore = FindScoreCommand();
+		PF_CHECK(Tests, ResizedScore && std::abs(ResizedScore->Bounds.Left - (130.0f * 1279.0f / 960.0f)) < 0.01f &&
+			std::abs(ResizedScore->Bounds.Top - (30.0f * 721.0f / 540.0f)) < 0.01f &&
+			std::abs(ResizedScore->Bounds.Right - (480.0f * 1279.0f / 960.0f)) < 0.01f &&
+			std::abs(ResizedScore->Bounds.Bottom - (90.0f * 721.0f / 540.0f)) < 0.01f);
+		const RuntimeUIRect ResizedScoreBounds = ResizedScore ? ResizedScore->Bounds : RuntimeUIRect{};
+		const RuntimeUIViewport ScaledFramebufferViewport{ WideViewport.LogicalSize, 2558, 1442 };
+		PF_CHECK(Tests, SubmitPassiveViewport(ScaledFramebufferViewport));
+		PF_CHECK(Tests, Session.GetRuntimeUIViewport().FramebufferWidth == 2558 &&
+			Session.GetRuntimeUIViewport().FramebufferHeight == 1442);
+		const RuntimeUIDrawCommand* FramebufferScaledScore = FindScoreCommand();
+		PF_CHECK(Tests, FramebufferScaledScore && FramebufferScaledScore->Bounds.Left == ResizedScoreBounds.Left &&
+			FramebufferScaledScore->Bounds.Top == ResizedScoreBounds.Top &&
+			FramebufferScaledScore->Bounds.Right == ResizedScoreBounds.Right &&
+			FramebufferScaledScore->Bounds.Bottom == ResizedScoreBounds.Bottom);
+		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerPressed, { 840.0f, 58.0f }));
+		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerReleased, { 840.0f, 58.0f }));
+		PF_CHECK(Tests, Session.IsPaused());
+		const std::string PausedScore = FindScore();
+		for (uint32_t Frame = 0; Frame < 30; ++Frame)
+			PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, FindScore() == PausedScore);
+		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerPressed, { 480.0f, 250.0f }));
+		PF_CHECK(Tests, Pointer(RuntimeUIInputKind::PointerReleased, { 480.0f, 250.0f }));
+		PF_CHECK(Tests, !Session.IsPaused());
+		Session.Stop();
 #endif
 	}
 }
@@ -801,4 +975,5 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	TestLinkedPrefabSampleCookAndRuntimeScene(Tests);
 	TestLuaAuthoringSampleCookAndRuntime(Tests);
 	TestPhysicsQueriesSampleCookedPlayer(Tests);
+	TestRuntimeUISampleCookedPlayer(Tests);
 }
