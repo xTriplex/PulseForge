@@ -232,6 +232,14 @@ namespace PulseForgeEditor
 		return Routing;
 	}
 
+	[[nodiscard]] constexpr bool IsEditorShortcutContextActive(const PulseForge::InputRoutingState& Routing) noexcept
+	{
+		for (size_t Index = 0; Index < Routing.ContextCount; ++Index)
+			if (Routing.Contexts[Index].Context == PulseForge::InputContext::EditorShortcuts)
+				return Routing.Contexts[Index].Active;
+		return false;
+	}
+
 	struct ViewportCameraNavigationContext
 	{
 		bool SceneAvailable = false;

@@ -176,7 +176,7 @@ namespace
 		{
 			if (m_Pipe != INVALID_HANDLE_VALUE)
 			{
-				if (m_Connected) DisconnectNamedPipe(m_Pipe);
+				if (m_Connected) DisconnectClient();
 				CloseHandle(m_Pipe);
 			}
 		}
@@ -184,6 +184,9 @@ namespace
 		void Poll(PulseForge::GameplayInputService* GameplayInput, PulseForge::InputWindowID InputWindow,
 			bool RuntimeUIInputBlocked, ImVec2 ImageMinimum, ImVec2 ImageMaximum)
 		{
+			if (m_LeftButtonDown && (GameplayInput != m_GameplayInput || InputWindow != m_InputWindow ||
+				(m_PressTargetsRuntimeUI && RuntimeUIInputBlocked)))
+				CancelInteraction();
 			m_GameplayInput = GameplayInput;
 			m_InputWindow = InputWindow;
 			m_RuntimeUIInputBlocked = RuntimeUIInputBlocked;
@@ -244,14 +247,12 @@ namespace
 			if (!PeekNamedPipe(m_Pipe, nullptr, 0, nullptr, &Available, nullptr))
 			{
 				DisconnectClient();
-				ReleaseHeldButton();
 				return;
 			}
 			if (Available == 0) return;
 			if (Available > 127)
 			{
 				DisconnectClient();
-				ReleaseHeldButton();
 				return;
 			}
 
@@ -260,7 +261,6 @@ namespace
 			if (!ReadFile(m_Pipe, Buffer.data(), static_cast<DWORD>(Buffer.size() - 1), &Read, nullptr))
 			{
 				DisconnectClient();
-				ReleaseHeldButton();
 				return;
 			}
 
@@ -296,7 +296,12 @@ namespace
 					GImGui->HoveredId, GImGui->ActiveId);
 				Reply = ReplyBuffer.data();
 			}
-			else Reply = ApplyCommand(Command) ? "QUEUED\n" : "REJECTED\n";
+			else
+			{
+				const bool Accepted = ApplyCommand(Command);
+				if (!Accepted && m_LeftButtonDown) CancelInteraction();
+				Reply = Accepted ? "QUEUED\n" : "REJECTED\n";
+			}
 			DWORD Written = 0;
 			WriteFile(m_Pipe, Reply, static_cast<DWORD>(std::strlen(Reply)), &Written, nullptr);
 		}
@@ -308,18 +313,23 @@ namespace
 			if (Command == "PING") return true;
 			if (Command == "CANCEL")
 			{
-				if (m_LeftButtonDown) IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-				IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-				QueueGameplayCancellation();
-				m_LeftButtonDown = false;
-				m_HasPointerPosition = false;
+				CancelInteraction();
 				return true;
 			}
 			if (Command == "DOWN")
 			{
 				if (!m_HasPointerPosition || m_LeftButtonDown) return false;
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
-				QueueGameplayButton(PulseForge::InputEventKind::Pressed);
+				m_PressGameplayInput = m_GameplayInput;
+				m_PressInputWindow = m_InputWindow;
+				const ImVec2 ViewportOrigin = (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0
+					? ImGui::GetMainViewport()->Pos : ImVec2(0.0f, 0.0f);
+				const float PointerX = m_ClientPointerX + ViewportOrigin.x;
+				const float PointerY = m_ClientPointerY + ViewportOrigin.y;
+				m_PressTargetsRuntimeUI = m_PressGameplayInput != nullptr &&
+					PointerX >= m_ImageMinimum.x && PointerY >= m_ImageMinimum.y &&
+					PointerX < m_ImageMaximum.x && PointerY < m_ImageMaximum.y;
+				QueueGameplayButton(PulseForge::InputEventKind::Pressed, m_PressGameplayInput, m_PressInputWindow);
 				m_LeftButtonDown = true;
 				return true;
 			}
@@ -327,8 +337,8 @@ namespace
 			{
 				if (!m_LeftButtonDown) return false;
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-				QueueGameplayButton(PulseForge::InputEventKind::Released);
-				m_LeftButtonDown = false;
+				QueueGameplayButton(PulseForge::InputEventKind::Released, m_PressGameplayInput, m_PressInputWindow);
+				ClearInteractionState();
 				return true;
 			}
 			if (!Command.starts_with("MOVE ")) return false;
@@ -362,39 +372,56 @@ namespace
 			return true;
 		}
 
-		void QueueGameplayButton(PulseForge::InputEventKind Kind)
+		void QueueGameplayButton(PulseForge::InputEventKind Kind, PulseForge::GameplayInputService* GameplayInput,
+			PulseForge::InputWindowID InputWindow)
 		{
-			if (!m_GameplayInput || m_InputWindow == 0) return;
-			(void)m_GameplayInput->QueueEvent({ .Kind = Kind,
+			if (!GameplayInput || InputWindow == 0) return;
+			(void)GameplayInput->QueueEvent({ .Kind = Kind,
 				.Control = { PulseForge::InputDevice::MouseButton,
 					static_cast<uint16_t>(PulseForge::MouseControl::Left) },
-				.Window = m_InputWindow, .X = m_ClientPointerX, .Y = m_ClientPointerY });
+				.Window = InputWindow, .X = m_ClientPointerX, .Y = m_ClientPointerY });
 		}
 
-		void QueueGameplayCancellation()
+		void QueueGameplayCancellation(PulseForge::GameplayInputService* GameplayInput,
+			PulseForge::InputWindowID InputWindow)
 		{
-			if (!m_GameplayInput || m_InputWindow == 0) return;
-			(void)m_GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::CaptureCancelled,
-				.Window = m_InputWindow });
+			if (!GameplayInput || InputWindow == 0) return;
+			(void)GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::CaptureCancelled,
+				.Window = InputWindow });
 		}
 
-		void ReleaseHeldButton()
+		void CancelInteraction()
 		{
-			if (!m_LeftButtonDown || ImGui::GetCurrentContext() == nullptr) return;
-			ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-			QueueGameplayCancellation();
+			if (ImGui::GetCurrentContext() != nullptr)
+				ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+			if (m_LeftButtonDown)
+			{
+				if (ImGui::GetCurrentContext() != nullptr)
+					ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+				QueueGameplayCancellation(m_PressGameplayInput, m_PressInputWindow);
+				// The opt-in transport owns this synthetic press and has now released it locally.
+				// Deliver that neutral state after cancellation so the next clean injected click can rearm.
+				QueueGameplayButton(PulseForge::InputEventKind::Released, m_PressGameplayInput, m_PressInputWindow);
+			}
+			ClearInteractionState();
+		}
+
+		void ClearInteractionState()
+		{
 			m_LeftButtonDown = false;
+			m_HasPointerPosition = false;
+			m_ClientPointerX = -FLT_MAX;
+			m_ClientPointerY = -FLT_MAX;
+			m_PressGameplayInput = nullptr;
+			m_PressInputWindow = 0;
+			m_PressTargetsRuntimeUI = false;
 		}
 
 		void DisconnectClient()
 		{
+			CancelInteraction();
 			if (m_Pipe != INVALID_HANDLE_VALUE) DisconnectNamedPipe(m_Pipe);
 			m_Connected = false;
-			if (m_LeftButtonDown && ImGui::GetCurrentContext() != nullptr)
-				ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-			if (ImGui::GetCurrentContext() != nullptr) ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-			m_LeftButtonDown = false;
-			m_HasPointerPosition = false;
 		}
 
 		HANDLE m_Pipe = INVALID_HANDLE_VALUE;
@@ -408,6 +435,9 @@ namespace
 		float m_ClientPointerY = -FLT_MAX;
 		PulseForge::GameplayInputService* m_GameplayInput = nullptr;
 		PulseForge::InputWindowID m_InputWindow = 0;
+		PulseForge::GameplayInputService* m_PressGameplayInput = nullptr;
+		PulseForge::InputWindowID m_PressInputWindow = 0;
+		bool m_PressTargetsRuntimeUI = false;
 		bool m_RuntimeUIInputBlocked = false;
 		ImVec2 m_ImageMinimum{};
 		ImVec2 m_ImageMaximum{};
@@ -8919,8 +8949,7 @@ namespace
 			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI() && !m_RuntimeUITextInputBlocked && Routing.FocusedWindow != 0)
 				(void)PulseForge::AppendRuntimeUIInputContext(
 					Routing, m_SceneRuntime->GetRuntimeUIInputPolicy(), Routing.FocusedWindow);
-			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !EditorWidgetInputOwned &&
-				!ViewportNavigation;
+			m_EditorShortcutsRouted = PulseForgeEditor::IsEditorShortcutContextActive(Routing);
 			Application.GetGameplayInput().PublishFrame(Routing);
 			m_InputMappingPanel.MarkInputPublished();
 		}

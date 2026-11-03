@@ -365,10 +365,12 @@ end
 					ViewportWithoutImGuiKeyboardFocus.ContextCount == 4);
 		PF_CHECK(Tests, !ViewportWithoutImGuiKeyboardFocus.Contexts[0].Active &&
 					!ViewportWithoutImGuiKeyboardFocus.Contexts[1].Active);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(ViewportWithoutImGuiKeyboardFocus));
 		InputRoutingState RuntimeUIRouting = ViewportWithoutImGuiKeyboardFocus;
 		PF_CHECK(Tests, AppendRuntimeUIInputContext(RuntimeUIRouting, RuntimeUIInputPolicy::Modal, MainViewportWindow));
 		PF_CHECK(Tests, RuntimeUIRouting.ContextCount == 5 && RuntimeUIRouting.Contexts[4].Context == InputContext::RuntimeUI &&
 					RuntimeUIRouting.Contexts[4].Active && RuntimeUIRouting.Contexts[4].Consumes == InputDeviceMask::All);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(RuntimeUIRouting));
 		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
 							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
 							.Window = MainViewportWindow }));
@@ -380,11 +382,22 @@ end
 							.Window = MainViewportWindow }));
 		Input.PublishFrame(RuntimeUIRouting);
 		PF_CHECK(Tests, Input.FindAction("ui.pointer") && Input.FindAction("ui.pointer")->Released);
+		const InputRoutingState OrdinaryEditingRouting = MakeRouting(MainViewportWindow);
+		PF_CHECK(Tests, IsEditorShortcutContextActive(OrdinaryEditingRouting));
+		PF_CHECK(Tests, OrdinaryEditingRouting.Contexts[1].Context == InputContext::EditorShortcuts &&
+				OrdinaryEditingRouting.Contexts[1].Active);
+		const InputRoutingState ViewportNavigationRouting = MakeRouting(MainViewportWindow, true, true, false, true);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(ViewportNavigationRouting));
+		InputRoutingState NavigationRuntimeUIRouting = ViewportNavigationRouting;
+		PF_CHECK(Tests, AppendRuntimeUIInputContext(NavigationRuntimeUIRouting, RuntimeUIInputPolicy::Modal, MainViewportWindow));
+		PF_CHECK(Tests, NavigationRuntimeUIRouting.Contexts[4].Active &&
+				NavigationRuntimeUIRouting.Contexts[4].Consumes == InputDeviceMask::All);
 		const InputRoutingState ActiveEditorWidgetRouting = MakeRouting(MainViewportWindow, true, true, false, false, true);
 		PF_CHECK(Tests, ActiveEditorWidgetRouting.Contexts[0].Context == InputContext::Gameplay &&
 				!ActiveEditorWidgetRouting.Contexts[0].Active);
 		PF_CHECK(Tests, ActiveEditorWidgetRouting.Contexts[1].Context == InputContext::EditorShortcuts &&
 				!ActiveEditorWidgetRouting.Contexts[1].Active);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(ActiveEditorWidgetRouting));
 		PF_CHECK(Tests, !ActiveEditorWidgetRouting.Contexts[3].Active);
 		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
 							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
@@ -406,6 +419,9 @@ end
 		});
 		PF_CHECK(Tests, TextEntryWithoutImGuiKeyboardFocus.FocusedWindow == MainViewportWindow &&
 					TextEntryWithoutImGuiKeyboardFocus.Contexts[3].Active);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(TextEntryWithoutImGuiKeyboardFocus));
+		const InputRoutingState PopupOwnedRouting = MakeRouting(MainViewportWindow, true, true, true);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(PopupOwnedRouting));
 		Input.PublishFrame(TextEntryWithoutImGuiKeyboardFocus);
 		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
 							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
@@ -416,14 +432,17 @@ end
 		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
 							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
 							.Window = MainViewportWindow }));
-		Input.PublishFrame(BuildEditorGameplayInputRouting({
+		const InputRoutingState UnfocusedNativeViewport = BuildEditorGameplayInputRouting({
 			.ViewportWindow = MainViewportWindow,
 			.ViewportAvailable = true,
 			.NativeOwnerFocused = false,
 			.ImGuiOwnerFocused = true,
 			.RuntimeActive = true,
 			.ViewportKeyboardFocused = true
-		}));
+		});
+		PF_CHECK(Tests, UnfocusedNativeViewport.FocusedWindow == 0 &&
+				!IsEditorShortcutContextActive(UnfocusedNativeViewport));
+		Input.PublishFrame(UnfocusedNativeViewport);
 		PF_CHECK(Tests, Input.FindAction("ui.pointer") && !Input.FindAction("ui.pointer")->Held);
 		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
 							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
