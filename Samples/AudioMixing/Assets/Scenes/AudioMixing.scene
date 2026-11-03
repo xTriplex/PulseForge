@@ -1,0 +1,37 @@
+{
+  "format": "PulseForgeScene",
+  "version": 13,
+  "entities": [
+    {
+      "uuid": "b0190000-0000-4000-8000-000000000201",
+      "tag": { "name": "Audio Settings Canvas" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "runtimeUICanvas": { "documentAsset": "b0190000-0000-4000-8000-000000000020", "enabled": true, "inputPolicy": "modal" },
+      "audioSource": { "asset": "b0190000-0000-4000-8000-000000000032", "volume": 0.35, "looping": false, "playOnStart": false, "spatialized": false, "bus": "ui" },
+      "script": { "asset": "b0190000-0000-4000-8000-000000000050", "enabled": true },
+      "parent": null
+    },
+    {
+      "uuid": "b0190000-0000-4000-8000-000000000202",
+      "tag": { "name": "Primary Audio Listener" },
+      "transform": { "translation": [0.0, 0.0, 10.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.78539816, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true, "projection": "orthographic", "orthographicHeight": 10.0 },
+      "audioListener": { "primary": true },
+      "parent": null
+    },
+    {
+      "uuid": "b0190000-0000-4000-8000-000000000203",
+      "tag": { "name": "Looping Music" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "audioSource": { "asset": "b0190000-0000-4000-8000-000000000030", "volume": 0.35, "looping": true, "playOnStart": true, "spatialized": false, "bus": "music" },
+      "parent": null
+    },
+    {
+      "uuid": "b0190000-0000-4000-8000-000000000204",
+      "tag": { "name": "Effects Test Source" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "audioSource": { "asset": "b0190000-0000-4000-8000-000000000031", "volume": 0.6, "looping": false, "playOnStart": false, "spatialized": false, "bus": "effects" },
+      "parent": null
+    }
+  ]
+}

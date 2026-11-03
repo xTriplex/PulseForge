@@ -156,6 +156,7 @@ if(BUILD_TESTING)
 			"-DPULSEFORGE_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/TestCookConfigurationCLI.cmake")
 	add_executable(PulseForgeCookedAssetCatalogTests Tests/CookedAssetCatalogTests.cpp)
+	target_include_directories(PulseForgeCookedAssetCatalogTests PRIVATE PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeCookedAssetCatalogTests PRIVATE PulseForgeCookedAssetCatalog)
 	set_property(TARGET PulseForgeCookedAssetCatalogTests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 	add_test(NAME PulseForge.CookedAssetCatalog COMMAND PulseForgeCookedAssetCatalogTests)
@@ -220,16 +221,27 @@ if(BUILD_TESTING)
 		Tests/AudioRuntimeTests.cpp
 	)
 	target_include_directories(PulseForgeAudioRuntimeTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_compile_definitions(PulseForgeAudioRuntimeTests PRIVATE
+		"PF_AUDIO_MIXING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj\"")
 	target_link_libraries(PulseForgeAudioRuntimeTests PRIVATE
 		PulseForgeAssetServices
 		PulseForgeAudioAssets
 		PulseForgeAudioScene
+		PulseForgeRuntime
 		PulseForgeScripting
 	)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAudioRuntimeTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.AudioRuntime COMMAND PulseForgeAudioRuntimeTests)
+
+	add_executable(PulseForgeAudioSessionConsumer Tests/ModuleConsumers/AudioSessionConsumer.cpp)
+	target_link_libraries(PulseForgeAudioSessionConsumer PRIVATE PulseForgeRuntime)
+	set_property(TARGET PulseForgeAudioSessionConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeAudioSessionConsumer PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.AudioSessionConsumer COMMAND PulseForgeAudioSessionConsumer)
 
 	add_executable(PulseForgeScriptingRuntimeTests
 		Tests/PulseForgeScriptingRuntimeTests.cpp
@@ -408,6 +420,7 @@ if(BUILD_TESTING)
 		PulseForgeDerivedDataConsumer
 		PulseForgeSceneRendererConsumer
 		PulseForgeAudioRuntimeTests
+		PulseForgeAudioSessionConsumer
 		PulseForgeScriptingRuntimeTests
 		PulseForgePlayerLaunchConfigurationTests
 		PulseForgeBufferUpdateTests
@@ -479,6 +492,13 @@ if(BUILD_TESTING)
 					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
 					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
 			set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+			add_test(NAME PulseForge.AudioMixing.ExportedPackageInteraction
+				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/AudioMixingPackageAcceptance.py"
+					--export "$<TARGET_FILE:PulseForgeExport>"
+					--template-root "$<TARGET_FILE_DIR:PulseForgeCookedGame>"
+					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
+					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj")
+			set_tests_properties(PulseForge.AudioMixing.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
 			add_dependencies(PulseForgeTests PulseForgeExport PulseForgeCookedPlayerTemplate)
 		else()
 			message(STATUS "Runtime UI exported-package acceptance requires a runnable Python 3 interpreter; test is not registered")

@@ -1388,6 +1388,7 @@ end
 			ReplacementServiceEntity->SetAudioSource(AudioSourceComponent{ ServiceAudioAsset->ID, 1.0f, false, false, false }).has_value());
 		PF_CHECK(Tests, ReusedServiceScriptRuntime.Advance(ReusedServiceScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, ReusedServiceScriptRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, ServiceAudioRuntime.ProcessPendingCommands().has_value());
 		PF_CHECK(Tests, ServiceAudioRuntime.GetPlaybackCount() == 0);
 		const auto NoStaleForceFrame = ServicePhysicsRuntime.Advance(ReusedServiceScene, Timestep(0.1));
 		const auto NoStaleForceTransform = ReplacementServiceEntity->GetTransform();
@@ -1399,6 +1400,11 @@ end
 		PF_CHECK(Tests, ReplacementServiceEntity->SetScript(ScriptComponent{ FreshServiceScriptAsset->ID }).has_value());
 		PF_CHECK(Tests, ReusedServiceScriptRuntime.Advance(ReusedServiceScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, ReusedServiceScriptRuntime.GetDiagnostics().empty());
+		// The first pass binds the replacement entity incarnation; its first OnUpdate runs on the next advance.
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.Advance(ReusedServiceScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, ServiceAudioRuntime.ProcessPendingCommands().has_value());
+		PF_CHECK(Tests, ServiceAudioRuntime.Advance(ReusedServiceScene).has_value());
 		PF_CHECK(Tests, ServiceAudioRuntime.GetPlaybackCount() == 1);
 		const auto FreshServiceForceFrame = ServicePhysicsRuntime.Advance(ReusedServiceScene, Timestep(0.1));
 		const auto FreshServiceTransform = ReplacementServiceEntity->GetTransform();

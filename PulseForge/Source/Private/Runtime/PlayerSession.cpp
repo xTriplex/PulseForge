@@ -1,5 +1,6 @@
 #include "Runtime/PlayerSession.h"
 #include "Runtime/CookedContentProvider.h"
+#include "Audio/AudioSession.h"
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
@@ -95,10 +96,19 @@ namespace PulseForge
 			if (!CandidateScene)
 				return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
 					"Could not load cooked startup scene: " + CandidateScene.error().Message));
-			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices);
+			auto CandidateAudioSession = AudioSession::CreateForCooked(
+				m_CookedAssets, m_CookedAssets->GetAudioMixDefaults(), AudioSessionDesc{ .Engine = m_RuntimeDescription.Audio,
+					.Diagnostics = m_RuntimeServices.Diagnostics });
+			if (!CandidateAudioSession)
+				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeStartFailed,
+					"Could not create cooked player audio session: " + CandidateAudioSession.error().Message));
+			auto CandidateServices = m_RuntimeServices;
+			CandidateServices.AudioSessionState = CandidateAudioSession->get();
+			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, CandidateServices);
 			if (auto Started = CandidateRuntime->Start(**CandidateScene); !Started)
 				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeStartFailed,
 					"Could not start cooked player runtime: " + Started.error().Message));
+			m_AudioSession = std::move(*CandidateAudioSession);
 			m_Scene = std::move(*CandidateScene);
 			m_Runtime = std::move(CandidateRuntime);
 			m_SceneAsset = StartupScene;
@@ -130,12 +140,20 @@ namespace PulseForge
 			return std::unexpected(
 				MakeError(PlayerSessionErrorCode::SceneLoadFailed, "Could not load player startup scene: " + Loaded.error().Message));
 
-		auto CandidateRuntime = std::make_unique<SceneRuntime>(*CandidateProject, m_RuntimeDescription, m_RuntimeServices);
+		auto CandidateAudioSession = AudioSession::CreateForProject(*CandidateProject,
+			AudioSessionDesc{ .Engine = m_RuntimeDescription.Audio, .Diagnostics = m_RuntimeServices.Diagnostics });
+		if (!CandidateAudioSession)
+			return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeStartFailed,
+				"Could not create player audio session: " + CandidateAudioSession.error().Message));
+		auto CandidateServices = m_RuntimeServices;
+		CandidateServices.AudioSessionState = CandidateAudioSession->get();
+		auto CandidateRuntime = std::make_unique<SceneRuntime>(*CandidateProject, m_RuntimeDescription, CandidateServices);
 		if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
 			return std::unexpected(
 				MakeError(PlayerSessionErrorCode::RuntimeStartFailed, "Could not start player scene runtime: " + Started.error().Message));
 
 		m_Project = std::move(CandidateProject);
+		m_AudioSession = std::move(*CandidateAudioSession);
 		m_Scene = std::move(CandidateScene);
 		m_Runtime = std::move(CandidateRuntime);
 		m_SceneAsset = *StartupScene;
@@ -207,13 +225,17 @@ namespace PulseForge
 			const auto OriginRequest = m_PendingScene->OriginRequest;
 			m_PendingScene.reset();
 #if defined(PF_COOKED_RUNTIME_ONLY)
-			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices);
+			auto CandidateServices = m_RuntimeServices;
+			CandidateServices.AudioSessionState = m_AudioSession.get();
+			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, CandidateServices);
 #else
+			auto CandidateServices = m_RuntimeServices;
+			CandidateServices.AudioSessionState = m_AudioSession.get();
 			auto CandidateRuntime = m_CookedAssets
-				? std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices)
-				: std::make_unique<SceneRuntime>(*m_Project, m_RuntimeDescription, m_RuntimeServices);
+				? std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, CandidateServices)
+				: std::make_unique<SceneRuntime>(*m_Project, m_RuntimeDescription, CandidateServices);
 #endif
-			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
+			if (auto Started = CandidateRuntime->Start(*CandidateScene, true); !Started)
 			{
 				if (OriginRequest && m_Runtime)
 					(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Rejected);
@@ -226,6 +248,23 @@ namespace PulseForge
 					(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Rejected);
 				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed,
 					"Could not apply player pause state to requested scene: " + Paused.error().Message));
+			}
+			if (auto Suspended = m_Runtime->SuspendAudioForTransition(); !Suspended)
+			{
+				if (OriginRequest && m_Runtime)
+					(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Rejected);
+				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed,
+					"Could not suspend outgoing audio for scene transition: " + Suspended.error().Message));
+			}
+			if (auto Activated = CandidateRuntime->ActivateAudio(); !Activated)
+			{
+				auto Resumed = m_Runtime->ResumeAudioAfterTransition();
+				if (OriginRequest && m_Runtime)
+					(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Rejected);
+				const std::string ResumeDetail = Resumed ? std::string{} :
+					"; outgoing audio resume also failed: " + Resumed.error().Message;
+				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed,
+					"Could not activate requested scene audio: " + Activated.error().Message + ResumeDetail));
 			}
 			if (OriginRequest && m_Runtime)
 				(void)m_Runtime->ResolveBoundaryRequest(*OriginRequest, SceneRuntimeBoundaryResolution::Committed);
@@ -312,6 +351,7 @@ namespace PulseForge
 		m_Runtime.reset();
 		if (HadRuntime) AdvanceGeneration(m_RuntimeUISessionGeneration);
 		m_Scene.reset();
+		m_AudioSession.reset();
 		m_SceneAsset.reset();
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		m_Project.reset();

@@ -31,7 +31,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 12;
+		constexpr int64_t SceneFormatVersion = 13;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -147,6 +147,25 @@ namespace PulseForge
 					return false;
 			}
 			return true;
+		}
+
+		const char* AudioBusToString(AudioBus Bus) noexcept
+		{
+			switch (Bus)
+			{
+				case AudioBus::Music: return "music";
+				case AudioBus::Effects: return "effects";
+				case AudioBus::UI: return "ui";
+			}
+			return "";
+		}
+
+		std::optional<AudioBus> AudioBusFromString(std::string_view Value) noexcept
+		{
+			if (Value == "music") return AudioBus::Music;
+			if (Value == "effects") return AudioBus::Effects;
+			if (Value == "ui") return AudioBus::UI;
+			return std::nullopt;
 		}
 
 		bool ReadUInt32(const Json& Value, uint32_t& Output)
@@ -613,7 +632,8 @@ namespace PulseForge
 						{ "volume", AudioSourceData.Volume },
 						{ "looping", AudioSourceData.Looping },
 						{ "playOnStart", AudioSourceData.PlayOnStart },
-						{ "spatialized", AudioSourceData.Spatialized }
+						{ "spatialized", AudioSourceData.Spatialized },
+						{ "bus", AudioBusToString(AudioSourceData.Bus) }
 					});
 				}
 				if (AudioListener->has_value())
@@ -1173,25 +1193,40 @@ namespace PulseForge
 				{
 					if (!SerializedAudioSource->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity audioSource must be an object"));
-					if (auto Fields =
-							ValidateKnownFields(*SerializedAudioSource, { "asset", "volume", "looping", "playOnStart", "spatialized" },
-								"Audio source component", SceneSerializationErrorCode::InvalidEntityData);
-						!Fields)
-						return std::unexpected(Fields.error());
+					const auto AudioSourceFields = DocumentVersion >= 13
+						? ValidateKnownFields(*SerializedAudioSource,
+							{ "asset", "volume", "looping", "playOnStart", "spatialized", "bus" },
+							"Audio source component", SceneSerializationErrorCode::InvalidEntityData)
+						: ValidateKnownFields(*SerializedAudioSource,
+							{ "asset", "volume", "looping", "playOnStart", "spatialized" },
+							"Audio source component", SceneSerializationErrorCode::InvalidEntityData);
+					if (!AudioSourceFields)
+						return std::unexpected(AudioSourceFields.error());
 					const auto Asset = SerializedAudioSource->find("asset");
 					const auto Volume = SerializedAudioSource->find("volume");
 					const auto Looping = SerializedAudioSource->find("looping");
 					const auto PlayOnStart = SerializedAudioSource->find("playOnStart");
 					const auto Spatialized = SerializedAudioSource->find("spatialized");
+					const auto BusValue = SerializedAudioSource->find("bus");
 					if (Asset == SerializedAudioSource->end() || !Asset->is_string() ||
 						Volume == SerializedAudioSource->end() || !Volume->is_number() ||
 						Looping == SerializedAudioSource->end() || !Looping->is_boolean() ||
 						PlayOnStart == SerializedAudioSource->end() || !PlayOnStart->is_boolean() ||
-						Spatialized == SerializedAudioSource->end() || !Spatialized->is_boolean())
+						Spatialized == SerializedAudioSource->end() || !Spatialized->is_boolean() ||
+						(DocumentVersion >= 13 && (BusValue == SerializedAudioSource->end() || !BusValue->is_string())))
 					{
 						return std::unexpected(MakeError(
 							SceneSerializationErrorCode::InvalidEntityData,
-							"Audio source requires asset, volume, looping, playOnStart, and spatialized fields"));
+							"Audio source requires asset, volume, looping, playOnStart, and spatialized fields; scene v13 also requires bus"));
+					}
+					AudioBus Bus = AudioBus::Effects;
+					if (BusValue != SerializedAudioSource->end())
+					{
+						const auto ParsedBus = AudioBusFromString(BusValue->get<std::string>());
+						if (!ParsedBus)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Audio source bus must be one of 'music', 'effects', or 'ui'"));
+						Bus = *ParsedBus;
 					}
 
 					const auto ParsedAsset = UUID::Parse(Asset->get<std::string>());
@@ -1205,7 +1240,8 @@ namespace PulseForge
 						Volume->get<float>(),
 						Looping->get<bool>(),
 						PlayOnStart->get<bool>(),
-						Spatialized->get<bool>() };
+						Spatialized->get<bool>(),
+						Bus };
 					if (auto Validation = AudioSourceData->Validate(); !Validation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 				}

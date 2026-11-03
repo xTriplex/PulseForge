@@ -24,6 +24,7 @@ namespace PulseForge
 			const CookedAssetCompatibility& ExpectedCompatibility);
 
 		[[nodiscard]] const UUID& GetProjectID() const noexcept;
+		[[nodiscard]] const AudioMixGains& GetAudioMixDefaults() const noexcept;
 		[[nodiscard]] const AssetID& GetStartupScene() const noexcept;
 		[[nodiscard]] const std::vector<AssetID>& GetDynamicRoots() const noexcept;
 		[[nodiscard]] const CookedAssetCompatibility& GetCompatibility() const noexcept;

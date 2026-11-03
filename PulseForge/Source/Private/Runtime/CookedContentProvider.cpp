@@ -47,6 +47,11 @@ namespace PulseForge
 		return m_Catalog->GetProjectID();
 	}
 
+	const AudioMixGains& CookedContentProvider::GetAudioMixDefaults() const noexcept
+	{
+		return m_Catalog->GetAudioMixDefaults();
+	}
+
 	const AssetID& CookedContentProvider::GetStartupScene() const noexcept
 	{
 		return m_Catalog->GetStartupScene();

@@ -590,9 +590,7 @@ namespace PulseForge::ScriptEnvironment
 			return 1;
 		}
 
-		using AudioControl = std::expected<void, AudioSceneRuntimeError> (AudioSceneRuntime::*)(UUID);
-
-		int InvokeAudioControl(lua_State* State, AudioControl Control)
+		int InvokeAudioControl(lua_State* State, AudioControlOperation Operation)
 		{
 			LuaEntity* UserData = GetLuaEntity(State);
 			if (!UserData) return ReturnHostError(State, "entity method requires an Entity value as self");
@@ -606,7 +604,7 @@ namespace PulseForge::ScriptEnvironment
 			try
 			{
 				{
-					auto Result = (Instance->Services.Audio->*Control)(UserData->Value.GetUUID());
+					auto Result = Instance->Services.Audio->QueueControl(UserData->Value, Operation);
 					if (Result) Succeeded = true;
 					else CopyHostError(Failure, Result.error().Message);
 				}
@@ -754,22 +752,22 @@ namespace PulseForge::ScriptEnvironment
 
 		int LuaEntityPlayAudio(lua_State* State)
 		{
-			return InvokeAudioControl(State, &AudioSceneRuntime::Play);
+			return InvokeAudioControl(State, AudioControlOperation::Play);
 		}
 
 		int LuaEntityPauseAudio(lua_State* State)
 		{
-			return InvokeAudioControl(State, &AudioSceneRuntime::Pause);
+			return InvokeAudioControl(State, AudioControlOperation::Pause);
 		}
 
 		int LuaEntityResumeAudio(lua_State* State)
 		{
-			return InvokeAudioControl(State, &AudioSceneRuntime::Resume);
+			return InvokeAudioControl(State, AudioControlOperation::Resume);
 		}
 
 		int LuaEntityStopAudio(lua_State* State)
 		{
-			return InvokeAudioControl(State, &AudioSceneRuntime::StopPlayback);
+			return InvokeAudioControl(State, AudioControlOperation::Stop);
 		}
 
 		int LuaEntityDestroy(lua_State* State)
@@ -880,6 +878,116 @@ namespace PulseForge::ScriptEnvironment
 			try { Updated = Instance->Services.SetRuntimeUIText(*Identifier, std::string(Text, TextBytes)); }
 			catch (...) { Updated = false; }
 			lua_pushboolean(State, Updated);
+			return 1;
+		}
+
+		std::optional<std::string_view> ReadAudioMixChannel(lua_State* State, int Index)
+		{
+			if (lua_type(State, Index) != LUA_TSTRING) return std::nullopt;
+			size_t Length = 0;
+			const char* Text = lua_tolstring(State, Index, &Length);
+			const std::string_view Channel(Text, Length);
+			if (Channel != "master" && Channel != "music" && Channel != "effects" && Channel != "ui")
+				return std::nullopt;
+			return Channel;
+		}
+
+		int LuaAudioGetGain(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			const auto Channel = ReadAudioMixChannel(State, 1);
+			if (!Instance || !Channel || !Instance->Services.GetAudioGain)
+				return ReturnHostError(State, "audio.get_gain requires an available audio settings service and master/music/effects/ui channel");
+			std::optional<float> Gain;
+			try { Gain = Instance->Services.GetAudioGain(*Channel); }
+			catch (...) { return ReturnHostError(State, "audio.get_gain failed in the audio session host"); }
+			if (!Gain || !std::isfinite(*Gain))
+				return ReturnHostError(State, "the requested audio mix channel is unavailable in this runtime session");
+			lua_pushnumber(State, *Gain);
+			return 1;
+		}
+
+		int LuaAudioSetGain(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			const auto Channel = ReadAudioMixChannel(State, 1);
+			if (!Instance || !Channel || !Instance->Services.SetAudioGain || lua_type(State, 2) != LUA_TNUMBER)
+				return ReturnHostError(State, "audio.set_gain requires an available audio settings service, channel, and numeric gain");
+			const lua_Number Number = lua_tonumber(State, 2);
+			if (!std::isfinite(static_cast<double>(Number)) || Number < 0.0 || Number > 1.0)
+				return ReturnHostError(State, "audio gain must be finite and between zero and one");
+			bool Updated = false;
+			try { Updated = Instance->Services.SetAudioGain(*Channel, static_cast<float>(Number)); }
+			catch (...) { return ReturnHostError(State, "audio.set_gain failed in the audio session host"); }
+			if (!Updated) return ReturnHostError(State, "the active audio session rejected the gain change");
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		int LuaAudioGetMuted(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			const auto Channel = ReadAudioMixChannel(State, 1);
+			if (!Instance || !Channel || !Instance->Services.GetAudioMuted)
+				return ReturnHostError(State, "audio.is_muted requires an available audio settings service and channel");
+			std::optional<bool> Muted;
+			try { Muted = Instance->Services.GetAudioMuted(*Channel); }
+			catch (...) { return ReturnHostError(State, "audio.is_muted failed in the audio session host"); }
+			if (!Muted) return ReturnHostError(State, "the requested audio mix channel is unavailable in this runtime session");
+			lua_pushboolean(State, *Muted);
+			return 1;
+		}
+
+		int LuaAudioSetMuted(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			const auto Channel = ReadAudioMixChannel(State, 1);
+			if (!Instance || !Channel || !Instance->Services.SetAudioMuted || lua_type(State, 2) != LUA_TBOOLEAN)
+				return ReturnHostError(State, "audio.set_muted requires an available audio settings service, channel, and boolean");
+			bool Updated = false;
+			try { Updated = Instance->Services.SetAudioMuted(*Channel, lua_toboolean(State, 2) != 0); }
+			catch (...) { return ReturnHostError(State, "audio.set_muted failed in the audio session host"); }
+			if (!Updated) return ReturnHostError(State, "the active audio session rejected the mute change");
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		int LuaAudioSaveSettings(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.SaveAudioSettings)
+				return ReturnHostError(State, "audio.save_settings is unavailable in this runtime session");
+			bool Saved = false;
+			try { Saved = Instance->Services.SaveAudioSettings(); }
+			catch (...) { return ReturnHostError(State, "audio.save_settings failed in the audio session host"); }
+			if (!Saved) return ReturnHostError(State, "user audio settings could not be saved");
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		int LuaAudioGetOutputState(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.GetAudioOutputState)
+				return ReturnHostError(State, "audio.get_output_state is unavailable in this runtime session");
+			std::optional<std::string_view> OutputState;
+			try { OutputState = Instance->Services.GetAudioOutputState(); }
+			catch (...) { return ReturnHostError(State, "audio.get_output_state failed in the audio session host"); }
+			if (!OutputState)
+				return ReturnHostError(State, "audio output state is unavailable in this runtime session");
+			lua_pushlstring(State, OutputState->data(), OutputState->size());
+			return 1;
+		}
+
+		int LuaAudioRetryOutput(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.RetryAudioOutput)
+				return ReturnHostError(State, "audio.retry_output is unavailable in this runtime session");
+			bool Recovered = false;
+			try { Recovered = Instance->Services.RetryAudioOutput(); }
+			catch (...) { return ReturnHostError(State, "audio.retry_output failed in the audio session host"); }
+			lua_pushboolean(State, Recovered);
 			return 1;
 		}
 
@@ -1101,6 +1209,23 @@ namespace PulseForge::ScriptEnvironment
 		lua_pushcfunction(State, LuaUISetText);
 		lua_setfield(State, -2, "set_text");
 		lua_setglobal(State, "ui");
+
+		lua_newtable(State);
+		lua_pushcfunction(State, LuaAudioGetGain);
+		lua_setfield(State, -2, "get_gain");
+		lua_pushcfunction(State, LuaAudioSetGain);
+		lua_setfield(State, -2, "set_gain");
+		lua_pushcfunction(State, LuaAudioGetMuted);
+		lua_setfield(State, -2, "is_muted");
+		lua_pushcfunction(State, LuaAudioSetMuted);
+		lua_setfield(State, -2, "set_muted");
+		lua_pushcfunction(State, LuaAudioSaveSettings);
+		lua_setfield(State, -2, "save_settings");
+		lua_pushcfunction(State, LuaAudioGetOutputState);
+		lua_setfield(State, -2, "get_output_state");
+		lua_pushcfunction(State, LuaAudioRetryOutput);
+		lua_setfield(State, -2, "retry_output");
+		lua_setglobal(State, "audio");
 
 		lua_newtable(State);
 		lua_pushcfunction(State, LuaPhysicsRaycast);

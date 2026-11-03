@@ -2,6 +2,8 @@
 #include "Scene/UUID.h"
 #include "TestSupport.h"
 
+#include <nlohmann/json.hpp>
+
 #include <array>
 #include <cstddef>
 #include <filesystem>
@@ -28,6 +30,7 @@ namespace
 		UUID Project;
 		AssetID StartupScene;
 		std::vector<std::byte> Payload;
+		AudioMixGains AudioMixDefaults{ .Master = 0.8f, .Music = 0.7f, .Effects = 0.6f, .UI = 0.5f };
 
 		TemporaryCookRoot()
 		{
@@ -83,7 +86,8 @@ namespace
 			const CookedAssetDigest Digest = CookedAssetCatalog::ComputePayloadDigest(Payload);
 			CookedAssetEntry Entry{ StartupScene, CookedAssetProductKind::Scene, {}, std::string(PayloadRelativePath),
 				1, Payload.size(), Digest.Algorithm, Digest.Value, {} };
-			return CookedAssetCatalog::SerializeManifest(Project, StartupScene, Compatibility, {}, { std::move(Entry) });
+			return CookedAssetCatalog::SerializeManifest(
+				Project, StartupScene, Compatibility, {}, { std::move(Entry) }, {}, AudioMixDefaults);
 		}
 
 		std::expected<std::shared_ptr<const CookedAssetCatalog>, CookedAssetCatalogError> Open(
@@ -134,6 +138,7 @@ namespace
 		auto Catalog = Fixture.Open();
 		PF_CHECK(Tests, Catalog.has_value());
 		if (!Catalog) return;
+		PF_CHECK(Tests, (*Catalog)->GetAudioMixDefaults() == Fixture.AudioMixDefaults);
 		PF_CHECK(Tests, (*Catalog)->GetContentRoot() == std::filesystem::absolute(Fixture.Root).lexically_normal());
 		const CookedAssetEntry* Entry = (*Catalog)->Find(Fixture.StartupScene, CookedAssetProductKind::Scene);
 		PF_CHECK(Tests, Entry != nullptr);
@@ -186,18 +191,30 @@ namespace
 		PF_CHECK(Tests, !Truncated && Truncated.error().Code == CookedAssetCatalogErrorCode::InvalidManifest);
 
 		std::string Unsupported = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 3", "\"version\": 77"));
+		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 4", "\"version\": 77"));
 		Fixture.WriteManifest(Unsupported);
 		const auto Version = Fixture.Open();
 		PF_CHECK(Tests, !Version && Version.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
-		std::string LegacyVersion = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(LegacyVersion, "\"version\": 3", "\"version\": 2"));
-		PF_CHECK(Tests, ReplaceOnce(LegacyVersion, "      \"sourcePath\": \"\",\n", ""));
-		Fixture.WriteManifest(LegacyVersion);
-		const auto LegacyManifest = Fixture.Open();
-		PF_CHECK(Tests, LegacyManifest.has_value());
+		auto LegacyVersionTwo = nlohmann::ordered_json::parse(*Baseline);
+		LegacyVersionTwo["version"] = 2;
+		LegacyVersionTwo.erase("audioMixDefaults");
+		for (auto& Entry : LegacyVersionTwo["entries"])
+			Entry.erase("sourcePath");
+		Fixture.WriteManifest(LegacyVersionTwo.dump(2) + "\n");
+		const auto LegacyManifestTwo = Fixture.Open();
+		PF_CHECK(Tests, LegacyManifestTwo.has_value());
+		if (LegacyManifestTwo)
+			PF_CHECK(Tests, (*LegacyManifestTwo)->GetAudioMixDefaults() == AudioMixGains{});
+		auto LegacyVersionThree = nlohmann::ordered_json::parse(*Baseline);
+		LegacyVersionThree["version"] = 3;
+		LegacyVersionThree.erase("audioMixDefaults");
+		Fixture.WriteManifest(LegacyVersionThree.dump(2) + "\n");
+		const auto LegacyManifestThree = Fixture.Open();
+		PF_CHECK(Tests, LegacyManifestThree.has_value());
+		if (LegacyManifestThree)
+			PF_CHECK(Tests, (*LegacyManifestThree)->GetAudioMixDefaults() == AudioMixGains{});
 		std::string UnsupportedLegacy = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(UnsupportedLegacy, "\"version\": 3", "\"version\": 1"));
+		PF_CHECK(Tests, ReplaceOnce(UnsupportedLegacy, "\"version\": 4", "\"version\": 1"));
 		Fixture.WriteManifest(UnsupportedLegacy);
 		const auto UnsupportedLegacyManifest = Fixture.Open();
 		PF_CHECK(Tests, !UnsupportedLegacyManifest &&

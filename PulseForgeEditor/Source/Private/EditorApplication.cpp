@@ -21,6 +21,8 @@
 #include "Assets/Project.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/SceneAssetService.h"
+#include "Audio/AudioSession.h"
+#include "Assets/AudioAssetCache.h"
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneSerializer.h"
@@ -63,6 +65,7 @@
 #include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
+#include "Editor/EditorAudioPreviewController.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorApplicationFactory.h"
 #include "Editor/EditorPlatformServices.h"
@@ -618,6 +621,18 @@ namespace
 
 		void ReportInspectorError(std::string Message) override { SetError(std::move(Message)); }
 
+		[[nodiscard]] std::expected<void, std::string> PreviewAudioAsset(
+			const PulseForge::AssetID& Asset, PulseForge::AudioBus Bus) override
+		{
+			if (!m_Project) return std::unexpected("Open a project before previewing an audio asset.");
+			return m_AudioPreview.Play(Asset, Bus);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> StopAudioPreview() override
+		{
+			return m_AudioPreview.Stop();
+		}
+
 		[[nodiscard]] std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
 			const PulseForge::AssetID& Asset) override
 		{
@@ -946,6 +961,8 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ShutdownPlayerProcess();
 			m_ConsolePanel.Detach();
 			ShutdownImGui();
@@ -1081,6 +1098,8 @@ namespace
 			ResetViewportSceneRenderer();
 			ResetViewportTarget();
 			m_Scene.reset();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ShutdownImGui();
 			ShutdownFileDialog();
 			m_Project.reset();
@@ -1091,6 +1110,29 @@ namespace
 			AdvancePerformanceCaptureLifecycle();
 			(void)m_DeferredEditorOperations.ExecuteNext();
 			PollPlayerProcess();
+			const std::optional<PulseForge::UUID> SelectedEntity = m_SceneWorkspace.Selection().GetPrimary();
+			const std::optional<PulseForge::AssetID> SelectedAsset = m_ContentBrowser.SelectedAsset();
+			if (SelectedEntity != m_AudioPreviewSelectedEntity || SelectedAsset != m_AudioPreviewSelectedAsset)
+				m_AudioPreview.Cancel();
+			m_AudioPreviewSelectedEntity = SelectedEntity;
+			m_AudioPreviewSelectedAsset = SelectedAsset;
+			if (m_AudioSession)
+			{
+				m_AudioSession->PollDeviceState();
+				m_AudioPreview.ReconcileDeviceGeneration();
+				const PulseForge::AudioDeviceState CurrentState = m_AudioSession->GetDeviceState();
+				if (!m_LastAudioDeviceState || *m_LastAudioDeviceState != CurrentState)
+				{
+					if (CurrentState == PulseForge::AudioDeviceState::Unavailable ||
+						CurrentState == PulseForge::AudioDeviceState::RecoveryFailed)
+					{
+						const std::string_view DeviceDiagnostic = m_AudioSession->GetDeviceDiagnostic();
+						if (DeviceDiagnostic.empty()) SetWarning("Audio output is unavailable; simulation continues silently.");
+						else SetWarning(std::string(DeviceDiagnostic));
+					}
+					m_LastAudioDeviceState = CurrentState;
+				}
+			}
 			m_ConsolePanel.CapturePendingLogs();
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_Context)
@@ -2033,6 +2075,36 @@ namespace
 			if (!LevelDocument) SetWarning("The Level Editor document session could not be registered: " + LevelDocument.error());
 		}
 
+		void ConfigureProjectAudio()
+		{
+			m_AudioPreview.ClearSession();
+			m_LastAudioDeviceState.reset();
+			if (!m_Project) return;
+
+			PulseForge::AudioSessionDesc Description;
+			Description.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
+			auto Session = PulseForge::AudioSession::CreateForProject(*m_Project, std::move(Description));
+			if (!Session)
+			{
+				SetWarning("Project opened without its shared audio session: " + Session.error().Message);
+				return;
+			}
+			m_AudioSession = std::move(*Session);
+			m_AudioPreview.SetSession(m_AudioSession.get());
+			m_LastAudioDeviceState = m_AudioSession->GetDeviceState();
+
+			std::string Diagnostic;
+			if (!m_AudioSession->GetDeviceDiagnostic().empty())
+				Diagnostic = std::string(m_AudioSession->GetDeviceDiagnostic());
+			if (!m_AudioSession->GetSettingsDiagnostic().empty())
+			{
+				if (!Diagnostic.empty()) Diagnostic += " ";
+				Diagnostic += "User mix settings: ";
+				Diagnostic += m_AudioSession->GetSettingsDiagnostic();
+			}
+			if (!Diagnostic.empty()) SetWarning(std::move(Diagnostic));
+		}
+
 		bool ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
 		{
 			if (!FinishSceneEdit()) return false;
@@ -2040,10 +2112,13 @@ namespace
 			auto StartupScene = std::move(Prepared.StartupScene);
 			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ResetViewportSceneRenderer();
 			m_PendingAssetMovePlan.reset();
 			++m_AssetOperationGeneration;
 			m_Project.emplace(std::move(Prepared.Project));
+			ConfigureProjectAudio();
 			ConfigureGameplayInputForProject();
 			RegisterLevelDocument();
 			ResetContentBrowserNavigation();
@@ -4991,6 +5066,8 @@ namespace
 			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); })) return;
 			m_BuildProfileController.ProjectChanged("Project closed");
 			ClearScene();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ResetViewportSceneRenderer();
 			ClearGameplayInputProject();
 			m_Project.reset();
@@ -5202,6 +5279,28 @@ namespace
 			if (m_Scene)
 				AddMetric("Authored scene entities", "Scene", "Currently open authored scene", m_Scene->GetEntityCount(),
 					PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			if (m_AudioSession)
+			{
+				const PulseForge::AudioEngineMemoryStats AudioMemory = m_AudioSession->GetEngine().GetMemoryStats();
+				AddMetric("Retained encoded audio clips", "AudioSession", "Clip payloads retained by the current audio engine",
+					AudioMemory.RetainedClipCount, PulseForgeEditor::EditorResourceMetricKind::Count,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+				AddMetric("Retained encoded audio bytes", "AudioSession", "Exact encoded clip payload bytes; shared clips counted once",
+					AudioMemory.RetainedEncodedClipBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+				AddMetric("Live audio playback objects", "AudioSession", "Playback handles with an initialized miniaudio sound",
+					AudioMemory.LivePlaybackCount, PulseForgeEditor::EditorResourceMetricKind::Count,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+				AddMetric("Known audio playback object bytes", "AudioSession", "C++ AudioPlayback::Impl object sizes only",
+					AudioMemory.KnownPlaybackObjectBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+					PulseForgeEditor::EditorResourceMetricQuality::LogicalAllocation);
+				AddMetric("Known audio decoder object bytes", "AudioSession", "C++ ma_decoder structures; backend allocations excluded",
+					AudioMemory.KnownDecoderObjectBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+					PulseForgeEditor::EditorResourceMetricQuality::LogicalAllocation);
+				Resources.push_back({ "Audio backend allocation bytes", "AudioSession", "Codec, sound graph, and backend allocator totals",
+					0, PulseForgeEditor::EditorResourceMetricKind::Bytes, PulseForgeEditor::EditorResourceMetricQuality::Unavailable,
+					"The pinned miniaudio allocator does not expose exact aggregate backend allocation totals." });
+			}
 			const PulseForgeEditor::AssetPreviewStats PreviewStats = m_AssetPreviews.GetStats();
 			AddMetric("Queued decoded preview bytes", "AssetPreviewService", "Completed pixel payloads awaiting UI upload",
 				PreviewStats.QueuedResultCpuBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
@@ -8575,6 +8674,7 @@ namespace
 			Services.InputState = &PulseForge::Application::Get().GetInput();
 			Services.GameplayInput = &PulseForge::Application::Get().GetGameplayInput();
 			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
+			Services.AudioSessionState = m_AudioSession.get();
 			Services.QueueSceneTransition = [this](const PulseForge::AssetID& Asset)
 			{
 				if (!m_SceneRuntime || !m_Project || m_QueuedRuntimeSceneTransition) return false;
@@ -8630,14 +8730,43 @@ namespace
 			}
 			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(
 				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
-			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
+			if (auto Started = CandidateRuntime->Start(*CandidateScene, true); !Started)
 			{
 				RejectBoundaryRequest();
 				SetError("Runtime scene transition could not start: " + Started.error().Message);
 				return;
 			}
-			(void)m_SceneRuntime->ResolveBoundaryRequest(
-				*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Committed);
+			auto SuspendedOutgoing = m_SceneRuntime->SuspendAudioForTransition();
+			if (!SuspendedOutgoing)
+			{
+				RejectBoundaryRequest();
+				SetError("Could not suspend outgoing scene audio for transition: " + SuspendedOutgoing.error().Message);
+				return;
+			}
+			if (auto Activated = CandidateRuntime->ActivateAudio(); !Activated)
+			{
+				auto ResumedOutgoing = m_SceneRuntime->ResumeAudioAfterTransition();
+				RejectBoundaryRequest();
+				std::string Message = "Runtime scene transition audio could not activate: " + Activated.error().Message;
+				if (!ResumedOutgoing)
+					Message += " Outgoing scene audio also could not resume: " + ResumedOutgoing.error().Message;
+				else Message += " The outgoing scene remains active and its audio was resumed.";
+				SetError(std::move(Message));
+				return;
+			}
+			if (!m_SceneRuntime->ResolveBoundaryRequest(
+					*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Committed))
+			{
+				CandidateRuntime->Stop();
+				auto ResumedOutgoing = m_SceneRuntime->ResumeAudioAfterTransition();
+				(void)m_SceneRuntime->ResolveBoundaryRequest(
+					*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Rejected);
+				SetError(ResumedOutgoing
+					? "Runtime scene transition was cancelled because its request became stale; the outgoing scene remains active."
+					: "Runtime scene transition request became stale and outgoing audio could not resume: " +
+						ResumedOutgoing.error().Message);
+				return;
+			}
 
 			auto RetiredScene = std::move(m_RuntimeScene);
 			auto RetiredRuntime = std::move(m_SceneRuntime);
@@ -8672,9 +8801,15 @@ namespace
 
 			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(
 				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
-			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
+			if (auto Result = CandidateRuntime->Start(**CandidateScene, true); !Result)
 			{
 				SetError("Could not start the scene runtime: " + Result.error().Message);
+				return;
+			}
+			m_AudioPreview.Cancel();
+			if (auto Activated = CandidateRuntime->ActivateAudio(); !Activated)
+			{
+				SetError("Could not activate scene audio: " + Activated.error().Message);
 				return;
 			}
 
@@ -9114,6 +9249,11 @@ namespace
 
 		void UpdateAssetList(bool RendererAssetsChanged = false)
 		{
+			if (RendererAssetsChanged)
+			{
+				m_AudioPreview.Cancel();
+				if (m_AudioSession) m_AudioSession->GetAssets().Clear();
+			}
 			m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 			m_AssetPreviewProjectPending = true;
 			m_AssetPreviewAssetsPending = true;
@@ -9436,6 +9576,11 @@ namespace
 		bool m_DocumentHostTabGroupSourceCenterValid = false;
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
+		std::unique_ptr<PulseForge::AudioSession> m_AudioSession;
+		PulseForgeEditor::EditorAudioPreviewController m_AudioPreview;
+		std::optional<PulseForge::AudioDeviceState> m_LastAudioDeviceState;
+		std::optional<PulseForge::UUID> m_AudioPreviewSelectedEntity;
+		std::optional<PulseForge::AssetID> m_AudioPreviewSelectedAsset;
 		std::unique_ptr<PulseForgeEditor::EditorPlayerProcess> m_PlayerProcess;
 		bool m_PlayerStopRequested = false;
 		bool m_PlayerMonitorErrorReported = false;

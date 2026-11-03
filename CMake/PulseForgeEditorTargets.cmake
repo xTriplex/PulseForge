@@ -26,6 +26,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorBuildProfilePanel.cpp
 		PulseForgeEditor/Source/Private/EditorBuildProfileController.cpp
 		PulseForgeEditor/Source/Private/EditorPerformanceCaptureService.cpp
+		PulseForgeEditor/Source/Private/EditorAudioPreviewController.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp
@@ -77,7 +78,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore PulseForgeAssetExportService
 		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
-			PulseForgeAssetDependencyCatalog PulseForgeScriptAssets
+			PulseForgeAssetDependencyCatalog PulseForgeScriptAssets PulseForgeAudioAssets
 			PulseForgeBuildProfiles
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
