@@ -3,13 +3,18 @@
 #include "Input/GameplayInput.h"
 #include "Scripting/Detail/ScriptFloatPropertyRead.h"
 
+#include <array>
+#include <cstdint>
 #include <stdexcept>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string_view>
 
 namespace
 {
+struct AudioBindingProbe;
+
 #if defined(PF_DEBUG)
 	struct LuaAllocationFaultProbe final
 	{
@@ -19,18 +24,134 @@ namespace
 		bool Armed = true;
 		size_t RejectedAllocationCount = 0;
 		size_t LastRequestedBytes = 0;
+		AudioBindingProbe* AudioProbe = nullptr;
+		bool RejectAudioHostErrorAllocation = false;
+		size_t AudioHostErrorAllocationAttemptCount = 0;
+		bool AudioErrorAllocationBeforeExceptionCleanup = false;
 	};
 
+	bool RejectLuaAllocation(void* Context, PulseForge::ScriptRuntimeAllocationPointForTesting Point,
+		size_t ModuleIndex, size_t RequestedBytes) noexcept;
+#endif
+
+	enum class AudioBindingOperation : size_t
+	{
+		GetGain,
+		SetGain,
+		GetMuted,
+		SetMuted,
+		SaveSettings,
+		GetOutputState,
+		RetryOutput,
+		Count
+	};
+
+	struct AudioBindingProbe final
+	{
+		std::array<size_t, static_cast<size_t>(AudioBindingOperation::Count)> Calls{};
+		std::array<bool, static_cast<size_t>(AudioBindingOperation::Count)> Throw{};
+		std::array<bool, static_cast<size_t>(AudioBindingOperation::Count)> Reject{};
+		std::array<std::string_view, static_cast<size_t>(AudioBindingOperation::Count)> LastChannel{};
+		size_t HostCallbackCount = 0;
+		size_t ActiveExceptionCount = 0;
+		size_t DestroyedExceptionCount = 0;
+		float Gain = 0.625f;
+		bool Muted = false;
+		bool RetryResult = true;
+	};
+
+#if defined(PF_DEBUG)
 	bool RejectLuaAllocation(void* Context, PulseForge::ScriptRuntimeAllocationPointForTesting Point,
 		size_t ModuleIndex, size_t RequestedBytes) noexcept
 	{
 		auto& Probe = *static_cast<LuaAllocationFaultProbe*>(Context);
+		if (Point == PulseForge::ScriptRuntimeAllocationPointForTesting::AudioHostErrorString)
+		{
+			++Probe.AudioHostErrorAllocationAttemptCount;
+			if (!Probe.Armed || !Probe.RejectAudioHostErrorAllocation) return false;
+			if (!Probe.AudioProbe || Probe.AudioProbe->HostCallbackCount == 0 ||
+				Probe.AudioProbe->ActiveExceptionCount != 0 || Probe.AudioProbe->DestroyedExceptionCount == 0)
+			{
+				Probe.AudioErrorAllocationBeforeExceptionCleanup = true;
+				return false;
+			}
+		}
 		if (!Probe.Armed || Probe.TargetPoint != Point || Probe.TargetModuleIndex != ModuleIndex) return false;
 		++Probe.RejectedAllocationCount;
 		Probe.LastRequestedBytes = RequestedBytes;
 		return true;
 	}
 #endif
+
+	struct AudioBindingHostException final
+	{
+		explicit AudioBindingHostException(AudioBindingProbe& Probe) noexcept : m_Probe(&Probe)
+		{
+			++m_Probe->ActiveExceptionCount;
+		}
+
+		~AudioBindingHostException() noexcept
+		{
+			--m_Probe->ActiveExceptionCount;
+			++m_Probe->DestroyedExceptionCount;
+		}
+
+		AudioBindingProbe* m_Probe;
+	};
+
+	bool EnterAudioHostOperation(AudioBindingProbe& Probe, AudioBindingOperation Operation)
+	{
+		const size_t Index = static_cast<size_t>(Operation);
+		++Probe.Calls[Index];
+		++Probe.HostCallbackCount;
+		if (Probe.Throw[Index]) throw AudioBindingHostException(Probe);
+		return !Probe.Reject[Index];
+	}
+
+	void InstallAudioBindingServices(PulseForge::ScriptRuntimeServices& Services, AudioBindingProbe& Probe)
+	{
+		using namespace PulseForge;
+		Services.GetAudioGain = [&Probe](std::string_view Channel) -> std::optional<float>
+		{
+			Probe.LastChannel[static_cast<size_t>(AudioBindingOperation::GetGain)] = Channel;
+			if (!EnterAudioHostOperation(Probe, AudioBindingOperation::GetGain)) return std::nullopt;
+			return Probe.Gain;
+		};
+		Services.SetAudioGain = [&Probe](std::string_view Channel, float Gain)
+		{
+			Probe.LastChannel[static_cast<size_t>(AudioBindingOperation::SetGain)] = Channel;
+			if (!EnterAudioHostOperation(Probe, AudioBindingOperation::SetGain)) return false;
+			Probe.Gain = Gain;
+			return true;
+		};
+		Services.GetAudioMuted = [&Probe](std::string_view Channel) -> std::optional<bool>
+		{
+			Probe.LastChannel[static_cast<size_t>(AudioBindingOperation::GetMuted)] = Channel;
+			if (!EnterAudioHostOperation(Probe, AudioBindingOperation::GetMuted)) return std::nullopt;
+			return Probe.Muted;
+		};
+		Services.SetAudioMuted = [&Probe](std::string_view Channel, bool Muted)
+		{
+			Probe.LastChannel[static_cast<size_t>(AudioBindingOperation::SetMuted)] = Channel;
+			if (!EnterAudioHostOperation(Probe, AudioBindingOperation::SetMuted)) return false;
+			Probe.Muted = Muted;
+			return true;
+		};
+		Services.SaveAudioSettings = [&Probe]
+		{
+			return EnterAudioHostOperation(Probe, AudioBindingOperation::SaveSettings);
+		};
+		Services.GetAudioOutputState = [&Probe]() -> std::optional<std::string_view>
+		{
+			if (!EnterAudioHostOperation(Probe, AudioBindingOperation::GetOutputState)) return std::nullopt;
+			return "DefaultActive";
+		};
+		Services.RetryAudioOutput = [&Probe]
+		{
+			if (!EnterAudioHostOperation(Probe, AudioBindingOperation::RetryOutput)) return false;
+			return Probe.RetryResult;
+		};
+	}
 
 	std::vector<std::byte> MakeSilentScriptTestWave()
 	{
@@ -174,6 +295,214 @@ end
 		PF_CHECK(Tests, NonStringErrorRuntime.GetDiagnostics().size() == 1 &&
 			NonStringErrorRuntime.GetDiagnostics().front().Message == "Lua returned a non-string error object");
 		NonStringErrorRuntime.Stop();
+
+		constexpr std::string_view AudioBindingSuccessSource = R"(
+function OnUpdate()
+  assert(audio.get_gain("music") == 0.625)
+  assert(audio.set_gain("effects", 0.25) == true)
+  assert(audio.is_muted("ui") == false)
+  assert(audio.set_muted("music", true) == true)
+  assert(audio.save_settings() == true)
+  assert(audio.get_output_state() == "DefaultActive")
+  assert(audio.retry_output() == true)
+end
+)";
+		const auto AudioBindingSuccessAsset = CreateScriptAsset("audio_binding_success.lua", AudioBindingSuccessSource);
+		PF_CHECK(Tests, AudioBindingSuccessAsset.has_value());
+		if (!AudioBindingSuccessAsset) return;
+		Scene AudioBindingSuccessScene;
+		const auto AudioBindingSuccessEntity = AudioBindingSuccessScene.CreateEntity("Successful audio bindings");
+		PF_CHECK(Tests, AudioBindingSuccessEntity &&
+			AudioBindingSuccessEntity->SetScript(ScriptComponent{ AudioBindingSuccessAsset->ID }).has_value());
+		if (!AudioBindingSuccessEntity) return;
+		AudioBindingProbe AudioBindingSuccessProbe;
+		ScriptRuntimeServices AudioBindingSuccessServices;
+		InstallAudioBindingServices(AudioBindingSuccessServices, AudioBindingSuccessProbe);
+		ScriptRuntime AudioBindingSuccessRuntime(*ProjectResult, {}, AudioBindingSuccessServices);
+		PF_CHECK(Tests, AudioBindingSuccessRuntime.Start(AudioBindingSuccessScene).has_value());
+		PF_CHECK(Tests, AudioBindingSuccessRuntime.Advance(AudioBindingSuccessScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, AudioBindingSuccessRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, AudioBindingSuccessProbe.Calls[0] == 1 && AudioBindingSuccessProbe.Calls[1] == 1 &&
+			AudioBindingSuccessProbe.Calls[2] == 1 && AudioBindingSuccessProbe.Calls[3] == 1 &&
+			AudioBindingSuccessProbe.Calls[4] == 1 && AudioBindingSuccessProbe.Calls[5] == 1 &&
+			AudioBindingSuccessProbe.Calls[6] == 1);
+		PF_CHECK(Tests, AudioBindingSuccessProbe.Gain == 0.25f && AudioBindingSuccessProbe.Muted);
+		PF_CHECK(Tests, AudioBindingSuccessProbe.LastChannel[0] == "music" &&
+			AudioBindingSuccessProbe.LastChannel[1] == "effects" && AudioBindingSuccessProbe.LastChannel[2] == "ui" &&
+			AudioBindingSuccessProbe.LastChannel[3] == "music");
+		AudioBindingSuccessRuntime.Stop();
+
+		constexpr std::string_view AudioBindingRejectedSource = R"(
+function OnUpdate()
+  local gain, gainError = audio.get_gain("music")
+  assert(gain == nil and gainError == "the requested audio mix channel is unavailable in this runtime session")
+  local setGain, setGainError = audio.set_gain("effects", 0.25)
+  assert(setGain == nil and setGainError == "the active audio session rejected the gain change")
+  local muted, mutedError = audio.is_muted("ui")
+  assert(muted == nil and mutedError == "the requested audio mix channel is unavailable in this runtime session")
+  local setMuted, setMutedError = audio.set_muted("music", true)
+  assert(setMuted == nil and setMutedError == "the active audio session rejected the mute change")
+  local saved, saveError = audio.save_settings()
+  assert(saved == nil and saveError == "user audio settings could not be saved")
+  local output, outputError = audio.get_output_state()
+  assert(output == nil and outputError == "audio output state is unavailable in this runtime session")
+  assert(audio.retry_output() == false)
+end
+)";
+		const auto AudioBindingRejectedAsset = CreateScriptAsset("audio_binding_rejected.lua", AudioBindingRejectedSource);
+		PF_CHECK(Tests, AudioBindingRejectedAsset.has_value());
+		if (!AudioBindingRejectedAsset) return;
+		Scene AudioBindingRejectedScene;
+		const auto AudioBindingRejectedEntity = AudioBindingRejectedScene.CreateEntity("Rejected audio bindings");
+		PF_CHECK(Tests, AudioBindingRejectedEntity &&
+			AudioBindingRejectedEntity->SetScript(ScriptComponent{ AudioBindingRejectedAsset->ID }).has_value());
+		if (!AudioBindingRejectedEntity) return;
+		AudioBindingProbe AudioBindingRejectedProbe;
+		AudioBindingRejectedProbe.Reject.fill(true);
+		ScriptRuntimeServices AudioBindingRejectedServices;
+		InstallAudioBindingServices(AudioBindingRejectedServices, AudioBindingRejectedProbe);
+		ScriptRuntime AudioBindingRejectedRuntime(*ProjectResult, {}, AudioBindingRejectedServices);
+		PF_CHECK(Tests, AudioBindingRejectedRuntime.Start(AudioBindingRejectedScene).has_value());
+		PF_CHECK(Tests, AudioBindingRejectedRuntime.Advance(AudioBindingRejectedScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, AudioBindingRejectedRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, AudioBindingRejectedProbe.Calls[0] == 1 && AudioBindingRejectedProbe.Calls[1] == 1 &&
+			AudioBindingRejectedProbe.Calls[2] == 1 && AudioBindingRejectedProbe.Calls[3] == 1 &&
+			AudioBindingRejectedProbe.Calls[4] == 1 && AudioBindingRejectedProbe.Calls[5] == 1 &&
+			AudioBindingRejectedProbe.Calls[6] == 1);
+		AudioBindingRejectedRuntime.Stop();
+
+		constexpr std::string_view AudioBindingUnavailableSource = R"(
+function OnUpdate()
+  local gain, gainError = audio.get_gain("music")
+  assert(gain == nil and type(gainError) == "string")
+  local setGain, setGainError = audio.set_gain("effects", 0.25)
+  assert(setGain == nil and type(setGainError) == "string")
+  local muted, mutedError = audio.is_muted("ui")
+  assert(muted == nil and type(mutedError) == "string")
+  local setMuted, setMutedError = audio.set_muted("music", true)
+  assert(setMuted == nil and type(setMutedError) == "string")
+  local saved, saveError = audio.save_settings()
+  assert(saved == nil and type(saveError) == "string")
+  local output, outputError = audio.get_output_state()
+  assert(output == nil and type(outputError) == "string")
+  local retried, retryError = audio.retry_output()
+  assert(retried == nil and type(retryError) == "string")
+end
+)";
+		const auto AudioBindingUnavailableAsset = CreateScriptAsset("audio_binding_unavailable.lua", AudioBindingUnavailableSource);
+		PF_CHECK(Tests, AudioBindingUnavailableAsset.has_value());
+		if (!AudioBindingUnavailableAsset) return;
+		Scene AudioBindingUnavailableScene;
+		const auto AudioBindingUnavailableEntity = AudioBindingUnavailableScene.CreateEntity("Unavailable audio services");
+		PF_CHECK(Tests, AudioBindingUnavailableEntity &&
+			AudioBindingUnavailableEntity->SetScript(ScriptComponent{ AudioBindingUnavailableAsset->ID }).has_value());
+		if (!AudioBindingUnavailableEntity) return;
+		ScriptRuntime AudioBindingUnavailableRuntime(*ProjectResult);
+		PF_CHECK(Tests, AudioBindingUnavailableRuntime.Start(AudioBindingUnavailableScene).has_value());
+		PF_CHECK(Tests, AudioBindingUnavailableRuntime.Advance(AudioBindingUnavailableScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, AudioBindingUnavailableRuntime.GetDiagnostics().empty());
+		AudioBindingUnavailableRuntime.Stop();
+
+		constexpr std::string_view AudioBindingThrowSource = R"(
+function OnUpdate()
+  local gain, gainError = audio.get_gain("music")
+  assert(gain == nil and gainError == "audio.get_gain failed in the audio session host")
+  local setGain, setGainError = audio.set_gain("effects", 0.25)
+  assert(setGain == nil and setGainError == "audio.set_gain failed in the audio session host")
+  local muted, mutedError = audio.is_muted("ui")
+  assert(muted == nil and mutedError == "audio.is_muted failed in the audio session host")
+  local setMuted, setMutedError = audio.set_muted("music", true)
+  assert(setMuted == nil and setMutedError == "audio.set_muted failed in the audio session host")
+  local saved, saveError = audio.save_settings()
+  assert(saved == nil and saveError == "audio.save_settings failed in the audio session host")
+  local output, outputError = audio.get_output_state()
+  assert(output == nil and outputError == "audio.get_output_state failed in the audio session host")
+  local retried, retryError = audio.retry_output()
+  assert(retried == nil and retryError == "audio.retry_output failed in the audio session host")
+end
+)";
+		const auto AudioBindingThrowAsset = CreateScriptAsset("audio_binding_throw.lua", AudioBindingThrowSource);
+		PF_CHECK(Tests, AudioBindingThrowAsset.has_value());
+		if (!AudioBindingThrowAsset) return;
+		Scene AudioBindingThrowScene;
+		const auto AudioBindingThrowEntity = AudioBindingThrowScene.CreateEntity("Throwing audio services");
+		PF_CHECK(Tests, AudioBindingThrowEntity &&
+			AudioBindingThrowEntity->SetScript(ScriptComponent{ AudioBindingThrowAsset->ID }).has_value());
+		if (!AudioBindingThrowEntity) return;
+		AudioBindingProbe AudioBindingThrowProbe;
+		AudioBindingThrowProbe.Throw.fill(true);
+		ScriptRuntimeServices AudioBindingThrowServices;
+		InstallAudioBindingServices(AudioBindingThrowServices, AudioBindingThrowProbe);
+		ScriptRuntime AudioBindingThrowRuntime(*ProjectResult, {}, AudioBindingThrowServices);
+		PF_CHECK(Tests, AudioBindingThrowRuntime.Start(AudioBindingThrowScene).has_value());
+		PF_CHECK(Tests, AudioBindingThrowRuntime.Advance(AudioBindingThrowScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, AudioBindingThrowRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, AudioBindingThrowProbe.Calls[0] == 1 && AudioBindingThrowProbe.Calls[1] == 1 &&
+			AudioBindingThrowProbe.Calls[2] == 1 && AudioBindingThrowProbe.Calls[3] == 1 &&
+			AudioBindingThrowProbe.Calls[4] == 1 && AudioBindingThrowProbe.Calls[5] == 1 &&
+			AudioBindingThrowProbe.Calls[6] == 1);
+		PF_CHECK(Tests, AudioBindingThrowProbe.ActiveExceptionCount == 0 &&
+			AudioBindingThrowProbe.DestroyedExceptionCount == 7);
+		AudioBindingThrowRuntime.Stop();
+
+#if defined(PF_DEBUG)
+		constexpr std::string_view AudioBindingOomSource = R"(
+function OnUpdate()
+  local gain = audio.get_gain("music")
+  if gain then
+    assert(gain == 0.625)
+    assert(entity:set_translation(gain, 0, 0))
+  end
+end
+function OnDestroy()
+  local allocationProbe = string.rep("x", 512)
+  assert(#allocationProbe == 512)
+end
+)";
+		const auto AudioBindingOomAsset = CreateScriptAsset("audio_binding_oom.lua", AudioBindingOomSource);
+		PF_CHECK(Tests, AudioBindingOomAsset.has_value());
+		if (!AudioBindingOomAsset) return;
+		Scene AudioBindingOomScene;
+		const auto AudioBindingOomEntity = AudioBindingOomScene.CreateEntity("Audio binding allocation failure");
+		PF_CHECK(Tests, AudioBindingOomEntity &&
+			AudioBindingOomEntity->SetScript(ScriptComponent{ AudioBindingOomAsset->ID }).has_value());
+		if (!AudioBindingOomEntity) return;
+		AudioBindingProbe AudioBindingOomProbe;
+		AudioBindingOomProbe.Throw[static_cast<size_t>(AudioBindingOperation::GetGain)] = true;
+		LuaAllocationFaultProbe AudioBindingOomFault;
+		AudioBindingOomFault.TargetPoint = ScriptRuntimeAllocationPointForTesting::AudioHostErrorString;
+		AudioBindingOomFault.RejectAudioHostErrorAllocation = true;
+		AudioBindingOomFault.AudioProbe = &AudioBindingOomProbe;
+		const ScriptRuntimeAllocationFaultHooksForTesting AudioBindingOomHooks{ &AudioBindingOomFault, RejectLuaAllocation };
+		ScriptRuntimeDesc AudioBindingOomDescription;
+		AudioBindingOomDescription.AllocationFaultHooksForTesting = &AudioBindingOomHooks;
+		ScriptRuntimeServices AudioBindingOomServices;
+		InstallAudioBindingServices(AudioBindingOomServices, AudioBindingOomProbe);
+		ScriptRuntime AudioBindingOomRuntime(*ProjectResult, AudioBindingOomDescription, AudioBindingOomServices);
+		PF_CHECK(Tests, AudioBindingOomRuntime.Start(AudioBindingOomScene).has_value());
+		PF_CHECK(Tests, AudioBindingOomRuntime.Advance(AudioBindingOomScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, AudioBindingOomFault.AudioHostErrorAllocationAttemptCount > 0 &&
+			AudioBindingOomFault.RejectedAllocationCount > 0 && AudioBindingOomFault.LastRequestedBytes > 0);
+		PF_CHECK(Tests, !AudioBindingOomFault.AudioErrorAllocationBeforeExceptionCleanup &&
+			AudioBindingOomProbe.ActiveExceptionCount == 0 && AudioBindingOomProbe.DestroyedExceptionCount == 1);
+		PF_CHECK(Tests, AudioBindingOomRuntime.IsRunning() && AudioBindingOomRuntime.GetDiagnostics().size() == 1 &&
+			AudioBindingOomRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::UpdateFailed);
+
+		AudioBindingOomFault.Armed = false;
+		AudioBindingOomFault.RejectAudioHostErrorAllocation = false;
+		AudioBindingOomProbe.Throw[static_cast<size_t>(AudioBindingOperation::GetGain)] = false;
+		const auto AudioBindingRecoveryEntity = AudioBindingOomScene.CreateEntity("Audio binding recovery");
+		PF_CHECK(Tests, AudioBindingRecoveryEntity &&
+			AudioBindingRecoveryEntity->SetScript(ScriptComponent{ AudioBindingOomAsset->ID }).has_value());
+		if (!AudioBindingRecoveryEntity) return;
+		PF_CHECK(Tests, AudioBindingOomRuntime.Advance(AudioBindingOomScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, AudioBindingOomRuntime.GetScriptCount() == 2 && AudioBindingOomRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, AudioBindingRecoveryEntity->GetTransform()->Translation.x == 0.625f &&
+			AudioBindingOomProbe.Calls[static_cast<size_t>(AudioBindingOperation::GetGain)] == 2);
+		AudioBindingOomRuntime.Stop();
+		PF_CHECK(Tests, AudioBindingOomRuntime.GetDiagnostics().size() == 1 &&
+			AudioBindingOomRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::UpdateFailed);
+#endif
 
 		const auto WriteScriptSource = [&](const AssetID& Asset, std::string_view Source)
 		{

@@ -49,6 +49,24 @@ namespace PulseForge::ScriptEnvironment
 			return 2;
 		}
 
+		int ReturnAudioHostError(lua_State* State, ScriptInstance* Instance, const char* Message)
+		{
+			lua_pushnil(State);
+#if defined(PF_DEBUG)
+			const bool TrackAllocation = Instance && Instance->Memory.FaultHooks;
+			if (TrackAllocation)
+				Instance->Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::AudioHostErrorString;
+#else
+			(void)Instance;
+#endif
+			lua_pushstring(State, Message);
+#if defined(PF_DEBUG)
+			if (TrackAllocation)
+				Instance->Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
+#endif
+			return 2;
+		}
+
 		LuaEntity* GetLuaEntity(lua_State* State)
 		{
 			return static_cast<LuaEntity*>(luaL_testudata(State, 1, EntityMetatableName));
@@ -899,8 +917,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!Instance || !Channel || !Instance->Services.GetAudioGain)
 				return ReturnHostError(State, "audio.get_gain requires an available audio settings service and master/music/effects/ui channel");
 			std::optional<float> Gain;
+			bool HostFailed = false;
 			try { Gain = Instance->Services.GetAudioGain(*Channel); }
-			catch (...) { return ReturnHostError(State, "audio.get_gain failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.get_gain failed in the audio session host");
 			if (!Gain || !std::isfinite(*Gain))
 				return ReturnHostError(State, "the requested audio mix channel is unavailable in this runtime session");
 			lua_pushnumber(State, *Gain);
@@ -917,8 +937,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!std::isfinite(static_cast<double>(Number)) || Number < 0.0 || Number > 1.0)
 				return ReturnHostError(State, "audio gain must be finite and between zero and one");
 			bool Updated = false;
+			bool HostFailed = false;
 			try { Updated = Instance->Services.SetAudioGain(*Channel, static_cast<float>(Number)); }
-			catch (...) { return ReturnHostError(State, "audio.set_gain failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.set_gain failed in the audio session host");
 			if (!Updated) return ReturnHostError(State, "the active audio session rejected the gain change");
 			lua_pushboolean(State, true);
 			return 1;
@@ -931,8 +953,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!Instance || !Channel || !Instance->Services.GetAudioMuted)
 				return ReturnHostError(State, "audio.is_muted requires an available audio settings service and channel");
 			std::optional<bool> Muted;
+			bool HostFailed = false;
 			try { Muted = Instance->Services.GetAudioMuted(*Channel); }
-			catch (...) { return ReturnHostError(State, "audio.is_muted failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.is_muted failed in the audio session host");
 			if (!Muted) return ReturnHostError(State, "the requested audio mix channel is unavailable in this runtime session");
 			lua_pushboolean(State, *Muted);
 			return 1;
@@ -945,8 +969,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!Instance || !Channel || !Instance->Services.SetAudioMuted || lua_type(State, 2) != LUA_TBOOLEAN)
 				return ReturnHostError(State, "audio.set_muted requires an available audio settings service, channel, and boolean");
 			bool Updated = false;
+			bool HostFailed = false;
 			try { Updated = Instance->Services.SetAudioMuted(*Channel, lua_toboolean(State, 2) != 0); }
-			catch (...) { return ReturnHostError(State, "audio.set_muted failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.set_muted failed in the audio session host");
 			if (!Updated) return ReturnHostError(State, "the active audio session rejected the mute change");
 			lua_pushboolean(State, true);
 			return 1;
@@ -958,8 +984,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!Instance || !Instance->Services.SaveAudioSettings)
 				return ReturnHostError(State, "audio.save_settings is unavailable in this runtime session");
 			bool Saved = false;
+			bool HostFailed = false;
 			try { Saved = Instance->Services.SaveAudioSettings(); }
-			catch (...) { return ReturnHostError(State, "audio.save_settings failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.save_settings failed in the audio session host");
 			if (!Saved) return ReturnHostError(State, "user audio settings could not be saved");
 			lua_pushboolean(State, true);
 			return 1;
@@ -971,8 +999,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!Instance || !Instance->Services.GetAudioOutputState)
 				return ReturnHostError(State, "audio.get_output_state is unavailable in this runtime session");
 			std::optional<std::string_view> OutputState;
+			bool HostFailed = false;
 			try { OutputState = Instance->Services.GetAudioOutputState(); }
-			catch (...) { return ReturnHostError(State, "audio.get_output_state failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.get_output_state failed in the audio session host");
 			if (!OutputState)
 				return ReturnHostError(State, "audio output state is unavailable in this runtime session");
 			lua_pushlstring(State, OutputState->data(), OutputState->size());
@@ -985,8 +1015,10 @@ namespace PulseForge::ScriptEnvironment
 			if (!Instance || !Instance->Services.RetryAudioOutput)
 				return ReturnHostError(State, "audio.retry_output is unavailable in this runtime session");
 			bool Recovered = false;
+			bool HostFailed = false;
 			try { Recovered = Instance->Services.RetryAudioOutput(); }
-			catch (...) { return ReturnHostError(State, "audio.retry_output failed in the audio session host"); }
+			catch (...) { HostFailed = true; }
+			if (HostFailed) return ReturnAudioHostError(State, Instance, "audio.retry_output failed in the audio session host");
 			lua_pushboolean(State, Recovered);
 			return 1;
 		}

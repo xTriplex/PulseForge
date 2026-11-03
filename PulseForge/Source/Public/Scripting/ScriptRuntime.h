@@ -31,7 +31,8 @@ namespace PulseForge
 	{
 		None,
 		MainChunkReference,
-		ModuleChunkReference
+		ModuleChunkReference,
+		AudioHostErrorString
 	};
 
 #if defined(PF_DEBUG)

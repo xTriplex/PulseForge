@@ -152,8 +152,8 @@ namespace PulseForge
 
 #if defined(PF_DEBUG)
 			if (Memory.FaultHooks && Memory.FaultHooks->RejectAllocation &&
-				Memory.ActiveReferencePoint != ScriptRuntimeAllocationPointForTesting::None &&
-				Memory.FaultHooks->RejectAllocation(Memory.FaultHooks->Context, Memory.ActiveReferencePoint,
+				Memory.ActiveAllocationPoint != ScriptRuntimeAllocationPointForTesting::None &&
+				Memory.FaultHooks->RejectAllocation(Memory.FaultHooks->Context, Memory.ActiveAllocationPoint,
 					Memory.ActiveModuleIndex, NewSize))
 				return nullptr;
 #endif
@@ -208,7 +208,7 @@ namespace PulseForge
 			const auto Point = static_cast<ScriptRuntimeAllocationPointForTesting>(lua_tointeger(State, 2));
 			const size_t ModuleIndex = static_cast<size_t>(lua_tointeger(State, 3));
 #if defined(PF_DEBUG)
-			Instance->Memory.ActiveReferencePoint = Point;
+			Instance->Memory.ActiveAllocationPoint = Point;
 			Instance->Memory.ActiveModuleIndex = ModuleIndex;
 #else
 			(void)Point;
@@ -217,7 +217,7 @@ namespace PulseForge
 			lua_pushvalue(State, 1);
 			const int Reference = luaL_ref(State, LUA_REGISTRYINDEX);
 #if defined(PF_DEBUG)
-			Instance->Memory.ActiveReferencePoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance->Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
 			Instance->Memory.ActiveModuleIndex = 0;
 #endif
 			lua_pushinteger(State, Reference);
@@ -278,7 +278,7 @@ namespace PulseForge
 			lua_pushinteger(State, static_cast<lua_Integer>(ModuleIndex));
 			const int Status = lua_pcall(State, 3, 1, 0);
 #if defined(PF_DEBUG)
-			Instance.Memory.ActiveReferencePoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance.Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
 			Instance.Memory.ActiveModuleIndex = 0;
 #endif
 			if (Status != LUA_OK)
@@ -334,6 +334,10 @@ namespace PulseForge
 				{ .Kind = ScriptRuntimeObservationKind::CallbackEntered,
 					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset, .Callback = Callback });
 			const int Status = lua_pcall(State, ArgumentCount, 0, 0);
+#if defined(PF_DEBUG)
+			Instance.Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance.Memory.ActiveModuleIndex = 0;
+#endif
 			lua_sethook(State, nullptr, 0, 0);
 			if (Status != LUA_OK) return std::unexpected(LuaErrorMessage(State));
 			Observe(Instance.Services.Observer,
@@ -377,6 +381,10 @@ namespace PulseForge
 				{ .Kind = ScriptRuntimeObservationKind::CallbackEntered,
 					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset, .Callback = Callback });
 			const int Status = lua_pcall(State, 2, 0, 0);
+#if defined(PF_DEBUG)
+			Instance.Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance.Memory.ActiveModuleIndex = 0;
+#endif
 			lua_sethook(State, nullptr, 0, 0);
 			if (Status != LUA_OK)
 			{
@@ -428,6 +436,10 @@ namespace PulseForge
 					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset,
 					.Callback = ScriptRuntimeCallback::OnUIAction });
 			const int Status = lua_pcall(State, 4, 0, 0);
+#if defined(PF_DEBUG)
+			Instance.Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance.Memory.ActiveModuleIndex = 0;
+#endif
 			lua_sethook(State, nullptr, 0, 0);
 			if (Status != LUA_OK)
 			{
@@ -940,6 +952,10 @@ namespace PulseForge
 			Instance.InstructionBudget = (Instance.MaximumInstructions / InstructionHookQuantum) * InstructionHookQuantum;
 			lua_sethook(State, InstructionBudgetHook, LUA_MASKCOUNT, InstructionHookQuantum);
 			const int ExecuteStatus = lua_pcall(State, 0, 0, 0);
+#if defined(PF_DEBUG)
+			Instance.Memory.ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
+			Instance.Memory.ActiveModuleIndex = 0;
+#endif
 			lua_sethook(State, nullptr, 0, 0);
 			Instance.ExecutingChunkReference = LUA_NOREF;
 			Instance.ExecutingImporterPath = nullptr;
