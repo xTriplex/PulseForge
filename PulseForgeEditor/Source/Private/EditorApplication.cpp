@@ -1,3 +1,12 @@
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
 #ifdef PF_EDITOR_RENDERER_OPENGL
 #define GLFW_INCLUDE_NONE
 #include <glad/glad.h>
@@ -125,6 +134,8 @@
 #include <cfloat>
 #include <cstdint>
 #include <chrono>
+#include <cstring>
+#include <cstdio>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -142,10 +153,275 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+#include <cstdlib>
+#endif
 
 namespace
 {
 	using EditorJson = nlohmann::ordered_json;
+
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+	bool IsPrivateUIInputAutomationEnabled() noexcept
+	{
+		const char* Enabled = std::getenv("PULSEFORGE_PRIVATE_UI_INPUT_AUTOMATION");
+		return Enabled != nullptr && std::string_view(Enabled) == "1";
+	}
+
+	// Opt-in test transport queues ImGui events only; normal Win32/GLFW focus and input rules remain unchanged.
+	class DebugPrivateDesktopImGuiInputAdapter final
+	{
+	public:
+		~DebugPrivateDesktopImGuiInputAdapter()
+		{
+			if (m_Pipe != INVALID_HANDLE_VALUE)
+			{
+				if (m_Connected) DisconnectNamedPipe(m_Pipe);
+				CloseHandle(m_Pipe);
+			}
+		}
+
+		void Poll(PulseForge::GameplayInputService* GameplayInput, PulseForge::InputWindowID InputWindow,
+			bool RuntimeUIInputBlocked, ImVec2 ImageMinimum, ImVec2 ImageMaximum)
+		{
+			m_GameplayInput = GameplayInput;
+			m_InputWindow = InputWindow;
+			m_RuntimeUIInputBlocked = RuntimeUIInputBlocked;
+			m_ImageMinimum = ImageMinimum;
+			m_ImageMaximum = ImageMaximum;
+			if (!m_Initialized)
+			{
+				m_Initialized = true;
+				m_Enabled = IsPrivateUIInputAutomationEnabled();
+				if (!m_Enabled) return;
+
+				m_PipeName = L"\\\\.\\pipe\\PulseForge.PrivateImGuiInput." + std::to_wstring(GetCurrentProcessId());
+				m_Pipe = CreateNamedPipeW(
+					m_PipeName.c_str(),
+					PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+					PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+					1,
+					256,
+					256,
+					0,
+					nullptr);
+				if (m_Pipe == INVALID_HANDLE_VALUE)
+				{
+					m_Enabled = false;
+					PF_ERROR("Could not create opt-in Debug ImGui input pipe (Win32 error {}).", GetLastError());
+					return;
+				}
+
+				PF_INFO("Opt-in Debug ImGui input adapter is listening at {}.",
+					std::string("\\\\.\\pipe\\PulseForge.PrivateImGuiInput.") + std::to_string(GetCurrentProcessId()));
+			}
+
+			if (!m_Enabled || m_Pipe == INVALID_HANDLE_VALUE) return;
+			ImGuiIO& IO = ImGui::GetIO();
+			if (m_HasPointerPosition)
+			{
+				if (m_ClientPointerX >= 0.0f && m_ClientPointerY >= 0.0f &&
+					m_ClientPointerX < IO.DisplaySize.x && m_ClientPointerY < IO.DisplaySize.y)
+				{
+					const ImVec2 ViewportOrigin = (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0
+						? ImGui::GetMainViewport()->Pos : ImVec2(0.0f, 0.0f);
+					IO.AddMousePosEvent(m_ClientPointerX + ViewportOrigin.x, m_ClientPointerY + ViewportOrigin.y);
+				}
+				else
+				{
+					IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+					m_HasPointerPosition = false;
+				}
+			}
+			if (!m_Connected)
+			{
+				if (ConnectNamedPipe(m_Pipe, nullptr)) m_Connected = true;
+				else if (GetLastError() == ERROR_PIPE_CONNECTED) m_Connected = true;
+				else return;
+			}
+
+			DWORD Available = 0;
+			if (!PeekNamedPipe(m_Pipe, nullptr, 0, nullptr, &Available, nullptr))
+			{
+				DisconnectClient();
+				ReleaseHeldButton();
+				return;
+			}
+			if (Available == 0) return;
+			if (Available > 127)
+			{
+				DisconnectClient();
+				ReleaseHeldButton();
+				return;
+			}
+
+			std::array<char, 128> Buffer{};
+			DWORD Read = 0;
+			if (!ReadFile(m_Pipe, Buffer.data(), static_cast<DWORD>(Buffer.size() - 1), &Read, nullptr))
+			{
+				DisconnectClient();
+				ReleaseHeldButton();
+				return;
+			}
+
+			std::string_view Command(Buffer.data(), Read);
+			while (!Command.empty() && (Command.back() == '\r' || Command.back() == '\n')) Command.remove_suffix(1);
+			std::array<char, 384> ReplyBuffer{};
+			const char* Reply = nullptr;
+			if (Command == "STATE")
+			{
+				const ImGuiIO& IO = ImGui::GetIO();
+				const PulseForge::GameplayPointerPosition* Pointer = nullptr;
+				std::optional<PulseForge::GameplayPointerPosition> PointerStorage;
+				const PulseForge::ActionValue* UIClick = nullptr;
+				if (m_GameplayInput && m_InputWindow != 0)
+				{
+					PointerStorage = m_GameplayInput->GetPointerPosition(m_InputWindow);
+					if (PointerStorage) Pointer = &*PointerStorage;
+					UIClick = m_GameplayInput->FindAction("ui.pointer");
+				}
+				std::snprintf(ReplyBuffer.data(), ReplyBuffer.size(),
+					"STATE display=%.1f,%.1f viewport=%.1f,%.1f mouse=%.1f,%.1f image=%.1f,%.1f,%.1f,%.1f "
+					"window=%llu blocked=%d pointer=%d:%.1f,%.1f uiClick=%d,%d,%d "
+					"hoveredViewport=%u down=%d hovered=%u active=%u\n",
+					IO.DisplaySize.x, IO.DisplaySize.y,
+					ImGui::GetMainViewport()->Pos.x, ImGui::GetMainViewport()->Pos.y,
+					IO.MousePos.x, IO.MousePos.y, m_ImageMinimum.x, m_ImageMinimum.y,
+					m_ImageMaximum.x, m_ImageMaximum.y, static_cast<unsigned long long>(m_InputWindow),
+					m_RuntimeUIInputBlocked ? 1 : 0, Pointer ? 1 : 0,
+					Pointer ? Pointer->X : -1.0f, Pointer ? Pointer->Y : -1.0f,
+					UIClick && UIClick->Pressed ? 1 : 0, UIClick && UIClick->Held ? 1 : 0,
+					UIClick && UIClick->Released ? 1 : 0, IO.MouseHoveredViewport,
+					IO.MouseDown[ImGuiMouseButton_Left] ? 1 : 0,
+					GImGui->HoveredId, GImGui->ActiveId);
+				Reply = ReplyBuffer.data();
+			}
+			else Reply = ApplyCommand(Command) ? "QUEUED\n" : "REJECTED\n";
+			DWORD Written = 0;
+			WriteFile(m_Pipe, Reply, static_cast<DWORD>(std::strlen(Reply)), &Written, nullptr);
+		}
+
+	private:
+		bool ApplyCommand(std::string_view Command)
+		{
+			ImGuiIO& IO = ImGui::GetIO();
+			if (Command == "PING") return true;
+			if (Command == "CANCEL")
+			{
+				if (m_LeftButtonDown) IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+				IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+				QueueGameplayCancellation();
+				m_LeftButtonDown = false;
+				m_HasPointerPosition = false;
+				return true;
+			}
+			if (Command == "DOWN")
+			{
+				if (!m_HasPointerPosition || m_LeftButtonDown) return false;
+				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+				QueueGameplayButton(PulseForge::InputEventKind::Pressed);
+				m_LeftButtonDown = true;
+				return true;
+			}
+			if (Command == "UP")
+			{
+				if (!m_LeftButtonDown) return false;
+				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+				QueueGameplayButton(PulseForge::InputEventKind::Released);
+				m_LeftButtonDown = false;
+				return true;
+			}
+			if (!Command.starts_with("MOVE ")) return false;
+
+			Command.remove_prefix(5);
+			float X = 0.0f;
+			float Y = 0.0f;
+			const char* Begin = Command.data();
+			const char* End = Begin + Command.size();
+			const auto XResult = std::from_chars(Begin, End, X);
+			if (XResult.ec != std::errc{} || XResult.ptr == End || *XResult.ptr != ' ') return false;
+			const char* YBegin = XResult.ptr;
+			while (YBegin != End && *YBegin == ' ') ++YBegin;
+			const auto YResult = std::from_chars(YBegin, End, Y);
+			if (YResult.ec != std::errc{} || YResult.ptr != End || !std::isfinite(X) || !std::isfinite(Y)) return false;
+			if (IO.DisplaySize.x <= 0.0f || IO.DisplaySize.y <= 0.0f ||
+				X < 0.0f || Y < 0.0f || X >= IO.DisplaySize.x || Y >= IO.DisplaySize.y)
+				return false;
+
+			const ImVec2 ViewportOrigin = (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0
+				? ImGui::GetMainViewport()->Pos : ImVec2(0.0f, 0.0f);
+			IO.AddMousePosEvent(X + ViewportOrigin.x, Y + ViewportOrigin.y);
+			m_ClientPointerX = X;
+			m_ClientPointerY = Y;
+			m_HasPointerPosition = true;
+			if (m_GameplayInput && m_InputWindow != 0)
+				(void)m_GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::PointerMoved,
+					.Control = { PulseForge::InputDevice::MouseMotion,
+						static_cast<uint16_t>(PulseForge::MouseControl::MotionX) },
+					.Window = m_InputWindow, .X = X, .Y = Y });
+			return true;
+		}
+
+		void QueueGameplayButton(PulseForge::InputEventKind Kind)
+		{
+			if (!m_GameplayInput || m_InputWindow == 0) return;
+			(void)m_GameplayInput->QueueEvent({ .Kind = Kind,
+				.Control = { PulseForge::InputDevice::MouseButton,
+					static_cast<uint16_t>(PulseForge::MouseControl::Left) },
+				.Window = m_InputWindow, .X = m_ClientPointerX, .Y = m_ClientPointerY });
+		}
+
+		void QueueGameplayCancellation()
+		{
+			if (!m_GameplayInput || m_InputWindow == 0) return;
+			(void)m_GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::CaptureCancelled,
+				.Window = m_InputWindow });
+		}
+
+		void ReleaseHeldButton()
+		{
+			if (!m_LeftButtonDown || ImGui::GetCurrentContext() == nullptr) return;
+			ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+			QueueGameplayCancellation();
+			m_LeftButtonDown = false;
+		}
+
+		void DisconnectClient()
+		{
+			if (m_Pipe != INVALID_HANDLE_VALUE) DisconnectNamedPipe(m_Pipe);
+			m_Connected = false;
+			if (m_LeftButtonDown && ImGui::GetCurrentContext() != nullptr)
+				ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+			if (ImGui::GetCurrentContext() != nullptr) ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+			m_LeftButtonDown = false;
+			m_HasPointerPosition = false;
+		}
+
+		HANDLE m_Pipe = INVALID_HANDLE_VALUE;
+		std::wstring m_PipeName;
+		bool m_Initialized = false;
+		bool m_Enabled = false;
+		bool m_Connected = false;
+		bool m_HasPointerPosition = false;
+		bool m_LeftButtonDown = false;
+		float m_ClientPointerX = -FLT_MAX;
+		float m_ClientPointerY = -FLT_MAX;
+		PulseForge::GameplayInputService* m_GameplayInput = nullptr;
+		PulseForge::InputWindowID m_InputWindow = 0;
+		bool m_RuntimeUIInputBlocked = false;
+		ImVec2 m_ImageMinimum{};
+		ImVec2 m_ImageMaximum{};
+	};
+
+	void PollDebugPrivateDesktopImGuiInput(
+		PulseForge::GameplayInputService* GameplayInput, PulseForge::InputWindowID InputWindow,
+		bool RuntimeUIInputBlocked, ImVec2 ImageMinimum, ImVec2 ImageMaximum)
+	{
+		static DebugPrivateDesktopImGuiInputAdapter Adapter;
+		Adapter.Poll(GameplayInput, InputWindow, RuntimeUIInputBlocked, ImageMinimum, ImageMaximum);
+	}
+#endif
+
 	std::optional<std::string> BuildContentFingerprint(
 		const std::filesystem::path& ProjectFile, const std::optional<std::filesystem::path>& SceneFile,
 		std::string& UnavailableReason)
@@ -1316,6 +1592,24 @@ namespace
 			ImGui_ImplOpenGL3_NewFrame();
 #endif
 			ImGui_ImplGlfw_NewFrame();
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+			PulseForge::GameplayInputService* DebugGameplayInput = nullptr;
+			PulseForge::InputWindowID DebugInputWindow = 0;
+			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI())
+			{
+				ImGuiViewport* RuntimeUIOwner = ResolveSceneViewportOwner();
+				GLFWwindow* RuntimeUINativeOwner = RuntimeUIOwner
+					? static_cast<GLFWwindow*>(RuntimeUIOwner->PlatformHandle) : nullptr;
+				if (RuntimeUIOwner && RuntimeUIOwner->ID == ImGui::GetMainViewport()->ID && RuntimeUINativeOwner)
+				{
+					DebugGameplayInput = &PulseForge::Application::Get().GetGameplayInput();
+					DebugInputWindow = m_ViewportScrollInput.GetInputWindowID(RuntimeUIOwner->ID, RuntimeUINativeOwner);
+				}
+			}
+			PollDebugPrivateDesktopImGuiInput(DebugGameplayInput, DebugInputWindow, m_RuntimeUITextInputBlocked,
+				ImVec2(m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y),
+				ImVec2(m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y));
+#endif
 			QueueDocumentHostTabTearOffTestInput();
 			QueueDocumentHostTabReattachTestInput();
 			QueueDocumentTabReorderTestInput();
@@ -2083,6 +2377,13 @@ namespace
 
 			PulseForge::AudioSessionDesc Description;
 			Description.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+			if (IsPrivateUIInputAutomationEnabled())
+			{
+				Description.Engine.OutputBackend = PulseForge::AudioOutputBackend::Null;
+				PF_INFO("Opt-in private UI input automation is using PulseForge Null audio output.");
+			}
+#endif
 			auto Session = PulseForge::AudioSession::CreateForProject(*m_Project, std::move(Description));
 			if (!Session)
 			{
@@ -8583,12 +8884,15 @@ namespace
 			bool ImGuiOwnerFocused = true;
 
 			bool TextOrModalInput = m_InputMappingPanel.NeedsTextEntryRoute();
+			bool EditorWidgetInputOwned = false;
 			if (m_Context)
 			{
 				ImGui::SetCurrentContext(m_Context);
 				const ImGuiIO& IO = ImGui::GetIO();
-				TextOrModalInput = TextOrModalInput || IO.WantTextInput || ImGui::IsAnyItemActive() ||
-					ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+				const bool PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+				TextOrModalInput = TextOrModalInput || IO.WantTextInput || PopupOpen;
+				EditorWidgetInputOwned = PulseForgeEditor::IsEditorWidgetInputOwned(
+					ImGui::IsAnyItemActive(), IsCursorOverViewportImage());
 				if (GImGui && GImGui->NavWindow && SceneViewportOwner &&
 					GImGui->NavWindow->ViewportId != SceneViewportOwner->ID)
 					ImGuiOwnerFocused = false;
@@ -8609,12 +8913,14 @@ namespace
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
 				.TextOrModalInput = TextOrModalInput,
+				.EditorWidgetInputOwned = EditorWidgetInputOwned,
 				.ViewportNavigation = ViewportNavigation });
-			m_RuntimeUITextInputBlocked = TextOrModalInput;
-			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI() && !TextOrModalInput && Routing.FocusedWindow != 0)
+			m_RuntimeUITextInputBlocked = TextOrModalInput || EditorWidgetInputOwned;
+			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI() && !m_RuntimeUITextInputBlocked && Routing.FocusedWindow != 0)
 				(void)PulseForge::AppendRuntimeUIInputContext(
 					Routing, m_SceneRuntime->GetRuntimeUIInputPolicy(), Routing.FocusedWindow);
-			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !ViewportNavigation;
+			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !EditorWidgetInputOwned &&
+				!ViewportNavigation;
 			Application.GetGameplayInput().PublishFrame(Routing);
 			m_InputMappingPanel.MarkInputPublished();
 		}

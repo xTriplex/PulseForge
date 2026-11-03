@@ -197,14 +197,20 @@ namespace PulseForgeEditor
 		bool RuntimeActive = false;
 		bool ViewportKeyboardFocused = false;
 		bool TextOrModalInput = false;
+		bool EditorWidgetInputOwned = false;
 		bool ViewportNavigation = false;
 	};
+
+	[[nodiscard]] constexpr bool IsEditorWidgetInputOwned(bool ImGuiItemActive, bool PointerOverSceneViewportImage) noexcept
+	{
+		return ImGuiItemActive && !PointerOverSceneViewportImage;
+	}
 
 	[[nodiscard]] constexpr PulseForge::InputRoutingState BuildEditorGameplayInputRouting(
 		const EditorGameplayInputRoutingRequest& Request) noexcept
 	{
 		PulseForge::InputRoutingState Routing;
-		if (Request.ViewportWindow == 0 || !Request.NativeOwnerFocused || !Request.ImGuiOwnerFocused) return Routing;
+		if (Request.ViewportWindow == 0 || !Request.NativeOwnerFocused) return Routing;
 
 		Routing.FocusedWindow = Request.ViewportWindow;
 		const auto AddContext = [&Routing](PulseForge::InputContext Context, PulseForge::InputDeviceMask Consumes, bool Active)
@@ -215,8 +221,10 @@ namespace PulseForgeEditor
 		};
 		const auto KeyboardAndMouse = PulseForge::InputDeviceMask::Keyboard | PulseForge::InputDeviceMask::Mouse;
 		const bool GameplayActive = Request.RuntimeActive && Request.ViewportAvailable && Request.ViewportKeyboardFocused &&
-									!Request.TextOrModalInput && !Request.ViewportNavigation;
-		const bool ShortcutsActive = !Request.TextOrModalInput && !Request.ViewportNavigation;
+										 Request.ImGuiOwnerFocused && !Request.TextOrModalInput && !Request.EditorWidgetInputOwned &&
+										 !Request.ViewportNavigation;
+		const bool ShortcutsActive = Request.ImGuiOwnerFocused && !Request.TextOrModalInput && !Request.EditorWidgetInputOwned &&
+										  !Request.ViewportNavigation;
 		AddContext(PulseForge::InputContext::Gameplay, PulseForge::InputDeviceMask::None, GameplayActive);
 		AddContext(PulseForge::InputContext::EditorShortcuts, PulseForge::InputDeviceMask::None, ShortcutsActive);
 		AddContext(PulseForge::InputContext::ViewportNavigation, KeyboardAndMouse, Request.ViewportNavigation);

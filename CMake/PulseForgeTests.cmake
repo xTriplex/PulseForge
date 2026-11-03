@@ -366,6 +366,8 @@ if(BUILD_TESTING)
 			PulseForgeEditor/Source/Public
 			PulseForge/Vendor/json/include
 		)
+		target_compile_definitions(PulseForgeEditorTests PRIVATE
+			"PF_AUDIO_MIXING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj\"")
 		if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 			target_compile_definitions(PulseForgeEditorTests PRIVATE PF_EDITOR_RENDERER_OPENGL)
 		endif()
