@@ -32,6 +32,9 @@ namespace PulseForgeEditor
 		void FinalizePendingEdits(bool HasActiveImGuiItem);
 		[[nodiscard]] std::optional<bool> ApplyHistoryStep(std::string_view Key, bool Redo);
 		void MarkSaved(std::string_view Key);
+		void MarkSaved(std::string_view Key, std::string SourceBytes);
+		void SetSourceBytes(std::string Key, std::string SourceBytes);
+		[[nodiscard]] const std::string* FindSourceBytes(std::string_view Key) const;
 		void Forget(std::string_view Key);
 		void ClearProject(std::string_view ProjectKeyPrefix);
 
@@ -42,6 +45,7 @@ namespace PulseForgeEditor
 			EditorSnapshotHistory<PulseForge::MaterialAssetDesc> History;
 			std::optional<PulseForge::MaterialAssetDesc> EditStart;
 			std::optional<std::string> Error;
+			std::optional<std::string> SavedSourceBytes;
 			bool Dirty = false;
 		};
 

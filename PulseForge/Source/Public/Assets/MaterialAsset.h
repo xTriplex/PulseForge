@@ -40,6 +40,13 @@ namespace PulseForge
 		bool DoubleSided = false;
 	};
 
+	struct MaterialAssetSourceSnapshot
+	{
+		MaterialAssetDesc Description;
+		std::string SourceBytes;
+		std::filesystem::path SourcePath;
+	};
+
 	enum class MaterialAssetErrorCode : uint8_t
 	{
 		InvalidDescription,
@@ -49,6 +56,7 @@ namespace PulseForge
 		FileReadFailed,
 		FileWriteFailed,
 		FileReplaceFailed,
+		SourceChanged,
 		AssetNotFound,
 		UnsupportedAssetType,
 		PathResolutionFailed,

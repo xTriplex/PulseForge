@@ -37,6 +37,7 @@ namespace PulseForgeEditor
 		State.History.Reset(*State.Draft);
 		State.EditStart.reset();
 		State.Error.reset();
+		State.SavedSourceBytes.reset();
 		State.Dirty = false;
 	}
 
@@ -130,6 +131,23 @@ namespace PulseForgeEditor
 			Found->Error.reset();
 			if (!Found->History.IsEmpty()) Found->History.MarkSaved();
 		}
+	}
+
+	void EditorMaterialDraftStore::MarkSaved(std::string_view Key, std::string SourceBytes)
+	{
+		MarkSaved(Key);
+		if (Entry* const Found = FindEntry(Key)) Found->SavedSourceBytes = std::move(SourceBytes);
+	}
+
+	void EditorMaterialDraftStore::SetSourceBytes(std::string Key, std::string SourceBytes)
+	{
+		m_Entries[std::move(Key)].SavedSourceBytes = std::move(SourceBytes);
+	}
+
+	const std::string* EditorMaterialDraftStore::FindSourceBytes(std::string_view Key) const
+	{
+		const Entry* const Found = FindEntry(Key);
+		return Found && Found->SavedSourceBytes ? &*Found->SavedSourceBytes : nullptr;
 	}
 
 	void EditorMaterialDraftStore::Forget(std::string_view Key)

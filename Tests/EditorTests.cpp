@@ -131,7 +131,7 @@ namespace
 		PF_CHECK(Tests, !ShouldApplyFirstOpenPanelDocking(false, false));
 		PF_CHECK(Tests, ShouldApplyFirstOpenPanelDocking(false, true));
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, false) == AssetBrowserOpenAction::None);
-		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, true) == AssetBrowserOpenAction::ShowMaterialDetails);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, true) == AssetBrowserOpenAction::OpenMaterialEditor);
 		// Utility-panel opening is intentionally independent of document-host preferences.
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", true, true) == AssetBrowserOpenAction::OpenScene);
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".png", true, true) == AssetBrowserOpenAction::None);

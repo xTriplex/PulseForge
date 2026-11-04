@@ -52,13 +52,17 @@ namespace PulseForgeEditor
 			return std::unexpected(Error);
 		}
 
-		auto Loaded = PulseForge::MaterialAssetService::Load(Asset, Project.GetRootPath(), Project.GetAssetRegistry());
+		auto Loaded = PulseForge::MaterialAssetService::LoadSourceSnapshot(Asset, Project.GetRootPath(), Project.GetAssetRegistry());
 		if (!Loaded)
 		{
 			m_Drafts.SetError(Key, Loaded.error().Message);
 			return std::unexpected(Loaded.error().Message);
 		}
-		return std::ref(m_Drafts.PutDraft(Key, std::move(*Loaded)));
+		PulseForge::MaterialAssetDesc Description = std::move(Loaded->Description);
+		std::string SourceBytes = std::move(Loaded->SourceBytes);
+		auto& Draft = m_Drafts.PutDraft(Key, std::move(Description));
+		m_Drafts.SetSourceBytes(Key, std::move(SourceBytes));
+		return std::ref(Draft);
 	}
 
 	void EditorMaterialDraftController::ReplaceDraft(
@@ -131,9 +135,13 @@ namespace PulseForgeEditor
 		PulseForge::MaterialAssetDesc* const Draft = m_Drafts.FindDraft(Key);
 		if (Draft && m_Drafts.IsDirty(Key))
 		{
-			const auto Saved = PulseForge::MaterialAssetService::Save(Asset, Project.GetRootPath(), Project.GetAssetRegistry(), *Draft);
+			const std::string* const Baseline = m_Drafts.FindSourceBytes(Key);
+			if (!Baseline)
+				return std::unexpected("The material draft has no committed source baseline; reload before saving");
+			const auto Saved = PulseForge::MaterialAssetService::SaveIfSourceUnchanged(
+				Asset, Project.GetRootPath(), Project.GetAssetRegistry(), *Draft, *Baseline);
 			if (!Saved) return std::unexpected(Saved.error().Message);
-			m_Drafts.MarkSaved(Key);
+			m_Drafts.MarkSaved(Key, *Saved);
 
 			const PulseForgeEditor::EditorDocumentIdentity Identity{ Project.GetDescription().ID, Asset,
 				PulseForgeEditor::EditorDocumentKind::Material };
@@ -145,10 +153,13 @@ namespace PulseForgeEditor
 	std::expected<void, std::string> EditorMaterialDraftController::Reload(
 		PulseForge::Project& Project, const PulseForge::AssetID& Asset, EditorDocumentManager& Documents)
 	{
-		auto Loaded = PulseForge::MaterialAssetService::Load(Asset, Project.GetRootPath(), Project.GetAssetRegistry());
+		auto Loaded = PulseForge::MaterialAssetService::LoadSourceSnapshot(Asset, Project.GetRootPath(), Project.GetAssetRegistry());
 		if (!Loaded) return std::unexpected(Loaded.error().Message);
 
-		m_Drafts.ReplaceDraft(MakeKey(Project, Asset), std::move(*Loaded));
+		const std::string Key = MakeKey(Project, Asset);
+		std::string SourceBytes = std::move(Loaded->SourceBytes);
+		m_Drafts.ReplaceDraft(Key, std::move(Loaded->Description));
+		m_Drafts.SetSourceBytes(Key, std::move(SourceBytes));
 		const PulseForgeEditor::EditorDocumentIdentity Identity{ Project.GetDescription().ID, Asset,
 			PulseForgeEditor::EditorDocumentKind::Material };
 		if (auto* Session = Documents.Find(Identity)) Session->Revision = Session->SavedRevision;

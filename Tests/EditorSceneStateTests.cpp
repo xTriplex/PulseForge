@@ -613,6 +613,14 @@ namespace
 		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .RuntimeActive = true }));
 		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .CameraNavigationActive = true }));
 
+		PF_CHECK(Tests, CanRouteFocusedDocumentCommand(true, false, false, false, false, false));
+		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(false, false, false, false, false, false));
+		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, true, false, false, false, false));
+		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, true, false, false, false));
+		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, false, true, false, false));
+		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, false, false, true, false));
+		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, false, false, false, true));
+
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, true, false }, false) == ViewportGizmoPointerOutcome::Continue);
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, true }, false) == ViewportGizmoPointerOutcome::Complete);
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, false }, false) == ViewportGizmoPointerOutcome::Complete);

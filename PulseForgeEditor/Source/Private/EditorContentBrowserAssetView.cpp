@@ -37,13 +37,15 @@ namespace PulseForgeEditor
 				DeferredAction = [Handler, Identifier] { Handler(EditorContentBrowserAssetAction::OpenRuntimeUI, Identifier); };
 				break;
 			}
-			case AssetBrowserOpenAction::ShowMaterialDetails:
+			case AssetBrowserOpenAction::OpenMaterialEditor:
 			{
 				const auto Handler = ActionHandler;
 				const PulseForge::AssetID Identifier = Asset.ID;
-				DeferredAction = [Handler, Identifier] { Handler(EditorContentBrowserAssetAction::ShowMaterialDetails, Identifier); };
+				DeferredAction = [Handler, Identifier] { Handler(EditorContentBrowserAssetAction::OpenMaterialEditor, Identifier); };
 				break;
 			}
+			case AssetBrowserOpenAction::ShowMaterialDetails:
+				break;
 			case AssetBrowserOpenAction::None:
 				break;
 			}

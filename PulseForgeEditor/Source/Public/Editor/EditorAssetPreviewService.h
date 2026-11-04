@@ -93,6 +93,7 @@ namespace PulseForgeEditor
 		// Call on the service's owning UI/update thread; worker-owned statistics are snapshotted under m_Mutex.
 		[[nodiscard]] AssetPreviewStats GetStats() const;
 		void PumpUploads();
+		void InvalidateAsset(std::string_view ProjectID, std::string_view AssetID) noexcept;
 		void InvalidateAll() noexcept;
 		void Shutdown() noexcept;
 
@@ -106,6 +107,7 @@ namespace PulseForgeEditor
 			std::string AssetID;
 			std::filesystem::path SourcePath;
 			uint64_t Generation = 0;
+			uint64_t AssetGeneration = 0;
 			RequestKind Kind = RequestKind::Image;
 		};
 		struct CpuPreview
@@ -113,6 +115,7 @@ namespace PulseForgeEditor
 			std::string ProjectID;
 			std::string AssetID;
 			uint64_t Generation = 0;
+			uint64_t AssetGeneration = 0;
 			uint32_t Width = 0;
 			uint32_t Height = 0;
 			std::array<uint64_t, 2> Fingerprint{};
@@ -126,6 +129,7 @@ namespace PulseForgeEditor
 			bool Visible = false;
 			uint64_t LastUse = 0;
 			uint64_t Generation = 0;
+			uint64_t AssetGeneration = 0;
 			std::array<uint64_t, 2> Fingerprint{};
 			AssetPreviewKey CacheKey;
 			uint32_t Width = 0;
@@ -148,10 +152,12 @@ namespace PulseForgeEditor
 		std::condition_variable m_WorkAvailable;
 		std::deque<Request> m_Requests;
 		std::deque<CpuPreview> m_Completed;
+		std::unordered_map<std::string, uint64_t> m_PendingAssetGenerations;
 		std::unordered_map<std::string, Entry> m_Entries;
 		std::jthread m_Worker;
 		std::string m_ProjectID;
 		uint64_t m_Generation = 1;
+		uint64_t m_NextAssetGeneration = 1;
 		uint64_t m_UseCounter = 0;
 		AssetPreviewStats m_Stats;
 		std::atomic_uint64_t m_StaleResultsDiscarded = 0;

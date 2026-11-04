@@ -12,7 +12,8 @@ namespace PulseForgeEditor
 {
 	struct EditorDocumentWorkspaceState
 	{
-		uint32_t Version = 3;
+		uint32_t Version = 4;
+		bool LegacyMaterialDetailsMigration = false;
 		PulseForge::UUID Project;
 		std::optional<PulseForge::UUID> MaterialDetailsAsset;
 		std::vector<EditorDocumentHost> Hosts;

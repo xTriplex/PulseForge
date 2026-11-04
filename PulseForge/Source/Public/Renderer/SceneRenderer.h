@@ -189,12 +189,18 @@ namespace PulseForge
 		// Supplies an owned frame snapshot. Canvas presence is separate from its prepared draw-list size.
 		void SetRuntimeUIFrame(
 			std::span<const RuntimeUIDrawCommand> Commands, const RuntimeUIViewport& Viewport, bool CanvasPresent = true);
+		// Renderer-local draft input for isolated Editor previews. The caller validates the description before this call;
+		// this never changes project or material asset data.
+		[[nodiscard]] std::expected<void, SceneRendererError> SetTransientMaterialOverride(
+			const AssetID& Material, const MaterialAssetDesc& Description, uint64_t Revision);
+		void ClearTransientMaterialOverride() noexcept;
 		[[nodiscard]] bool SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept;
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept;
 		// Clears cached material descriptions and binding sets after an explicit material-asset save.
 		void RefreshMaterialAssets() noexcept;
+		void RefreshMaterialAsset(const AssetID& Material) noexcept;
 		// Invalidates project asset data and dependent bindings at an update boundary before command recording.
 		void RefreshProjectAssets() noexcept;
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
@@ -223,6 +229,7 @@ namespace PulseForge
 		class ShadowTargetCache;
 		class LocalLightingState;
 		class ShadowPass;
+		struct TransientMaterialOverride;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		SceneRenderer(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content);
@@ -322,6 +329,7 @@ namespace PulseForge
 		uint64_t m_ValidationPreparationRequest = 0;
 #endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
+		std::unique_ptr<TransientMaterialOverride> m_TransientMaterialOverride;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
 		std::unique_ptr<RuntimeUIRenderPass> m_RuntimeUIRenderPass;
 		TextureHandle m_TransparentRuntimeUITexture;

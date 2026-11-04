@@ -31,6 +31,9 @@ namespace PulseForgeEditor
 		void DrawContents(const PulseForge::Project* Project, std::optional<PulseForge::AssetID>& SelectedAsset,
 			const std::vector<PulseForge::AssetRecord>& Assets, EditorMaterialDraftController& Drafts, EditorAssetSelector& AssetSelector,
 			EditorStyle& Style, EditorMaterialDetailsActionSink& Actions);
+		void DrawEditorContents(const PulseForge::Project& Project, const PulseForge::AssetID& Asset,
+			const std::vector<PulseForge::AssetRecord>& Assets, EditorMaterialDraftController& Drafts,
+			EditorAssetSelector& AssetSelector, EditorStyle& Style, EditorMaterialDetailsActionSink& Actions);
 
 	private:
 		[[nodiscard]] bool DrawMaterialProperties(const PulseForge::Project& Project, const PulseForge::AssetRecord& Asset,

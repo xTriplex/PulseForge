@@ -30,20 +30,23 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(const Resources& Resources);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset,
 			const std::optional<AssetID>& EnvironmentAsset, uint64_t EnvironmentRevision,
-			const EnvironmentLightingTextures& EnvironmentTextures);
+			const EnvironmentLightingTextures& EnvironmentTextures, const MaterialAssetDesc* OverrideDescription = nullptr,
+			uint64_t OverrideRevision = 0);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureDefaultMaterialBindings(
 			const EnvironmentLightingTextures& EnvironmentTextures, uint64_t EnvironmentRevision);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
 			const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady,
 			uint64_t ResourceRevision);
 		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
-			const SceneMeshInstance& Instance);
+			const SceneMeshInstance& Instance, const MaterialAssetDesc* OverrideDescription = nullptr);
 		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(
 			const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset,
-			uint64_t EnvironmentRevision);
+			uint64_t EnvironmentRevision, const MaterialAssetDesc* OverrideDescription = nullptr,
+			uint64_t OverrideRevision = 0);
 		[[nodiscard]] const BindingSet* FindEnvironmentBindings(
 			const AssetID& EnvironmentAsset, bool IsReady, uint64_t ResourceRevision) const;
 		void RefreshMaterialAssets() noexcept;
+		void RefreshMaterialAsset(const AssetID& MaterialAsset) noexcept;
 		void RefreshProjectAssets() noexcept;
 
 	private:

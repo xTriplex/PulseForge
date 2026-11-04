@@ -34,6 +34,8 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorInputMappingPanel.cpp
 		PulseForgeEditor/Source/Private/EditorInspectorPanel.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
+		PulseForgeEditor/Source/Private/EditorMaterialDocumentEditor.cpp
+		PulseForgeEditor/Source/Private/EditorMaterialPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorStatusPanel.cpp
 		PulseForgeEditor/Source/Private/EditorViewportMouseCapture.cpp
 		PulseForgeEditor/Source/Private/EditorViewportScrollInput.cpp
