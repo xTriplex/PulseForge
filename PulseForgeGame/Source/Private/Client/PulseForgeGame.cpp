@@ -3,6 +3,8 @@
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #endif
+#include "Assets/AudioAssetCache.h"
+#include "Audio/AudioSession.h"
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
@@ -250,6 +252,14 @@ public:
 			m_RuntimeUIPackageAcceptance = std::string_view(UIAcceptance) == "1";
 		if (const char* Acceptance = std::getenv("PULSEFORGE_COOKED_PLAYER_ACCEPTANCE"))
 			m_CookedPlayerAcceptance = std::string_view(Acceptance) == "1";
+		if (const char* AudioAcceptance = std::getenv("PULSEFORGE_AUDIO_MIXING_PACKAGE_ACCEPTANCE"))
+		{
+			const std::string_view Value(AudioAcceptance);
+			m_AudioMixingPackageAcceptance = Value == "exercise" || Value == "verify";
+			m_AudioMixingPackageVerify = Value == "verify";
+			if (!m_AudioMixingPackageAcceptance)
+				throw std::runtime_error("Audio mixing package acceptance mode must be 'exercise' or 'verify'");
+		}
 #endif
 		PulseForge::SceneRuntimeServices Services{ .InputState = &PulseForge::Application::Get().GetInput(),
 			.GameplayInput = &PulseForge::Application::Get().GetGameplayInput(),
@@ -257,13 +267,15 @@ public:
 		auto& Application = PulseForge::Application::Get();
 		PulseForge::SceneRuntimeDesc RuntimeDescription{};
 #if defined(PF_DEBUG)
-		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance)
+		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance || m_AudioMixingPackageAcceptance)
 		{
 			RuntimeDescription.Audio.OutputBackend = PulseForge::AudioOutputBackend::Null;
 			if (m_CookedPlayerAcceptance)
 				PF_INFO("PULSEFORGE_COOKED_AUDIO_BACKEND=NULL; deterministic output selected for process acceptance");
 			if (m_RuntimeUIPackageAcceptance)
 				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_AUDIO_BACKEND=NULL; deterministic output selected for G18 package acceptance");
+			if (m_AudioMixingPackageAcceptance)
+				PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_BACKEND=NULL; explicit silent output selected for package acceptance");
 		}
 #endif
 		if (!m_Configuration.CookedContentRoot.empty())
@@ -296,7 +308,7 @@ public:
 		}
 		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
 #if defined(PF_DEBUG)
-		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance)
+		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance || m_AudioMixingPackageAcceptance)
 		{
 			if (!UserDataRoot)
 				throw std::runtime_error("Player package acceptance could not resolve its isolated user-data directory");
@@ -304,6 +316,8 @@ public:
 				PF_INFO("PULSEFORGE_COOKED_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
 			if (m_RuntimeUIPackageAcceptance)
 				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
+			if (m_AudioMixingPackageAcceptance)
+				PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
 		}
 #endif
 		if (m_CookedContent)
@@ -417,6 +431,9 @@ public:
 		if (m_RuntimeUIPackageAcceptance && Application.GetInputWindowID() != 0)
 			Routing.FocusedWindow = Application.GetInputWindowID();
 		AdvanceRuntimeUIPackageAcceptanceInput(Application, DeltaTime, Routing.FocusedWindow);
+		if (m_AudioMixingPackageAcceptance && Application.GetInputWindowID() != 0)
+			Routing.FocusedWindow = Application.GetInputWindowID();
+		AdvanceAudioMixingPackageInput(Application, DeltaTime, Routing.FocusedWindow);
 #endif
 		if (m_Session && Routing.FocusedWindow != 0)
 		{
@@ -520,6 +537,8 @@ public:
 			}
 			if (m_RuntimeUIPackageAcceptance)
 				AdvanceRuntimeUIPackageAcceptanceChecks(Application);
+			if (m_AudioMixingPackageAcceptance)
+				AdvanceAudioMixingPackageAcceptanceChecks(Application);
 #endif
 			if (Advanced && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged && Advanced->PhysicsSteps > 0)
 			{
@@ -608,6 +627,40 @@ public:
 			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE=PASS; normal shutdown requested");
 			PulseForge::Application::Get().RequestClose();
 		}
+		if (m_AudioMixingPackageAcceptance && !m_AudioMixingPackageInitialFrameRendered && m_Session &&
+			m_Session->HasRuntimeUI() && m_Session->GetAudioSession())
+		{
+			const auto Commands = m_Session->GetRuntimeUIDrawCommands();
+			const auto HasText = [&Commands](std::string_view Text)
+			{
+				return std::any_of(Commands.begin(), Commands.end(), [Text](const PulseForge::RuntimeUIDrawCommand& Command)
+					{ return Command.Text.find(Text) != std::string::npos; });
+			};
+			const PulseForge::AudioMixState Mix = m_Session->GetAudioSession()->GetMixState();
+			const bool InitialValuesVisible = m_AudioMixingPackageVerify
+				? HasText("Music: 90%") && HasText("Effects: 85%") && HasText("UI: 90%")
+				: HasText("Music: 80%") && HasText("Effects: 75%") && HasText("UI: 90%");
+			const bool InitialMixValid = m_AudioMixingPackageVerify
+				? std::abs(Mix.Gains.Music - 0.9f) < 0.001f && std::abs(Mix.Gains.Effects - 0.85f) < 0.001f &&
+					std::abs(Mix.Gains.UI - 0.9f) < 0.001f && Mix.MusicMuted
+				: std::abs(Mix.Gains.Music - 0.8f) < 0.001f && std::abs(Mix.Gains.Effects - 0.75f) < 0.001f &&
+					std::abs(Mix.Gains.UI - 0.9f) < 0.001f;
+			const size_t LoadedCookedClips = m_Session->GetAudioSession()->GetAssets().GetLoadedCount();
+			if (HasText("Audio authoring and mixing") && InitialValuesVisible && InitialMixValid &&
+				Rendered->RuntimeUIQuadCount > 0 && Rendered->RuntimeUIFontAtlasCount > 0 && LoadedCookedClips > 0)
+			{
+				m_AudioMixingPackageInitialFrameRendered = true;
+				PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_UI=PASS; rendered the cooked sample labels/font; quads={}; batches={}; "
+					"font_atlases={}; cooked_audio_clips={}; output=null",
+					Rendered->RuntimeUIQuadCount, Rendered->RuntimeUIBatchCount, Rendered->RuntimeUIFontAtlasCount, LoadedCookedClips);
+			}
+		}
+		if (m_AudioMixingPackageAcceptance && m_AudioMixingPackageComplete && !m_AudioMixingPackageShutdownRequested)
+		{
+			m_AudioMixingPackageShutdownRequested = true;
+			PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_ACCEPTANCE=PASS; normal shutdown requested; synthetic mapped input");
+			PulseForge::Application::Get().RequestClose();
+		}
 		if (m_RuntimeUIPackageSmoke && !m_RuntimeUIPackageSmokeShutdownRequested && Rendered->RuntimeUIQuadCount > 0)
 		{
 			m_RuntimeUIPackageSmokeShutdownRequested = true;
@@ -648,6 +701,8 @@ public:
 		if (m_RuntimeUIPackageSmokeShutdownRequested) PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS");
 		if (m_RuntimeUIPackageAcceptanceComplete && !m_RuntimeUIPackageAcceptanceFailed)
 			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS; Player exited normally after menu/gameplay/pause/resume interaction");
+		if (m_AudioMixingPackageComplete && !m_AudioMixingPackageFailed)
+			PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_SHUTDOWN=PASS; Player exited normally after settings restore or mixing/pause interaction");
 #endif
 		if (m_EditorShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_ORDERLY_STOP=PASS");
 	}
@@ -680,6 +735,194 @@ private:
 		Complete,
 		Failed
 	};
+
+	enum class AudioMixingPackageAcceptanceStage : uint8_t
+	{
+		WaitForRenderedUI,
+		MovePointer,
+		PressPointer,
+		ReleasePointer,
+		WaitForAction,
+		Complete,
+		Failed
+	};
+
+	struct AudioMixingPackageButton final
+	{
+		float X;
+		float Y;
+		std::string_view Name;
+	};
+
+	static constexpr std::array<AudioMixingPackageButton, 9> AudioMixingPackageButtons = {{
+		{ 387.5f, 118.5f, "Music +" },
+		{ 387.5f, 198.5f, "Effects +" },
+		{ 387.5f, 278.5f, "UI +" },
+		{ 510.0f, 118.5f, "Mute music" },
+		{ 527.5f, 198.5f, "Play effect" },
+		{ 185.0f, 430.0f, "Pause gameplay" },
+		{ 302.5f, 278.5f, "UI -" },
+		{ 440.0f, 430.0f, "Resume" },
+		{ 707.5f, 430.0f, "Save settings" }
+	}};
+
+	void AdvanceAudioMixingPackageInput(
+		PulseForge::Application& Application, PulseForge::Timestep DeltaTime, PulseForge::InputWindowID Window)
+	{
+		if (!m_AudioMixingPackageAcceptance || m_AudioMixingPackageVerify || m_AudioMixingPackageComplete ||
+			m_AudioMixingPackageFailed)
+			return;
+		m_AudioMixingPackageElapsed += std::clamp(DeltaTime.GetSeconds(), 0.0, 0.25);
+		if (m_AudioMixingPackageElapsed > 45.0)
+		{
+			FailAudioMixingPackageAcceptance(Application, "the bounded mapped-input sequence exceeded 45 seconds");
+			return;
+		}
+		if (Window == 0 || !m_Session || !m_AudioMixingPackageInitialFrameRendered)
+			return;
+		if (m_AudioMixingPackageActionIndex >= AudioMixingPackageButtons.size())
+			return;
+		const AudioMixingPackageButton& Button = AudioMixingPackageButtons[m_AudioMixingPackageActionIndex];
+		switch (m_AudioMixingPackageStage)
+		{
+			case AudioMixingPackageAcceptanceStage::WaitForRenderedUI:
+			case AudioMixingPackageAcceptanceStage::MovePointer:
+				if (QueueAudioMixingPointer(Application, Window, PulseForge::InputEventKind::PointerMoved, Button.X, Button.Y))
+					m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::PressPointer;
+				break;
+			case AudioMixingPackageAcceptanceStage::PressPointer:
+				if (QueueAudioMixingPointer(Application, Window, PulseForge::InputEventKind::Pressed, Button.X, Button.Y))
+					m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::ReleasePointer;
+				break;
+			case AudioMixingPackageAcceptanceStage::ReleasePointer:
+				if (QueueAudioMixingPointer(Application, Window, PulseForge::InputEventKind::Released, Button.X, Button.Y))
+					m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::WaitForAction;
+				break;
+			case AudioMixingPackageAcceptanceStage::WaitForAction:
+			case AudioMixingPackageAcceptanceStage::Complete:
+			case AudioMixingPackageAcceptanceStage::Failed:
+				break;
+		}
+	}
+
+	bool QueueAudioMixingPointer(
+		PulseForge::Application& Application,
+		PulseForge::InputWindowID Window,
+		PulseForge::InputEventKind Kind,
+		float X,
+		float Y)
+	{
+		PulseForge::InputEvent Event;
+		Event.Kind = Kind;
+		Event.Window = Window;
+		if (Kind == PulseForge::InputEventKind::PointerMoved)
+		{
+			Event.Control = { .Device = PulseForge::InputDevice::MouseMotion,
+				.Code = static_cast<uint16_t>(PulseForge::MouseControl::MotionX) };
+			Event.X = X;
+			Event.Y = Y;
+		}
+		else
+			Event.Control = { .Device = PulseForge::InputDevice::MouseButton,
+				.Code = static_cast<uint16_t>(PulseForge::MouseControl::Left) };
+		if (Application.GetGameplayInput().QueueEvent(Event))
+			return true;
+		FailAudioMixingPackageAcceptance(Application, "the mapped Player input queue rejected a synthetic pointer event");
+		return false;
+	}
+
+	bool HasAudioMixingPackageText(std::string_view Text)
+	{
+		if (!m_Session) return false;
+		const auto Commands = m_Session->GetRuntimeUIDrawCommands();
+		return std::any_of(Commands.begin(), Commands.end(), [Text](const PulseForge::RuntimeUIDrawCommand& Command)
+			{ return Command.Text.find(Text) != std::string::npos; });
+	}
+
+	void AdvanceAudioMixingPackageAcceptanceChecks(PulseForge::Application& Application)
+	{
+		if (!m_AudioMixingPackageAcceptance || m_AudioMixingPackageComplete || m_AudioMixingPackageFailed || !m_Session)
+			return;
+		if (m_AudioMixingPackageElapsed > 45.0)
+		{
+			FailAudioMixingPackageAcceptance(Application, "the bounded package interaction exceeded 45 seconds");
+			return;
+		}
+		if (!m_AudioMixingPackageInitialFrameRendered)
+			return;
+		auto* Audio = m_Session->GetAudioSession();
+		if (!Audio)
+		{
+			FailAudioMixingPackageAcceptance(Application, "PlayerSession did not retain its cooked AudioSession");
+			return;
+		}
+		const PulseForge::AudioMixState Mix = Audio->GetMixState();
+		if (m_AudioMixingPackageVerify)
+		{
+			if (!Audio->GetSettingsDiagnostic().empty() || std::abs(Mix.Gains.Music - 0.9f) >= 0.001f ||
+				std::abs(Mix.Gains.Effects - 0.85f) >= 0.001f || std::abs(Mix.Gains.UI - 0.9f) >= 0.001f ||
+				!Mix.MusicMuted)
+			{
+				FailAudioMixingPackageAcceptance(Application, "a new Player process did not restore the saved project-scoped mix");
+				return;
+			}
+			m_AudioMixingPackageComplete = true;
+			PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_SETTINGS_RESTORED=PASS; second Player process restored gains and music mute");
+			return;
+		}
+
+		switch (m_AudioMixingPackageStage)
+		{
+			case AudioMixingPackageAcceptanceStage::WaitForRenderedUI:
+			case AudioMixingPackageAcceptanceStage::MovePointer:
+			case AudioMixingPackageAcceptanceStage::PressPointer:
+			case AudioMixingPackageAcceptanceStage::ReleasePointer:
+			case AudioMixingPackageAcceptanceStage::Complete:
+			case AudioMixingPackageAcceptanceStage::Failed:
+				break;
+			case AudioMixingPackageAcceptanceStage::WaitForAction:
+			{
+				bool ActionObserved = false;
+				switch (m_AudioMixingPackageActionIndex)
+				{
+					case 0: ActionObserved = std::abs(Mix.Gains.Music - 0.9f) < 0.001f && HasAudioMixingPackageText("Music: 90%"); break;
+					case 1: ActionObserved = std::abs(Mix.Gains.Effects - 0.85f) < 0.001f && HasAudioMixingPackageText("Effects: 85%"); break;
+					case 2: ActionObserved = std::abs(Mix.Gains.UI - 1.0f) < 0.001f && HasAudioMixingPackageText("UI: 100%"); break;
+					case 3: ActionObserved = Mix.MusicMuted && HasAudioMixingPackageText("Music: 90% (muted)"); break;
+					case 4: ActionObserved = Audio->GetAssets().GetLoadedCount() >= 3; break;
+					case 5: ActionObserved = m_Session->IsPaused(); break;
+					case 6: ActionObserved = m_Session->IsPaused() && std::abs(Mix.Gains.UI - 0.9f) < 0.001f &&
+						HasAudioMixingPackageText("UI: 90%"); break;
+					case 7: ActionObserved = !m_Session->IsPaused(); break;
+					case 8: ActionObserved = !Audio->HasUnsavedUserSettings() && !Audio->GetSettingsPath().empty() &&
+						std::filesystem::exists(Audio->GetSettingsPath()); break;
+				}
+				if (ActionObserved)
+				{
+					PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_ACTION=PASS; {}", AudioMixingPackageButtons[m_AudioMixingPackageActionIndex].Name);
+					++m_AudioMixingPackageActionIndex;
+					if (m_AudioMixingPackageActionIndex == AudioMixingPackageButtons.size())
+					{
+						m_AudioMixingPackageComplete = true;
+						m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::Complete;
+						PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_SETTINGS_SAVED=PASS; dirty state cleared after atomic publication");
+					}
+					else
+						m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::MovePointer;
+				}
+				break;
+			}
+		}
+	}
+
+	void FailAudioMixingPackageAcceptance(PulseForge::Application& Application, std::string_view Reason)
+	{
+		if (m_AudioMixingPackageFailed) return;
+		m_AudioMixingPackageFailed = true;
+		m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::Failed;
+		PF_ERROR("PULSEFORGE_AUDIO_MIXING_PACKAGE_ACCEPTANCE=FAIL; {}", Reason);
+		Application.RequestClose();
+	}
 
 	void AdvanceRuntimeUIPackageAcceptanceInput(
 		PulseForge::Application& Application, PulseForge::Timestep DeltaTime, PulseForge::InputWindowID Window)
@@ -983,6 +1226,15 @@ private:
 	double m_RuntimeUIPackageAcceptanceElapsed = 0.0;
 	int m_RuntimeUIPackageScoreBeforeAction = 0;
 	int m_RuntimeUIPackagePausedScore = 0;
+	bool m_AudioMixingPackageAcceptance = false;
+	bool m_AudioMixingPackageVerify = false;
+	bool m_AudioMixingPackageInitialFrameRendered = false;
+	bool m_AudioMixingPackageComplete = false;
+	bool m_AudioMixingPackageFailed = false;
+	bool m_AudioMixingPackageShutdownRequested = false;
+	AudioMixingPackageAcceptanceStage m_AudioMixingPackageStage = AudioMixingPackageAcceptanceStage::WaitForRenderedUI;
+	double m_AudioMixingPackageElapsed = 0.0;
+	size_t m_AudioMixingPackageActionIndex = 0;
 #endif
 	EditorShutdownChannel m_EditorShutdownChannel;
 	bool m_EditorShutdownRequested = false;

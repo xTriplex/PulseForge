@@ -66,6 +66,7 @@ namespace PulseForge
 	{
 		AssetCookRequest Request;
 		UUID ProjectID;
+		AudioMixGains AudioMixDefaults;
 		std::vector<AssetID> SortedRoots;
 		std::vector<AssetCookPlannedProduct> Products;
 		AssetContentFingerprint ProjectFileFingerprint;

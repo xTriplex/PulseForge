@@ -16,6 +16,7 @@ namespace PulseForge
 	class Project;
 	class Scene;
 	class CookedContentProvider;
+	class AudioSession;
 
 	enum class PlayerSessionErrorCode : uint8_t
 	{
@@ -64,6 +65,8 @@ namespace PulseForge
 		[[nodiscard]] double GetTimeScale() const noexcept { return m_TimeScale; }
 		[[nodiscard]] bool IsPaused() const noexcept { return m_Paused; }
 		[[nodiscard]] bool IsRunning() const noexcept { return m_Runtime != nullptr; }
+		[[nodiscard]] AudioSession* GetAudioSession() noexcept { return m_AudioSession.get(); }
+		[[nodiscard]] const AudioSession* GetAudioSession() const noexcept { return m_AudioSession.get(); }
 		[[nodiscard]] bool HasRuntimeUI() const noexcept { return m_Runtime && m_Runtime->HasRuntimeUI(); }
 		[[nodiscard]] RuntimeUIInputPolicy GetRuntimeUIInputPolicy() const noexcept
 		{
@@ -114,6 +117,7 @@ namespace PulseForge
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::unique_ptr<Project> m_Project;
 #endif
+		std::unique_ptr<AudioSession> m_AudioSession;
 		std::unique_ptr<Scene> m_Scene;
 		std::unique_ptr<SceneRuntime> m_Runtime;
 		std::unique_ptr<PendingScene> m_PendingScene;

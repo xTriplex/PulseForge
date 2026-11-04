@@ -38,7 +38,7 @@ namespace PulseForge::ScriptRuntimeDetail
 		LuaMemoryPool* Pool = nullptr;
 #if defined(PF_DEBUG)
 		const ScriptRuntimeAllocationFaultHooksForTesting* FaultHooks = nullptr;
-		ScriptRuntimeAllocationPointForTesting ActiveReferencePoint = ScriptRuntimeAllocationPointForTesting::None;
+		ScriptRuntimeAllocationPointForTesting ActiveAllocationPoint = ScriptRuntimeAllocationPointForTesting::None;
 		size_t ActiveModuleIndex = 0;
 #endif
 	};

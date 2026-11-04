@@ -1,0 +1,13 @@
+{
+  "format": "PulseForgeProject",
+  "version": 2,
+  "projectId": "b0190000-0000-4000-8000-000000000100",
+  "name": "Audio Authoring and Mixing",
+  "startScene": "b0190000-0000-4000-8000-000000000010",
+  "audioMixDefaults": {
+    "master": 1.0,
+    "music": 0.8,
+    "effects": 0.75,
+    "ui": 0.9
+  }
+}

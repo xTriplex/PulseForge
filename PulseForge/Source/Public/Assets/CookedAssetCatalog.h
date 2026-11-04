@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetID.h"
+#include "Audio/AudioMixSettings.h"
 #include "Core/Core.h"
 
 #include <cstddef>
@@ -118,8 +119,8 @@ namespace PulseForge
 	class PULSEFORGE_API CookedAssetCatalog final
 	{
 	public:
-		// Version 2 added build-configuration provenance; version 3 adds managed Lua source identities.
-		static constexpr uint32_t ManifestVersion = 3;
+		// Version 2 added build-configuration provenance; v3 added script source identities; v4 adds authored audio defaults.
+		static constexpr uint32_t ManifestVersion = 4;
 		static constexpr std::string_view ManifestFileName = "manifest.pfmanifest";
 		static constexpr size_t MaximumManifestBytes = 16u * 1024u * 1024u;
 		static constexpr size_t MaximumEntries = 250'000;
@@ -133,7 +134,8 @@ namespace PulseForge
 			const CookedAssetCompatibility& Compatibility,
 			std::vector<AssetID> DynamicRoots,
 			std::vector<CookedAssetEntry> Entries,
-			std::stop_token CancellationToken = {});
+			std::stop_token CancellationToken = {},
+			AudioMixGains AudioMixDefaults = {});
 		[[nodiscard]] static CookedAssetDigest ComputePayloadDigest(std::span<const std::byte> Bytes);
 		[[nodiscard]] static std::expected<CookedAssetDigest, std::string> ComputePayloadDigestCancellable(
 			std::span<const std::byte> Bytes, std::stop_token CancellationToken);
@@ -141,6 +143,7 @@ namespace PulseForge
 		[[nodiscard]] const UUID& GetProjectID() const noexcept { return m_ProjectID; }
 		[[nodiscard]] const AssetID& GetStartupScene() const noexcept { return m_StartupScene; }
 		[[nodiscard]] const CookedAssetCompatibility& GetCompatibility() const noexcept { return m_Compatibility; }
+		[[nodiscard]] const AudioMixGains& GetAudioMixDefaults() const noexcept { return m_AudioMixDefaults; }
 		[[nodiscard]] const std::vector<AssetID>& GetDynamicRoots() const noexcept { return m_DynamicRoots; }
 		[[nodiscard]] const std::vector<CookedAssetEntry>& GetEntries() const noexcept { return m_Entries; }
 		[[nodiscard]] const CookedAssetEntry* Find(
@@ -152,12 +155,14 @@ namespace PulseForge
 
 	private:
 		CookedAssetCatalog(std::filesystem::path ContentRoot, UUID ProjectID, AssetID StartupScene,
-			CookedAssetCompatibility Compatibility, std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries);
+			CookedAssetCompatibility Compatibility, AudioMixGains AudioMixDefaults,
+			std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries);
 
 		std::filesystem::path m_ContentRoot;
 		UUID m_ProjectID;
 		AssetID m_StartupScene;
 		CookedAssetCompatibility m_Compatibility;
+		AudioMixGains m_AudioMixDefaults;
 		std::vector<AssetID> m_DynamicRoots;
 		std::vector<CookedAssetEntry> m_Entries;
 		std::map<std::string, size_t, std::less<>> m_ScriptsByProjectPath;

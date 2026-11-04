@@ -1,13 +1,13 @@
 #include "Runtime/SceneRuntime.h"
 #include "Runtime/CookedContentProvider.h"
 
-#include "Assets/AudioAssetCache.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/AssetTypes.h"
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
 #endif
 #include "Audio/AudioSceneRuntime.h"
+#include "Audio/AudioSession.h"
 #include "Core/Diagnostics.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"
@@ -31,6 +31,20 @@ namespace PulseForge
 			std::string Message)
 		{
 			return { Code, Subsystem, std::move(Message) };
+		}
+
+		std::string_view AudioDeviceStateName(AudioDeviceState State) noexcept
+		{
+			switch (State)
+			{
+				case AudioDeviceState::DefaultActive: return "default_active";
+				case AudioDeviceState::ExplicitNull: return "explicit_null";
+				case AudioDeviceState::Unavailable: return "unavailable";
+				case AudioDeviceState::Recovering: return "recovering";
+				case AudioDeviceState::RecoveryFailed: return "recovery_failed";
+				case AudioDeviceState::OfflineTest: return "offline_test";
+			}
+			return "unknown";
 		}
 
 		uint64_t NextRuntimeSessionGeneration() noexcept
@@ -87,9 +101,9 @@ namespace PulseForge
 			std::vector<RuntimeUIDrawCommand> DrawCommands;
 			uint64_t TreeGeneration = 0;
 		};
-		// Declaration order intentionally makes script callbacks stop before their services and dependencies.
-		std::optional<AudioEngine> AudioDevice;
-		std::unique_ptr<AudioAssetCache> AudioAssets;
+		// Reverse destruction stops scripts and scene voices before the session-owned engine and cache.
+		std::unique_ptr<AudioSession> OwnedAudioSession;
+		AudioSession* AudioSessionState = nullptr;
 		std::unique_ptr<AudioSceneRuntime> Audio;
 		std::unique_ptr<PhysicsSceneRuntime> Physics;
 		std::unique_ptr<ScriptRuntime> Scripting;
@@ -99,6 +113,7 @@ namespace PulseForge
 		std::vector<RuntimeUIDrawCommand> RuntimeUIDrawCommands;
 		Scene* Source = nullptr;
 		bool Paused = false;
+		bool AudioActivationDeferred = false;
 		enum class Lifecycle : uint8_t { Starting, Active, Stopping };
 		enum class RequestStatus : uint8_t { None, Pending, Committed, Rejected, Cancelled, Superseded };
 		Lifecycle State = Lifecycle::Starting;
@@ -132,7 +147,7 @@ namespace PulseForge
 		Stop();
 	}
 
-	std::expected<void, SceneRuntimeError> SceneRuntime::Start(Scene& Source)
+	std::expected<void, SceneRuntimeError> SceneRuntime::Start(Scene& Source, bool DeferAudioActivation)
 	{
 		if (m_Impl)
 			return std::unexpected(MakeError(
@@ -148,6 +163,7 @@ namespace PulseForge
 			auto Candidate = std::make_unique<Impl>();
 			Candidate->Source = &Source;
 			Candidate->SessionGeneration = SessionGeneration;
+			Candidate->AudioActivationDeferred = DeferAudioActivation;
 			const Project* SourceProject = nullptr;
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 			SourceProject = m_Project;
@@ -179,40 +195,38 @@ namespace PulseForge
 					.FramebufferHeight = static_cast<uint32_t>(Candidate->RuntimeUI->Document.DesignSize.y) };
 			}
 
-			auto AudioDevice = AudioEngine::Create(m_Description.Audio);
-			if (!AudioDevice)
-				return std::unexpected(MakeError(
-					SceneRuntimeErrorCode::InitializationFailed,
-					SceneRuntimeSubsystem::AudioDevice,
-					"Could not initialize the audio device: " + AudioDevice.error().Message));
-			Candidate->AudioDevice.emplace(std::move(*AudioDevice));
-			if (m_CookedAssets)
+			Candidate->AudioSessionState = m_Services.AudioSessionState;
+			if (!Candidate->AudioSessionState)
 			{
-				auto Provider = m_CookedAssets;
-				Candidate->AudioAssets = std::make_unique<AudioAssetCache>(*Candidate->AudioDevice,
-					[Provider = std::move(Provider)](const AssetID& Asset) -> std::expected<std::vector<std::byte>, AudioAssetError>
-					{
-						auto Bytes = Provider->ReadAudio(Asset);
-						if (!Bytes)
-							return std::unexpected(AudioAssetError{ .Code = AudioAssetErrorCode::FileReadFailed,
-								.Asset = Asset, .Message = Bytes.error().Message });
-						return std::move(*Bytes);
-					});
+				AudioSessionDesc AudioDescription{ .Engine = m_Description.Audio, .Diagnostics = m_Services.Diagnostics };
+				std::expected<std::unique_ptr<AudioSession>, AudioSessionError> CreatedSession =
+					std::unexpected(AudioSessionError{ AudioSessionErrorCode::AssetProviderUnavailable,
+						"Scene runtime requires a source project or cooked content provider" });
+				if (m_CookedAssets)
+					CreatedSession = AudioSession::CreateForCooked(
+						m_CookedAssets, m_CookedAssets->GetAudioMixDefaults(), std::move(AudioDescription));
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+				else if (m_Project)
+					CreatedSession = AudioSession::CreateForProject(*m_Project, std::move(AudioDescription));
+#endif
+				if (!CreatedSession)
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed,
+						SceneRuntimeSubsystem::AudioDevice, "Could not create audio session: " + CreatedSession.error().Message));
+				Candidate->OwnedAudioSession = std::move(*CreatedSession);
+				Candidate->AudioSessionState = Candidate->OwnedAudioSession.get();
 			}
+			const UUID* ExpectedProjectID = nullptr;
+			if (m_CookedAssets)
+				ExpectedProjectID = &m_CookedAssets->GetProjectID();
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 			else if (m_Project)
-				Candidate->AudioAssets = std::make_unique<AudioAssetCache>(
-					*Candidate->AudioDevice, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
-#else
-			else
-				return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
-					"Cooked runtime requires a cooked content provider"));
+				ExpectedProjectID = &m_Project->GetDescription().ID;
 #endif
-#if !defined(PF_COOKED_RUNTIME_ONLY)
-			else
-				return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
-					"Scene runtime requires a source project or cooked content provider"));
-#endif
+			if (!Candidate->AudioSessionState || !ExpectedProjectID ||
+				Candidate->AudioSessionState->GetProjectID() != *ExpectedProjectID)
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed,
+					SceneRuntimeSubsystem::AudioDevice,
+					"Audio session identity does not match the active source project or cooked package"));
 
 			Candidate->Physics = std::make_unique<PhysicsSceneRuntime>(m_Description.Physics);
 			if (auto Result = Candidate->Physics->Start(Source); !Result)
@@ -221,8 +235,12 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Physics,
 					"Could not start scene physics: " + Result.error().Message));
 
-			Candidate->Audio = std::make_unique<AudioSceneRuntime>(*Candidate->AudioDevice, *Candidate->AudioAssets);
-			if (auto Result = Candidate->Audio->Start(Source); !Result)
+			Candidate->Audio = std::make_unique<AudioSceneRuntime>(
+				Candidate->AudioSessionState->GetEngine(),
+				Candidate->AudioSessionState->GetAssets(),
+				Candidate->AudioSessionState->GetGeneration(),
+				SessionGeneration);
+			if (auto Result = Candidate->Audio->Start(Source, DeferAudioActivation); !Result)
 				return std::unexpected(MakeError(
 					SceneRuntimeErrorCode::InitializationFailed,
 					SceneRuntimeSubsystem::Audio,
@@ -235,6 +253,66 @@ namespace PulseForge
 				.InputState = m_Services.InputState,
 				.Observer = m_Services.ScriptObserver };
 			auto* CandidateOwner = Candidate.get();
+			const auto AudioSettingsAvailable = [CandidateOwner]() noexcept
+			{
+				return CandidateOwner->State == Impl::Lifecycle::Active && !CandidateOwner->AudioActivationDeferred &&
+					CandidateOwner->AudioSessionState;
+			};
+			Services.GetAudioGain = [CandidateOwner, AudioSettingsAvailable](std::string_view Channel) -> std::optional<float>
+			{
+				if (!AudioSettingsAvailable()) return std::nullopt;
+				const AudioMixState Mix = CandidateOwner->AudioSessionState->GetMixState();
+				if (Channel == "master") return Mix.Gains.Master;
+				if (Channel == "music") return Mix.Gains.Music;
+				if (Channel == "effects") return Mix.Gains.Effects;
+				if (Channel == "ui") return Mix.Gains.UI;
+				return std::nullopt;
+			};
+			Services.SetAudioGain = [CandidateOwner, AudioSettingsAvailable](std::string_view Channel, float Gain)
+			{
+				if (!AudioSettingsAvailable()) return false;
+				std::expected<void, AudioSessionError> Result = std::unexpected(AudioSessionError{
+					AudioSessionErrorCode::InvalidMixSettings, "Unknown audio mix channel" });
+				if (Channel == "master") Result = CandidateOwner->AudioSessionState->SetUserMasterGain(Gain);
+				else if (Channel == "music") Result = CandidateOwner->AudioSessionState->SetUserBusGain(AudioBus::Music, Gain);
+				else if (Channel == "effects") Result = CandidateOwner->AudioSessionState->SetUserBusGain(AudioBus::Effects, Gain);
+				else if (Channel == "ui") Result = CandidateOwner->AudioSessionState->SetUserBusGain(AudioBus::UI, Gain);
+				return Result.has_value();
+			};
+			Services.GetAudioMuted = [CandidateOwner, AudioSettingsAvailable](std::string_view Channel) -> std::optional<bool>
+			{
+				if (!AudioSettingsAvailable()) return std::nullopt;
+				const AudioMixState Mix = CandidateOwner->AudioSessionState->GetMixState();
+				if (Channel == "master") return Mix.MasterMuted;
+				if (Channel == "music") return Mix.MusicMuted;
+				if (Channel == "effects") return Mix.EffectsMuted;
+				if (Channel == "ui") return Mix.UIMuted;
+				return std::nullopt;
+			};
+			Services.SetAudioMuted = [CandidateOwner, AudioSettingsAvailable](std::string_view Channel, bool Muted)
+			{
+				if (!AudioSettingsAvailable()) return false;
+				std::expected<void, AudioSessionError> Result = std::unexpected(AudioSessionError{
+					AudioSessionErrorCode::InvalidMixSettings, "Unknown audio mix channel" });
+				if (Channel == "master") Result = CandidateOwner->AudioSessionState->SetMasterMuted(Muted);
+				else if (Channel == "music") Result = CandidateOwner->AudioSessionState->SetBusMuted(AudioBus::Music, Muted);
+				else if (Channel == "effects") Result = CandidateOwner->AudioSessionState->SetBusMuted(AudioBus::Effects, Muted);
+				else if (Channel == "ui") Result = CandidateOwner->AudioSessionState->SetBusMuted(AudioBus::UI, Muted);
+				return Result.has_value();
+			};
+			Services.SaveAudioSettings = [CandidateOwner, AudioSettingsAvailable]()
+			{
+				return AudioSettingsAvailable() && CandidateOwner->AudioSessionState->SaveUserSettings().has_value();
+			};
+			Services.GetAudioOutputState = [CandidateOwner, AudioSettingsAvailable]() -> std::optional<std::string_view>
+			{
+				if (!AudioSettingsAvailable()) return std::nullopt;
+				return AudioDeviceStateName(CandidateOwner->AudioSessionState->GetDeviceState());
+			};
+			Services.RetryAudioOutput = [CandidateOwner, AudioSettingsAvailable]()
+			{
+				return AudioSettingsAvailable() && CandidateOwner->AudioSessionState->RetryDefaultOutput().has_value();
+			};
 			if (m_Services.QueueSceneTransition)
 			{
 				Services.QueueSceneTransition = [CandidateOwner, Request = m_Services.QueueSceneTransition](const AssetID& Asset)
@@ -324,6 +402,42 @@ namespace PulseForge
 				SceneRuntimeSubsystem::None,
 				std::string("Could not start scene runtime: ") + Exception.what()));
 		}
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::ActivateAudio()
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::None,
+				"Scene runtime is not started"));
+		if (!m_Impl->AudioActivationDeferred)
+			return {};
+		if (auto Activated = m_Impl->Audio->Activate(); !Activated)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+				"Could not activate candidate scene audio: " + Activated.error().Message));
+		m_Impl->AudioActivationDeferred = false;
+		return {};
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::SuspendAudioForTransition()
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::None,
+				"Scene runtime is not started"));
+		if (auto Suspended = m_Impl->Audio->SuspendForTransition(); !Suspended)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+				"Could not suspend outgoing scene audio: " + Suspended.error().Message));
+		return {};
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::ResumeAudioAfterTransition()
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::None,
+				"Scene runtime is not started"));
+		if (auto Resumed = m_Impl->Audio->ResumeAfterTransition(); !Resumed)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+				"Could not resume retained scene audio: " + Resumed.error().Message));
+		return {};
 	}
 
 	void SceneRuntime::Stop() noexcept
@@ -485,6 +599,8 @@ namespace PulseForge
 				SceneRuntimeErrorCode::InvalidDeltaTime,
 				SceneRuntimeSubsystem::None,
 				"Scene runtime frame delta must be finite and non-negative"));
+		if (m_Impl->AudioSessionState)
+			m_Impl->AudioSessionState->PollDeviceState();
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
@@ -517,6 +633,13 @@ namespace PulseForge
 		}
 		else
 			m_Impl->RuntimeUIDrawCommands.clear();
+		if (m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending &&
+			m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Committed)
+		{
+			if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+					"Could not apply queued audio controls: " + Result.error().Message));
+		}
 		if (m_Impl->RequestedPause && m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending &&
 			m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Committed)
 		{
@@ -538,6 +661,9 @@ namespace PulseForge
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+				"Could not apply queued audio controls: " + Result.error().Message));
 		if (m_Impl->RequestedPause)
 		{
 			const bool RequestedPause = *m_Impl->RequestedPause;
@@ -562,6 +688,9 @@ namespace PulseForge
 			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
 				return SceneRuntimeFrameResult{ .PhysicsSteps = *PhysicsResult, .PhysicsStats = m_Impl->Physics->GetStats() };
 		}
+		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+				"Could not apply queued contact audio controls: " + Result.error().Message));
 
 		{
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "AudioSceneRuntime::Advance", "AudioSceneRuntime");

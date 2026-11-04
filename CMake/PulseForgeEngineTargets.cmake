@@ -161,14 +161,16 @@ target_link_libraries(PulseForgeScripting
 		PulseForgeCookedRuntimeProvider spdlog::spdlog
 )
 add_library(PulseForgeRuntime STATIC
+	PulseForge/Source/Private/Audio/AudioSession.cpp
 	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
 	PulseForge/Source/Private/Runtime/PlayerSession.cpp
 )
 target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
+target_include_directories(PulseForgeRuntime PRIVATE PulseForge/Vendor/json/include)
 target_link_libraries(PulseForgeRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
 	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeCookedRuntimeProvider PulseForgeScene
-		PulseForgeInput
+		PulseForgeInput PulseForgeCore
 )
 
 # The cooked player compiles the same runtime owners with their source-project branches removed.
@@ -198,13 +200,15 @@ target_link_libraries(PulseForgeCookedScripting
 set_property(TARGET PulseForgeCookedScripting PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
 add_library(PulseForgeCookedRuntime STATIC
+	PulseForge/Source/Private/Audio/AudioSession.cpp
 	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
 	PulseForge/Source/Private/Runtime/PlayerSession.cpp)
 target_include_directories(PulseForgeCookedRuntime PUBLIC PulseForge/Source/Public)
+target_include_directories(PulseForgeCookedRuntime PRIVATE PulseForge/Vendor/json/include)
 target_compile_definitions(PulseForgeCookedRuntime PUBLIC PF_COOKED_RUNTIME_ONLY)
 target_link_libraries(PulseForgeCookedRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeCookedScripting PulseForgeCookedRuntimeProvider PulseForgeScene
-	PRIVATE PulseForgeCookedAudioAssets PulseForgeCookedAudioScene PulseForgeInput)
+	PRIVATE PulseForgeCookedAudioAssets PulseForgeCookedAudioScene PulseForgeInput PulseForgeCore)
 set_property(TARGET PulseForgeCookedRuntime PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp

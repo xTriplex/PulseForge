@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -30,7 +31,8 @@ namespace PulseForge
 	{
 		None,
 		MainChunkReference,
-		ModuleChunkReference
+		ModuleChunkReference,
+		AudioHostErrorString
 	};
 
 #if defined(PF_DEBUG)
@@ -144,6 +146,14 @@ namespace PulseForge
 		std::function<bool()> QueueStop;
 		std::function<bool(bool)> QueuePause;
 		std::function<bool(UUID, std::string)> SetRuntimeUIText;
+		// Optional owner-thread user mix access for runtime settings UI; channels are master/music/effects/ui.
+		std::function<std::optional<float>(std::string_view)> GetAudioGain;
+		std::function<bool(std::string_view, float)> SetAudioGain;
+		std::function<std::optional<bool>(std::string_view)> GetAudioMuted;
+		std::function<bool(std::string_view, bool)> SetAudioMuted;
+		std::function<bool()> SaveAudioSettings;
+		std::function<std::optional<std::string_view>()> GetAudioOutputState;
+		std::function<bool()> RetryAudioOutput;
 	};
 
 	enum class ScriptRuntimeErrorCode : uint8_t

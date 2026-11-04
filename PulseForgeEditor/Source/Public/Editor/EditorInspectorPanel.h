@@ -2,6 +2,7 @@
 
 #include "Assets/AssetRegistry.h"
 #include "Assets/ScriptSourceMetadata.h"
+#include "Audio/AudioBus.h"
 #include "Scene/PropertyMetadata.h"
 #include "Scene/Scene.h"
 #include "Scripting/ScriptRuntime.h"
@@ -28,6 +29,17 @@ namespace PulseForgeEditor
 		[[nodiscard]] virtual std::expected<void, std::string> RunInspectorSceneEdit(
 			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) = 0;
 		virtual void ReportInspectorError(std::string Message) = 0;
+		[[nodiscard]] virtual std::expected<void, std::string> PreviewAudioAsset(
+			const PulseForge::AssetID& Asset, PulseForge::AudioBus Bus)
+		{
+			(void)Asset;
+			(void)Bus;
+			return std::unexpected("Audio preview is unavailable in this Inspector context");
+		}
+		[[nodiscard]] virtual std::expected<void, std::string> StopAudioPreview()
+		{
+			return {};
+		}
 		[[nodiscard]] virtual std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
 			const PulseForge::AssetID& Asset)
 		{

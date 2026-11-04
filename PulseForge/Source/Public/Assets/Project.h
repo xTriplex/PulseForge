@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Audio/AudioMixSettings.h"
 #include "Core/Core.h"
 
 #include <cstddef>
@@ -20,6 +21,7 @@ namespace PulseForge
 		UUID ID;
 		std::string Name;
 		std::optional<AssetID> StartScene;
+		AudioMixGains AudioMixDefaults;
 	};
 
 	enum class ProjectErrorCode : uint8_t
@@ -79,6 +81,7 @@ namespace PulseForge
 		[[nodiscard]] AssetRegistry& GetAssetRegistry() noexcept { return m_Registry; }
 
 		[[nodiscard]] std::expected<void, ProjectError> SetStartScene(std::optional<AssetID> Scene);
+		[[nodiscard]] std::expected<void, ProjectError> SetAudioMixDefaults(const AudioMixGains& Defaults);
 		[[nodiscard]] std::expected<void, ProjectError> Save() const;
 
 	private:

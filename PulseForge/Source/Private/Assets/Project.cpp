@@ -6,11 +6,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <fstream>
-#include <initializer_list>
 #include <limits>
 #include <optional>
+#include <span>
 #include <system_error>
 
 namespace PulseForge
@@ -19,9 +20,9 @@ namespace PulseForge
 	{
 		using Json = nlohmann::ordered_json;
 		constexpr std::string_view ProjectFormat = "PulseForgeProject";
-		constexpr int64_t ProjectFormatVersion = 1;
+		constexpr int64_t ProjectFormatVersion = 2;
 
-		std::optional<std::string> FindUnknownField(const Json& Object, std::initializer_list<std::string_view> AllowedFields)
+		std::optional<std::string> FindUnknownField(const Json& Object, std::span<const std::string_view> AllowedFields)
 		{
 			for (const auto& [Key, Value] : Object.items())
 			{
@@ -102,6 +103,15 @@ namespace PulseForge
 			Document["projectId"] = Description.ID.ToString();
 			Document["name"] = Description.Name;
 			if (Description.StartScene) Document["startScene"] = Description.StartScene->ToString();
+			if (!Description.AudioMixDefaults.IsValid())
+				return std::unexpected(MakeError(
+					ProjectErrorCode::InvalidDescription, {}, "Project audio mix defaults must be finite and between zero and one"));
+			Document["audioMixDefaults"] = Json::object({
+				{ "master", Description.AudioMixDefaults.Master },
+				{ "music", Description.AudioMixDefaults.Music },
+				{ "effects", Description.AudioMixDefaults.Effects },
+				{ "ui", Description.AudioMixDefaults.UI }
+			});
 			std::string Data = Document.dump(2) + "\n";
 			if (Data.size() > MaximumDocumentBytes)
 				return std::unexpected(
@@ -135,12 +145,24 @@ namespace PulseForge
 			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
 				return std::unexpected(
 					MakeError(ProjectErrorCode::InvalidDocument, {}, "Project document requires an integer format version"));
-			const bool SupportedVersion = Version->is_number_unsigned()
-											  ? Version->get<uint64_t>() == static_cast<uint64_t>(ProjectFormatVersion)
-											  : Version->get<int64_t>() == ProjectFormatVersion;
+			const bool VersionOne = Version->is_number_unsigned()
+				? Version->get<uint64_t>() == 1
+				: Version->get<int64_t>() == 1;
+			const bool VersionTwo = Version->is_number_unsigned()
+				? Version->get<uint64_t>() == static_cast<uint64_t>(ProjectFormatVersion)
+				: Version->get<int64_t>() == ProjectFormatVersion;
+			const bool SupportedVersion = VersionOne || VersionTwo;
 			if (!SupportedVersion)
 				return std::unexpected(MakeError(ProjectErrorCode::UnsupportedVersion, {}, "Project document version is not supported"));
-			if (const auto Unknown = FindUnknownField(Document, { "format", "version", "projectId", "name", "startScene" }))
+			const int64_t DocumentVersion = VersionTwo ? ProjectFormatVersion : 1;
+			static constexpr std::array<std::string_view, 5> VersionOneFields = {
+				"format", "version", "projectId", "name", "startScene" };
+			static constexpr std::array<std::string_view, 6> VersionTwoFields = {
+				"format", "version", "projectId", "name", "startScene", "audioMixDefaults" };
+			const std::span<const std::string_view> AllowedFields = DocumentVersion == 1
+				? std::span<const std::string_view>(VersionOneFields)
+				: std::span<const std::string_view>(VersionTwoFields);
+			if (const auto Unknown = FindUnknownField(Document, AllowedFields))
 				return std::unexpected(
 					MakeError(ProjectErrorCode::InvalidDocument, {}, "Project document contains unsupported field '" + *Unknown + "'"));
 
@@ -179,6 +201,30 @@ namespace PulseForge
 						{},
 						StartScene ? "Project startup scene UUID must not be nil" : StartScene.error().Message));
 				Description.StartScene = *StartScene;
+			}
+			if (DocumentVersion == ProjectFormatVersion)
+			{
+				const auto Mix = Document.find("audioMixDefaults");
+				if (Mix == Document.end() || !Mix->is_object())
+					return std::unexpected(MakeError(
+						ProjectErrorCode::InvalidDocument, {}, "Project v2 requires an audioMixDefaults object"));
+				static constexpr std::array<std::string_view, 4> MixFields = { "master", "music", "effects", "ui" };
+				if (const auto Unknown = FindUnknownField(*Mix, MixFields))
+					return std::unexpected(MakeError(
+						ProjectErrorCode::InvalidDocument, {}, "Project audioMixDefaults contains unsupported field '" + *Unknown + "'"));
+				const auto Master = Mix->find("master");
+				const auto Music = Mix->find("music");
+				const auto Effects = Mix->find("effects");
+				const auto UI = Mix->find("ui");
+				if (Master == Mix->end() || !Master->is_number() || Music == Mix->end() || !Music->is_number() ||
+					Effects == Mix->end() || !Effects->is_number() || UI == Mix->end() || !UI->is_number())
+					return std::unexpected(MakeError(
+						ProjectErrorCode::InvalidDocument, {}, "Project audioMixDefaults requires master, music, effects, and ui numeric gains"));
+				Description.AudioMixDefaults = {
+					.Master = Master->get<float>(), .Music = Music->get<float>(), .Effects = Effects->get<float>(), .UI = UI->get<float>() };
+				if (!Description.AudioMixDefaults.IsValid())
+					return std::unexpected(MakeError(
+						ProjectErrorCode::InvalidDocument, {}, "Project audio mix defaults must be finite and between zero and one"));
 			}
 
 			if (auto Validation = Serialize(Description); !Validation)
@@ -327,6 +373,21 @@ namespace PulseForge
 		if (auto Saved = Save(); !Saved)
 		{
 			m_Description.StartScene = Previous;
+			return Saved;
+		}
+		return {};
+	}
+
+	std::expected<void, ProjectError> Project::SetAudioMixDefaults(const AudioMixGains& Defaults)
+	{
+		if (!Defaults.IsValid())
+			return std::unexpected(MakeError(
+				ProjectErrorCode::InvalidDescription, m_ProjectFile, "Project audio mix defaults must be finite and between zero and one"));
+		const AudioMixGains Previous = m_Description.AudioMixDefaults;
+		m_Description.AudioMixDefaults = Defaults;
+		if (auto Saved = Save(); !Saved)
+		{
+			m_Description.AudioMixDefaults = Previous;
 			return Saved;
 		}
 		return {};

@@ -1,6 +1,8 @@
 #include "TestEditorSupport.h"
 #include "Editor/Detail/EditorInputMappingPanel.h"
+#include "Audio/AudioSession.h"
 #include "Input/GameplayInputStore.h"
+#include "UI/RuntimeUI.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -301,7 +303,17 @@ end
 		Space.Id = "Jump.space";
 		Space.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) };
 		Jump.Bindings.push_back(Space);
-		Map.Actions = { Move, Jump };
+		GameplayActionDefinition GameplayPointer{ .Id = "GameplayPointer", .Type = ActionValueType::Digital };
+		ActionBinding GameplayMouse;
+		GameplayMouse.Id = "GameplayPointer.left";
+		GameplayMouse.Primary = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) };
+		GameplayPointer.Bindings.push_back(GameplayMouse);
+		GameplayActionDefinition UIPointer{ .Id = "ui.pointer", .Type = ActionValueType::Digital, .Context = InputContext::RuntimeUI };
+		ActionBinding UIMouse;
+		UIMouse.Id = "ui.pointer.left";
+		UIMouse.Primary = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) };
+		UIPointer.Bindings.push_back(UIMouse);
+		Map.Actions = { Move, Jump, GameplayPointer, UIPointer };
 		PF_CHECK(Tests, Input.SetActionMap(std::move(Map)).has_value());
 
 		Scene RuntimeScene;
@@ -326,7 +338,7 @@ end
 
 		constexpr InputWindowID MainViewportWindow = 17;
 		const auto MakeRouting = [&ViewportFocused](InputWindowID Window, bool NativeFocused = true, bool ImGuiFocused = true,
-									 bool TextOrModal = false, bool ViewportNavigation = false)
+									 bool TextOrModal = false, bool ViewportNavigation = false, bool EditorWidgetInputOwned = false)
 		{
 			return BuildEditorGameplayInputRouting({ .ViewportWindow = Window,
 				.ViewportAvailable = true,
@@ -335,8 +347,103 @@ end
 				.RuntimeActive = true,
 				.ViewportKeyboardFocused = ViewportFocused,
 				.TextOrModalInput = TextOrModal,
+				.EditorWidgetInputOwned = EditorWidgetInputOwned,
 				.ViewportNavigation = ViewportNavigation });
 		};
+		PF_CHECK(Tests, IsEditorWidgetInputOwned(true, false));
+		PF_CHECK(Tests, !IsEditorWidgetInputOwned(true, true));
+		PF_CHECK(Tests, !IsEditorWidgetInputOwned(false, false));
+		const InputRoutingState ViewportWithoutImGuiKeyboardFocus = BuildEditorGameplayInputRouting({
+			.ViewportWindow = MainViewportWindow,
+			.ViewportAvailable = true,
+			.NativeOwnerFocused = true,
+			.ImGuiOwnerFocused = false,
+			.RuntimeActive = true,
+			.ViewportKeyboardFocused = false
+		});
+		PF_CHECK(Tests, ViewportWithoutImGuiKeyboardFocus.FocusedWindow == MainViewportWindow &&
+					ViewportWithoutImGuiKeyboardFocus.ContextCount == 4);
+		PF_CHECK(Tests, !ViewportWithoutImGuiKeyboardFocus.Contexts[0].Active &&
+					!ViewportWithoutImGuiKeyboardFocus.Contexts[1].Active);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(ViewportWithoutImGuiKeyboardFocus));
+		InputRoutingState RuntimeUIRouting = ViewportWithoutImGuiKeyboardFocus;
+		PF_CHECK(Tests, AppendRuntimeUIInputContext(RuntimeUIRouting, RuntimeUIInputPolicy::Modal, MainViewportWindow));
+		PF_CHECK(Tests, RuntimeUIRouting.ContextCount == 5 && RuntimeUIRouting.Contexts[4].Context == InputContext::RuntimeUI &&
+					RuntimeUIRouting.Contexts[4].Active && RuntimeUIRouting.Contexts[4].Consumes == InputDeviceMask::All);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(RuntimeUIRouting));
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(RuntimeUIRouting);
+		PF_CHECK(Tests, Input.FindAction("ui.pointer") && Input.FindAction("ui.pointer")->Pressed);
+		PF_CHECK(Tests, Input.FindAction("GameplayPointer") && !Input.FindAction("GameplayPointer")->Pressed);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(RuntimeUIRouting);
+		PF_CHECK(Tests, Input.FindAction("ui.pointer") && Input.FindAction("ui.pointer")->Released);
+		const InputRoutingState OrdinaryEditingRouting = MakeRouting(MainViewportWindow);
+		PF_CHECK(Tests, IsEditorShortcutContextActive(OrdinaryEditingRouting));
+		PF_CHECK(Tests, OrdinaryEditingRouting.Contexts[1].Context == InputContext::EditorShortcuts &&
+				OrdinaryEditingRouting.Contexts[1].Active);
+		const InputRoutingState ViewportNavigationRouting = MakeRouting(MainViewportWindow, true, true, false, true);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(ViewportNavigationRouting));
+		InputRoutingState NavigationRuntimeUIRouting = ViewportNavigationRouting;
+		PF_CHECK(Tests, AppendRuntimeUIInputContext(NavigationRuntimeUIRouting, RuntimeUIInputPolicy::Modal, MainViewportWindow));
+		PF_CHECK(Tests, NavigationRuntimeUIRouting.Contexts[4].Active &&
+				NavigationRuntimeUIRouting.Contexts[4].Consumes == InputDeviceMask::All);
+		const InputRoutingState ActiveEditorWidgetRouting = MakeRouting(MainViewportWindow, true, true, false, false, true);
+		PF_CHECK(Tests, ActiveEditorWidgetRouting.Contexts[0].Context == InputContext::Gameplay &&
+				!ActiveEditorWidgetRouting.Contexts[0].Active);
+		PF_CHECK(Tests, ActiveEditorWidgetRouting.Contexts[1].Context == InputContext::EditorShortcuts &&
+				!ActiveEditorWidgetRouting.Contexts[1].Active);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(ActiveEditorWidgetRouting));
+		PF_CHECK(Tests, !ActiveEditorWidgetRouting.Contexts[3].Active);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(ActiveEditorWidgetRouting);
+		PF_CHECK(Tests, Input.FindAction("ui.pointer") && !Input.FindAction("ui.pointer")->Pressed);
+		PF_CHECK(Tests, Input.FindAction("GameplayPointer") && !Input.FindAction("GameplayPointer")->Pressed);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		const InputRoutingState TextEntryWithoutImGuiKeyboardFocus = BuildEditorGameplayInputRouting({
+			.ViewportWindow = MainViewportWindow,
+			.ViewportAvailable = true,
+			.NativeOwnerFocused = true,
+			.ImGuiOwnerFocused = false,
+			.RuntimeActive = true,
+			.TextOrModalInput = true
+		});
+		PF_CHECK(Tests, TextEntryWithoutImGuiKeyboardFocus.FocusedWindow == MainViewportWindow &&
+					TextEntryWithoutImGuiKeyboardFocus.Contexts[3].Active);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(TextEntryWithoutImGuiKeyboardFocus));
+		const InputRoutingState PopupOwnedRouting = MakeRouting(MainViewportWindow, true, true, true);
+		PF_CHECK(Tests, !IsEditorShortcutContextActive(PopupOwnedRouting));
+		Input.PublishFrame(TextEntryWithoutImGuiKeyboardFocus);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(TextEntryWithoutImGuiKeyboardFocus);
+		PF_CHECK(Tests, Input.FindAction("ui.pointer") && !Input.FindAction("ui.pointer")->Pressed);
+		PF_CHECK(Tests, Input.FindAction("GameplayPointer") && !Input.FindAction("GameplayPointer")->Pressed);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+							.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) },
+							.Window = MainViewportWindow }));
+		const InputRoutingState UnfocusedNativeViewport = BuildEditorGameplayInputRouting({
+			.ViewportWindow = MainViewportWindow,
+			.ViewportAvailable = true,
+			.NativeOwnerFocused = false,
+			.ImGuiOwnerFocused = true,
+			.RuntimeActive = true,
+			.ViewportKeyboardFocused = true
+		});
+		PF_CHECK(Tests, UnfocusedNativeViewport.FocusedWindow == 0 &&
+				!IsEditorShortcutContextActive(UnfocusedNativeViewport));
+		Input.PublishFrame(UnfocusedNativeViewport);
+		PF_CHECK(Tests, Input.FindAction("ui.pointer") && !Input.FindAction("ui.pointer")->Held);
 		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
 							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
 							.Window = MainViewportWindow }));
@@ -461,6 +568,220 @@ end
 		PF_CHECK(Tests, RestartedRuntime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Input.FindAction("Move") && Input.FindAction("Move")->Held);
 		RestartedRuntime.Stop();
+	}
+
+	void TestEditorPlayAudioMixingUIRouting(TestRunner& Tests)
+	{
+#if defined(PF_AUDIO_MIXING_SAMPLE_PROJECT)
+		using namespace PulseForge;
+		const std::filesystem::path ProjectFile(PF_AUDIO_MIXING_SAMPLE_PROJECT);
+		auto ProjectResult = Project::Open(ProjectFile);
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult) return;
+
+		const auto TemporaryID = UUID::Generate();
+		PF_CHECK(Tests, TemporaryID.has_value());
+		if (!TemporaryID) return;
+		const std::filesystem::path TemporaryRoot = std::filesystem::temp_directory_path() /
+			std::filesystem::u8path("PulseForge-EditorPlay-AudioMixing-" + TemporaryID->ToString());
+		struct TemporaryRootCleanup final
+		{
+			std::filesystem::path Root;
+			~TemporaryRootCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Root, Error);
+			}
+		} Cleanup{ TemporaryRoot };
+		std::error_code Error;
+		std::filesystem::create_directories(TemporaryRoot, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		const auto StartupScene = ProjectResult->GetDescription().StartScene;
+		PF_CHECK(Tests, StartupScene.has_value());
+		if (!StartupScene) return;
+		Scene RuntimeScene;
+		const auto Loaded = SceneAssetService::Load(
+			*StartupScene, ProjectResult->GetRootPath(), ProjectResult->GetAssetRegistry(), RuntimeScene);
+		PF_CHECK(Tests, Loaded.has_value());
+		if (!Loaded) return;
+
+		auto ActionMap = LoadProjectGameplayActionMap(ProjectResult->GetRootPath());
+		PF_CHECK(Tests, ActionMap.has_value());
+		if (!ActionMap) return;
+		GameplayActionDefinition GameplayClick{ .Id = "game.click", .Type = ActionValueType::Digital };
+		ActionBinding GameplayClickBinding;
+		GameplayClickBinding.Id = "game.click.mouse";
+		GameplayClickBinding.Primary = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) };
+		GameplayClick.Bindings.push_back(GameplayClickBinding);
+		ActionMap->Actions.push_back(std::move(GameplayClick));
+		GameplayInputService GameplayInput;
+		const auto ActionMapApplied = GameplayInput.SetActionMap(std::move(*ActionMap));
+		PF_CHECK(Tests, ActionMapApplied.has_value());
+		if (!ActionMapApplied) return;
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Offline;
+		AudioSessionDesc AudioDescription;
+		AudioDescription.Engine.OutputBackend = AudioOutputBackend::Offline;
+		AudioDescription.UserDataDirectory = TemporaryRoot / "UserData";
+		auto AudioResult = AudioSession::CreateForProject(*ProjectResult, std::move(AudioDescription));
+		PF_CHECK(Tests, AudioResult.has_value());
+		if (!AudioResult) return;
+		auto Audio = std::move(*AudioResult);
+
+		struct ScriptCapture final
+		{
+			size_t UIActions = 0;
+			size_t Diagnostics = 0;
+		};
+		ScriptCapture Capture;
+		const auto ObserveScript = [](void* Context, const ScriptRuntimeObservation& Observation) noexcept
+		{
+			auto& State = *static_cast<ScriptCapture*>(Context);
+			if (Observation.Kind == ScriptRuntimeObservationKind::Diagnostic) ++State.Diagnostics;
+			else if (Observation.Kind == ScriptRuntimeObservationKind::CallbackEntered &&
+				Observation.Callback == ScriptRuntimeCallback::OnUIAction)
+				++State.UIActions;
+		};
+		SceneRuntimeServices Services;
+		Services.GameplayInput = &GameplayInput;
+		Services.AudioSessionState = Audio.get();
+		Services.ScriptObserver = { &Capture, ObserveScript };
+		SceneRuntime Runtime(*ProjectResult, RuntimeDescription, Services);
+		const auto Started = Runtime.Start(RuntimeScene, true);
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started) return;
+		PF_CHECK(Tests, Runtime.HasRuntimeUI());
+		PF_CHECK(Tests, Runtime.GetRuntimeUIInputPolicy() == RuntimeUIInputPolicy::Modal);
+		const auto Activated = Runtime.ActivateAudio();
+		PF_CHECK(Tests, Activated.has_value());
+		if (!Activated || !Runtime.HasRuntimeUI()) return;
+
+		constexpr InputWindowID Window = 0xA190u;
+		constexpr uint64_t EditorSessionGeneration = 19;
+		const RuntimeUIViewport Viewport{ { 960.0f, 540.0f }, 960, 540 };
+		const glm::vec2 ViewportOrigin{ 113.0f, 47.0f };
+		RuntimeUIInputAdapter Adapter;
+		auto AdvanceEditorFrame = [&](std::optional<glm::vec2> Pointer, bool PointerPressed = false, bool PointerReleased = false)
+		{
+			if (Pointer && !GameplayInput.QueueEvent({ .Kind = InputEventKind::PointerMoved,
+					.Control = { InputDevice::MouseMotion, static_cast<uint16_t>(MouseControl::MotionX) }, .Window = Window,
+					.X = ViewportOrigin.x + Pointer->x, .Y = ViewportOrigin.y + Pointer->y }))
+				return false;
+			if (PointerPressed && !GameplayInput.QueueEvent({ .Kind = InputEventKind::Pressed,
+					.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) }, .Window = Window }))
+				return false;
+			if (PointerReleased && !GameplayInput.QueueEvent({ .Kind = InputEventKind::Released,
+					.Control = { InputDevice::MouseButton, static_cast<uint16_t>(MouseControl::Left) }, .Window = Window }))
+				return false;
+
+			// Runtime UI must keep receiving viewport input when a neighboring Editor pane owns ImGui navigation.
+			InputRoutingState Routing = PulseForgeEditor::BuildEditorGameplayInputRouting({ .ViewportWindow = Window,
+				.ViewportAvailable = true, .NativeOwnerFocused = true, .ImGuiOwnerFocused = false, .RuntimeActive = true,
+				.ViewportKeyboardFocused = false });
+			if (Runtime.HasRuntimeUI() && Routing.FocusedWindow != 0)
+				(void)AppendRuntimeUIInputContext(Routing, Runtime.GetRuntimeUIInputPolicy(), Window);
+			if (Routing.FocusedWindow != Window || Routing.ContextCount != 5 || !Routing.Contexts[4].Active)
+				return false;
+			GameplayInput.PublishFrame(Routing);
+			if (PointerPressed)
+			{
+				const ActionValue* UIAction = GameplayInput.FindAction("ui.pointer");
+				const ActionValue* GameplayAction = GameplayInput.FindAction("game.click");
+				if (!UIAction || !UIAction->Pressed || !GameplayAction || GameplayAction->Pressed) return false;
+			}
+
+			const auto PointerPosition = GameplayInput.GetPointerPosition(Window);
+			const bool PointerOverImage = PointerPosition && PointerPosition->X >= ViewportOrigin.x &&
+				PointerPosition->Y >= ViewportOrigin.y && PointerPosition->X < ViewportOrigin.x + Viewport.LogicalSize.x &&
+				PointerPosition->Y < ViewportOrigin.y + Viewport.LogicalSize.y;
+			const ActionValue* Click = GameplayInput.FindAction("ui.pointer");
+			const ActionValue* Navigate = GameplayInput.FindAction("ui.navigate");
+			const ActionValue* Activate = GameplayInput.FindAction("ui.activate");
+			const ActionValue* Cancel = GameplayInput.FindAction("ui.cancel");
+			RuntimeUIHostInputSample Sample{ .SessionGeneration = EditorSessionGeneration,
+				.TreeGeneration = Runtime.GetRuntimeUIInputGeneration(), .InputOwner = Window, .Viewport = Viewport,
+				.ViewportOrigin = ViewportOrigin, .DeltaSeconds = 1.0 / 60.0, .Focused = PointerOverImage,
+				.PointerPressed = Click && Click->Pressed, .PointerHeld = Click && Click->Held,
+				.PointerReleased = Click && Click->Released,
+				.Navigation = Navigate ? glm::vec2{ Navigate->X, Navigate->Y } : glm::vec2{},
+				.ActivatePressed = Activate && Activate->Pressed, .ActivateHeld = Activate && Activate->Held,
+				.CancelPressed = Cancel && Cancel->Pressed, .CancelHeld = Cancel && Cancel->Held };
+			if (PointerPosition && PointerOverImage)
+				Sample.PointerPosition = glm::vec2{ PointerPosition->X - ViewportOrigin.x, PointerPosition->Y - ViewportOrigin.y };
+			const RuntimeUIHostFrame HostFrame = BuildRuntimeUIHostFrame(Adapter, std::move(Sample), Runtime.GetRuntimeUIInputPolicy());
+			if (!Runtime.SubmitRuntimeUIFrame(HostFrame.Viewport, HostFrame.Events)) return false;
+			return Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value();
+		};
+		PF_CHECK(Tests, AdvanceEditorFrame(glm::vec2{ 10.0f, 10.0f }));
+		PF_CHECK(Tests, Capture.Diagnostics == 0);
+
+		auto FindButtonCenter = [&](std::string_view Label) -> std::optional<glm::vec2>
+		{
+			const auto Commands = Runtime.GetRuntimeUIDrawCommands();
+			const auto Button = std::find_if(Commands.begin(), Commands.end(), [Label](const RuntimeUIDrawCommand& Command)
+			{
+				return Command.Kind == RuntimeUIElementKind::Button && Command.Text == Label;
+			});
+			PF_CHECK(Tests, Button != Commands.end());
+			if (Button == Commands.end()) return std::nullopt;
+			return glm::vec2{ (Button->Bounds.Left + Button->Bounds.Right) * 0.5f,
+				(Button->Bounds.Top + Button->Bounds.Bottom) * 0.5f };
+		};
+		auto ClickButton = [&](std::string_view Label)
+		{
+			const auto Position = FindButtonCenter(Label);
+			if (!Position) return false;
+			return AdvanceEditorFrame(Position, true) && AdvanceEditorFrame(Position, false, true);
+		};
+		auto RefreshRuntimeText = [&]
+		{
+			return AdvanceEditorFrame(std::nullopt) && AdvanceEditorFrame(std::nullopt);
+		};
+		auto HasText = [&](std::string_view Value)
+		{
+			const auto Commands = Runtime.GetRuntimeUIDrawCommands();
+			return std::any_of(Commands.begin(), Commands.end(), [Value](const RuntimeUIDrawCommand& Command)
+			{ return Command.Kind == RuntimeUIElementKind::Text && Command.Text == Value; });
+		};
+		PF_CHECK(Tests, RefreshRuntimeText());
+		PF_CHECK(Tests, HasText("Music: 80%"));
+		PF_CHECK(Tests, ClickButton("Music +"));
+		PF_CHECK(Tests, std::abs(Audio->GetMixState().Gains.Music - 0.9f) < 0.001f);
+		PF_CHECK(Tests, RefreshRuntimeText());
+		PF_CHECK(Tests, HasText("Music: 90%"));
+		PF_CHECK(Tests, ClickButton("Mute music"));
+		PF_CHECK(Tests, Audio->GetMixState().MusicMuted);
+		PF_CHECK(Tests, RefreshRuntimeText());
+		PF_CHECK(Tests, HasText("Music: 90% (muted)"));
+		PF_CHECK(Tests, ClickButton("Effects +"));
+		PF_CHECK(Tests, std::abs(Audio->GetMixState().Gains.Effects - 0.85f) < 0.001f);
+		PF_CHECK(Tests, RefreshRuntimeText());
+		PF_CHECK(Tests, HasText("Effects: 85%"));
+		PF_CHECK(Tests, ClickButton("UI +"));
+		PF_CHECK(Tests, std::abs(Audio->GetMixState().Gains.UI - 1.0f) < 0.001f);
+		PF_CHECK(Tests, RefreshRuntimeText());
+		PF_CHECK(Tests, HasText("UI: 100%"));
+		const size_t ActionsBeforeEffect = Capture.UIActions;
+		PF_CHECK(Tests, ClickButton("Play effect"));
+		PF_CHECK(Tests, Capture.UIActions == ActionsBeforeEffect + 1 && Capture.Diagnostics == 0);
+		PF_CHECK(Tests, ClickButton("Pause gameplay"));
+		PF_CHECK(Tests, Runtime.IsPaused());
+		PF_CHECK(Tests, ClickButton("Music +"));
+		PF_CHECK(Tests, std::abs(Audio->GetMixState().Gains.Music - 1.0f) < 0.001f);
+		PF_CHECK(Tests, ClickButton("Resume"));
+		PF_CHECK(Tests, !Runtime.IsPaused());
+		PF_CHECK(Tests, ClickButton("Save settings"));
+		PF_CHECK(Tests, !Audio->HasUnsavedUserSettings());
+		std::error_code SettingsError;
+		PF_CHECK(Tests, std::filesystem::exists(Audio->GetSettingsPath(), SettingsError) && !SettingsError);
+		PF_CHECK(Tests, Capture.Diagnostics == 0);
+		Runtime.Stop();
+#else
+		(void)Tests;
+#endif
 	}
 
 	void TestEditorDeferredOperationQueue(TestRunner& Tests)
@@ -1148,6 +1469,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorWorkspacePanelState(Tests);
 	TestGamepadAndModifierBindingCapture(Tests);
 	TestEditorPlayGameplayFocusLifecycle(Tests);
+	TestEditorPlayAudioMixingUIRouting(Tests);
 	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
 	TestEditorAssetSelectorPolicy(Tests);

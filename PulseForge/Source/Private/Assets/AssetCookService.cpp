@@ -383,7 +383,8 @@ namespace PulseForge
 
 		bool SameProducts(const AssetCookPlan& First, const AssetCookPlan& Second)
 		{
-			if (First.ProjectID != Second.ProjectID || First.ProjectFileFingerprint != Second.ProjectFileFingerprint ||
+		if (First.ProjectID != Second.ProjectID || First.AudioMixDefaults != Second.AudioMixDefaults ||
+			First.ProjectFileFingerprint != Second.ProjectFileFingerprint ||
 				First.ProjectFileBytes != Second.ProjectFileBytes || First.GameplayInputFingerprint != Second.GameplayInputFingerprint ||
 				First.GameplayInputBytes != Second.GameplayInputBytes || First.GameplayInputPresent != Second.GameplayInputPresent ||
 				First.SortedRoots != Second.SortedRoots ||
@@ -501,6 +502,7 @@ namespace PulseForge
 		Plan.Request.DynamicRoots.erase(std::unique(Plan.Request.DynamicRoots.begin(), Plan.Request.DynamicRoots.end()),
 			Plan.Request.DynamicRoots.end());
 		Plan.ProjectID = Description.ID;
+		Plan.AudioMixDefaults = Description.AudioMixDefaults;
 		Plan.ProjectFileFingerprint = ProjectFingerprint;
 		Plan.ProjectFileBytes = ProjectBytes;
 		Plan.SortedRoots = Plan.Request.DynamicRoots;
@@ -907,6 +909,10 @@ namespace PulseForge
 		AssetFingerprintBuilder GenerationBuilder("pulseforge-cooked-generation-v1");
 		PF_INFO("Computing cooked generation identity");
 		GenerationBuilder.UpdateText("project", Plan.ProjectID.ToString());
+		GenerationBuilder.UpdateText("audio.master", std::to_string(Plan.AudioMixDefaults.Master));
+		GenerationBuilder.UpdateText("audio.music", std::to_string(Plan.AudioMixDefaults.Music));
+		GenerationBuilder.UpdateText("audio.effects", std::to_string(Plan.AudioMixDefaults.Effects));
+		GenerationBuilder.UpdateText("audio.ui", std::to_string(Plan.AudioMixDefaults.UI));
 		GenerationBuilder.UpdateText("target", Request.Compatibility.TargetPlatform);
 		GenerationBuilder.UpdateText("backend", Request.Compatibility.RendererBackend);
 		GenerationBuilder.UpdateText("abi", Request.Compatibility.RuntimeABI);
@@ -940,7 +946,7 @@ namespace PulseForge
 					"Cooked product path is too long or collides with another logical product", Request.OutputRoot, Entry.Asset));
 		}
 		auto Manifest = CookedAssetCatalog::SerializeManifest(Plan.ProjectID, Request.StartupScene,
-			Request.Compatibility, Plan.Request.DynamicRoots, Entries, Request.CancellationToken);
+			Request.Compatibility, Plan.Request.DynamicRoots, Entries, Request.CancellationToken, Plan.AudioMixDefaults);
 		if (!Manifest)
 		{
 			if (Manifest.error().Code == CookedAssetCatalogErrorCode::Cancelled || Request.CancellationToken.stop_requested())

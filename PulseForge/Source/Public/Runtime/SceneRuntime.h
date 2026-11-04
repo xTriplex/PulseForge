@@ -25,6 +25,7 @@ namespace PulseForge
 	class Project;
 	class Scene;
 	class CookedContentProvider;
+	class AudioSession;
 
 	struct SceneRuntimeDesc
 	{
@@ -39,6 +40,8 @@ namespace PulseForge
 		Input* InputState = nullptr;
 		GameplayInputService* GameplayInput = nullptr;
 		DiagnosticRecorder* Diagnostics = nullptr;
+		// Optional session owner shared across scene replacements. When null, SceneRuntime creates an owned session.
+		AudioSession* AudioSessionState = nullptr;
 		// Optional host policy check; an error rejects a pause change before audio state is modified.
 		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
 		ScriptRuntimeObserver ScriptObserver;
@@ -118,7 +121,12 @@ namespace PulseForge
 		SceneRuntime(const SceneRuntime&) = delete;
 		SceneRuntime& operator=(const SceneRuntime&) = delete;
 
-		[[nodiscard]] std::expected<void, SceneRuntimeError> Start(Scene& Source);
+		[[nodiscard]] std::expected<void, SceneRuntimeError> Start(Scene& Source, bool DeferAudioActivation = false);
+		// Starts candidate PlayOnStart voices after the host commits a prepared scene transition.
+		[[nodiscard]] std::expected<void, SceneRuntimeError> ActivateAudio();
+		// Temporarily silence all started scene voices while testing candidate activation; resume on rejection.
+		[[nodiscard]] std::expected<void, SceneRuntimeError> SuspendAudioForTransition();
+		[[nodiscard]] std::expected<void, SceneRuntimeError> ResumeAudioAfterTransition();
 		void Stop() noexcept;
 		[[nodiscard]] bool IsRunning() const noexcept;
 		[[nodiscard]] std::expected<void, SceneRuntimeError> SetPaused(bool Paused);

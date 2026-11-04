@@ -304,7 +304,7 @@ namespace
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 12") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 13") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"projection\": \"orthographic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("runtimeUICanvas") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);

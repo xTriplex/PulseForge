@@ -14,6 +14,7 @@
 #include <expected>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 
 namespace PulseForgeEditor
 {
@@ -983,6 +984,7 @@ namespace PulseForgeEditor
 		if (!Result || !Result->has_value()) return;
 
 		PulseForge::AudioSourceComponent Component = **Result;
+		const PulseForge::AssetID OriginalAudioAsset = Component.AudioAsset;
 		const bool IsExpanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::AudioSource, "Audio Source");
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
@@ -1003,10 +1005,39 @@ namespace PulseForgeEditor
 				Changed = DrawAssetSelector(Inspector, "##AudioAsset", Audio, { ".wav", ".mp3", ".flac", ".ogg" }, false);
 			if (Inspector.Style.BeginPropertyRow("Volume"))
 				Changed |= ImGui::DragFloat("##AudioVolume", &Component.Volume, 0.01f, 0.0f, 1.0f, "%.2f");
+			static constexpr const char* BusNames[]{ "Music", "Effects", "UI" };
+			int BusIndex = static_cast<int>(Component.Bus);
+			if (BusIndex < 0 || BusIndex >= static_cast<int>(std::size(BusNames))) BusIndex = static_cast<int>(PulseForge::AudioBus::Effects);
+			if (Inspector.Style.BeginPropertyRow("Bus") && ImGui::Combo("##AudioBus", &BusIndex, BusNames, static_cast<int>(std::size(BusNames))))
+			{
+				Component.Bus = static_cast<PulseForge::AudioBus>(BusIndex);
+				Changed = true;
+			}
 			if (Inspector.Style.BeginPropertyRow("Looping")) Changed |= ImGui::Checkbox("##AudioLooping", &Component.Looping);
 			if (Inspector.Style.BeginPropertyRow("Play On Start")) Changed |= ImGui::Checkbox("##AudioPlayOnStart", &Component.PlayOnStart);
 			if (Inspector.Style.BeginPropertyRow("Spatialized")) Changed |= ImGui::Checkbox("##AudioSpatialized", &Component.Spatialized);
 			Inspector.Style.EndPropertyTable();
+		}
+		if (Audio && *Audio != OriginalAudioAsset)
+		{
+			auto Stopped = Inspector.Actions.StopAudioPreview();
+			if (!Stopped) Inspector.Actions.ReportInspectorError(Stopped.error());
+		}
+		if (!Audio) ImGui::BeginDisabled();
+		if (ImGui::Button("Preview audio##AudioSource"))
+		{
+			if (Audio)
+			{
+				auto Previewed = Inspector.Actions.PreviewAudioAsset(*Audio, Component.Bus);
+				if (!Previewed) Inspector.Actions.ReportInspectorError(Previewed.error());
+			}
+		}
+		if (!Audio) ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Stop preview##AudioSource"))
+		{
+			auto Stopped = Inspector.Actions.StopAudioPreview();
+			if (!Stopped) Inspector.Actions.ReportInspectorError(Stopped.error());
 		}
 		if (Changed && Audio)
 		{

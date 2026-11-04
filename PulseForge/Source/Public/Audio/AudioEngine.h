@@ -1,9 +1,11 @@
 #pragma once
 
+#include "Audio/AudioBus.h"
 #include "Core/Core.h"
 
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -19,7 +21,10 @@ namespace PulseForge
 		PlaybackInitializationFailed,
 		PlaybackStartFailed,
 		PlaybackControlFailed,
-		InvalidPlayback
+		InvalidPlayback,
+		WrongThread,
+		InvalidBus,
+		OfflineRenderingUnavailable
 	};
 
 	struct AudioError
@@ -31,12 +36,34 @@ namespace PulseForge
 	enum class AudioOutputBackend : uint8_t
 	{
 		Default,
-		Null
+		Null,
+		Offline
+	};
+
+	enum class AudioDeviceEvent : uint8_t
+	{
+		Started,
+		Stopped,
+		Rerouted,
+		InterruptionBegan,
+		InterruptionEnded,
+		Unlocked
 	};
 
 	struct AudioEngineDesc
 	{
 		AudioOutputBackend OutputBackend = AudioOutputBackend::Default;
+	};
+
+	struct AudioEngineMemoryStats final
+	{
+		uint64_t RetainedClipCount = 0;
+		uint64_t RetainedEncodedClipBytes = 0;
+		uint64_t LivePlaybackCount = 0;
+		uint64_t KnownPlaybackObjectBytes = 0;
+		uint64_t KnownDecoderObjectBytes = 0;
+		// miniaudio's codec/backend allocations are allocator-owned and are not exposed as an exact byte count.
+		std::optional<uint64_t> BackendAllocatedBytes;
 	};
 
 	struct AudioPlaybackDesc
@@ -45,6 +72,9 @@ namespace PulseForge
 		bool Looping = false;
 		bool Spatialized = false;
 		glm::vec3 Position{ 0.0f };
+		AudioBus Bus = AudioBus::Effects;
+		// Prepares a voice without making it audible until AudioPlayback::Resume is called.
+		bool StartPaused = false;
 
 		[[nodiscard]] PULSEFORGE_API std::expected<void, AudioError> Validate() const;
 	};
@@ -109,12 +139,26 @@ namespace PulseForge
 		AudioEngine& operator=(const AudioEngine&) = delete;
 
 		[[nodiscard]] bool IsInitialized() const noexcept;
+		// Changes when a replacement engine/device instance is created; scene owners use it to retire old voices.
+		[[nodiscard]] uint64_t GetDeviceGeneration() const noexcept;
+		// Reports exact retained encoded payload and known C++ object sizes; backend-owned allocations remain unknown.
+		[[nodiscard]] AudioEngineMemoryStats GetMemoryStats() const noexcept;
 		[[nodiscard]] std::expected<AudioClip, AudioError> CreateClip(
 			std::string_view DebugName,
 			std::span<const std::byte> EncodedData) const;
 		[[nodiscard]] std::expected<AudioPlayback, AudioError> Play(
 			const AudioClip& Clip,
 			const AudioPlaybackDesc& Description = {}) const;
+		// Mix, playback control, and listener changes are owner-thread operations.
+		[[nodiscard]] std::expected<void, AudioError> SetMasterGain(float Gain);
+		[[nodiscard]] std::expected<void, AudioError> SetBusGain(AudioBus Bus, float Gain);
+		[[nodiscard]] std::expected<void, AudioError> SetMasterMuted(bool Muted);
+		[[nodiscard]] std::expected<void, AudioError> SetBusMuted(AudioBus Bus, bool Muted);
+		[[nodiscard]] std::expected<AudioBusMix, AudioError> GetBusMix(AudioBus Bus) const;
+		// Offline output is fixed at 48 kHz stereo float. Span length is interleaved and must contain whole frames.
+		[[nodiscard]] std::expected<size_t, AudioError> RenderOfflineFrames(std::span<float> InterleavedSamples);
+		// The miniaudio callback only records the latest event; the session owner consumes it and performs recovery.
+		[[nodiscard]] std::optional<AudioDeviceEvent> ConsumeDeviceEvent() noexcept;
 		[[nodiscard]] std::expected<void, AudioError> SetListenerPosition(const glm::vec3& Position);
 		[[nodiscard]] std::expected<void, AudioError> SetListenerDirection(const glm::vec3& Direction);
 
@@ -123,6 +167,7 @@ namespace PulseForge
 		explicit AudioEngine(std::shared_ptr<Impl> Implementation);
 		std::shared_ptr<Impl> m_Impl;
 
+		friend class AudioClip;
 		friend class AudioPlayback;
 	};
 }

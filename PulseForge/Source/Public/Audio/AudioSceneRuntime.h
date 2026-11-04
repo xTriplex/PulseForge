@@ -11,8 +11,17 @@ namespace PulseForge
 {
 	class AudioAssetCache;
 	class AudioEngine;
+	class Entity;
 	class Scene;
 	class UUID;
+
+	enum class AudioControlOperation : uint8_t
+	{
+		Play,
+		Pause,
+		Resume,
+		Stop
+	};
 
 	enum class AudioSceneRuntimeErrorCode : uint8_t
 	{
@@ -26,7 +35,9 @@ namespace PulseForge
 		AssetLoadFailed,
 		PlaybackFailed,
 		MissingAudioSource,
-		MissingPlayback
+		MissingPlayback,
+		CommandQueueFull,
+		InvalidCommand
 	};
 
 	struct AudioSceneRuntimeError
@@ -39,12 +50,24 @@ namespace PulseForge
 	{
 	public:
 		// The engine, asset cache, and started scene must outlive this runtime; keep the scene at the same address while started.
-		AudioSceneRuntime(AudioEngine& Engine, AudioAssetCache& Assets);
+		AudioSceneRuntime(
+			AudioEngine& Engine,
+			AudioAssetCache& Assets,
+			uint64_t SessionGeneration = 1,
+			uint64_t SceneGeneration = 1);
 		~AudioSceneRuntime();
 		AudioSceneRuntime(const AudioSceneRuntime&) = delete;
 		AudioSceneRuntime& operator=(const AudioSceneRuntime&) = delete;
 
-		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> Start(Scene& Source);
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> Start(Scene& Source, bool DeferActivation = false);
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> Activate();
+		// Suspend only voices that were started; resume restores that exact set unless global/entity pause now applies.
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> SuspendForTransition();
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> ResumeAfterTransition();
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> QueueControl(
+			const Entity& Target,
+			AudioControlOperation Operation);
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> ProcessPendingCommands();
 		void Stop() noexcept;
 		[[nodiscard]] bool IsRunning() const noexcept;
 		[[nodiscard]] size_t GetPlaybackCount() const noexcept;
@@ -60,6 +83,8 @@ namespace PulseForge
 		struct Impl;
 		AudioEngine& m_Engine;
 		AudioAssetCache& m_Assets;
+		uint64_t m_SessionGeneration = 0;
+		uint64_t m_SceneGeneration = 0;
 		std::unique_ptr<Impl> m_Impl;
 	};
 }

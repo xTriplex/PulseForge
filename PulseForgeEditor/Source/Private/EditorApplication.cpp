@@ -1,3 +1,12 @@
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
 #ifdef PF_EDITOR_RENDERER_OPENGL
 #define GLFW_INCLUDE_NONE
 #include <glad/glad.h>
@@ -21,6 +30,8 @@
 #include "Assets/Project.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/SceneAssetService.h"
+#include "Audio/AudioSession.h"
+#include "Assets/AudioAssetCache.h"
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneSerializer.h"
@@ -63,6 +74,7 @@
 #include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
+#include "Editor/EditorAudioPreviewController.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorApplicationFactory.h"
 #include "Editor/EditorPlatformServices.h"
@@ -122,6 +134,8 @@
 #include <cfloat>
 #include <cstdint>
 #include <chrono>
+#include <cstring>
+#include <cstdio>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -139,10 +153,332 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+#include <cstdlib>
+#endif
 
 namespace
 {
 	using EditorJson = nlohmann::ordered_json;
+
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+	bool IsPrivateUIInputAutomationEnabled() noexcept
+	{
+		const char* Enabled = std::getenv("PULSEFORGE_PRIVATE_UI_INPUT_AUTOMATION");
+		return Enabled != nullptr && std::string_view(Enabled) == "1";
+	}
+
+	// Opt-in test transport queues ImGui events only; normal Win32/GLFW focus and input rules remain unchanged.
+	class DebugPrivateDesktopImGuiInputAdapter final
+	{
+	public:
+		~DebugPrivateDesktopImGuiInputAdapter()
+		{
+			ClosePipeHandle();
+			ClearInteractionState();
+			m_GameplayInput = nullptr;
+			m_InputWindow = 0;
+		}
+
+		void Poll(PulseForge::GameplayInputService* GameplayInput, PulseForge::InputWindowID InputWindow,
+			bool RuntimeUIInputBlocked, ImVec2 ImageMinimum, ImVec2 ImageMaximum)
+		{
+			if (m_ShuttingDown) return;
+			if (m_LeftButtonDown && (GameplayInput != m_GameplayInput || InputWindow != m_InputWindow ||
+				(m_PressTargetsRuntimeUI && RuntimeUIInputBlocked)))
+				CancelInteraction();
+			m_GameplayInput = GameplayInput;
+			m_InputWindow = InputWindow;
+			m_RuntimeUIInputBlocked = RuntimeUIInputBlocked;
+			m_ImageMinimum = ImageMinimum;
+			m_ImageMaximum = ImageMaximum;
+			if (!m_Initialized)
+			{
+				m_Initialized = true;
+				m_Enabled = IsPrivateUIInputAutomationEnabled();
+				if (!m_Enabled) return;
+
+				m_PipeName = L"\\\\.\\pipe\\PulseForge.PrivateImGuiInput." + std::to_wstring(GetCurrentProcessId());
+				m_Pipe = CreateNamedPipeW(
+					m_PipeName.c_str(),
+					PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+					PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+					1,
+					256,
+					256,
+					0,
+					nullptr);
+				if (m_Pipe == INVALID_HANDLE_VALUE)
+				{
+					m_Enabled = false;
+					PF_ERROR("Could not create opt-in Debug ImGui input pipe (Win32 error {}).", GetLastError());
+					return;
+				}
+
+				PF_INFO("Opt-in Debug ImGui input adapter is listening at {}.",
+					std::string("\\\\.\\pipe\\PulseForge.PrivateImGuiInput.") + std::to_string(GetCurrentProcessId()));
+			}
+
+			if (!m_Enabled || m_Pipe == INVALID_HANDLE_VALUE) return;
+			ImGuiIO& IO = ImGui::GetIO();
+			if (m_HasPointerPosition)
+			{
+				if (m_ClientPointerX >= 0.0f && m_ClientPointerY >= 0.0f &&
+					m_ClientPointerX < IO.DisplaySize.x && m_ClientPointerY < IO.DisplaySize.y)
+				{
+					const ImVec2 ViewportOrigin = (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0
+						? ImGui::GetMainViewport()->Pos : ImVec2(0.0f, 0.0f);
+					IO.AddMousePosEvent(m_ClientPointerX + ViewportOrigin.x, m_ClientPointerY + ViewportOrigin.y);
+				}
+				else
+				{
+					IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+					m_HasPointerPosition = false;
+				}
+			}
+			if (!m_Connected)
+			{
+				if (ConnectNamedPipe(m_Pipe, nullptr)) m_Connected = true;
+				else if (GetLastError() == ERROR_PIPE_CONNECTED) m_Connected = true;
+				else return;
+			}
+
+			DWORD Available = 0;
+			if (!PeekNamedPipe(m_Pipe, nullptr, 0, nullptr, &Available, nullptr))
+			{
+				DisconnectClient();
+				return;
+			}
+			if (Available == 0) return;
+			if (Available > 127)
+			{
+				DisconnectClient();
+				return;
+			}
+
+			std::array<char, 128> Buffer{};
+			DWORD Read = 0;
+			if (!ReadFile(m_Pipe, Buffer.data(), static_cast<DWORD>(Buffer.size() - 1), &Read, nullptr))
+			{
+				DisconnectClient();
+				return;
+			}
+
+			std::string_view Command(Buffer.data(), Read);
+			while (!Command.empty() && (Command.back() == '\r' || Command.back() == '\n')) Command.remove_suffix(1);
+			std::array<char, 384> ReplyBuffer{};
+			const char* Reply = nullptr;
+			if (Command == "STATE")
+			{
+				const ImGuiIO& IO = ImGui::GetIO();
+				const PulseForge::GameplayPointerPosition* Pointer = nullptr;
+				std::optional<PulseForge::GameplayPointerPosition> PointerStorage;
+				const PulseForge::ActionValue* UIClick = nullptr;
+				if (m_GameplayInput && m_InputWindow != 0)
+				{
+					PointerStorage = m_GameplayInput->GetPointerPosition(m_InputWindow);
+					if (PointerStorage) Pointer = &*PointerStorage;
+					UIClick = m_GameplayInput->FindAction("ui.pointer");
+				}
+				std::snprintf(ReplyBuffer.data(), ReplyBuffer.size(),
+					"STATE display=%.1f,%.1f viewport=%.1f,%.1f mouse=%.1f,%.1f image=%.1f,%.1f,%.1f,%.1f "
+					"window=%llu blocked=%d pointer=%d:%.1f,%.1f uiClick=%d,%d,%d "
+					"hoveredViewport=%u down=%d hovered=%u active=%u\n",
+					IO.DisplaySize.x, IO.DisplaySize.y,
+					ImGui::GetMainViewport()->Pos.x, ImGui::GetMainViewport()->Pos.y,
+					IO.MousePos.x, IO.MousePos.y, m_ImageMinimum.x, m_ImageMinimum.y,
+					m_ImageMaximum.x, m_ImageMaximum.y, static_cast<unsigned long long>(m_InputWindow),
+					m_RuntimeUIInputBlocked ? 1 : 0, Pointer ? 1 : 0,
+					Pointer ? Pointer->X : -1.0f, Pointer ? Pointer->Y : -1.0f,
+					UIClick && UIClick->Pressed ? 1 : 0, UIClick && UIClick->Held ? 1 : 0,
+					UIClick && UIClick->Released ? 1 : 0, IO.MouseHoveredViewport,
+					IO.MouseDown[ImGuiMouseButton_Left] ? 1 : 0,
+					GImGui->HoveredId, GImGui->ActiveId);
+				Reply = ReplyBuffer.data();
+			}
+			else
+			{
+				const bool Accepted = ApplyCommand(Command);
+				if (!Accepted && m_LeftButtonDown) CancelInteraction();
+				Reply = Accepted ? "QUEUED\n" : "REJECTED\n";
+			}
+			DWORD Written = 0;
+			WriteFile(m_Pipe, Reply, static_cast<DWORD>(std::strlen(Reply)), &Written, nullptr);
+		}
+
+		void Shutdown(ImGuiContext* Context) noexcept
+		{
+			if (m_ShuttingDown) return;
+			m_ShuttingDown = true;
+			m_Enabled = false;
+			m_Initialized = true;
+			if (Context && ImGui::GetCurrentContext() != Context) ImGui::SetCurrentContext(Context);
+
+			const bool HadHeldButton = m_LeftButtonDown;
+			const bool HadImGuiContext = Context && ImGui::GetCurrentContext() == Context;
+			const bool CancellationComplete = CancelInteraction(HadImGuiContext);
+			if (HadHeldButton)
+				PF_INFO("PULSEFORGE_PRIVATE_UI_INPUT_SHUTDOWN held=1 context={} cancellation_complete={}",
+					HadImGuiContext ? 1 : 0, CancellationComplete ? 1 : 0);
+
+			ClosePipeHandle();
+			m_GameplayInput = nullptr;
+			m_InputWindow = 0;
+		}
+
+	private:
+		bool ApplyCommand(std::string_view Command)
+		{
+			ImGuiIO& IO = ImGui::GetIO();
+			if (Command == "PING") return true;
+			if (Command == "CANCEL")
+			{
+				CancelInteraction();
+				return true;
+			}
+			if (Command == "DOWN")
+			{
+				if (!m_HasPointerPosition || m_LeftButtonDown) return false;
+				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+				m_PressGameplayInput = m_GameplayInput;
+				m_PressInputWindow = m_InputWindow;
+				const ImVec2 ViewportOrigin = (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0
+					? ImGui::GetMainViewport()->Pos : ImVec2(0.0f, 0.0f);
+				const float PointerX = m_ClientPointerX + ViewportOrigin.x;
+				const float PointerY = m_ClientPointerY + ViewportOrigin.y;
+				m_PressTargetsRuntimeUI = m_PressGameplayInput != nullptr &&
+					PointerX >= m_ImageMinimum.x && PointerY >= m_ImageMinimum.y &&
+					PointerX < m_ImageMaximum.x && PointerY < m_ImageMaximum.y;
+				QueueGameplayButton(PulseForge::InputEventKind::Pressed, m_PressGameplayInput, m_PressInputWindow);
+				m_LeftButtonDown = true;
+				return true;
+			}
+			if (Command == "UP")
+			{
+				if (!m_LeftButtonDown) return false;
+				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+				QueueGameplayButton(PulseForge::InputEventKind::Released, m_PressGameplayInput, m_PressInputWindow);
+				ClearInteractionState();
+				return true;
+			}
+			if (!Command.starts_with("MOVE ")) return false;
+
+			Command.remove_prefix(5);
+			float X = 0.0f;
+			float Y = 0.0f;
+			const char* Begin = Command.data();
+			const char* End = Begin + Command.size();
+			const auto XResult = std::from_chars(Begin, End, X);
+			if (XResult.ec != std::errc{} || XResult.ptr == End || *XResult.ptr != ' ') return false;
+			const char* YBegin = XResult.ptr;
+			while (YBegin != End && *YBegin == ' ') ++YBegin;
+			const auto YResult = std::from_chars(YBegin, End, Y);
+			if (YResult.ec != std::errc{} || YResult.ptr != End || !std::isfinite(X) || !std::isfinite(Y)) return false;
+			if (IO.DisplaySize.x <= 0.0f || IO.DisplaySize.y <= 0.0f ||
+				X < 0.0f || Y < 0.0f || X >= IO.DisplaySize.x || Y >= IO.DisplaySize.y)
+				return false;
+
+			const ImVec2 ViewportOrigin = (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0
+				? ImGui::GetMainViewport()->Pos : ImVec2(0.0f, 0.0f);
+			IO.AddMousePosEvent(X + ViewportOrigin.x, Y + ViewportOrigin.y);
+			m_ClientPointerX = X;
+			m_ClientPointerY = Y;
+			m_HasPointerPosition = true;
+			if (m_GameplayInput && m_InputWindow != 0)
+				(void)m_GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::PointerMoved,
+					.Control = { PulseForge::InputDevice::MouseMotion,
+						static_cast<uint16_t>(PulseForge::MouseControl::MotionX) },
+					.Window = m_InputWindow, .X = X, .Y = Y });
+			return true;
+		}
+
+		bool QueueGameplayButton(PulseForge::InputEventKind Kind, PulseForge::GameplayInputService* GameplayInput,
+			PulseForge::InputWindowID InputWindow)
+		{
+			if (!GameplayInput || InputWindow == 0) return false;
+			return GameplayInput->QueueEvent({ .Kind = Kind,
+				.Control = { PulseForge::InputDevice::MouseButton,
+					static_cast<uint16_t>(PulseForge::MouseControl::Left) },
+				.Window = InputWindow, .X = m_ClientPointerX, .Y = m_ClientPointerY });
+		}
+
+		bool QueueGameplayCancellation(PulseForge::GameplayInputService* GameplayInput,
+			PulseForge::InputWindowID InputWindow)
+		{
+			if (!GameplayInput || InputWindow == 0) return false;
+			return GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::CaptureCancelled,
+				.Window = InputWindow });
+		}
+
+		bool CancelInteraction(bool HasImGuiContext = ImGui::GetCurrentContext() != nullptr)
+		{
+			if (HasImGuiContext)
+				ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+			bool CancellationQueued = !m_LeftButtonDown;
+			bool NeutralReleaseQueued = !m_LeftButtonDown;
+			if (m_LeftButtonDown)
+			{
+				if (HasImGuiContext)
+					ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+				CancellationQueued = QueueGameplayCancellation(m_PressGameplayInput, m_PressInputWindow);
+				// The opt-in transport owns this synthetic press and has now released it locally.
+				// Deliver that neutral state after cancellation so the next clean injected click can rearm.
+				NeutralReleaseQueued = QueueGameplayButton(
+					PulseForge::InputEventKind::Released, m_PressGameplayInput, m_PressInputWindow);
+			}
+			ClearInteractionState();
+			return CancellationQueued && NeutralReleaseQueued;
+		}
+
+		void ClearInteractionState()
+		{
+			m_LeftButtonDown = false;
+			m_HasPointerPosition = false;
+			m_ClientPointerX = -FLT_MAX;
+			m_ClientPointerY = -FLT_MAX;
+			m_PressGameplayInput = nullptr;
+			m_PressInputWindow = 0;
+			m_PressTargetsRuntimeUI = false;
+		}
+
+		void DisconnectClient()
+		{
+			CancelInteraction();
+			if (m_Pipe != INVALID_HANDLE_VALUE) DisconnectNamedPipe(m_Pipe);
+			m_Connected = false;
+		}
+
+		void ClosePipeHandle() noexcept
+		{
+			if (m_Pipe == INVALID_HANDLE_VALUE) return;
+			if (m_Connected) DisconnectNamedPipe(m_Pipe);
+			CloseHandle(m_Pipe);
+			m_Pipe = INVALID_HANDLE_VALUE;
+			m_Connected = false;
+		}
+
+		HANDLE m_Pipe = INVALID_HANDLE_VALUE;
+		std::wstring m_PipeName;
+		bool m_Initialized = false;
+		bool m_Enabled = false;
+		bool m_Connected = false;
+		bool m_ShuttingDown = false;
+		bool m_HasPointerPosition = false;
+		bool m_LeftButtonDown = false;
+		float m_ClientPointerX = -FLT_MAX;
+		float m_ClientPointerY = -FLT_MAX;
+		PulseForge::GameplayInputService* m_GameplayInput = nullptr;
+		PulseForge::InputWindowID m_InputWindow = 0;
+		PulseForge::GameplayInputService* m_PressGameplayInput = nullptr;
+		PulseForge::InputWindowID m_PressInputWindow = 0;
+		bool m_PressTargetsRuntimeUI = false;
+		bool m_RuntimeUIInputBlocked = false;
+		ImVec2 m_ImageMinimum{};
+		ImVec2 m_ImageMaximum{};
+	};
+
+#endif
+
 	std::optional<std::string> BuildContentFingerprint(
 		const std::filesystem::path& ProjectFile, const std::optional<std::filesystem::path>& SceneFile,
 		std::string& UnavailableReason)
@@ -152,7 +488,7 @@ namespace
 		{
 			std::ifstream Input(Path, std::ios::binary);
 			if (!Input) return false;
-			std::array<char, 64 * 1024> Buffer{};
+			std::array<char, 4 * 1024> Buffer{};
 			while (Input)
 			{
 				Input.read(Buffer.data(), static_cast<std::streamsize>(Buffer.size()));
@@ -618,6 +954,18 @@ namespace
 
 		void ReportInspectorError(std::string Message) override { SetError(std::move(Message)); }
 
+		[[nodiscard]] std::expected<void, std::string> PreviewAudioAsset(
+			const PulseForge::AssetID& Asset, PulseForge::AudioBus Bus) override
+		{
+			if (!m_Project) return std::unexpected("Open a project before previewing an audio asset.");
+			return m_AudioPreview.Play(Asset, Bus);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> StopAudioPreview() override
+		{
+			return m_AudioPreview.Stop();
+		}
+
 		[[nodiscard]] std::expected<PulseForge::ScriptSourceMetadata, std::string> ReadScriptSourceMetadata(
 			const PulseForge::AssetID& Asset) override
 		{
@@ -946,6 +1294,8 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ShutdownPlayerProcess();
 			m_ConsolePanel.Detach();
 			ShutdownImGui();
@@ -1073,6 +1423,9 @@ namespace
 		{
 			m_BuildProfileController.Shutdown("Editor shutdown");
 			m_DeferredEditorOperations.Clear();
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+			ShutdownDebugPrivateDesktopImGuiInputAdapter();
+#endif
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
@@ -1081,6 +1434,8 @@ namespace
 			ResetViewportSceneRenderer();
 			ResetViewportTarget();
 			m_Scene.reset();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ShutdownImGui();
 			ShutdownFileDialog();
 			m_Project.reset();
@@ -1091,6 +1446,29 @@ namespace
 			AdvancePerformanceCaptureLifecycle();
 			(void)m_DeferredEditorOperations.ExecuteNext();
 			PollPlayerProcess();
+			const std::optional<PulseForge::UUID> SelectedEntity = m_SceneWorkspace.Selection().GetPrimary();
+			const std::optional<PulseForge::AssetID> SelectedAsset = m_ContentBrowser.SelectedAsset();
+			if (SelectedEntity != m_AudioPreviewSelectedEntity || SelectedAsset != m_AudioPreviewSelectedAsset)
+				m_AudioPreview.Cancel();
+			m_AudioPreviewSelectedEntity = SelectedEntity;
+			m_AudioPreviewSelectedAsset = SelectedAsset;
+			if (m_AudioSession)
+			{
+				m_AudioSession->PollDeviceState();
+				m_AudioPreview.ReconcileDeviceGeneration();
+				const PulseForge::AudioDeviceState CurrentState = m_AudioSession->GetDeviceState();
+				if (!m_LastAudioDeviceState || *m_LastAudioDeviceState != CurrentState)
+				{
+					if (CurrentState == PulseForge::AudioDeviceState::Unavailable ||
+						CurrentState == PulseForge::AudioDeviceState::RecoveryFailed)
+					{
+						const std::string_view DeviceDiagnostic = m_AudioSession->GetDeviceDiagnostic();
+						if (DeviceDiagnostic.empty()) SetWarning("Audio output is unavailable; simulation continues silently.");
+						else SetWarning(std::string(DeviceDiagnostic));
+					}
+					m_LastAudioDeviceState = CurrentState;
+				}
+			}
 			m_ConsolePanel.CapturePendingLogs();
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_Context)
@@ -1274,6 +1652,24 @@ namespace
 			ImGui_ImplOpenGL3_NewFrame();
 #endif
 			ImGui_ImplGlfw_NewFrame();
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+			PulseForge::GameplayInputService* DebugGameplayInput = nullptr;
+			PulseForge::InputWindowID DebugInputWindow = 0;
+			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI())
+			{
+				ImGuiViewport* RuntimeUIOwner = ResolveSceneViewportOwner();
+				GLFWwindow* RuntimeUINativeOwner = RuntimeUIOwner
+					? static_cast<GLFWwindow*>(RuntimeUIOwner->PlatformHandle) : nullptr;
+				if (RuntimeUIOwner && RuntimeUIOwner->ID == ImGui::GetMainViewport()->ID && RuntimeUINativeOwner)
+				{
+					DebugGameplayInput = &PulseForge::Application::Get().GetGameplayInput();
+					DebugInputWindow = m_ViewportScrollInput.GetInputWindowID(RuntimeUIOwner->ID, RuntimeUINativeOwner);
+				}
+			}
+			m_DebugPrivateDesktopImGuiInputAdapter.Poll(DebugGameplayInput, DebugInputWindow, m_RuntimeUITextInputBlocked,
+				ImVec2(m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y),
+				ImVec2(m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y));
+#endif
 			QueueDocumentHostTabTearOffTestInput();
 			QueueDocumentHostTabReattachTestInput();
 			QueueDocumentTabReorderTestInput();
@@ -2033,6 +2429,43 @@ namespace
 			if (!LevelDocument) SetWarning("The Level Editor document session could not be registered: " + LevelDocument.error());
 		}
 
+		void ConfigureProjectAudio()
+		{
+			m_AudioPreview.ClearSession();
+			m_LastAudioDeviceState.reset();
+			if (!m_Project) return;
+
+			PulseForge::AudioSessionDesc Description;
+			Description.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+			if (IsPrivateUIInputAutomationEnabled())
+			{
+				Description.Engine.OutputBackend = PulseForge::AudioOutputBackend::Null;
+				PF_INFO("Opt-in private UI input automation is using PulseForge Null audio output.");
+			}
+#endif
+			auto Session = PulseForge::AudioSession::CreateForProject(*m_Project, std::move(Description));
+			if (!Session)
+			{
+				SetWarning("Project opened without its shared audio session: " + Session.error().Message);
+				return;
+			}
+			m_AudioSession = std::move(*Session);
+			m_AudioPreview.SetSession(m_AudioSession.get());
+			m_LastAudioDeviceState = m_AudioSession->GetDeviceState();
+
+			std::string Diagnostic;
+			if (!m_AudioSession->GetDeviceDiagnostic().empty())
+				Diagnostic = std::string(m_AudioSession->GetDeviceDiagnostic());
+			if (!m_AudioSession->GetSettingsDiagnostic().empty())
+			{
+				if (!Diagnostic.empty()) Diagnostic += " ";
+				Diagnostic += "User mix settings: ";
+				Diagnostic += m_AudioSession->GetSettingsDiagnostic();
+			}
+			if (!Diagnostic.empty()) SetWarning(std::move(Diagnostic));
+		}
+
 		bool ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
 		{
 			if (!FinishSceneEdit()) return false;
@@ -2040,10 +2473,13 @@ namespace
 			auto StartupScene = std::move(Prepared.StartupScene);
 			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ResetViewportSceneRenderer();
 			m_PendingAssetMovePlan.reset();
 			++m_AssetOperationGeneration;
 			m_Project.emplace(std::move(Prepared.Project));
+			ConfigureProjectAudio();
 			ConfigureGameplayInputForProject();
 			RegisterLevelDocument();
 			ResetContentBrowserNavigation();
@@ -4991,6 +5427,8 @@ namespace
 			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); })) return;
 			m_BuildProfileController.ProjectChanged("Project closed");
 			ClearScene();
+			m_AudioPreview.ClearSession();
+			m_AudioSession.reset();
 			ResetViewportSceneRenderer();
 			ClearGameplayInputProject();
 			m_Project.reset();
@@ -5202,6 +5640,28 @@ namespace
 			if (m_Scene)
 				AddMetric("Authored scene entities", "Scene", "Currently open authored scene", m_Scene->GetEntityCount(),
 					PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			if (m_AudioSession)
+			{
+				const PulseForge::AudioEngineMemoryStats AudioMemory = m_AudioSession->GetEngine().GetMemoryStats();
+				AddMetric("Retained encoded audio clips", "AudioSession", "Clip payloads retained by the current audio engine",
+					AudioMemory.RetainedClipCount, PulseForgeEditor::EditorResourceMetricKind::Count,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+				AddMetric("Retained encoded audio bytes", "AudioSession", "Exact encoded clip payload bytes; shared clips counted once",
+					AudioMemory.RetainedEncodedClipBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+				AddMetric("Live audio playback objects", "AudioSession", "Playback handles with an initialized miniaudio sound",
+					AudioMemory.LivePlaybackCount, PulseForgeEditor::EditorResourceMetricKind::Count,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+				AddMetric("Known audio playback object bytes", "AudioSession", "C++ AudioPlayback::Impl object sizes only",
+					AudioMemory.KnownPlaybackObjectBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+					PulseForgeEditor::EditorResourceMetricQuality::LogicalAllocation);
+				AddMetric("Known audio decoder object bytes", "AudioSession", "C++ ma_decoder structures; backend allocations excluded",
+					AudioMemory.KnownDecoderObjectBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+					PulseForgeEditor::EditorResourceMetricQuality::LogicalAllocation);
+				Resources.push_back({ "Audio backend allocation bytes", "AudioSession", "Codec, sound graph, and backend allocator totals",
+					0, PulseForgeEditor::EditorResourceMetricKind::Bytes, PulseForgeEditor::EditorResourceMetricQuality::Unavailable,
+					"The pinned miniaudio allocator does not expose exact aggregate backend allocation totals." });
+			}
 			const PulseForgeEditor::AssetPreviewStats PreviewStats = m_AssetPreviews.GetStats();
 			AddMetric("Queued decoded preview bytes", "AssetPreviewService", "Completed pixel payloads awaiting UI upload",
 				PreviewStats.QueuedResultCpuBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
@@ -8484,12 +8944,15 @@ namespace
 			bool ImGuiOwnerFocused = true;
 
 			bool TextOrModalInput = m_InputMappingPanel.NeedsTextEntryRoute();
+			bool EditorWidgetInputOwned = false;
 			if (m_Context)
 			{
 				ImGui::SetCurrentContext(m_Context);
 				const ImGuiIO& IO = ImGui::GetIO();
-				TextOrModalInput = TextOrModalInput || IO.WantTextInput || ImGui::IsAnyItemActive() ||
-					ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+				const bool PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+				TextOrModalInput = TextOrModalInput || IO.WantTextInput || PopupOpen;
+				EditorWidgetInputOwned = PulseForgeEditor::IsEditorWidgetInputOwned(
+					ImGui::IsAnyItemActive(), IsCursorOverViewportImage());
 				if (GImGui && GImGui->NavWindow && SceneViewportOwner &&
 					GImGui->NavWindow->ViewportId != SceneViewportOwner->ID)
 					ImGuiOwnerFocused = false;
@@ -8510,12 +8973,13 @@ namespace
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
 				.TextOrModalInput = TextOrModalInput,
+				.EditorWidgetInputOwned = EditorWidgetInputOwned,
 				.ViewportNavigation = ViewportNavigation });
-			m_RuntimeUITextInputBlocked = TextOrModalInput;
-			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI() && !TextOrModalInput && Routing.FocusedWindow != 0)
+			m_RuntimeUITextInputBlocked = TextOrModalInput || EditorWidgetInputOwned;
+			if (m_SceneRuntime && m_SceneRuntime->HasRuntimeUI() && !m_RuntimeUITextInputBlocked && Routing.FocusedWindow != 0)
 				(void)PulseForge::AppendRuntimeUIInputContext(
 					Routing, m_SceneRuntime->GetRuntimeUIInputPolicy(), Routing.FocusedWindow);
-			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !ViewportNavigation;
+			m_EditorShortcutsRouted = PulseForgeEditor::IsEditorShortcutContextActive(Routing);
 			Application.GetGameplayInput().PublishFrame(Routing);
 			m_InputMappingPanel.MarkInputPublished();
 		}
@@ -8575,6 +9039,7 @@ namespace
 			Services.InputState = &PulseForge::Application::Get().GetInput();
 			Services.GameplayInput = &PulseForge::Application::Get().GetGameplayInput();
 			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
+			Services.AudioSessionState = m_AudioSession.get();
 			Services.QueueSceneTransition = [this](const PulseForge::AssetID& Asset)
 			{
 				if (!m_SceneRuntime || !m_Project || m_QueuedRuntimeSceneTransition) return false;
@@ -8630,14 +9095,43 @@ namespace
 			}
 			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(
 				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
-			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
+			if (auto Started = CandidateRuntime->Start(*CandidateScene, true); !Started)
 			{
 				RejectBoundaryRequest();
 				SetError("Runtime scene transition could not start: " + Started.error().Message);
 				return;
 			}
-			(void)m_SceneRuntime->ResolveBoundaryRequest(
-				*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Committed);
+			auto SuspendedOutgoing = m_SceneRuntime->SuspendAudioForTransition();
+			if (!SuspendedOutgoing)
+			{
+				RejectBoundaryRequest();
+				SetError("Could not suspend outgoing scene audio for transition: " + SuspendedOutgoing.error().Message);
+				return;
+			}
+			if (auto Activated = CandidateRuntime->ActivateAudio(); !Activated)
+			{
+				auto ResumedOutgoing = m_SceneRuntime->ResumeAudioAfterTransition();
+				RejectBoundaryRequest();
+				std::string Message = "Runtime scene transition audio could not activate: " + Activated.error().Message;
+				if (!ResumedOutgoing)
+					Message += " Outgoing scene audio also could not resume: " + ResumedOutgoing.error().Message;
+				else Message += " The outgoing scene remains active and its audio was resumed.";
+				SetError(std::move(Message));
+				return;
+			}
+			if (!m_SceneRuntime->ResolveBoundaryRequest(
+					*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Committed))
+			{
+				CandidateRuntime->Stop();
+				auto ResumedOutgoing = m_SceneRuntime->ResumeAudioAfterTransition();
+				(void)m_SceneRuntime->ResolveBoundaryRequest(
+					*BoundaryRequest, PulseForge::SceneRuntimeBoundaryResolution::Rejected);
+				SetError(ResumedOutgoing
+					? "Runtime scene transition was cancelled because its request became stale; the outgoing scene remains active."
+					: "Runtime scene transition request became stale and outgoing audio could not resume: " +
+						ResumedOutgoing.error().Message);
+				return;
+			}
 
 			auto RetiredScene = std::move(m_RuntimeScene);
 			auto RetiredRuntime = std::move(m_SceneRuntime);
@@ -8672,9 +9166,15 @@ namespace
 
 			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(
 				*m_Project, PulseForge::SceneRuntimeDesc{}, CreateSceneRuntimeServices());
-			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
+			if (auto Result = CandidateRuntime->Start(**CandidateScene, true); !Result)
 			{
 				SetError("Could not start the scene runtime: " + Result.error().Message);
+				return;
+			}
+			m_AudioPreview.Cancel();
+			if (auto Activated = CandidateRuntime->ActivateAudio(); !Activated)
+			{
+				SetError("Could not activate scene audio: " + Activated.error().Message);
 				return;
 			}
 
@@ -8851,7 +9351,7 @@ namespace
 					FailEditorRuntimePlayStopTest("The Edit-mode viewport rendered without an active project scene.");
 					return;
 				}
-				const auto AuthoredSnapshot = PulseForge::SceneSerializer::Serialize(*m_Scene);
+				auto AuthoredSnapshot = PulseForge::SceneSerializer::Serialize(*m_Scene);
 				if (!AuthoredSnapshot)
 				{
 					FailEditorRuntimePlayStopTest("Could not snapshot the authored scene before Play: " + AuthoredSnapshot.error().Message);
@@ -9114,6 +9614,11 @@ namespace
 
 		void UpdateAssetList(bool RendererAssetsChanged = false)
 		{
+			if (RendererAssetsChanged)
+			{
+				m_AudioPreview.Cancel();
+				if (m_AudioSession) m_AudioSession->GetAssets().Clear();
+			}
 			m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 			m_AssetPreviewProjectPending = true;
 			m_AssetPreviewAssetsPending = true;
@@ -9228,6 +9733,13 @@ namespace
 			if (m_FileDialogActive) PulseForgeEditor::EditorPlatformServices::ShutdownNativeFileDialogs();
 			m_FileDialogActive = false;
 		}
+
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+		void ShutdownDebugPrivateDesktopImGuiInputAdapter() noexcept
+		{
+			m_DebugPrivateDesktopImGuiInputAdapter.Shutdown(m_Context);
+		}
+#endif
 
 		ImGuiContext* m_Context = nullptr;
 		void* m_PreviousImGuiUserData = nullptr;
@@ -9436,6 +9948,14 @@ namespace
 		bool m_DocumentHostTabGroupSourceCenterValid = false;
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
+		std::unique_ptr<PulseForge::AudioSession> m_AudioSession;
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+		DebugPrivateDesktopImGuiInputAdapter m_DebugPrivateDesktopImGuiInputAdapter;
+#endif
+		PulseForgeEditor::EditorAudioPreviewController m_AudioPreview;
+		std::optional<PulseForge::AudioDeviceState> m_LastAudioDeviceState;
+		std::optional<PulseForge::UUID> m_AudioPreviewSelectedEntity;
+		std::optional<PulseForge::AssetID> m_AudioPreviewSelectedAsset;
 		std::unique_ptr<PulseForgeEditor::EditorPlayerProcess> m_PlayerProcess;
 		bool m_PlayerStopRequested = false;
 		bool m_PlayerMonitorErrorReported = false;

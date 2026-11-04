@@ -18,6 +18,8 @@ namespace PulseForge
 				AudioSourceErrorCode::InvalidVolume,
 				"Audio source volume must be finite and between zero and one" });
 		}
+		if (Bus != AudioBus::Music && Bus != AudioBus::Effects && Bus != AudioBus::UI)
+			return std::unexpected(AudioSourceError{ AudioSourceErrorCode::InvalidBus, "Audio source bus is not supported" });
 		return {};
 	}
 }

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -208,9 +209,10 @@ namespace PulseForge
 
 	CookedAssetCatalog::CookedAssetCatalog(
 		std::filesystem::path ContentRoot, UUID ProjectID, AssetID StartupScene, CookedAssetCompatibility Compatibility,
-		std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries)
+		AudioMixGains AudioMixDefaults, std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries)
 		: m_ContentRoot(std::move(ContentRoot)), m_ProjectID(ProjectID), m_StartupScene(StartupScene),
-		  m_Compatibility(std::move(Compatibility)), m_DynamicRoots(std::move(DynamicRoots)), m_Entries(std::move(Entries))
+		  m_Compatibility(std::move(Compatibility)), m_AudioMixDefaults(AudioMixDefaults),
+		  m_DynamicRoots(std::move(DynamicRoots)), m_Entries(std::move(Entries))
 	{
 		for (size_t Index = 0; Index < m_Entries.size(); ++Index)
 			if (m_Entries[Index].Product == CookedAssetProductKind::Script && !m_Entries[Index].SourceRelativePath.empty())
@@ -261,13 +263,14 @@ namespace PulseForge
 
 	std::expected<std::string, CookedAssetCatalogError> CookedAssetCatalog::SerializeManifest(
 		const UUID& ProjectID, const AssetID& StartupScene, const CookedAssetCompatibility& Compatibility,
-		std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries, std::stop_token CancellationToken)
+		std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries, std::stop_token CancellationToken,
+		AudioMixGains AudioMixDefaults)
 	{
 		if (CancellationToken.stop_requested())
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::Cancelled, {}, "Cook manifest serialization was cancelled"));
 		if (ProjectID.IsNil() || StartupScene.IsNil() || Compatibility.TargetPlatform.empty() ||
 			Compatibility.RendererBackend.empty() || Compatibility.RuntimeABI.empty() ||
-			GetCookedBuildConfigurationName(Compatibility.Configuration).empty())
+			GetCookedBuildConfigurationName(Compatibility.Configuration).empty() || !AudioMixDefaults.IsValid())
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Manifest identity or compatibility is incomplete"));
 		if (Entries.empty() || Entries.size() > MaximumEntries || DynamicRoots.size() > MaximumEntries)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Manifest entry or root count is invalid"));
@@ -369,6 +372,8 @@ namespace PulseForge
 			{ "targetPlatform", Compatibility.TargetPlatform }, { "rendererBackend", Compatibility.RendererBackend },
 			{ "runtimeABI", Compatibility.RuntimeABI },
 			{ "configuration", GetCookedBuildConfigurationName(Compatibility.Configuration) },
+			{ "audioMixDefaults", Json::object({ { "master", AudioMixDefaults.Master }, { "music", AudioMixDefaults.Music },
+				{ "effects", AudioMixDefaults.Effects }, { "ui", AudioMixDefaults.UI } }) },
 			{ "dynamicRoots", std::move(Roots) }, { "entries", std::move(JsonEntries) } });
 		std::string Data = Manifest.dump(2) + "\n";
 		if (CancellationToken.stop_requested())
@@ -410,14 +415,19 @@ namespace PulseForge
 			if (!Root.is_object() || !Root.contains("version") || !Root["version"].is_number_integer())
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest version is missing or invalid"));
 			const int64_t Version = Root["version"].get<int64_t>();
+			if (Version != 2 && Version != 3 && Version != ManifestVersion)
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedVersion, ManifestPath, "Cook manifest version is unsupported"));
 			const bool HasScriptPaths = Version >= 3;
-			if (!HasExactFields(Root, { "format", "version", "projectId", "startupScene", "targetPlatform", "rendererBackend",
-				"runtimeABI", "configuration", "dynamicRoots", "entries" }))
+			const bool HasAudioMixDefaults = Version >= 4;
+			const bool RootFieldsValid = HasAudioMixDefaults
+				? HasExactFields(Root, { "format", "version", "projectId", "startupScene", "targetPlatform", "rendererBackend",
+					"runtimeABI", "configuration", "audioMixDefaults", "dynamicRoots", "entries" })
+				: HasExactFields(Root, { "format", "version", "projectId", "startupScene", "targetPlatform", "rendererBackend",
+					"runtimeABI", "configuration", "dynamicRoots", "entries" });
+			if (!RootFieldsValid)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest fields are missing or unsupported"));
 			if (!Root["format"].is_string() || Root["format"].get<std::string>() != Format)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest format identifier is invalid"));
-			if (Version != 2 && Version != ManifestVersion)
-				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedVersion, ManifestPath, "Cook manifest version is unsupported"));
 			const auto ReadUUID = [&ManifestPath](const Json& Value, std::string_view Field) -> std::expected<UUID, CookedAssetCatalogError>
 			{
 				if (!Value.is_string()) return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Manifest field '" + std::string(Field) + "' must be a UUID string"));
@@ -440,6 +450,29 @@ namespace PulseForge
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedConfiguration, ManifestPath, Configuration.error()));
 			CookedAssetCompatibility Compatibility{ Root["targetPlatform"].get<std::string>(), Root["rendererBackend"].get<std::string>(),
 				Root["runtimeABI"].get<std::string>(), *Configuration };
+			AudioMixGains AudioMixDefaults;
+			if (HasAudioMixDefaults)
+			{
+				const Json& Gains = Root["audioMixDefaults"];
+				if (!HasExactFields(Gains, { "master", "music", "effects", "ui" }))
+					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath,
+						"Cooked audio mix defaults must contain exactly master, music, effects and ui gains"));
+				float* Destinations[] = { &AudioMixDefaults.Master, &AudioMixDefaults.Music,
+					&AudioMixDefaults.Effects, &AudioMixDefaults.UI };
+				const char* Fields[] = { "master", "music", "effects", "ui" };
+				for (size_t Index = 0; Index < std::size(Destinations); ++Index)
+				{
+					const Json& Value = Gains[Fields[Index]];
+					if (!Value.is_number())
+						return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath,
+							"Cooked audio gain '" + std::string(Fields[Index]) + "' must be numeric"));
+					const double Number = Value.get<double>();
+					if (!std::isfinite(Number) || Number < 0.0 || Number > 1.0)
+						return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath,
+							"Cooked audio gain '" + std::string(Fields[Index]) + "' must be finite and between zero and one"));
+					*Destinations[Index] = static_cast<float>(Number);
+				}
+			}
 			if (Compatibility.TargetPlatform != ExpectedCompatibility.TargetPlatform ||
 				Compatibility.RendererBackend != ExpectedCompatibility.RendererBackend || Compatibility.RuntimeABI != ExpectedCompatibility.RuntimeABI)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::IncompatibleTarget, ManifestPath, "Cooked target, renderer or runtime ABI is incompatible"));
@@ -549,7 +582,8 @@ namespace PulseForge
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::PayloadReadFailed, PayloadPath, "Cooked payload length differs from the manifest", Entry.Asset));
 			}
 			return std::shared_ptr<const CookedAssetCatalog>(new CookedAssetCatalog(
-				AbsoluteRoot, *ProjectID, *Startup, std::move(Compatibility), std::move(DynamicRoots), std::move(Entries)));
+				AbsoluteRoot, *ProjectID, *Startup, std::move(Compatibility), AudioMixDefaults,
+				std::move(DynamicRoots), std::move(Entries)));
 		}
 		catch (const nlohmann::json::exception& Exception)
 		{

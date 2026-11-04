@@ -521,6 +521,16 @@ namespace
 		Service.PublishFrame(Routing);
 		const auto* CaptureCanceled = Service.FindAction("Fire");
 		PF_CHECK(Tests, CaptureCanceled && !CaptureCanceled->Held && CaptureCanceled->Released && CaptureCanceled->Canceled);
+		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed, MouseButtonControl(MouseControl::Left))));
+		Service.PublishFrame(Routing);
+		const auto* AbandonedPressQuarantined = Service.FindAction("Fire");
+		PF_CHECK(Tests, AbandonedPressQuarantined && !AbandonedPressQuarantined->Held && !AbandonedPressQuarantined->Pressed);
+		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Released, MouseButtonControl(MouseControl::Left))));
+		Service.PublishFrame(Routing);
+		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed, MouseButtonControl(MouseControl::Left))));
+		Service.PublishFrame(Routing);
+		const auto* CleanClickRearmed = Service.FindAction("Fire");
+		PF_CHECK(Tests, CleanClickRearmed && CleanClickRearmed->Held && CleanClickRearmed->Pressed);
 
 		Service.Reset();
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Released, Keyboard(InputKey::Space))));

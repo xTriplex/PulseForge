@@ -468,7 +468,7 @@ namespace
 		PF_CHECK(Tests, std::filesystem::is_directory(Root / "Assets"));
 		PF_CHECK(Tests, !Project::Create(ProjectFile, "Duplicate Project"));
 		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{broken"));
-		for (const std::string_view UnsupportedVersion : { "0", "2", "99" })
+		for (const std::string_view UnsupportedVersion : { "0", "3", "99" })
 		{
 			const std::string UnsupportedProject = "{\"format\":\"PulseForgeProject\",\"version\":" + std::string(UnsupportedVersion) + "}";
 			const auto Result = ProjectSerializer::Deserialize(UnsupportedProject);
