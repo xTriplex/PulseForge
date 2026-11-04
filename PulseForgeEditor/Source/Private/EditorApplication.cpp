@@ -174,16 +174,16 @@ namespace
 	public:
 		~DebugPrivateDesktopImGuiInputAdapter()
 		{
-			if (m_Pipe != INVALID_HANDLE_VALUE)
-			{
-				if (m_Connected) DisconnectClient();
-				CloseHandle(m_Pipe);
-			}
+			ClosePipeHandle();
+			ClearInteractionState();
+			m_GameplayInput = nullptr;
+			m_InputWindow = 0;
 		}
 
 		void Poll(PulseForge::GameplayInputService* GameplayInput, PulseForge::InputWindowID InputWindow,
 			bool RuntimeUIInputBlocked, ImVec2 ImageMinimum, ImVec2 ImageMaximum)
 		{
+			if (m_ShuttingDown) return;
 			if (m_LeftButtonDown && (GameplayInput != m_GameplayInput || InputWindow != m_InputWindow ||
 				(m_PressTargetsRuntimeUI && RuntimeUIInputBlocked)))
 				CancelInteraction();
@@ -306,6 +306,26 @@ namespace
 			WriteFile(m_Pipe, Reply, static_cast<DWORD>(std::strlen(Reply)), &Written, nullptr);
 		}
 
+		void Shutdown(ImGuiContext* Context) noexcept
+		{
+			if (m_ShuttingDown) return;
+			m_ShuttingDown = true;
+			m_Enabled = false;
+			m_Initialized = true;
+			if (Context && ImGui::GetCurrentContext() != Context) ImGui::SetCurrentContext(Context);
+
+			const bool HadHeldButton = m_LeftButtonDown;
+			const bool HadImGuiContext = Context && ImGui::GetCurrentContext() == Context;
+			const bool CancellationComplete = CancelInteraction(HadImGuiContext);
+			if (HadHeldButton)
+				PF_INFO("PULSEFORGE_PRIVATE_UI_INPUT_SHUTDOWN held=1 context={} cancellation_complete={}",
+					HadImGuiContext ? 1 : 0, CancellationComplete ? 1 : 0);
+
+			ClosePipeHandle();
+			m_GameplayInput = nullptr;
+			m_InputWindow = 0;
+		}
+
 	private:
 		bool ApplyCommand(std::string_view Command)
 		{
@@ -372,38 +392,42 @@ namespace
 			return true;
 		}
 
-		void QueueGameplayButton(PulseForge::InputEventKind Kind, PulseForge::GameplayInputService* GameplayInput,
+		bool QueueGameplayButton(PulseForge::InputEventKind Kind, PulseForge::GameplayInputService* GameplayInput,
 			PulseForge::InputWindowID InputWindow)
 		{
-			if (!GameplayInput || InputWindow == 0) return;
-			(void)GameplayInput->QueueEvent({ .Kind = Kind,
+			if (!GameplayInput || InputWindow == 0) return false;
+			return GameplayInput->QueueEvent({ .Kind = Kind,
 				.Control = { PulseForge::InputDevice::MouseButton,
 					static_cast<uint16_t>(PulseForge::MouseControl::Left) },
 				.Window = InputWindow, .X = m_ClientPointerX, .Y = m_ClientPointerY });
 		}
 
-		void QueueGameplayCancellation(PulseForge::GameplayInputService* GameplayInput,
+		bool QueueGameplayCancellation(PulseForge::GameplayInputService* GameplayInput,
 			PulseForge::InputWindowID InputWindow)
 		{
-			if (!GameplayInput || InputWindow == 0) return;
-			(void)GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::CaptureCancelled,
+			if (!GameplayInput || InputWindow == 0) return false;
+			return GameplayInput->QueueEvent({ .Kind = PulseForge::InputEventKind::CaptureCancelled,
 				.Window = InputWindow });
 		}
 
-		void CancelInteraction()
+		bool CancelInteraction(bool HasImGuiContext = ImGui::GetCurrentContext() != nullptr)
 		{
-			if (ImGui::GetCurrentContext() != nullptr)
+			if (HasImGuiContext)
 				ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+			bool CancellationQueued = !m_LeftButtonDown;
+			bool NeutralReleaseQueued = !m_LeftButtonDown;
 			if (m_LeftButtonDown)
 			{
-				if (ImGui::GetCurrentContext() != nullptr)
+				if (HasImGuiContext)
 					ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-				QueueGameplayCancellation(m_PressGameplayInput, m_PressInputWindow);
+				CancellationQueued = QueueGameplayCancellation(m_PressGameplayInput, m_PressInputWindow);
 				// The opt-in transport owns this synthetic press and has now released it locally.
 				// Deliver that neutral state after cancellation so the next clean injected click can rearm.
-				QueueGameplayButton(PulseForge::InputEventKind::Released, m_PressGameplayInput, m_PressInputWindow);
+				NeutralReleaseQueued = QueueGameplayButton(
+					PulseForge::InputEventKind::Released, m_PressGameplayInput, m_PressInputWindow);
 			}
 			ClearInteractionState();
+			return CancellationQueued && NeutralReleaseQueued;
 		}
 
 		void ClearInteractionState()
@@ -424,11 +448,21 @@ namespace
 			m_Connected = false;
 		}
 
+		void ClosePipeHandle() noexcept
+		{
+			if (m_Pipe == INVALID_HANDLE_VALUE) return;
+			if (m_Connected) DisconnectNamedPipe(m_Pipe);
+			CloseHandle(m_Pipe);
+			m_Pipe = INVALID_HANDLE_VALUE;
+			m_Connected = false;
+		}
+
 		HANDLE m_Pipe = INVALID_HANDLE_VALUE;
 		std::wstring m_PipeName;
 		bool m_Initialized = false;
 		bool m_Enabled = false;
 		bool m_Connected = false;
+		bool m_ShuttingDown = false;
 		bool m_HasPointerPosition = false;
 		bool m_LeftButtonDown = false;
 		float m_ClientPointerX = -FLT_MAX;
@@ -443,13 +477,6 @@ namespace
 		ImVec2 m_ImageMaximum{};
 	};
 
-	void PollDebugPrivateDesktopImGuiInput(
-		PulseForge::GameplayInputService* GameplayInput, PulseForge::InputWindowID InputWindow,
-		bool RuntimeUIInputBlocked, ImVec2 ImageMinimum, ImVec2 ImageMaximum)
-	{
-		static DebugPrivateDesktopImGuiInputAdapter Adapter;
-		Adapter.Poll(GameplayInput, InputWindow, RuntimeUIInputBlocked, ImageMinimum, ImageMaximum);
-	}
 #endif
 
 	std::optional<std::string> BuildContentFingerprint(
@@ -461,7 +488,7 @@ namespace
 		{
 			std::ifstream Input(Path, std::ios::binary);
 			if (!Input) return false;
-			std::array<char, 64 * 1024> Buffer{};
+			std::array<char, 4 * 1024> Buffer{};
 			while (Input)
 			{
 				Input.read(Buffer.data(), static_cast<std::streamsize>(Buffer.size()));
@@ -1396,6 +1423,9 @@ namespace
 		{
 			m_BuildProfileController.Shutdown("Editor shutdown");
 			m_DeferredEditorOperations.Clear();
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+			ShutdownDebugPrivateDesktopImGuiInputAdapter();
+#endif
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
@@ -1636,7 +1666,7 @@ namespace
 					DebugInputWindow = m_ViewportScrollInput.GetInputWindowID(RuntimeUIOwner->ID, RuntimeUINativeOwner);
 				}
 			}
-			PollDebugPrivateDesktopImGuiInput(DebugGameplayInput, DebugInputWindow, m_RuntimeUITextInputBlocked,
+			m_DebugPrivateDesktopImGuiInputAdapter.Poll(DebugGameplayInput, DebugInputWindow, m_RuntimeUITextInputBlocked,
 				ImVec2(m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y),
 				ImVec2(m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y));
 #endif
@@ -9321,7 +9351,7 @@ namespace
 					FailEditorRuntimePlayStopTest("The Edit-mode viewport rendered without an active project scene.");
 					return;
 				}
-				const auto AuthoredSnapshot = PulseForge::SceneSerializer::Serialize(*m_Scene);
+				auto AuthoredSnapshot = PulseForge::SceneSerializer::Serialize(*m_Scene);
 				if (!AuthoredSnapshot)
 				{
 					FailEditorRuntimePlayStopTest("Could not snapshot the authored scene before Play: " + AuthoredSnapshot.error().Message);
@@ -9704,6 +9734,13 @@ namespace
 			m_FileDialogActive = false;
 		}
 
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+		void ShutdownDebugPrivateDesktopImGuiInputAdapter() noexcept
+		{
+			m_DebugPrivateDesktopImGuiInputAdapter.Shutdown(m_Context);
+		}
+#endif
+
 		ImGuiContext* m_Context = nullptr;
 		void* m_PreviousImGuiUserData = nullptr;
 		PulseForgeEditor::EditorLayout m_Layout;
@@ -9912,6 +9949,9 @@ namespace
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::AudioSession> m_AudioSession;
+#if defined(_WIN32) && (defined(_DEBUG) || defined(PF_DEBUG))
+		DebugPrivateDesktopImGuiInputAdapter m_DebugPrivateDesktopImGuiInputAdapter;
+#endif
 		PulseForgeEditor::EditorAudioPreviewController m_AudioPreview;
 		std::optional<PulseForge::AudioDeviceState> m_LastAudioDeviceState;
 		std::optional<PulseForge::UUID> m_AudioPreviewSelectedEntity;
