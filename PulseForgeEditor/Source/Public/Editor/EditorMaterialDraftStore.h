@@ -3,6 +3,7 @@
 #include "Assets/MaterialAsset.h"
 #include "Editor/EditorSnapshotHistory.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,6 +30,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::vector<std::string> GetKeys() const;
 		[[nodiscard]] bool CanUndo(std::string_view Key) const;
 		[[nodiscard]] bool CanRedo(std::string_view Key) const;
+		[[nodiscard]] uint64_t GetContentRevision(std::string_view Key) const noexcept;
 		[[nodiscard]] bool BeginEdit(std::string_view Key, const PulseForge::MaterialAssetDesc& InitialState);
 		void FinalizePendingEdits(bool HasActiveImGuiItem);
 		[[nodiscard]] std::optional<bool> ApplyHistoryStep(std::string_view Key, bool Redo);
@@ -48,6 +50,7 @@ namespace PulseForgeEditor
 			std::optional<PulseForge::MaterialAssetDesc> EditStart;
 			std::optional<std::string> Error;
 			std::optional<std::string> SavedSourceBytes;
+			uint64_t ContentRevision = 0;
 			bool Dirty = false;
 		};
 

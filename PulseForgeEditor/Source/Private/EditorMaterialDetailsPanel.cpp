@@ -293,8 +293,11 @@ namespace PulseForgeEditor
 			"Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
 		ImGui::PopStyleColor();
 
-		if (Changed && Drafts.BeginEdit(ProjectValue, Asset.ID, MaterialBeforeEdit))
-			Actions.MaterialDetailsDraftEdited(ProjectValue.GetDescription().ID, Asset.ID);
+		if (Changed)
+		{
+			const bool NewEdit = Drafts.BeginEdit(ProjectValue, Asset.ID, MaterialBeforeEdit);
+			if (NewEdit) Actions.MaterialDetailsDraftEdited(ProjectValue.GetDescription().ID, Asset.ID);
+		}
 		return true;
 	}
 

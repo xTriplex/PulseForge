@@ -97,6 +97,12 @@ namespace PulseForgeEditor
 		return m_Drafts.CanRedo(MakeKey(Project, Asset));
 	}
 
+	uint64_t EditorMaterialDraftController::GetContentRevision(
+		const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const
+	{
+		return m_Drafts.GetContentRevision(MakeKey(Project, Asset));
+	}
+
 	bool EditorMaterialDraftController::BeginEdit(
 		const PulseForge::Project& Project, const PulseForge::AssetID& Asset, const PulseForge::MaterialAssetDesc& InitialState)
 	{

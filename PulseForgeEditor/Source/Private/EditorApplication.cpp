@@ -8761,7 +8761,8 @@ namespace
 				const PulseForge::MaterialAssetDesc* const Draft = m_MaterialDrafts.FindDraft(*m_Project, Identity.Asset);
 				if (!Draft) continue;
 				m_MaterialPreviews.Prepare(PulseForge::Application::Get(), *m_ImGuiRenderer, *m_Project, Identity.Asset,
-					Session->SessionGeneration, Session->Revision, *Draft, m_EditorShaderDirectory);
+					Session->SessionGeneration, Session->Revision,
+					m_MaterialDrafts.GetContentRevision(*m_Project, Identity.Asset), *Draft, m_EditorShaderDirectory);
 			}
 		}
 		void UpdateSceneViewportOwner(ImGuiViewport* Viewport, GLFWwindow* Window)

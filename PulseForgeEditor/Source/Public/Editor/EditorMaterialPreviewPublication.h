@@ -30,16 +30,18 @@ namespace PulseForgeEditor
 			return m_HasPublishedFrame && m_IsCurrent && m_PublishedFingerprint == Fingerprint &&
 				m_PublishedAssetRevision == AssetRevision && m_CurrentAssetRevision == AssetRevision;
 		}
-		[[nodiscard]] bool PublishCandidate(uint64_t Fingerprint, uint64_t AssetRevision,
-			uint64_t PreparedDraftRevision, uint64_t CurrentDraftRevision,
+		[[nodiscard]] bool PublishCandidate(uint64_t PreparedFingerprint,
+			uint64_t PreparedAssetRevision, uint64_t CurrentAssetRevision,
+			uint64_t PreparedDraftContentRevision, uint64_t CurrentDraftContentRevision,
 			bool PreparationComplete, bool RenderSucceeded, size_t GeometryDrawCount) noexcept
 		{
-			if (Fingerprint == 0 || PreparedDraftRevision != CurrentDraftRevision || !PreparationComplete ||
+			if (PreparedFingerprint == 0 || PreparedAssetRevision != CurrentAssetRevision ||
+				PreparedDraftContentRevision != CurrentDraftContentRevision || !PreparationComplete ||
 				!RenderSucceeded || GeometryDrawCount != 1) return false;
 			m_DisplayedSlot = GetCandidateSlot();
-			m_PublishedFingerprint = Fingerprint;
-			m_PublishedAssetRevision = AssetRevision;
-			m_CurrentAssetRevision = AssetRevision;
+			m_PublishedFingerprint = PreparedFingerprint;
+			m_PublishedAssetRevision = PreparedAssetRevision;
+			m_CurrentAssetRevision = CurrentAssetRevision;
 			m_HasPublishedFrame = true;
 			m_IsCurrent = true;
 			return true;

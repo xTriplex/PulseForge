@@ -102,7 +102,10 @@ namespace PulseForgeEditor
 		uint64_t DraftFingerprint = 0;
 		uint64_t RequestedFingerprint = 0;
 		uint64_t AssetRevision = 1;
-		uint64_t PreparedDraftRevision = 0;
+		uint64_t RequestedDraftContentRevision = 0;
+		uint64_t PreparedFingerprint = 0;
+		uint64_t PreparedAssetRevision = 0;
+		uint64_t PreparedDraftContentRevision = 0;
 		EditorMaterialPreviewPublication Publication;
 		uint64_t LastTouchedFrame = 0;
 		bool Prepared = false;
@@ -248,6 +251,7 @@ namespace PulseForgeEditor
 
 	void EditorMaterialPreviewService::Prepare(PulseForge::RenderDevice& Runtime, EditorTextureRegistry& Textures,
 		PulseForge::Project& Project, const PulseForge::UUID& Material, uint64_t SessionGeneration, uint64_t DraftRevision,
+		uint64_t DraftContentRevision,
 		const PulseForge::MaterialAssetDesc& Draft, const std::filesystem::path& CompiledShaderDirectory)
 	{
 		if (const auto Existing = m_Entries.find(SessionGeneration); Existing != m_Entries.end() &&
@@ -257,6 +261,7 @@ namespace PulseForgeEditor
 		if (!Preview) return;
 		Preview->LastTouchedFrame = m_Frame;
 		Preview->Prepared = false;
+		Preview->RequestedDraftContentRevision = DraftContentRevision;
 		if (!Preview->Renderer || !Preview->Scene || !Preview->Targets[0] || !Preview->Targets[1]) return;
 
 		auto Serialized = PulseForge::MaterialAssetSerializer::Serialize(Draft);
@@ -305,16 +310,18 @@ namespace PulseForgeEditor
 			return;
 		}
 		Preview->Prepared = true;
-		Preview->PreparedDraftRevision = DraftRevision;
+		Preview->PreparedFingerprint = Fingerprint;
+		Preview->PreparedAssetRevision = Preview->AssetRevision;
+		Preview->PreparedDraftContentRevision = DraftContentRevision;
 		Preview->Error = "A complete material preview candidate is ready.";
 	}
 
-	bool EditorMaterialPreviewService::RequestRetry(uint64_t SessionGeneration) noexcept
+	bool EditorMaterialPreviewService::RequestRetry(uint64_t SessionGeneration, uint64_t CurrentDraftContentRevision) noexcept
 	{
 		const auto Found = m_Entries.find(SessionGeneration);
 		if (Found == m_Entries.end()) return false;
 		Entry& Preview = *Found->second;
-		if (Preview.RequestedFingerprint != 0 &&
+		if (Preview.RequestedFingerprint != 0 && Preview.RequestedDraftContentRevision == CurrentDraftContentRevision &&
 			Preview.Publication.IsCurrent(Preview.RequestedFingerprint, Preview.AssetRevision)) return false;
 		if (!Preview.Publication.HasPublishedFrame())
 		{
@@ -332,19 +339,23 @@ namespace PulseForgeEditor
 	}
 
 	bool EditorMaterialPreviewService::Draw(
-		uint64_t SessionGeneration, uint64_t CurrentDraftRevision, float Width, float Height)
+		uint64_t SessionGeneration, uint64_t CurrentDraftContentRevision, float Width, float Height)
 	{
 		const auto Found = m_Entries.find(SessionGeneration);
 		if (Found == m_Entries.end()) return false;
 		Entry& Preview = *Found->second;
 		Preview.LastTouchedFrame = m_Frame;
-		if (Preview.Prepared && Preview.Renderer && Preview.PreparedDraftRevision == CurrentDraftRevision)
+		if (Preview.Prepared && Preview.Renderer &&
+			Preview.PreparedDraftContentRevision == CurrentDraftContentRevision &&
+			Preview.PreparedAssetRevision == Preview.AssetRevision)
 		{
 			const size_t Candidate = Preview.Publication.GetCandidateSlot();
 			auto Rendered = Preview.Renderer->RenderPreparedSceneToOutput(*Preview.Targets[Candidate]);
 			const size_t GeometryDrawCount = Rendered ? Rendered->GeometryDrawCount : 0;
-			if (Preview.Publication.PublishCandidate(Preview.RequestedFingerprint, Preview.AssetRevision,
-				Preview.PreparedDraftRevision, CurrentDraftRevision, true, Rendered.has_value(), GeometryDrawCount))
+			if (Preview.Publication.PublishCandidate(Preview.PreparedFingerprint,
+				Preview.PreparedAssetRevision, Preview.AssetRevision,
+				Preview.PreparedDraftContentRevision, CurrentDraftContentRevision,
+				true, Rendered.has_value(), GeometryDrawCount))
 			{
 				Preview.Error.clear();
 			}
@@ -356,7 +367,9 @@ namespace PulseForgeEditor
 		else if (Preview.Prepared)
 		{
 			Preview.Prepared = false;
-			Preview.Error = "The material draft changed after preview preparation; retaining the last complete preview.";
+			Preview.Error = Preview.PreparedAssetRevision != Preview.AssetRevision
+				? "Preview assets changed after preparation; retaining the last complete preview."
+				: "The material draft changed after preview preparation; retaining the last complete preview.";
 		}
 		if (Preview.Publication.HasPublishedFrame() && Preview.TextureIDs[Preview.Publication.GetDisplayedSlot()] != 0)
 		{

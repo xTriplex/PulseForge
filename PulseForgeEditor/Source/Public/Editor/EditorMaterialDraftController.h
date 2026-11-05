@@ -5,6 +5,7 @@
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorMaterialDraftStore.h"
 
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -31,6 +32,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool IsDirty(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] bool CanUndo(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] bool CanRedo(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
+		[[nodiscard]] uint64_t GetContentRevision(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] bool BeginEdit(
 			const PulseForge::Project& Project, const PulseForge::AssetID& Asset, const PulseForge::MaterialAssetDesc& InitialState);
 		void FinalizePendingEdits(bool HasActiveImGuiItem);

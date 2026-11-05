@@ -1,9 +1,19 @@
 #include "Editor/EditorMaterialDraftStore.h"
 
+#include <cstdint>
 #include <utility>
 
 namespace PulseForgeEditor
 {
+	namespace
+	{
+		void AdvanceContentRevision(uint64_t& Revision) noexcept
+		{
+			++Revision;
+			if (Revision == 0) ++Revision;
+		}
+	} // namespace
+
 	bool EditorMaterialDraftStore::ContainsDraft(std::string_view Key) const
 	{
 		const Entry* const Found = FindEntry(Key);
@@ -26,6 +36,7 @@ namespace PulseForgeEditor
 	{
 		Entry& State = m_Entries[std::move(Key)];
 		State.Draft = std::move(Draft);
+		AdvanceContentRevision(State.ContentRevision);
 		if (State.History.IsEmpty()) State.History.Reset(*State.Draft);
 		return *State.Draft;
 	}
@@ -34,6 +45,7 @@ namespace PulseForgeEditor
 	{
 		Entry& State = m_Entries[std::move(Key)];
 		State.Draft = std::move(Draft);
+		AdvanceContentRevision(State.ContentRevision);
 		State.History.Reset(*State.Draft);
 		State.EditStart.reset();
 		State.Error.reset();
@@ -94,12 +106,19 @@ namespace PulseForgeEditor
 		return Found && Found->Draft && Found->History.CanRedo();
 	}
 
+	uint64_t EditorMaterialDraftStore::GetContentRevision(std::string_view Key) const noexcept
+	{
+		const Entry* const Found = FindEntry(Key);
+		return Found && Found->Draft ? Found->ContentRevision : 0;
+	}
+
 	bool EditorMaterialDraftStore::BeginEdit(std::string_view Key, const PulseForge::MaterialAssetDesc& InitialState)
 	{
 		Entry* const Found = FindEntry(Key);
 		if (!Found || !Found->Draft) return false;
 		const bool NewEdit = !Found->EditStart.has_value();
 		if (NewEdit) Found->EditStart = InitialState;
+		AdvanceContentRevision(Found->ContentRevision);
 		Found->Dirty = true;
 		return NewEdit;
 	}
@@ -129,6 +148,7 @@ namespace PulseForgeEditor
 		if (Changed)
 		{
 			*Found->Draft = Found->History.GetCurrent();
+			AdvanceContentRevision(Found->ContentRevision);
 			Found->Dirty = Found->History.IsDirty();
 		}
 		return Changed;

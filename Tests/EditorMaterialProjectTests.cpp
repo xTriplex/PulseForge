@@ -316,7 +316,7 @@ namespace
 			const uint64_t FingerprintC = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesC);
 			PF_CHECK(Tests, FingerprintA != FingerprintB && FingerprintA != FingerprintC);
 			PF_CHECK(Tests, !Publication.HasPublishedFrame() && Publication.GetCandidateSlot() == 1);
-			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintA, 1, 1, 1, true, true, 1));
+			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintA, 1, 1, 1, 1, true, true, 1));
 			const size_t DisplayedA = Publication.GetDisplayedSlot();
 			PF_CHECK(Tests, Publication.HasPublishedFrame() && Publication.IsCurrent(FingerprintA, 1) && DisplayedA == 1);
 
@@ -327,13 +327,14 @@ namespace
 			const size_t CandidateB = Publication.GetCandidateSlot();
 			PF_CHECK(Tests, CandidateB != DisplayedA);
 			// Pending preparation, failed rendering, and a partial render cannot replace A.
-			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, false, false, 0));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, 2, false, false, 0));
 			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.HasPublishedFrame());
-			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, true, false, 0));
-			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, true, true, 0));
-			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 4, 5, true, true, 1));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, 2, true, false, 0));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, 2, true, true, 0));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 4, 5, true, true, 1));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 3, 5, 5, true, true, 1));
 			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.HasPublishedFrame());
-			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintC, 2, 5, 5, true, true, 1));
+			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintC, 2, 2, 5, 5, true, true, 1));
 			PF_CHECK(Tests, Publication.GetDisplayedSlot() == CandidateB && Publication.IsCurrent(FingerprintC, 2));
 			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintA, 2) && !Publication.IsCurrent(FingerprintB, 2));
 			const size_t DisplayedC = Publication.GetDisplayedSlot();
@@ -345,7 +346,7 @@ namespace
 			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintC, 3));
 
 			PulseForgeEditor::EditorMaterialPreviewPublication OtherMaterial;
-			PF_CHECK(Tests, OtherMaterial.PublishCandidate(FingerprintA, 1, 1, 1, true, true, 1));
+			PF_CHECK(Tests, OtherMaterial.PublishCandidate(FingerprintA, 1, 1, 1, 1, true, true, 1));
 			OtherMaterial.Invalidate(2);
 			PF_CHECK(Tests, OtherMaterial.HasPublishedFrame() && OtherMaterial.GetDisplayedSlot() == 1 &&
 				!OtherMaterial.IsCurrent(FingerprintA, 2));
@@ -353,6 +354,72 @@ namespace
 			PulseForgeEditor::EditorMaterialPreviewPublication NewDocument;
 			NewDocument.Invalidate(2);
 			PF_CHECK(Tests, !NewDocument.HasPublishedFrame());
+		}
+		{
+			using namespace PulseForge;
+			PulseForgeEditor::EditorMaterialDraftStore Drafts;
+			PulseForgeEditor::EditorMaterialPreviewPublication Publication;
+			constexpr std::string_view Key = "project:material-preview-transaction";
+			MaterialAssetDesc DraftA;
+			DraftA.BaseColorFactor = { 0.2f, 0.3f, 0.4f, 1.0f };
+			Drafts.PutDraft(std::string(Key), DraftA);
+			const uint64_t RevisionA = Drafts.GetContentRevision(Key);
+			const auto BytesA = MaterialAssetSerializer::Serialize(DraftA);
+			PF_CHECK(Tests, BytesA && RevisionA != 0);
+			if (!BytesA) return;
+			const uint64_t FingerprintA = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesA);
+			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintA, 1, 1, RevisionA, RevisionA, true, true, 1));
+			const size_t DisplayedA = Publication.GetDisplayedSlot();
+
+			// Model the production property panel: each changed value calls BeginEdit, while only its first return
+			// advances the document transaction revision through MaterialDetailsDraftEdited.
+			uint64_t DocumentRevision = 6;
+			const MaterialAssetDesc EditStart = *Drafts.FindDraft(Key);
+			Drafts.FindDraft(Key)->BaseColorFactor.r = 0.7f;
+			const bool FirstChangeStartedEdit = Drafts.BeginEdit(Key, EditStart);
+			if (FirstChangeStartedEdit) ++DocumentRevision;
+			PF_CHECK(Tests, FirstChangeStartedEdit && DocumentRevision == 7);
+			const uint64_t RevisionB = Drafts.GetContentRevision(Key);
+			const auto BytesB = MaterialAssetSerializer::Serialize(*Drafts.FindDraft(Key));
+			PF_CHECK(Tests, BytesB);
+			if (!BytesB) return;
+			const uint64_t FingerprintB = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesB);
+			PF_CHECK(Tests, FingerprintA != FingerprintB && RevisionB != RevisionA);
+
+			// Preparation captures B. A later slider update in the same drag keeps the transaction revision at 7.
+			Drafts.FindDraft(Key)->BaseColorFactor.r = 0.85f;
+			const bool LaterChangeStartedEdit = Drafts.BeginEdit(Key, EditStart);
+			if (LaterChangeStartedEdit) ++DocumentRevision;
+			const uint64_t RevisionC = Drafts.GetContentRevision(Key);
+			const auto BytesC = MaterialAssetSerializer::Serialize(*Drafts.FindDraft(Key));
+			PF_CHECK(Tests, BytesC && !LaterChangeStartedEdit && DocumentRevision == 7);
+			if (!BytesC) return;
+			const uint64_t FingerprintC = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesC);
+			PF_CHECK(Tests, FingerprintC != FingerprintB && RevisionC != RevisionB);
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 1, 1, RevisionB, RevisionC, true, true, 1));
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.HasPublishedFrame());
+			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintC, 1, 1, RevisionC, RevisionC, true, true, 1));
+			const size_t DisplayedC = Publication.GetDisplayedSlot();
+			PF_CHECK(Tests, DisplayedC != DisplayedA && Publication.IsCurrent(FingerprintC, 1));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintC, 1, 1, RevisionC, RevisionC + 1, true, true, 1));
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedC);
+
+			// One completed drag is still one history step, and history replacement invalidates a prepared frame.
+			Drafts.FinalizePendingEdits(false);
+			const auto Undo = Drafts.ApplyHistoryStep(Key, false);
+			PF_CHECK(Tests, Undo && *Undo && Drafts.FindDraft(Key)->BaseColorFactor.r == DraftA.BaseColorFactor.r);
+			const uint64_t UndoRevision = Drafts.GetContentRevision(Key);
+			PF_CHECK(Tests, UndoRevision != RevisionC &&
+				!Publication.PublishCandidate(FingerprintC, 1, 1, RevisionC, UndoRevision, true, true, 1));
+			const auto Redo = Drafts.ApplyHistoryStep(Key, true);
+			PF_CHECK(Tests, Redo && *Redo && Drafts.FindDraft(Key)->BaseColorFactor.r == 0.85f);
+			const uint64_t RedoRevision = Drafts.GetContentRevision(Key);
+			PF_CHECK(Tests, RedoRevision != UndoRevision &&
+				!Publication.PublishCandidate(FingerprintC, 1, 1, RevisionC, RedoRevision, true, true, 1));
+			Drafts.ReplaceDraft(std::string(Key), DraftA);
+			const uint64_t ReloadRevision = Drafts.GetContentRevision(Key);
+			PF_CHECK(Tests, ReloadRevision != RedoRevision &&
+				!Publication.PublishCandidate(FingerprintC, 1, 1, RedoRevision, ReloadRevision, true, true, 1));
 		}
 		const auto Identifier = PulseForge::UUID::Generate();
 		PF_CHECK(Tests, Identifier.has_value());
@@ -399,6 +466,7 @@ namespace
 		auto Loaded = Drafts.LoadDraft(ProjectValue, Material->ID);
 		PF_CHECK(Tests, Loaded.has_value());
 		if (!Loaded) return;
+		PF_CHECK(Tests, Drafts.GetContentRevision(ProjectValue, Material->ID) != 0);
 		struct MaterialActions final : PulseForgeEditor::EditorMaterialDetailsActionSink
 		{
 			Project& ProjectValue;
@@ -539,8 +607,10 @@ namespace
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, !Documents.Find(Identity)->IsDirty());
 		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.2f) < 1.0e-5f);
+		const uint64_t UnchangedSourceRevision = Drafts.GetContentRevision(ProjectValue, Material->ID);
 		Drafts.ReconcileProjectSources(ProjectValue);
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID) && Drafts.CanRedo(ProjectValue, Material->ID));
+		PF_CHECK(Tests, Drafts.GetContentRevision(ProjectValue, Material->ID) == UnchangedSourceRevision);
 
 		const auto Redone = Drafts.ApplyHistoryStep(ProjectValue, Material->ID, true, Documents);
 		PF_CHECK(Tests, Redone.has_value() && *Redone);
@@ -551,11 +621,15 @@ namespace
 		PF_CHECK(Tests, RenamedMaterial && RenamedMaterial->ID == Material->ID);
 		if (RenamedMaterial)
 		{
+			const uint64_t DirtyContentRevision = Drafts.GetContentRevision(ProjectValue, Material->ID);
 			*Material = *RenamedMaterial;
 			Drafts.ReconcileProjectSources(ProjectValue);
 			PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID) && Drafts.CanUndo(ProjectValue, Material->ID));
 			PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.85f) < 1.0e-5f);
+			PF_CHECK(Tests, Drafts.GetContentRevision(ProjectValue, Material->ID) == DirtyContentRevision);
 		}
+		const uint64_t DirtyMaterialRevision = Drafts.GetContentRevision(ProjectValue, Material->ID);
+		const uint64_t CleanMaterialRevision = Drafts.GetContentRevision(ProjectValue, SecondMaterial->ID);
 		MaterialAssetDesc ExternalEdit = *Drafts.FindDraft(ProjectValue, Material->ID);
 		ExternalEdit.BaseColorFactor = { 0.1f, 0.2f, 0.9f, 1.0f };
 		PF_CHECK(Tests, MaterialAssetSerializer::SaveToFile(ExternalEdit, Root / Material->ProjectRelativePath).has_value());
@@ -567,6 +641,8 @@ namespace
 		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
 		Drafts.ReconcileProjectSources(ProjectValue);
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, SecondMaterial->ID));
+		PF_CHECK(Tests, Drafts.GetContentRevision(ProjectValue, SecondMaterial->ID) != CleanMaterialRevision);
+		PF_CHECK(Tests, Drafts.GetContentRevision(ProjectValue, Material->ID) == DirtyMaterialRevision);
 		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, SecondMaterial->ID)->BaseColorFactor.r - 0.65f) < 1.0e-5f);
 		PF_CHECK(Tests, !Drafts.FindError(ProjectValue, SecondMaterial->ID));
 		const auto RefreshedCleanSave = Drafts.Save(ProjectValue, SecondMaterial->ID, Documents);

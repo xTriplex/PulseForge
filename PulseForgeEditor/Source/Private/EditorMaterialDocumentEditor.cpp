@@ -103,14 +103,15 @@ namespace PulseForgeEditor
 			const ImVec2 Available = ImGui::GetContentRegionAvail();
 			const float Width = (std::min)(Available.x, 480.0f);
 			const float Height = Width * (240.0f / 320.0f);
-			const bool Shown = m_Preview->Draw(Session.SessionGeneration, Session.Revision, Width, Height);
+			const uint64_t DraftContentRevision = m_Drafts.GetContentRevision(*Project, Session.Identity.Asset);
+			const bool Shown = m_Preview->Draw(Session.SessionGeneration, DraftContentRevision, Width, Height);
 			const std::string& PreviewError = m_Preview->GetError(Session.SessionGeneration);
 			if (!PreviewError.empty())
 			{
 				ImGui::TextWrapped(Shown ? "Last complete preview retained. New draft preview unavailable: %s" :
 					"Preview unavailable: %s", PreviewError.c_str());
 				if (ImGui::SmallButton("Retry Preview"))
-					(void)m_Preview->RequestRetry(Session.SessionGeneration);
+					(void)m_Preview->RequestRetry(Session.SessionGeneration, DraftContentRevision);
 			}
 			else if (!Shown) ImGui::TextDisabled("Preparing the fixed-PBR preview…");
 		}
