@@ -63,6 +63,18 @@ namespace PulseForgeEditor
 		CreateNativeHost
 	};
 
+	enum class DocumentTabTearOffTarget : uint8_t
+	{
+		Rejected,
+		FreeDocumentWorkspace,
+		OutsideEditorWindows
+	};
+
+	[[nodiscard]] constexpr bool HasReliableOutsideEditorWindowHitTest(bool HasHoveredViewport, uint32_t HoveredViewportID) noexcept
+	{
+		return HasHoveredViewport && HoveredViewportID == 0;
+	}
+
 	[[nodiscard]] constexpr bool ShouldCaptureDocumentTabDrag(
 		bool TabHovered,
 		bool CloseButtonHovered,
@@ -74,20 +86,14 @@ namespace PulseForgeEditor
 	[[nodiscard]] constexpr bool CanCreateNativeHostFromDocumentTabDrag(
 		bool SourceIsMainHost,
 		bool SourceIsNativeHost,
-		bool ReleaseOverMainEditorViewport) noexcept
+		DocumentTabTearOffTarget Target) noexcept
 	{
-		return (SourceIsMainHost || SourceIsNativeHost) && !ReleaseOverMainEditorViewport;
+		return (SourceIsMainHost || SourceIsNativeHost) && Target != DocumentTabTearOffTarget::Rejected;
 	}
 
-	[[nodiscard]] constexpr bool IsDocumentTabReleaseOverMainViewport(
-		uint32_t MainViewportID,
-		uint32_t HoveredViewportID,
-		bool HasReliableHoveredViewport,
-		bool PointerInsideMainViewportBounds) noexcept
+	[[nodiscard]] constexpr bool ShouldSuppressTabPressAfterDrag(bool Pressed, bool DragRelease) noexcept
 	{
-		if (HasReliableHoveredViewport && HoveredViewportID != 0)
-			return HoveredViewportID == MainViewportID;
-		return PointerInsideMainViewportBounds;
+		return Pressed && DragRelease;
 	}
 
 	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(

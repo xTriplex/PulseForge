@@ -16,7 +16,8 @@ namespace PulseForgeEditor
 		None,
 		NewScene,
 		SaveSceneAs,
-		Prefab
+		Prefab,
+		Material
 	};
 
 	class EditorAssetWorkflowState final
@@ -25,6 +26,7 @@ namespace PulseForgeEditor
 		void BeginAssetDestination(const PulseForge::AssetRecord& Asset, bool Duplicate);
 		void BeginSceneDestination(bool SaveAs, const std::optional<PulseForge::AssetRecord>& Source);
 		void BeginPrefabDestination(const PulseForge::UUID& Root);
+		void BeginMaterialDestination(std::string_view Folder);
 		void DismissDestination() noexcept;
 		[[nodiscard]] bool TakeDestinationDialogRequest() noexcept;
 

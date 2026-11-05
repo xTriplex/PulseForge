@@ -284,24 +284,26 @@ namespace
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(false, false, true));
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, true, true));
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, false, false));
-		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false, false));
-		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(false, true, false));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, false, false));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(true, false, true));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, true, true));
+		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::OutsideEditorWindows));
+		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(false, true, DocumentTabTearOffTarget::FreeDocumentWorkspace));
+		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, false, DocumentTabTearOffTarget::OutsideEditorWindows));
+		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::Rejected));
+		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, true, DocumentTabTearOffTarget::Rejected));
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, false, true, true) ==
 							DocumentTabReleaseAction::TransferToStrip);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, true, true, true) ==
 							DocumentTabReleaseAction::TransferToStrip);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, true, true, false) ==
 							DocumentTabReleaseAction::CreateNativeHost);
-		PF_CHECK(
-			Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, CanCreateNativeHostFromDocumentTabDrag(false, true, false),
-					   true, false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(false, false, false), true, false) == DocumentTabReleaseAction::None);
+							CanCreateNativeHostFromDocumentTabDrag(false, true, DocumentTabTearOffTarget::OutsideEditorWindows), true,
+							false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(true, false, false), true, false) == DocumentTabReleaseAction::CreateNativeHost);
+							CanCreateNativeHostFromDocumentTabDrag(false, false, DocumentTabTearOffTarget::Rejected), true,
+							false) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+							CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::FreeDocumentWorkspace), true,
+							false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(
 			Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, false, true, false) == DocumentTabReleaseAction::None);
 		PF_CHECK(
@@ -481,7 +483,9 @@ namespace
 		if (DetachOpen && NewMaterialHost)
 		{
 			PF_CHECK(Tests, Manager.MarkEdited(DetachMaterial));
-			const uint64_t DetachRevision = Manager.Find(DetachMaterial)->Revision;
+			EditorDocumentSession* const DetachSession = Manager.Find(DetachMaterial);
+			const uint64_t DetachRevision = DetachSession->Revision;
+			const uint64_t DetachSessionGeneration = DetachSession->SessionGeneration;
 			const auto RejectedDetach = Manager.Transfer(
 				DetachMaterial, *NewMaterialHost, 0, [](const EditorDocumentSession&, const EditorDocumentHost&) { return false; });
 			PF_CHECK(Tests, !RejectedDetach);
@@ -497,10 +501,14 @@ namespace
 					[](const EditorDocumentSession& Session, const EditorDocumentHost& Host)
 					{ return Host.Role == EditorDocumentHostRole::Native && Host.PlacementKind == Session.Identity.Kind; });
 				PF_CHECK(Tests, Detached && Detached->Changed);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial) == DetachSession &&
+									Manager.Find(DetachMaterial)->SessionGeneration == DetachSessionGeneration);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == *PreparedHost);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision && Manager.Find(DetachMaterial)->IsDirty());
 				const auto Reattached = Manager.Transfer(DetachMaterial, EditorDocumentManager::MainHostID, 0);
 				PF_CHECK(Tests, Reattached && Reattached->Changed);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial) == DetachSession &&
+									Manager.Find(DetachMaterial)->SessionGeneration == DetachSessionGeneration);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == EditorDocumentManager::MainHostID);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision && Manager.Find(DetachMaterial)->IsDirty());
 

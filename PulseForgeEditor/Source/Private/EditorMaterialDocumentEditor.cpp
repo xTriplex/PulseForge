@@ -93,10 +93,13 @@ namespace PulseForgeEditor
 		if (ImGui::Button("Discard") && !DiscardSession(Session) && Current->Error.empty())
 			Current->Error = "The material draft could not be reloaded.";
 		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (Session.IsDirty()) ImGui::TextDisabled("Unsaved changes");
+		else ImGui::TextDisabled("Saved");
 		ImGui::Separator();
 		const std::vector<PulseForge::AssetRecord> Assets = m_AssetListProvider();
 		m_Panel.DrawEditorContents(*Project, Session.Identity.Asset, Assets, m_Drafts,
-			m_AssetSelector, m_Style, m_Actions);
+			m_AssetSelector, m_Style, m_Actions, false);
 		ImGui::SeparatorText("Draft Preview");
 		if (m_Preview)
 		{

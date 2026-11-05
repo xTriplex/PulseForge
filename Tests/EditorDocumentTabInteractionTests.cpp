@@ -24,10 +24,15 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, AfterMidpoint && AfterMidpoint->HostID == "main" && AfterMidpoint->Index == 1);
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 90.0f, 20.0f }, 11));
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 110.0f, 20.0f }, 10));
-	PF_CHECK(Tests, !IsDocumentTabReleaseOverMainViewport(10, 11, true, true));
-	PF_CHECK(Tests, IsDocumentTabReleaseOverMainViewport(10, 10, true, false));
-	PF_CHECK(Tests, IsDocumentTabReleaseOverMainViewport(10, 0, true, true));
-	PF_CHECK(Tests, !IsDocumentTabReleaseOverMainViewport(10, 0, false, false));
+	PF_CHECK(Tests, ShouldSuppressTabPressAfterDrag(true, true));
+	PF_CHECK(Tests, !ShouldSuppressTabPressAfterDrag(true, false));
+	PF_CHECK(Tests, !ShouldSuppressTabPressAfterDrag(false, true));
+	PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::FreeDocumentWorkspace));
+	PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::OutsideEditorWindows));
+	PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::Rejected));
+	PF_CHECK(Tests, HasReliableOutsideEditorWindowHitTest(true, 0));
+	PF_CHECK(Tests, !HasReliableOutsideEditorWindowHitTest(false, 0));
+	PF_CHECK(Tests, !HasReliableOutsideEditorWindowHitTest(true, 11));
 
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
 	EditorDocumentTabDragFrame DragFrame;
@@ -57,7 +62,7 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.HoveredViewportID = 10;
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.LeftButtonDown = false;
-	DragFrame.ReleaseOverMainEditorViewport = true;
+	DragFrame.TearOffTarget = DocumentTabTearOffTarget::Rejected;
 	const auto UtilityPanelRelease = Interaction.UpdateDrag(DragFrame);
 	PF_CHECK(Tests, UtilityPanelRelease && UtilityPanelRelease->Action == DocumentTabReleaseAction::None);
 	PF_CHECK(Tests, UtilityPanelRelease && !UtilityPanelRelease->DropLocation);
@@ -74,7 +79,7 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.LeftButtonDown = false;
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.PointerPosition = { 180.0f, 120.0f };
-	DragFrame.ReleaseOverMainEditorViewport = true;
+	DragFrame.TearOffTarget = DocumentTabTearOffTarget::Rejected;
 	const auto NativeHostUtilityRelease = Interaction.UpdateDrag(DragFrame);
 	PF_CHECK(Tests, NativeHostUtilityRelease && NativeHostUtilityRelease->Action == DocumentTabReleaseAction::None);
 
@@ -84,13 +89,12 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.LeftButtonReleased = false;
 	DragFrame.PointerPosition = { 180.0f, 120.0f };
 	DragFrame.HoveredViewportID = 11;
-	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 11, true, true);
+	DragFrame.TearOffTarget = DocumentTabTearOffTarget::FreeDocumentWorkspace;
 	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
 	DragFrame.LeftButtonDown = false;
 	DragFrame.LeftButtonReleased = true;
 	const auto OverlappingNativeRelease = Interaction.UpdateDrag(DragFrame);
-	PF_CHECK(Tests, OverlappingNativeRelease &&
-		OverlappingNativeRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
+	PF_CHECK(Tests, OverlappingNativeRelease && OverlappingNativeRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
 	Interaction.BeginFrame();
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
@@ -102,13 +106,11 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.SourceIsMainHost = true;
 	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
 	DragFrame.PointerPosition = { 1200.0f, 120.0f };
-	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 10, true, false);
-	PF_CHECK(Tests, DragFrame.ReleaseOverMainEditorViewport);
+	DragFrame.TearOffTarget = DocumentTabTearOffTarget::FreeDocumentWorkspace;
 	DragFrame.LeftButtonDown = false;
 	DragFrame.LeftButtonReleased = true;
-	const auto MainViewportReportedOutsideRelease = Interaction.UpdateDrag(DragFrame);
-	PF_CHECK(Tests, MainViewportReportedOutsideRelease &&
-						MainViewportReportedOutsideRelease->Action == DocumentTabReleaseAction::None);
+	const auto MainWorkspaceRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, MainWorkspaceRelease && MainWorkspaceRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
 	DragFrame = {};
@@ -122,7 +124,7 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.PointerPosition = { 1200.0f, 120.0f };
 	DragFrame.HoveredViewportID = 0;
-	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 0, true, false);
+	DragFrame.TearOffTarget = DocumentTabTearOffTarget::OutsideEditorWindows;
 	const auto OutsideWindowRelease = Interaction.UpdateDrag(DragFrame);
 	PF_CHECK(Tests, OutsideWindowRelease && OutsideWindowRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
@@ -153,7 +155,7 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.PointerPosition = { -100001.0f, -100001.0f };
 	const auto TearOffRelease = Interaction.UpdateDrag(DragFrame);
-	PF_CHECK(Tests, TearOffRelease && TearOffRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
+	PF_CHECK(Tests, TearOffRelease && TearOffRelease->Action == DocumentTabReleaseAction::None);
 	PF_CHECK(Tests, TearOffRelease && TearOffRelease->ReleasePosition.X == 80.0f && TearOffRelease->ReleasePosition.Y == 40.0f);
 
 	Interaction.BeginDrag(Level, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
@@ -175,4 +177,8 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	Interaction.RegisterDropTarget({ "main", 10, { 10.0f, 10.0f }, { 110.0f, 50.0f }, 0, 1 });
 	Interaction.RegisterDropTarget({ "other", 10, { 10.0f, 10.0f }, { 110.0f, 50.0f }, 0, 1 });
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 30.0f, 20.0f }, 10));
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 40.0f, 20.0f });
+	Interaction.CancelDrag();
+	PF_CHECK(Tests, !Interaction.ActiveDragIdentity());
+	PF_CHECK(Tests, !Interaction.TakePendingTransfer());
 }

@@ -74,7 +74,7 @@ namespace PulseForgeEditor
 
 	void EditorMaterialDetailsPanel::DrawEditorContents(const PulseForge::Project& ProjectValue, const PulseForge::AssetID& Identifier,
 		const std::vector<PulseForge::AssetRecord>& Assets, EditorMaterialDraftController& Drafts,
-		EditorAssetSelector& AssetSelector, EditorStyle& Style, EditorMaterialDetailsActionSink& Actions)
+		EditorAssetSelector& AssetSelector, EditorStyle& Style, EditorMaterialDetailsActionSink& Actions, bool ShowActions)
 	{
 		const auto Asset = ProjectValue.GetAssetRegistry().Find(Identifier);
 		if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Material))
@@ -86,8 +86,11 @@ namespace PulseForgeEditor
 		Style.IconText(EditorIcon::Material, Name);
 		ImGui::Separator();
 		(void)DrawMaterialProperties(ProjectValue, *Asset, Assets, Drafts, AssetSelector, Style, Actions);
-		ImGui::Separator();
-		DrawMaterialActions(*Asset, ProjectValue, Drafts, Style, Actions);
+		if (ShowActions)
+		{
+			ImGui::Separator();
+			DrawMaterialActions(*Asset, ProjectValue, Drafts, Style, Actions);
+		}
 	}
 
 	bool EditorMaterialDetailsPanel::DrawMaterialProperties(const PulseForge::Project& ProjectValue, const PulseForge::AssetRecord& Asset,

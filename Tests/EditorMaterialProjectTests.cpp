@@ -221,6 +221,29 @@ namespace
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto DefaultCreated =
+			MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/first.material", MaterialAssetDesc{});
+		PF_CHECK(Tests, DefaultCreated.has_value());
+		if (DefaultCreated)
+		{
+			const auto DefaultLoaded = MaterialAssetService::Load(DefaultCreated->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, DefaultLoaded && DefaultLoaded->BaseColorTexture.IsNil() && DefaultLoaded->MetallicRoughnessTexture.IsNil() &&
+								DefaultLoaded->NormalTexture.IsNil());
+			PF_CHECK(Tests, DefaultLoaded && glm::all(glm::equal(DefaultLoaded->BaseColorFactor, glm::vec4(1.0f))) &&
+								DefaultLoaded->MetallicFactor == 0.0f && DefaultLoaded->RoughnessFactor == 1.0f);
+			const auto DistinctCreated =
+				MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/second.material", MaterialAssetDesc{});
+			PF_CHECK(Tests, DistinctCreated && DistinctCreated->ID != DefaultCreated->ID);
+			const std::filesystem::path FirstMaterialPath = ProjectRoot / "Assets" / "Materials" / "first.material";
+			std::ifstream FirstBeforeCollision(FirstMaterialPath, std::ios::binary);
+			const std::string FirstBytesBeforeCollision((std::istreambuf_iterator<char>(FirstBeforeCollision)), {});
+			const auto Collision =
+				MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/first.material", MaterialAssetDesc{});
+			PF_CHECK(Tests, !Collision && !Collision.error().CommittedAsset);
+			std::ifstream FirstAfterCollision(FirstMaterialPath, std::ios::binary);
+			const std::string FirstBytesAfterCollision((std::istreambuf_iterator<char>(FirstAfterCollision)), {});
+			PF_CHECK(Tests, FirstBytesBeforeCollision == FirstBytesAfterCollision);
+		}
 		const auto Created = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/validation.MATERIAL", Description);
 		PF_CHECK(Tests, Created.has_value());
 		PF_CHECK(Tests, Created && Created->ID != TextureMetadata->ID);
