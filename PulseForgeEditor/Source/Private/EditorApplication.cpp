@@ -690,42 +690,6 @@ namespace
 		return Bounds;
 	}
 
-	PulseForgeEditor::DocumentTabTearOffTarget ResolveDocumentTabTearOffTarget(const ImGuiIO& IO)
-	{
-		if (!GImGui || !GImGui->OpenPopupStack.empty())
-			return PulseForgeEditor::DocumentTabTearOffTarget::Rejected;
-		if (!PulseForgeEditor::IsUsableDocumentTabPointerPosition(IO.MousePos.x, IO.MousePos.y))
-		{
-			const bool HasHoveredViewport = (IO.BackendFlags & ImGuiBackendFlags_HasMouseHoveredViewport) != 0;
-			return PulseForgeEditor::HasReliableOutsideEditorWindowHitTest(HasHoveredViewport, IO.MouseHoveredViewport)
-				? PulseForgeEditor::DocumentTabTearOffTarget::OutsideEditorWindows
-				: PulseForgeEditor::DocumentTabTearOffTarget::Rejected;
-		}
-
-		for (const ImGuiViewport* Viewport : ImGui::GetPlatformIO().Viewports)
-		{
-			if (!Viewport || IO.MousePos.x < Viewport->Pos.x || IO.MousePos.y < Viewport->Pos.y ||
-				IO.MousePos.x >= Viewport->Pos.x + Viewport->Size.x || IO.MousePos.y >= Viewport->Pos.y + Viewport->Size.y)
-				continue;
-
-			const ImGuiWindow* const Hovered = GImGui->HoveredWindow;
-			if (!Hovered || Hovered->Viewport != Viewport || GImGui->HoveredId != 0)
-				return PulseForgeEditor::DocumentTabTearOffTarget::Rejected;
-
-			const std::string_view Name(Hovered->Name, static_cast<size_t>(ImStrlen(Hovered->Name)));
-			const bool IsWorkspaceSurface = Name == "##PFMainDocumentWorkspace" || Name == "##PFDocumentTearOffDropTarget";
-			const ImGuiWindow* const Root = Hovered->RootWindow;
-			const std::string_view RootName =
-				Root ? std::string_view(Root->Name, static_cast<size_t>(ImStrlen(Root->Name))) : std::string_view{};
-			const bool IsNativeDocumentHost = RootName.find("###PFDocumentHost_") != std::string_view::npos;
-			return IsWorkspaceSurface || (IsNativeDocumentHost && Hovered == Hovered->RootWindow)
-					   ? PulseForgeEditor::DocumentTabTearOffTarget::FreeDocumentWorkspace
-					   : PulseForgeEditor::DocumentTabTearOffTarget::Rejected;
-		}
-
-		return PulseForgeEditor::DocumentTabTearOffTarget::OutsideEditorWindows;
-	}
-
 	bool BeginEditorChromeBar(const char* ID, ImGuiDir Direction, float Height, PulseForgeEditor::EditorColorToken Background,
 		const PulseForgeEditor::EditorStyle& Style)
 	{
@@ -869,19 +833,12 @@ namespace
 			Failed
 		};
 
-		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
+		static constexpr size_t DocumentTabTestDropPointsPerPanel = 1;
 		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
 		static constexpr size_t DocumentHostTabReattachTestMaximumFrames = 3600;
-		static constexpr std::array<const char*, 5> DocumentTabTestInvalidDropPanelNames = { "Hierarchy", "Inspector", "Scene Viewport",
-			"Content Browser", "Console" };
-		static constexpr size_t DocumentTabTestConsolePanelIndex = DocumentTabTestInvalidDropPanelNames.size() - 1;
-		static constexpr std::array<const char*, DocumentTabTestInvalidDropPanelNames.size() * DocumentTabTestDropPointsPerPanel>
-			DocumentTabTestInvalidDropTargetNames = { "Hierarchy body", "Hierarchy top edge", "Hierarchy left edge", "Hierarchy right edge",
-				"Hierarchy bottom edge", "Inspector body", "Inspector top edge", "Inspector left edge", "Inspector right edge",
-				"Inspector bottom edge", "Scene Viewport body", "Scene Viewport top edge", "Scene Viewport left edge",
-				"Scene Viewport right edge", "Scene Viewport bottom edge", "Content Browser body", "Content Browser top edge",
-				"Content Browser left edge", "Content Browser right edge", "Content Browser bottom edge", "Console body",
-				"Console top edge", "Console left edge", "Console right edge", "Console bottom edge" };
+		static constexpr std::array<const char*, 1> DocumentTabTestTearOffPanelNames = { "Inspector" };
+		static constexpr std::array<const char*, DocumentTabTestTearOffPanelNames.size() * DocumentTabTestDropPointsPerPanel>
+			DocumentTabTestTearOffTargetNames = { "Inspector body" };
 
 		using GizmoHandle = PulseForgeEditor::ViewportGizmoHandle;
 		using ViewportGizmoGeometry = PulseForgeEditor::ViewportGizmoGeometry;
@@ -1740,7 +1697,18 @@ namespace
 			QueueDocumentTabReorderTestInput();
 			QueueDocumentTabGroupTestInput();
 			ImGui::NewFrame();
-			m_DocumentTabInteraction.BeginFrame();
+			const ImGuiIO& DocumentTabIO = ImGui::GetIO();
+			m_DocumentTabInteraction.BeginFrame(DocumentTabIO.MouseClicked[ImGuiMouseButton_Left]);
+			if (m_DocumentTabInteraction.ActiveDragIdentity() && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+			{
+				m_DocumentTabInteraction.CancelDragUntilNewPress();
+				ImGui::ClearDragDrop();
+			}
+			if (PulseForgeEditor::ShouldCaptureDocumentTabDragInput(
+					m_DocumentTabInteraction.ActiveDragIdentity().has_value(), m_DocumentTabInteraction.IsCancelledUntilNewPress(),
+					DocumentTabIO.MouseDown[ImGuiMouseButton_Left], DocumentTabIO.MouseReleased[ImGuiMouseButton_Left],
+					DocumentTabIO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left], DocumentTabIO.MouseDragThreshold))
+				ImGui::SetKeyOwner(ImGuiKey_MouseLeft, ImGuiKeyOwner_Any, ImGuiInputFlags_LockUntilRelease);
 			for (DocumentTabTestPointerTarget& Target : m_DocumentHostTabReattachInvalidDropTargets)
 				Target.Available = false;
 			m_DocumentHostTabReorderTestFirstTabCenterValid = false;
@@ -1789,7 +1757,6 @@ namespace
 			}
 			DrawWorkspacePanels();
 			AdvanceDocumentWorkspaceSwitchTest();
-			DrawDocumentTabTearOffDropTarget();
 			ProcessReleasedDocumentTabDrag();
 			ProcessPendingDocumentTabClose();
 			ProcessPendingDocumentTransfer();
@@ -3701,11 +3668,8 @@ namespace
 						break;
 					}
 					m_DocumentHostTabTearOffTestDrop =
-						m_DocumentHostTabTearOffFromNativeHost
-							? ImVec2(
-								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x + IO.MouseDragThreshold + 24.0f,
-								  m_DocumentHostTabTearOffTestStart.y);
+						ImVec2(MainViewport->WorkPos.x + MainViewport->WorkSize.x * 0.68f,
+							MainViewport->WorkPos.y + MainViewport->WorkSize.y * 0.62f);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -3722,22 +3686,12 @@ namespace
 				break;
 			case DocumentTabTearOffTestPhase::PressQueued:
 				IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
-				// The fixture releases outside every editor window. A zero viewport models that hit test explicitly;
-				// the production policy trusts GLFW's hovered-window identity when it is available.
-				IO.AddMouseViewportEvent(0);
+				IO.AddMouseViewportEvent(ImGui::GetMainViewport()->ID);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 				break;
 			case DocumentTabTearOffTestPhase::DragQueued:
-				if (m_DocumentHostTabTearOffFromNativeHost)
-				{
-					IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-					IO.AddMouseViewportEvent(0);
-				}
-				else
-				{
-					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
-					IO.AddMouseViewportEvent(0);
-				}
+				IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+				IO.AddMouseViewportEvent(ImGui::GetMainViewport()->ID);
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
 				break;
@@ -3796,7 +3750,7 @@ namespace
 					}
 					else
 					{
-						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab outside the main editor window created a "
+						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab in the main Editor workspace created a "
 								"native host and kept Level Editor in the main host.");
 					}
 					m_DocumentHostTabTearOffFromNativeHost = false;
@@ -3923,21 +3877,20 @@ namespace
 			{
 				const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[m_DocumentHostTabReattachInvalidDropIndex];
 				const auto* Session = m_Documents.Find(m_DocumentHostTabReattachTestIdentity);
-				const bool StillInSourceHost = Session && Session->HostID == m_DocumentHostTabReattachTestSourceHostID;
-				const auto MatchedDropTarget = FindDocumentTabDropTarget(Target.Position, Target.ViewportID);
-				if (!StillInSourceHost || MatchedDropTarget)
+				const auto* Host = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
+				const bool DetachedToNewNativeHost = Host && Host->Role == PulseForgeEditor::EditorDocumentHostRole::Native &&
+					Session->HostID != m_DocumentHostTabReattachTestSourceHostID;
+				const bool SourceHostRetired = m_Documents.FindHost(m_DocumentHostTabReattachTestSourceHostID) == nullptr;
+				if (!DetachedToNewNativeHost || (m_DocumentHostTabReattachExpectSourceHostRetired && !SourceHostRetired))
 				{
 					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
 					m_DocumentHostTabReattachTest = false;
-					if (!StillInSourceHost)
-						PF_ERROR("Document tab drag over {} changed membership: expected host '{}', current host '{}'.", Target.Name,
-							 m_DocumentHostTabReattachTestSourceHostID, Session ? Session->HostID : "<session missing>");
-					else
-						PF_ERROR("Document tab drag over {} matched registered strip host '{}' at index {}.", Target.Name,
-							 MatchedDropTarget->first, MatchedDropTarget->second);
+					PF_ERROR("Document tab drag over {} did not detach to a new native host or retire its empty source host.", Target.Name);
 					break;
 				}
-				PF_INFO("Document tab drag over {} was rejected without changing host membership.", Target.Name);
+				PF_INFO("Document tab drag over {} detached the same document into a floating native host.", Target.Name);
+				m_DocumentHostTabReattachTestSourceHostID = Session->HostID;
+				m_DocumentHostTabReattachExpectSourceHostRetired = true;
 				++m_DocumentHostTabReattachInvalidDropIndex;
 				m_DocumentHostTabReattachTestTabCenterValid = false;
 				m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::WaitingForTab;
@@ -3969,8 +3922,8 @@ namespace
 					LevelRetained)
 				{
 					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Complete;
-					PF_INFO("Document tab reattachment UI fixture passed: {} non-strip drops were rejected, then the tab "
-							"returned to the main strip; source-host retirement matched its remaining membership. Testing "
+					PF_INFO("Document tab reattachment UI fixture passed: the tab detached over Inspector, then returned to the main strip; "
+							"document identity survived both transfers. Testing "
 							"whether it can be dragged back into a native host (round trip {}/{}).",
 						m_DocumentHostTabReattachInvalidDropIndex, m_DocumentHostTabRoundTripCount + 1, DocumentTabRoundTripCycleCount);
 					m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
@@ -4233,7 +4186,7 @@ namespace
 					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
 					m_DocumentHostTabTearOffTest = true;
-					PF_INFO("Document tab native-group tear-off fixture is detaching the same session outside all editor windows.");
+					PF_INFO("Document tab native-group tear-off fixture is detaching the same session into the main Editor workspace.");
 				}
 				break;
 			}
@@ -7238,27 +7191,41 @@ namespace
 				Identity, std::move(DestinationHostID), Index, CreateNativeHost, std::move(NativeHostBounds) });
 		}
 
+		[[nodiscard]] bool CanTransferDocumentToHost(
+			const PulseForgeEditor::EditorDocumentIdentity& Identity, std::string_view DestinationHostID) const
+		{
+			const auto* Session = m_Documents.Find(Identity);
+			const auto* Destination = m_Documents.FindHost(DestinationHostID);
+			if (!Session || !Destination || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level) return false;
+			if (Session->HostID == DestinationHostID) return true;
+			if (Destination->Role == PulseForgeEditor::EditorDocumentHostRole::Native && Destination->PlacementKind != Identity.Kind)
+				return false;
+			if (Destination->Project && *Destination->Project != Identity.Project) return false;
+			return std::all_of(Destination->Documents.begin(), Destination->Documents.end(),
+				[&Identity](const auto& ExistingIdentity) { return ExistingIdentity.Project == Identity.Project; });
+		}
+
 		void ProcessReleasedDocumentTabDrag()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
-			if (m_DocumentTabInteraction.ActiveDragIdentity() && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-			{
-				m_DocumentTabInteraction.CancelDrag();
-				return;
-			}
 			const auto ActiveIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 			const auto* Session = ActiveIdentity ? m_Documents.Find(*ActiveIdentity) : nullptr;
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
+			const bool HasReliableHoveredViewport = (IO.BackendFlags & ImGuiBackendFlags_HasMouseHoveredViewport) != 0;
+			uint32_t HoveredRootWindowID = 0;
+			if (HasReliableHoveredViewport && GImGui->HoveredWindow && GImGui->HoveredWindow->RootWindow)
+				HoveredRootWindowID = GImGui->HoveredWindow->RootWindow->ID;
 			const PulseForgeEditor::EditorDocumentTabDragFrame Frame{ .LeftButtonReleased = IO.MouseReleased[ImGuiMouseButton_Left],
 				.LeftButtonDown = IO.MouseDown[ImGuiMouseButton_Left],
 				.ImGuiPayloadActive = ImGui::GetDragDropPayload() != nullptr,
+				.HasReliableHoveredViewport = HasReliableHoveredViewport,
 				.PointerPosition = { IO.MousePos.x, IO.MousePos.y },
 				.HoveredViewportID = IO.MouseHoveredViewport,
+				.HoveredRootWindowID = HoveredRootWindowID,
 				.MaximumObservedDistanceSquared = IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left],
 				.DragThreshold = IO.MouseDragThreshold,
 				.SourceIsMainHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main,
-				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native,
-				.TearOffTarget = ResolveDocumentTabTearOffTarget(IO) };
+				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native };
 			const auto Released = m_DocumentTabInteraction.UpdateDrag(Frame);
 			if (!Released) return;
 
@@ -7272,44 +7239,6 @@ namespace
 
 			QueueDocumentTransfer(Released->Identity, {}, 0, true,
 				MakeDocumentDropWindowBounds(ImVec2(Released->ReleasePosition.X, Released->ReleasePosition.Y)));
-		}
-
-		void DrawDocumentTabTearOffDropTarget()
-		{
-			const auto Identity = m_DocumentTabInteraction.ActiveDragIdentity();
-			if (!Identity || Identity->Kind == PulseForgeEditor::EditorDocumentKind::Level) return;
-			const ImGuiIO& IO = ImGui::GetIO();
-			const float ThresholdSquared = IO.MouseDragThreshold * IO.MouseDragThreshold;
-			if ((!IO.MouseDown[ImGuiMouseButton_Left] && !IO.MouseReleased[ImGuiMouseButton_Left]) ||
-				IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left] < ThresholdSquared)
-				return;
-
-			const ImGuiViewport* const Viewport = ImGui::GetMainViewport();
-			if (!Viewport) return;
-			ImGui::SetNextWindowViewport(Viewport->ID);
-			ImGui::SetNextWindowPos(
-				ImVec2(Viewport->WorkPos.x + Viewport->WorkSize.x * 0.5f, Viewport->WorkPos.y + Viewport->WorkSize.y * 0.5f),
-				ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-			ImGui::SetNextWindowSize(ImVec2(340.0f, 72.0f), ImGuiCond_Always);
-			constexpr ImGuiWindowFlags Flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
-											   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
-											   ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-											   ImGuiWindowFlags_NoScrollbar;
-			if (ImGui::Begin("##PFDocumentTearOffDropTarget", nullptr, Flags))
-			{
-				ImGui::TextUnformatted("Release to detach this document");
-				ImGui::TextDisabled("Drop on a document strip to transfer instead.");
-			}
-			ImGui::End();
-		}
-
-		[[nodiscard]] std::optional<std::pair<std::string, size_t>> FindDocumentTabDropTarget(
-			const ImVec2& Position, ImGuiID HoveredViewportID) const
-		{
-			const auto Result =
-				m_DocumentTabInteraction.FindDropTarget({ Position.x, Position.y }, static_cast<uint32_t>(HoveredViewportID));
-			if (!Result) return std::nullopt;
-			return std::pair{ Result->HostID, Result->Index };
 		}
 
 		void ProcessPendingDocumentTransfer()
@@ -7374,8 +7303,11 @@ namespace
 			if (!Payload || !Payload->IsDelivery() || !Payload->Data || Payload->DataSize <= 1) return;
 			const std::string_view Encoded(static_cast<const char*>(Payload->Data), static_cast<size_t>(Payload->DataSize - 1));
 			std::optional<PulseForgeEditor::EditorDocumentIdentity> Identity;
+			const auto CapturedIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
+			if (CapturedIdentity && GetDocumentPayload(*CapturedIdentity) == Encoded) Identity = CapturedIdentity;
 			for (const auto& [Candidate, Session] : m_Documents.GetSessions())
 			{
+				if (Identity) break;
 				(void)Session;
 				if (GetDocumentPayload(Candidate) == Encoded)
 				{
@@ -7383,7 +7315,7 @@ namespace
 					break;
 				}
 			}
-			if (!Identity) return;
+			if (!Identity || !CanTransferDocumentToHost(*Identity, DestinationHostID)) return;
 			QueueDocumentTransfer(*Identity, std::string(DestinationHostID), Index);
 		}
 
@@ -7415,8 +7347,12 @@ namespace
 				const ImVec2 TabMaximum = ImGui::GetItemRectMax();
 				const ImGuiViewport* TabViewport = ImGui::GetWindowViewport();
 				const ImGuiID TabViewportID = TabViewport ? TabViewport->ID : 0;
+				const ImGuiWindow* const StripRootWindow = ImGui::GetCurrentWindow()->RootWindow;
+				const uint32_t StripRootWindowID = StripRootWindow ? StripRootWindow->ID : 0;
+				const auto CapturedIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 				m_DocumentTabInteraction.RegisterDropTarget({ std::string(HostID), static_cast<uint32_t>(TabViewportID),
-					{ TabMinimum.x, TabMinimum.y }, { TabMaximum.x, TabMaximum.y }, Index, Index + 1 });
+					StripRootWindowID, { TabMinimum.x, TabMinimum.y }, { TabMaximum.x, TabMaximum.y }, Index, Index + 1,
+					CapturedIdentity && CanTransferDocumentToHost(*CapturedIdentity, HostID) });
 				if (m_DocumentHostTabTearOffTest && Session->Identity == m_DocumentHostTabTearOffTestIdentity)
 				{
 					m_DocumentHostTabTearOffTestTabCenter =
@@ -7569,6 +7505,7 @@ namespace
 					ImGui::EndPopup();
 				}
 				if (Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level &&
+					!m_DocumentTabInteraction.IsCancelledUntilNewPress() &&
 					ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 				{
 					// Preserve the original press coordinate as the drag source starts. If
@@ -7603,9 +7540,13 @@ namespace
 				const ImVec2 DropMinimum = ImGui::GetItemRectMin();
 				const ImVec2 DropMaximum = ImGui::GetItemRectMax();
 				const ImGuiViewport* DropViewport = ImGui::GetWindowViewport();
+				const ImGuiWindow* const StripRootWindow = ImGui::GetCurrentWindow()->RootWindow;
+				const uint32_t StripRootWindowID = StripRootWindow ? StripRootWindow->ID : 0;
+				const auto CapturedIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 				m_DocumentTabInteraction.RegisterDropTarget(
-					{ std::string(HostID), DropViewport ? static_cast<uint32_t>(DropViewport->ID) : 0, { DropMinimum.x, DropMinimum.y },
-						{ DropMaximum.x, DropMaximum.y }, Documents.size(), Documents.size() });
+					{ std::string(HostID), DropViewport ? static_cast<uint32_t>(DropViewport->ID) : 0, StripRootWindowID,
+						{ DropMinimum.x, DropMinimum.y }, { DropMaximum.x, DropMaximum.y }, Documents.size(), Documents.size(),
+						CapturedIdentity && CanTransferDocumentToHost(*CapturedIdentity, HostID) });
 				if (ImGui::BeginDragDropTarget())
 				{
 					if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_EDITOR_DOCUMENT"))
@@ -7756,28 +7697,19 @@ namespace
 			ImGui::End();
 		}
 
-		void CaptureDocumentTabTestInvalidDropTarget(PulseForgeEditor::EditorPanel Panel)
+		void CaptureDocumentTabTestTearOffTarget(PulseForgeEditor::EditorPanel Panel)
 		{
 			if (!m_DocumentHostTabReattachTest) return;
 
-			size_t PanelIndex = m_DocumentHostTabReattachInvalidDropTargets.size();
+			size_t PanelIndex = 0;
 			switch (Panel)
 			{
-			case PulseForgeEditor::EditorPanel::Hierarchy:
-				PanelIndex = 0;
-				break;
 			case PulseForgeEditor::EditorPanel::Inspector:
-				PanelIndex = 1;
 				break;
+			case PulseForgeEditor::EditorPanel::Hierarchy:
 			case PulseForgeEditor::EditorPanel::SceneViewport:
-				PanelIndex = 2;
-				break;
 			case PulseForgeEditor::EditorPanel::ContentBrowser:
-				PanelIndex = 3;
-				break;
 			case PulseForgeEditor::EditorPanel::Console:
-				PanelIndex = 4;
-				break;
 			case PulseForgeEditor::EditorPanel::Scene:
 			case PulseForgeEditor::EditorPanel::MaterialDetails:
 			case PulseForgeEditor::EditorPanel::Performance:
@@ -7785,7 +7717,7 @@ namespace
 			case PulseForgeEditor::EditorPanel::Count:
 				return;
 			}
-			if (PanelIndex >= DocumentTabTestInvalidDropPanelNames.size()) return;
+			if (PanelIndex >= DocumentTabTestTearOffPanelNames.size()) return;
 
 			ImGuiViewport* Viewport = ImGui::GetWindowViewport();
 			const ImVec2 Position = ImGui::GetWindowPos();
@@ -7800,17 +7732,13 @@ namespace
 			const float MaximumY = Position.y + RegionMaximum.y;
 			if (MaximumX - MinimumX < 12.0f || MaximumY - MinimumY < 12.0f) return;
 
-			const float CenterX = (MinimumX + MaximumX) * 0.5f;
-			const float CenterY = (MinimumY + MaximumY) * 0.5f;
-			constexpr float EdgeInset = 3.0f;
-			const std::array<ImVec2, DocumentTabTestDropPointsPerPanel> Positions = { ImVec2(CenterX, CenterY),
-				ImVec2(CenterX, MinimumY + EdgeInset), ImVec2(MinimumX + EdgeInset, CenterY), ImVec2(MaximumX - EdgeInset, CenterY),
-				ImVec2(CenterX, MaximumY - EdgeInset) };
+			const std::array<ImVec2, DocumentTabTestDropPointsPerPanel> Positions = {
+				ImVec2((MinimumX + MaximumX) * 0.5f, (MinimumY + MaximumY) * 0.5f) };
 			const size_t FirstTargetIndex = PanelIndex * DocumentTabTestDropPointsPerPanel;
 			for (size_t PointIndex = 0; PointIndex < Positions.size(); ++PointIndex)
 			{
 				auto& Target = m_DocumentHostTabReattachInvalidDropTargets[FirstTargetIndex + PointIndex];
-				Target.Name = DocumentTabTestInvalidDropTargetNames[FirstTargetIndex + PointIndex];
+				Target.Name = DocumentTabTestTearOffTargetNames[FirstTargetIndex + PointIndex];
 				Target.Position = Positions[PointIndex];
 				Target.ViewportID = Viewport->ID;
 				Target.Available = true;
@@ -7832,7 +7760,7 @@ namespace
 			const bool ContentsVisible = ImGui::Begin(WindowName.c_str(), IsOpen);
 			const bool DockingDomainValid = PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
 				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
-			if (ContentsVisible && DockingDomainValid) CaptureDocumentTabTestInvalidDropTarget(Panel);
+			if (ContentsVisible && DockingDomainValid) CaptureDocumentTabTestTearOffTarget(Panel);
 			if (ImGui::GetWindowViewport() && ImGui::GetMainViewport() && ImGui::GetWindowViewport()->ID == ImGui::GetMainViewport()->ID &&
 				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
 				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
@@ -9018,11 +8946,6 @@ namespace
 		void DrawConsolePanel()
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Console)) return;
-			if (m_DocumentHostTabReattachTest &&
-				m_DocumentHostTabReattachInvalidDropIndex >= (DocumentTabTestDropPointsPerPanel * DocumentTabTestConsolePanelIndex) &&
-				m_DocumentHostTabReattachInvalidDropIndex <
-					(DocumentTabTestDropPointsPerPanel * DocumentTabTestInvalidDropPanelNames.size()))
-				ImGui::SetNextWindowFocus();
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Console)) m_ConsolePanel.DrawContents(m_EditorStyle);
 			ImGui::End();
 		}
@@ -9151,10 +9074,6 @@ namespace
 		void DrawContentBrowserPanel()
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser)) return;
-			// The default layout stacks Content Browser and Console; select each while its drop targets are tested.
-			if (m_DocumentHostTabReattachTest &&
-				m_DocumentHostTabReattachInvalidDropIndex < (DocumentTabTestDropPointsPerPanel * DocumentTabTestConsolePanelIndex))
-				ImGui::SetNextWindowFocus();
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::ContentBrowser))
 			{
 				if (!m_Project)
@@ -10233,7 +10152,7 @@ namespace
 		ImVec2 m_DocumentHostTabReattachTestTabCenter{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestTabViewportID = 0;
 		bool m_DocumentHostTabReattachTestTabCenterValid = false;
-		std::array<DocumentTabTestPointerTarget, DocumentTabTestInvalidDropTargetNames.size()>
+		std::array<DocumentTabTestPointerTarget, DocumentTabTestTearOffTargetNames.size()>
 			m_DocumentHostTabReattachInvalidDropTargets{};
 		size_t m_DocumentHostTabReattachInvalidDropIndex = 0;
 		size_t m_DocumentHostTabReattachTestFrameCount = 0;

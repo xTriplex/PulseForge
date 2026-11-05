@@ -284,11 +284,9 @@ namespace
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(false, false, true));
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, true, true));
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, false, false));
-		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::OutsideEditorWindows));
-		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(false, true, DocumentTabTearOffTarget::FreeDocumentWorkspace));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, false, DocumentTabTearOffTarget::OutsideEditorWindows));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::Rejected));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, true, DocumentTabTearOffTarget::Rejected));
+		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false));
+		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(false, true));
+		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, false));
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, false, true, true) ==
 							DocumentTabReleaseAction::TransferToStrip);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, true, true, true) ==
@@ -296,13 +294,13 @@ namespace
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, true, true, false) ==
 							DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(false, true, DocumentTabTearOffTarget::OutsideEditorWindows), true,
+							CanCreateNativeHostFromDocumentTabDrag(false, true), true,
 							false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(false, false, DocumentTabTearOffTarget::Rejected), true,
+							CanCreateNativeHostFromDocumentTabDrag(false, false), true,
 							false) == DocumentTabReleaseAction::None);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(true, false, DocumentTabTearOffTarget::FreeDocumentWorkspace), true,
+							CanCreateNativeHostFromDocumentTabDrag(true, false), true,
 							false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(
 			Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, false, true, false) == DocumentTabReleaseAction::None);

@@ -63,18 +63,6 @@ namespace PulseForgeEditor
 		CreateNativeHost
 	};
 
-	enum class DocumentTabTearOffTarget : uint8_t
-	{
-		Rejected,
-		FreeDocumentWorkspace,
-		OutsideEditorWindows
-	};
-
-	[[nodiscard]] constexpr bool HasReliableOutsideEditorWindowHitTest(bool HasHoveredViewport, uint32_t HoveredViewportID) noexcept
-	{
-		return HasHoveredViewport && HoveredViewportID == 0;
-	}
-
 	[[nodiscard]] constexpr bool ShouldCaptureDocumentTabDrag(
 		bool TabHovered,
 		bool CloseButtonHovered,
@@ -85,10 +73,22 @@ namespace PulseForgeEditor
 
 	[[nodiscard]] constexpr bool CanCreateNativeHostFromDocumentTabDrag(
 		bool SourceIsMainHost,
-		bool SourceIsNativeHost,
-		DocumentTabTearOffTarget Target) noexcept
+		bool SourceIsNativeHost) noexcept
 	{
-		return (SourceIsMainHost || SourceIsNativeHost) && Target != DocumentTabTearOffTarget::Rejected;
+		return SourceIsMainHost || SourceIsNativeHost;
+	}
+
+	[[nodiscard]] constexpr bool ShouldCaptureDocumentTabDragInput(
+		bool HasCapturedDrag,
+		bool CancelledUntilNewPress,
+		bool LeftButtonDown,
+		bool LeftButtonReleased,
+		float MaximumObservedDistanceSquared,
+		float DragThreshold) noexcept
+	{
+		return (HasCapturedDrag || CancelledUntilNewPress) && (LeftButtonDown || LeftButtonReleased) &&
+			std::isfinite(MaximumObservedDistanceSquared) && std::isfinite(DragThreshold) && DragThreshold >= 0.0f &&
+			MaximumObservedDistanceSquared >= DragThreshold * DragThreshold;
 	}
 
 	[[nodiscard]] constexpr bool ShouldSuppressTabPressAfterDrag(bool Pressed, bool DragRelease) noexcept

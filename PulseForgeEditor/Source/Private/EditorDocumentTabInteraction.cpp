@@ -2,9 +2,10 @@
 
 namespace PulseForgeEditor
 {
-	void EditorDocumentTabInteraction::BeginFrame() noexcept
+	void EditorDocumentTabInteraction::BeginFrame(bool LeftButtonClicked) noexcept
 	{
 		m_DropTargets.clear();
+		if (LeftButtonClicked) m_CancelledUntilNewPress = false;
 	}
 
 	void EditorDocumentTabInteraction::RegisterDropTarget(EditorDocumentTabDropTarget Target)
@@ -13,12 +14,14 @@ namespace PulseForgeEditor
 	}
 
 	std::optional<EditorDocumentTabDropLocation> EditorDocumentTabInteraction::FindDropTarget(
-		DocumentTabPointerPosition Position, uint32_t HoveredViewportID) const
+		DocumentTabPointerPosition Position, bool HasReliableHoveredViewport, uint32_t HoveredViewportID,
+		uint32_t HoveredRootWindowID) const
 	{
+		if (!HasReliableHoveredViewport || HoveredViewportID == 0 || HoveredRootWindowID == 0) return std::nullopt;
 		std::optional<EditorDocumentTabDropLocation> Result;
 		for (const EditorDocumentTabDropTarget& Target : m_DropTargets)
 		{
-			if (HoveredViewportID != 0 && Target.ViewportID != HoveredViewportID) continue;
+			if (!Target.CanReceiveDrop || Target.ViewportID != HoveredViewportID || Target.RootWindowID != HoveredRootWindowID) continue;
 			if (Position.X < Target.Minimum.X || Position.X >= Target.Maximum.X || Position.Y < Target.Minimum.Y ||
 				Position.Y >= Target.Maximum.Y)
 				continue;
@@ -34,6 +37,7 @@ namespace PulseForgeEditor
 	void EditorDocumentTabInteraction::BeginDrag(const EditorDocumentIdentity& Identity,
 		std::optional<DocumentTabPointerPosition> StartPosition, DocumentTabPointerPosition CurrentPosition)
 	{
+		if (m_CancelledUntilNewPress) return;
 		if (!m_ActiveDrag || *m_ActiveDrag != Identity)
 		{
 			m_DragStart.reset();
@@ -49,6 +53,17 @@ namespace PulseForgeEditor
 		m_ActiveDrag.reset();
 		m_DragStart.reset();
 		m_LastValidDragPosition.reset();
+	}
+
+	void EditorDocumentTabInteraction::CancelDragUntilNewPress() noexcept
+	{
+		CancelDrag();
+		m_CancelledUntilNewPress = true;
+	}
+
+	bool EditorDocumentTabInteraction::IsCancelledUntilNewPress() const noexcept
+	{
+		return m_CancelledUntilNewPress;
 	}
 
 	std::optional<EditorDocumentIdentity> EditorDocumentTabInteraction::ActiveDragIdentity() const noexcept
@@ -85,9 +100,11 @@ namespace PulseForgeEditor
 		const float DragDistanceSquared =
 			CalculateDocumentTabDragDistanceSquared(DragStart, CurrentPosition, LastValidPosition, Frame.MaximumObservedDistanceSquared);
 		const bool TransferQueued = m_PendingTransfer && m_PendingTransfer->Identity == Identity;
-		const auto DropLocation = CurrentPosition ? FindDropTarget(*CurrentPosition, Frame.HoveredViewportID) : std::nullopt;
+		const auto DropLocation = CurrentPosition
+			? FindDropTarget(*CurrentPosition, Frame.HasReliableHoveredViewport, Frame.HoveredViewportID, Frame.HoveredRootWindowID)
+			: std::nullopt;
 		const bool CanCreateNativeHost = CanCreateNativeHostFromDocumentTabDrag(
-			Frame.SourceIsMainHost, Frame.SourceIsNativeHost, Frame.TearOffTarget);
+			Frame.SourceIsMainHost, Frame.SourceIsNativeHost);
 		const DocumentTabReleaseAction Action = ResolveDocumentTabReleaseAction(true, true, TransferQueued, DragDistanceSquared,
 			Frame.DragThreshold, CanCreateNativeHost, Identity.Kind != EditorDocumentKind::Level, DropLocation.has_value());
 		return EditorDocumentTabDragRelease{ Identity, Action, DropLocation, *ReleasePosition };
