@@ -1,5 +1,6 @@
 #include "TestEditorSupport.h"
 #include "Editor/EditorMaterialDraftController.h"
+#include "Editor/EditorMaterialPreviewPublication.h"
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "Editor/EditorMaterialDocumentEditor.h"
@@ -291,6 +292,43 @@ namespace
 	void TestMaterialDraftController(TestRunner& Tests)
 	{
 		using namespace PulseForge;
+		{
+			PulseForgeEditor::EditorMaterialPreviewPublication Publication;
+			MaterialAssetDesc DraftA;
+			DraftA.BaseColorFactor = { 0.25f, 0.4f, 0.7f, 1.0f };
+			MaterialAssetDesc DraftB = DraftA;
+			DraftB.BaseColorFactor.r = 0.75f;
+			const auto TextureA = PulseForge::UUID::Generate();
+			const auto TextureB = PulseForge::UUID::Generate();
+			PF_CHECK(Tests, TextureA && TextureB);
+			if (!TextureA || !TextureB) return;
+			DraftA.BaseColorTexture = *TextureA;
+			DraftB.BaseColorTexture = *TextureA;
+			MaterialAssetDesc DraftC = DraftA;
+			DraftC.BaseColorTexture = *TextureB;
+			const auto BytesA = MaterialAssetSerializer::Serialize(DraftA);
+			const auto BytesB = MaterialAssetSerializer::Serialize(DraftB);
+			const auto BytesC = MaterialAssetSerializer::Serialize(DraftC);
+			PF_CHECK(Tests, BytesA && BytesB && BytesC);
+			if (!BytesA || !BytesB || !BytesC) return;
+			const uint64_t FingerprintA = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesA);
+			const uint64_t FingerprintB = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesB);
+			const uint64_t FingerprintC = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesC);
+			PF_CHECK(Tests, FingerprintA != FingerprintB && FingerprintA != FingerprintC);
+			PF_CHECK(Tests, !Publication.HasPublishedFrame() && Publication.GetCandidateSlot() == 1);
+			Publication.Publish(FingerprintA);
+			const size_t DisplayedA = Publication.GetDisplayedSlot();
+			PF_CHECK(Tests, Publication.HasPublishedFrame() && Publication.IsCurrent(FingerprintA) && DisplayedA == 1);
+			const size_t CandidateB = Publication.GetCandidateSlot();
+			PF_CHECK(Tests, CandidateB != DisplayedA);
+			// Pending and failed candidate render paths do not call Publish, so the displayed target remains A.
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.IsCurrent(FingerprintA));
+			Publication.Publish(FingerprintC);
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == CandidateB && Publication.IsCurrent(FingerprintC));
+			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintA) && !Publication.IsCurrent(FingerprintB));
+			Publication.Invalidate();
+			PF_CHECK(Tests, !Publication.HasPublishedFrame());
+		}
 		const auto Identifier = PulseForge::UUID::Generate();
 		PF_CHECK(Tests, Identifier.has_value());
 		if (!Identifier) return;
@@ -476,19 +514,49 @@ namespace
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, !Documents.Find(Identity)->IsDirty());
 		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.2f) < 1.0e-5f);
+		Drafts.ReconcileProjectSources(ProjectValue);
+		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID) && Drafts.CanRedo(ProjectValue, Material->ID));
 
 		const auto Redone = Drafts.ApplyHistoryStep(ProjectValue, Material->ID, true, Documents);
 		PF_CHECK(Tests, Redone.has_value() && *Redone);
 		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		auto RenamedMaterial = AssetOperations::Move(ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(), Material->ID,
+			"Assets/Materials/Renamed-draft.material");
+		PF_CHECK(Tests, RenamedMaterial && RenamedMaterial->ID == Material->ID);
+		if (RenamedMaterial)
+		{
+			*Material = *RenamedMaterial;
+			Drafts.ReconcileProjectSources(ProjectValue);
+			PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID) && Drafts.CanUndo(ProjectValue, Material->ID));
+			PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.85f) < 1.0e-5f);
+		}
 		MaterialAssetDesc ExternalEdit = *Drafts.FindDraft(ProjectValue, Material->ID);
 		ExternalEdit.BaseColorFactor = { 0.1f, 0.2f, 0.9f, 1.0f };
 		PF_CHECK(Tests, MaterialAssetSerializer::SaveToFile(ExternalEdit, Root / Material->ProjectRelativePath).has_value());
 		const auto ExternalBytes = MaterialAssetSerializer::Serialize(ExternalEdit);
 		PF_CHECK(Tests, ExternalBytes.has_value());
+		MaterialAssetDesc CleanExternalEdit = *Drafts.FindDraft(ProjectValue, SecondMaterial->ID);
+		CleanExternalEdit.BaseColorFactor = { 0.65f, 0.55f, 0.45f, 1.0f };
+		PF_CHECK(Tests, MaterialAssetSerializer::SaveToFile(CleanExternalEdit, Root / SecondMaterial->ProjectRelativePath).has_value());
 		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
+		Drafts.ReconcileProjectSources(ProjectValue);
+		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, SecondMaterial->ID));
+		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, SecondMaterial->ID)->BaseColorFactor.r - 0.65f) < 1.0e-5f);
+		PF_CHECK(Tests, !Drafts.FindError(ProjectValue, SecondMaterial->ID));
+		const auto RefreshedCleanSave = Drafts.Save(ProjectValue, SecondMaterial->ID, Documents);
+		PF_CHECK(Tests, RefreshedCleanSave.has_value());
+		const MaterialAssetDesc CleanEditStart = *Drafts.FindDraft(ProjectValue, SecondMaterial->ID);
+		PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, SecondMaterial->ID, CleanEditStart));
+		Drafts.FindDraft(ProjectValue, SecondMaterial->ID)->MetallicFactor = 0.42f;
+		Drafts.FinalizePendingEdits(false);
+		PF_CHECK(Tests, Documents.MarkEdited(SecondIdentity));
+		const auto CleanAfterRefreshSave = Drafts.Save(ProjectValue, SecondMaterial->ID, Documents);
+		PF_CHECK(Tests, CleanAfterRefreshSave.has_value() && !Drafts.IsDirty(ProjectValue, SecondMaterial->ID));
+		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r == 0.85f);
 		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		PF_CHECK(Tests, Drafts.FindError(ProjectValue, Material->ID) != nullptr);
 		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.85f) < 1.0e-5f);
 		const bool ConflictedSave = MaterialSession && !EditorRegistry.Save(*MaterialSession);
 		PF_CHECK(Tests, ConflictedSave);
@@ -505,6 +573,9 @@ namespace
 		PF_CHECK(Tests, MaterialSession && EditorRegistry.Discard(*MaterialSession));
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.1f) < 1.0e-5f);
+		const auto DiscardBaseline = MaterialAssetService::LoadSourceSnapshot(
+			Material->ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
+		PF_CHECK(Tests, DiscardBaseline && Drafts.Save(ProjectValue, Material->ID, Documents));
 		const MaterialAssetDesc RetryStart = *Drafts.FindDraft(ProjectValue, Material->ID);
 		PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, Material->ID, RetryStart));
 		Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r = 0.85f;

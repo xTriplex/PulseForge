@@ -96,9 +96,22 @@ namespace PulseForgeEditor
 	{
 		if (const std::string* Error = Drafts.FindError(ProjectValue, Asset.ID))
 		{
-			ImGui::TextColored(Style.GetColor(EditorColorToken::Error), "Material could not be loaded: %s", Error->c_str());
-			if (ImGui::SmallButton("Retry Material Load")) Drafts.ClearLoadError(ProjectValue, Asset.ID);
-			return false;
+			ImGui::TextColored(Style.GetColor(EditorColorToken::Error), "Material source needs attention: %s", Error->c_str());
+			if (Drafts.FindDraft(ProjectValue, Asset.ID))
+			{
+				if (ImGui::SmallButton("Reload Source") && !Actions.RevertMaterialFromDetails(Asset.ID))
+					ImGui::OpenPopup("MaterialReloadFailed");
+				if (ImGui::BeginPopup("MaterialReloadFailed"))
+				{
+					ImGui::TextUnformatted("The source could not be reloaded; the current draft is preserved.");
+					ImGui::EndPopup();
+				}
+			}
+			else
+			{
+				if (ImGui::SmallButton("Retry Material Load")) Drafts.ClearLoadError(ProjectValue, Asset.ID);
+				return false;
+			}
 		}
 
 		auto Loaded = Drafts.LoadDraft(ProjectValue, Asset.ID);

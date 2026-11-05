@@ -7,6 +7,7 @@
 #include "Renderer/EnvironmentLightingTextures.h"
 #include "Renderer/RenderDevice.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/Mesh.h"
 #include "Renderer/DepthCubemap.h"
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/SpotlightShadowMath.h"
@@ -193,6 +194,7 @@ namespace PulseForge
 		// this never changes project or material asset data.
 		[[nodiscard]] std::expected<void, SceneRendererError> SetTransientMaterialOverride(
 			const AssetID& Material, const MaterialAssetDesc& Description, uint64_t Revision);
+		void SetTransientPreviewMesh(const AssetID& Identity, const Mesh* Geometry) noexcept;
 		void ClearTransientMaterialOverride() noexcept;
 		[[nodiscard]] bool SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept;
@@ -205,6 +207,10 @@ namespace PulseForge
 		void RefreshProjectAssets() noexcept;
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
 		[[nodiscard]] bool IsAssetPreparationPending() const noexcept { return m_AssetPreparationPending; }
+		[[nodiscard]] size_t GetPreparedMeshCount() const noexcept
+		{
+			return m_PreparedSnapshot ? m_PreparedSnapshot->Meshes.size() : 0;
+		}
 		[[nodiscard]] AssetPreparationServiceStats GetAssetPreparationStats() const noexcept;
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
 		[[nodiscard]] std::expected<AssetPreparationService::Subscription, AssetPreparationError>
@@ -330,6 +336,8 @@ namespace PulseForge
 #endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<TransientMaterialOverride> m_TransientMaterialOverride;
+		std::optional<AssetID> m_TransientPreviewMeshIdentity;
+		const Mesh* m_TransientPreviewMesh = nullptr;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
 		std::unique_ptr<RuntimeUIRenderPass> m_RuntimeUIRenderPass;
 		TextureHandle m_TransparentRuntimeUITexture;

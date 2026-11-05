@@ -23,7 +23,8 @@ namespace PulseForgeEditor
 		[[nodiscard]] PulseForge::MaterialAssetDesc* FindDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		[[nodiscard]] bool ContainsDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] DraftResult LoadDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
-		void ReplaceDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset, PulseForge::MaterialAssetDesc Draft);
+		void ReplaceDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset,
+			PulseForge::MaterialAssetDesc Draft, std::string SourceBytes);
 
 		[[nodiscard]] const std::string* FindError(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		void ClearLoadError(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
@@ -41,6 +42,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> Reload(
 			PulseForge::Project& Project, const PulseForge::AssetID& Asset, EditorDocumentManager& Documents);
 		[[nodiscard]] std::vector<PulseForge::AssetID> GetDirtyAssets(const PulseForge::Project& Project) const;
+		void ReconcileProjectSources(PulseForge::Project& Project);
 		void Forget(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		void ClearProject(const PulseForge::Project& Project);
 

@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorDocumentCommandOwner.h"
 
 #include <new>
 #include <stdexcept>
@@ -357,6 +358,23 @@ namespace
 		const EditorDocumentIdentity TextureCommandDocument{ *Project, *Material, EditorDocumentKind::Texture };
 		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(&TextureCommandDocument, *Project) == EditorDocumentCommandTarget::Unsupported);
 		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(&OtherProjectMaterial, *Project) == EditorDocumentCommandTarget::Unsupported);
+		{
+			const std::array NativeA{ MaterialA };
+			const std::array NativeB{ MaterialB };
+			auto OwnerA = ResolveEditorDocumentCommandOwner(false, false, std::nullopt, Level, NativeA);
+			auto OwnerB = ResolveEditorDocumentCommandOwner(false, false, std::nullopt, Level, NativeB);
+			PF_CHECK(Tests, OwnerA.Document == MaterialA && !OwnerA.MaterialDetailsAsset);
+			PF_CHECK(Tests, OwnerB.Document == MaterialB && !OwnerB.MaterialDetailsAsset);
+			const auto Transition = ResolveEditorDocumentCommandOwner(false, false, std::nullopt, Level, {});
+			PF_CHECK(Tests, !Transition.Document && !Transition.MaterialDetailsAsset);
+			const auto MainLevelOwner = ResolveEditorDocumentCommandOwner(true, false, std::nullopt, Level, {});
+			PF_CHECK(Tests, MainLevelOwner.Document == Level);
+			const auto DetailsOwner = ResolveEditorDocumentCommandOwner(true, true, *Material, Level, {});
+			PF_CHECK(Tests, !DetailsOwner.Document && DetailsOwner.MaterialDetailsAsset == Material);
+			const std::array AmbiguousNative{ MaterialA, MaterialB };
+			const auto Ambiguous = ResolveEditorDocumentCommandOwner(true, false, std::nullopt, Level, AmbiguousNative);
+			PF_CHECK(Tests, !Ambiguous.Document && !Ambiguous.MaterialDetailsAsset);
+		}
 		PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
 		const uint64_t LocationUpdateRevision = Manager.Find(MaterialA)->Revision;
 		const bool LocationUpdated =

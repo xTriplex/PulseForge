@@ -109,6 +109,8 @@ namespace PulseForgeEditor
 			{
 				ImGui::TextWrapped(Shown ? "Last complete preview retained. New draft preview unavailable: %s" :
 					"Preview unavailable: %s", PreviewError.c_str());
+				if (!Shown && ImGui::SmallButton("Retry Preview"))
+					(void)m_Preview->RequestRetry(Session.SessionGeneration);
 			}
 			else if (!Shown) ImGui::TextDisabled("Preparing the fixed-PBR preview…");
 		}

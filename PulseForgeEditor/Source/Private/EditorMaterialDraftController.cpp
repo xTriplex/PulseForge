@@ -66,9 +66,10 @@ namespace PulseForgeEditor
 	}
 
 	void EditorMaterialDraftController::ReplaceDraft(
-		const PulseForge::Project& Project, const PulseForge::AssetID& Asset, PulseForge::MaterialAssetDesc Draft)
+		const PulseForge::Project& Project, const PulseForge::AssetID& Asset, PulseForge::MaterialAssetDesc Draft,
+		std::string SourceBytes)
 	{
-		m_Drafts.ReplaceDraft(MakeKey(Project, Asset), std::move(Draft));
+		m_Drafts.ReplaceDraft(MakeKey(Project, Asset), std::move(Draft), std::move(SourceBytes));
 	}
 
 	const std::string* EditorMaterialDraftController::FindError(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const
@@ -157,9 +158,7 @@ namespace PulseForgeEditor
 		if (!Loaded) return std::unexpected(Loaded.error().Message);
 
 		const std::string Key = MakeKey(Project, Asset);
-		std::string SourceBytes = std::move(Loaded->SourceBytes);
-		m_Drafts.ReplaceDraft(Key, std::move(Loaded->Description));
-		m_Drafts.SetSourceBytes(Key, std::move(SourceBytes));
+		m_Drafts.ReplaceDraft(Key, std::move(Loaded->Description), std::move(Loaded->SourceBytes));
 		const PulseForgeEditor::EditorDocumentIdentity Identity{ Project.GetDescription().ID, Asset,
 			PulseForgeEditor::EditorDocumentKind::Material };
 		if (auto* Session = Documents.Find(Identity)) Session->Revision = Session->SavedRevision;
@@ -178,6 +177,41 @@ namespace PulseForgeEditor
 			if (auto Asset = PulseForge::UUID::Parse(std::string_view(Key).substr(Separator + 1))) Assets.push_back(*Asset);
 		}
 		return Assets;
+	}
+
+	void EditorMaterialDraftController::ReconcileProjectSources(PulseForge::Project& Project)
+	{
+		const std::string Prefix = PathToUtf8(Project.GetRootPath().lexically_normal()) + ":";
+		for (const std::string& Key : m_Drafts.GetKeys())
+		{
+			if (!Key.starts_with(Prefix)) continue;
+			const size_t Separator = Key.rfind(':');
+			if (Separator == std::string::npos) continue;
+			const auto AssetID = PulseForge::UUID::Parse(std::string_view(Key).substr(Separator + 1));
+			if (!AssetID) continue;
+			auto* Draft = m_Drafts.FindDraft(Key);
+			if (!Draft) continue;
+
+			auto Snapshot = PulseForge::MaterialAssetService::LoadSourceSnapshot(
+				*AssetID, Project.GetRootPath(), Project.GetAssetRegistry());
+			if (!Snapshot)
+			{
+				m_Drafts.SetError(Key, Snapshot.error().Message);
+				continue;
+			}
+			const std::string* const Baseline = m_Drafts.FindSourceBytes(Key);
+			if (Baseline && *Baseline == Snapshot->SourceBytes)
+			{
+				if (!m_Drafts.IsDirty(Key)) m_Drafts.ClearError(Key);
+				continue;
+			}
+			if (m_Drafts.IsDirty(Key))
+			{
+				m_Drafts.SetError(Key, "The material source changed outside this draft. Save is blocked; reload or discard to adopt the new source.");
+				continue;
+			}
+			m_Drafts.ReplaceDraft(Key, std::move(Snapshot->Description), std::move(Snapshot->SourceBytes));
+		}
 	}
 
 	void EditorMaterialDraftController::Forget(const PulseForge::Project& Project, const PulseForge::AssetID& Asset)

@@ -1,4 +1,5 @@
 #include "Editor/EditorMaterialPreviewService.h"
+#include "Editor/EditorMaterialPreviewPublication.h"
 
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
@@ -6,6 +7,8 @@
 #include "Editor/EditorTextureRegistry.h"
 #include "Renderer/RenderDevice.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/MeshData.h"
+#include "Renderer/Mesh.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
@@ -15,8 +18,12 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 #include <span>
+#include <vector>
 
 namespace PulseForgeEditor
 {
@@ -24,18 +31,59 @@ namespace PulseForgeEditor
 	{
 		constexpr uint32_t PreviewWidth = 320;
 		constexpr uint32_t PreviewHeight = 240;
-		constexpr size_t MaximumPreviewSessions = 4;
+		constexpr size_t MaximumPreviewSessions = 512;
+		constexpr uint32_t SphereSegments = 32;
+		constexpr uint32_t SphereRings = 20;
 
-		uint64_t HashDraft(std::string_view Bytes) noexcept
+		struct PreviewVertex final
 		{
-			uint64_t Hash = 14695981039346656037ull;
-			for (const unsigned char Byte : Bytes)
+			float Position[3];
+			float Color[4];
+			float UV[2];
+			float Normal[3];
+		};
+
+		PulseForge::MeshCreateResult CreatePreviewSphere(PulseForge::RenderDevice& Runtime)
+		{
+			std::vector<PreviewVertex> Vertices;
+			std::vector<uint32_t> Indices;
+			Vertices.reserve((SphereSegments + 1) * (SphereRings + 1));
+			Indices.reserve(SphereSegments * SphereRings * 6);
+			for (uint32_t Ring = 0; Ring <= SphereRings; ++Ring)
 			{
-				Hash ^= Byte;
-				Hash *= 1099511628211ull;
+				const float V = static_cast<float>(Ring) / SphereRings;
+				const float Latitude = glm::pi<float>() * V;
+				for (uint32_t Segment = 0; Segment <= SphereSegments; ++Segment)
+				{
+					const float U = static_cast<float>(Segment) / SphereSegments;
+					const float Longitude = glm::two_pi<float>() * U;
+					const float X = std::sin(Latitude) * std::cos(Longitude);
+					const float Y = std::cos(Latitude);
+					const float Z = std::sin(Latitude) * std::sin(Longitude);
+					Vertices.push_back({ { X, Y, Z }, { 1.0f, 1.0f, 1.0f, 1.0f }, { U, V }, { X, Y, Z } });
+				}
 			}
-			return Hash == 0 ? 1 : Hash;
+			for (uint32_t Ring = 0; Ring < SphereRings; ++Ring)
+				for (uint32_t Segment = 0; Segment < SphereSegments; ++Segment)
+				{
+					const uint32_t First = Ring * (SphereSegments + 1) + Segment;
+					const uint32_t Next = First + SphereSegments + 1;
+					Indices.insert(Indices.end(), { First, First + 1, Next, First + 1, Next + 1, Next });
+				}
+
+			PulseForge::MeshDesc Description;
+			Description.VertexLayout.Stride = sizeof(PreviewVertex);
+			Description.VertexLayout.Attributes = {
+				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float3, offsetof(PreviewVertex, Position) },
+				{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float4, offsetof(PreviewVertex, Color) },
+				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(PreviewVertex, UV) },
+				{ PulseForge::VertexSemantic::Normal, PulseForge::VertexFormat::Float3, offsetof(PreviewVertex, Normal) } };
+			Description.VertexData = std::as_bytes(std::span(Vertices));
+			Description.Indices = Indices;
+			Description.DebugName = "PulseForge editor fixed-PBR material preview sphere";
+			return Runtime.CreateMesh(Description);
 		}
+
 	}
 
 	struct EditorMaterialPreviewService::Entry final
@@ -45,18 +93,23 @@ namespace PulseForgeEditor
 		PulseForge::RenderDevice* Runtime = nullptr;
 		EditorTextureRegistry* Textures = nullptr;
 		std::unique_ptr<PulseForge::Scene> Scene;
+		PulseForge::MeshHandle PreviewMesh;
 		std::unique_ptr<PulseForge::SceneRenderer> Renderer;
-		PulseForge::RenderTargetHandle Target;
-		uint64_t TextureID = 0;
+		PulseForge::AssetID PreviewMeshIdentity;
+		std::array<PulseForge::RenderTargetHandle, 2> Targets;
+		std::array<uint64_t, 2> TextureIDs{};
 		uint64_t DraftFingerprint = 0;
+		EditorMaterialPreviewPublication Publication;
 		uint64_t LastTouchedFrame = 0;
 		bool Prepared = false;
-		bool HasLastGoodFrame = false;
+		bool RetryRequested = false;
 		std::string Error;
 
 		~Entry()
 		{
-			if (Textures && TextureID != 0) Textures->UnregisterTexture(TextureID);
+			if (Textures)
+				for (const uint64_t TextureID : TextureIDs)
+					if (TextureID != 0) Textures->UnregisterTexture(TextureID);
 		}
 	};
 
@@ -82,6 +135,7 @@ namespace PulseForgeEditor
 			if (!Preview->Renderer) continue;
 			Preview->Renderer->RefreshProjectAssets();
 			Preview->Prepared = false;
+			Preview->Publication.Invalidate();
 		}
 	}
 
@@ -110,11 +164,7 @@ namespace PulseForgeEditor
 		}
 		if (m_Entries.size() >= MaximumPreviewSessions)
 		{
-			auto Oldest = std::min_element(m_Entries.begin(), m_Entries.end(), [](const auto& First, const auto& Second)
-			{
-				return First.second->LastTouchedFrame < Second.second->LastTouchedFrame;
-			});
-			if (Oldest != m_Entries.end()) m_Entries.erase(Oldest);
+			return nullptr;
 		}
 
 		auto New = std::make_unique<Entry>();
@@ -130,24 +180,20 @@ namespace PulseForgeEditor
 		}
 		New->Renderer = std::move(*Renderer);
 		auto Scene = std::make_unique<PulseForge::Scene>();
-		std::vector<PulseForge::AssetRecord> MeshAssets;
-		for (const PulseForge::AssetRecord& Asset : Project.GetAssetRegistry().GetAssets())
-			if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Mesh)) MeshAssets.push_back(Asset);
-		std::sort(MeshAssets.begin(), MeshAssets.end(), [](const auto& First, const auto& Second)
-		{
-			return First.ProjectRelativePath < Second.ProjectRelativePath;
-		});
-		if (MeshAssets.empty())
-			New->Error = "Material preview needs a managed mesh asset in this project.";
+		auto CreatedPreviewMesh = CreatePreviewSphere(Runtime);
+		if (!CreatedPreviewMesh)
+			New->Error = "Could not create the built-in material preview sphere: " + CreatedPreviewMesh.error().Message;
 		else
 		{
+			New->PreviewMesh = std::move(*CreatedPreviewMesh);
+			New->PreviewMeshIdentity = PulseForge::UUID::Generate().value_or(PulseForge::UUID{});
 			auto MeshEntity = Scene->CreateEntity("Material preview mesh");
 			auto LightEntity = Scene->CreateEntity("Material preview light");
 			if (!MeshEntity || !LightEntity)
 				New->Error = "Could not create the isolated material preview scene.";
 			else
 			{
-				const auto MeshSet = MeshEntity->SetMeshRenderer({ MeshAssets.front().ID, Material });
+				const auto MeshSet = MeshEntity->SetMeshRenderer({ New->PreviewMeshIdentity, Material });
 				PulseForge::DirectionalLightComponent Light;
 				Light.Intensity = 3.0f;
 				Light.CastShadows = false;
@@ -158,29 +204,35 @@ namespace PulseForgeEditor
 				if (!MeshSet || !LightSet || !TransformSet)
 					New->Error = "Could not configure the isolated material preview scene.";
 				else
+				{
 					New->Scene = std::move(Scene);
+					New->Renderer->SetTransientPreviewMesh(New->PreviewMeshIdentity, New->PreviewMesh.get());
+				}
 			}
 		}
 
-		PulseForge::RenderTargetDesc TargetDescription;
-		TargetDescription.Width = PreviewWidth;
-		TargetDescription.Height = PreviewHeight;
-		TargetDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-		TargetDescription.DebugName = "PulseForge material draft preview";
-		if (auto Target = Runtime.CreateRenderTarget(TargetDescription); Target)
+		for (size_t Index = 0; Index < New->Targets.size(); ++Index)
 		{
-			if (const PulseForge::Texture* Color = (*Target)->GetColorTexture())
+			PulseForge::RenderTargetDesc TargetDescription;
+			TargetDescription.Width = PreviewWidth;
+			TargetDescription.Height = PreviewHeight;
+			TargetDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			TargetDescription.DebugName = "PulseForge material draft preview candidate";
+			if (auto Target = Runtime.CreateRenderTarget(TargetDescription); Target)
 			{
-				if (auto TextureID = Textures.RegisterTexture(*Color); TextureID)
+				if (const PulseForge::Texture* Color = (*Target)->GetColorTexture())
 				{
-					New->TextureID = *TextureID;
-					New->Target = std::move(*Target);
+					if (auto TextureID = Textures.RegisterTexture(*Color); TextureID)
+					{
+						New->TextureIDs[Index] = *TextureID;
+						New->Targets[Index] = std::move(*Target);
+					}
+					else New->Error = "Could not register the material preview image: " + TextureID.error();
 				}
-				else New->Error = "Could not register the material preview image: " + TextureID.error();
+				else New->Error = "The material preview target has no color texture.";
 			}
-			else New->Error = "The material preview target has no color texture.";
+			else New->Error = "Could not create the material preview target: " + Target.error().Message;
 		}
-		else New->Error = "Could not create the material preview target: " + Target.error().Message;
 
 		Entry* Result = New.get();
 		m_Entries.emplace(SessionGeneration, std::move(New));
@@ -191,11 +243,14 @@ namespace PulseForgeEditor
 		PulseForge::Project& Project, const PulseForge::UUID& Material, uint64_t SessionGeneration, uint64_t DraftRevision,
 		const PulseForge::MaterialAssetDesc& Draft, const std::filesystem::path& CompiledShaderDirectory)
 	{
+		if (const auto Existing = m_Entries.find(SessionGeneration); Existing != m_Entries.end() &&
+			Existing->second->RetryRequested && !Existing->second->Publication.HasPublishedFrame())
+			m_Entries.erase(Existing);
 		Entry* const Preview = FindOrCreate(Runtime, Textures, Project, Material, SessionGeneration, CompiledShaderDirectory);
 		if (!Preview) return;
 		Preview->LastTouchedFrame = m_Frame;
 		Preview->Prepared = false;
-		if (!Preview->Renderer || !Preview->Scene || !Preview->Target) return;
+		if (!Preview->Renderer || !Preview->Scene || !Preview->Targets[0] || !Preview->Targets[1]) return;
 
 		auto Serialized = PulseForge::MaterialAssetSerializer::Serialize(Draft);
 		if (!Serialized)
@@ -203,7 +258,13 @@ namespace PulseForgeEditor
 			Preview->Error = "Draft preview is invalid: " + Serialized.error().Message;
 			return;
 		}
-		const uint64_t Fingerprint = HashDraft(*Serialized);
+		const uint64_t Fingerprint = ComputeEditorMaterialPreviewFingerprint(*Serialized);
+		if (Preview->Publication.IsCurrent(Fingerprint))
+		{
+			Preview->Prepared = false;
+			Preview->Error.clear();
+			return;
+		}
 		if (Fingerprint != Preview->DraftFingerprint)
 		{
 			if (auto Updated = Preview->Renderer->SetTransientMaterialOverride(Material, Draft,
@@ -225,8 +286,26 @@ namespace PulseForgeEditor
 			Preview->Error = Prepared.error().Message;
 			return;
 		}
+		if (Preview->Renderer->IsAssetPreparationPending())
+		{
+			Preview->Error = "Preview resources are still preparing; the last complete preview is retained.";
+			return;
+		}
+		if (Preview->Renderer->GetPreparedMeshCount() != 1)
+		{
+			Preview->Error = "The preview scene did not prepare its required material geometry.";
+			return;
+		}
 		Preview->Prepared = true;
-		Preview->Error.clear();
+		Preview->Error = "A complete material preview candidate is ready.";
+	}
+
+	bool EditorMaterialPreviewService::RequestRetry(uint64_t SessionGeneration) noexcept
+	{
+		const auto Found = m_Entries.find(SessionGeneration);
+		if (Found == m_Entries.end() || Found->second->Publication.HasPublishedFrame()) return false;
+		Found->second->RetryRequested = true;
+		return true;
 	}
 
 	bool EditorMaterialPreviewService::Draw(uint64_t SessionGeneration, float Width, float Height)
@@ -235,21 +314,25 @@ namespace PulseForgeEditor
 		if (Found == m_Entries.end()) return false;
 		Entry& Preview = *Found->second;
 		Preview.LastTouchedFrame = m_Frame;
-		if (Preview.Prepared && Preview.Renderer && Preview.Target)
+		if (Preview.Prepared && Preview.Renderer)
 		{
-			auto Rendered = Preview.Renderer->RenderPreparedSceneToOutput(*Preview.Target);
-			if (Rendered)
+			const size_t Candidate = Preview.Publication.GetCandidateSlot();
+			auto Rendered = Preview.Renderer->RenderPreparedSceneToOutput(*Preview.Targets[Candidate]);
+			if (Rendered && Rendered->GeometryDrawCount == 1)
 			{
-				Preview.HasLastGoodFrame = true;
+				Preview.Publication.Publish(Preview.DraftFingerprint);
 				Preview.Error.clear();
 			}
-			else Preview.Error = Rendered.error().Message;
+			else Preview.Error = Rendered
+				? "The candidate rendered without the required material geometry; the last complete preview is retained."
+				: Rendered.error().Message;
+			Preview.Prepared = false;
 		}
-		if (Preview.HasLastGoodFrame && Preview.TextureID != 0)
+		if (Preview.Publication.HasPublishedFrame() && Preview.TextureIDs[Preview.Publication.GetDisplayedSlot()] != 0)
 		{
 			const float DrawWidth = (std::max)(1.0f, Width);
 			const float DrawHeight = (std::max)(1.0f, Height);
-			ImGui::Image(ImTextureRef(static_cast<ImTextureID>(Preview.TextureID)), ImVec2(DrawWidth, DrawHeight));
+			ImGui::Image(ImTextureRef(static_cast<ImTextureID>(Preview.TextureIDs[Preview.Publication.GetDisplayedSlot()])), ImVec2(DrawWidth, DrawHeight));
 			return true;
 		}
 		return false;

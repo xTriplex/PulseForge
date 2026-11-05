@@ -152,6 +152,36 @@ namespace PulseForgeEditor
 		return Candidates;
 	}
 
+	std::vector<PulseForge::AssetID> ConsumeLegacyMaterialDetailsEntries(EditorDocumentWorkspaceState& State)
+	{
+		auto Candidates = GetMaterialDetailsMigrationCandidates(State);
+		if (Candidates.empty()) return Candidates;
+		const std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> Consumed(Candidates.begin(), Candidates.end());
+		std::erase_if(State.RememberedPlacements, [](const auto& Placement)
+		{
+			return Placement.first == EditorDocumentKind::Material;
+		});
+		for (EditorDocumentHost& Host : State.Hosts)
+		{
+			const auto WasConsumed = [&Consumed](const EditorDocumentIdentity& Identity)
+			{
+				return Identity.Kind == EditorDocumentKind::Material && Consumed.contains(Identity.Asset);
+			};
+			std::erase_if(Host.Documents, WasConsumed);
+			if (Host.ActiveDocument && WasConsumed(*Host.ActiveDocument))
+				Host.ActiveDocument = Host.Documents.empty()
+					? std::nullopt : std::optional<EditorDocumentIdentity>(Host.Documents.front());
+		}
+		std::erase_if(State.Hosts, [](const EditorDocumentHost& Host)
+		{
+			return Host.Role == EditorDocumentHostRole::Native && Host.Documents.empty();
+		});
+		if (std::none_of(State.Hosts.begin(), State.Hosts.end(), [&State](const EditorDocumentHost& Host)
+			{ return Host.ID == State.FocusedHostID; }))
+			State.FocusedHostID = std::string(EditorDocumentManager::MainHostID);
+		return Candidates;
+	}
+
 	std::expected<std::string, std::string> EditorDocumentWorkspaceCodec::Serialize(
 		const EditorDocumentWorkspaceState& State)
 	{

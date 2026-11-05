@@ -33,4 +33,6 @@ namespace PulseForgeEditor
 
 	[[nodiscard]] std::vector<PulseForge::AssetID> GetMaterialDetailsMigrationCandidates(
 		const EditorDocumentWorkspaceState& State);
+	[[nodiscard]] std::vector<PulseForge::AssetID> ConsumeLegacyMaterialDetailsEntries(
+		EditorDocumentWorkspaceState& State);
 }

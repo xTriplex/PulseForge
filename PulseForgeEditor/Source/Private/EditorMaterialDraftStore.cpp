@@ -71,6 +71,17 @@ namespace PulseForgeEditor
 		return Keys;
 	}
 
+	std::vector<std::string> EditorMaterialDraftStore::GetKeys() const
+	{
+		std::vector<std::string> Keys;
+		Keys.reserve(m_Entries.size());
+		for (const auto& [Key, State] : m_Entries)
+		{
+			if (State.Draft) Keys.push_back(Key);
+		}
+		return Keys;
+	}
+
 	bool EditorMaterialDraftStore::CanUndo(std::string_view Key) const
 	{
 		const Entry* const Found = FindEntry(Key);
@@ -142,6 +153,12 @@ namespace PulseForgeEditor
 	void EditorMaterialDraftStore::SetSourceBytes(std::string Key, std::string SourceBytes)
 	{
 		m_Entries[std::move(Key)].SavedSourceBytes = std::move(SourceBytes);
+	}
+
+	void EditorMaterialDraftStore::ReplaceDraft(std::string Key, PulseForge::MaterialAssetDesc Draft, std::string SourceBytes)
+	{
+		ReplaceDraft(Key, std::move(Draft));
+		SetSourceBytes(std::move(Key), std::move(SourceBytes));
 	}
 
 	const std::string* EditorMaterialDraftStore::FindSourceBytes(std::string_view Key) const

@@ -882,10 +882,13 @@ namespace PulseForge
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
 					*Instance.MaterialAsset, "Referenced material asset is not present in the project registry" });
 
-			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
-			if (!Mesh)
+			const bool HasPreviewMesh = m_TransientPreviewMesh && m_TransientPreviewMeshIdentity == Instance.MeshAsset;
+			auto MeshResult = HasPreviewMesh
+				? std::expected<std::reference_wrapper<const Mesh>, MeshAssetError>(std::cref(*m_TransientPreviewMesh))
+				: m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
+			if (!MeshResult)
 			{
-				if (Mesh.error().Code == MeshAssetErrorCode::Pending)
+				if (MeshResult.error().Code == MeshAssetErrorCode::Pending)
 				{
 					m_AssetPreparationPending = true;
 					continue;
@@ -894,11 +897,12 @@ namespace PulseForge
 					SceneRendererErrorCode::AssetLoadFailed,
 					Instance.Entity,
 					Instance.MeshAsset,
-					"Could not load mesh asset: " + Mesh.error().Message
+				"Could not load mesh asset: " + MeshResult.error().Message
 				});
 			}
 
-			const VertexLayoutDesc& Layout = Mesh->get().GetVertexLayout();
+			const Mesh* const MeshResource = &MeshResult->get();
+			const VertexLayoutDesc& Layout = MeshResource->GetVertexLayout();
 			if (SceneVertexLayout && !SceneRendererPipelineCache::HasSameVertexLayout(*SceneVertexLayout, Layout))
 			{
 				return std::unexpected(SceneRendererError{
@@ -909,7 +913,7 @@ namespace PulseForge
 				});
 			}
 			SceneVertexLayout = Layout;
-			m_PreparedMeshResources.try_emplace(Instance.MeshAsset, &Mesh->get());
+			m_PreparedMeshResources.try_emplace(Instance.MeshAsset, MeshResource);
 
 			std::expected<void, SceneRendererError> Bindings;
 			if (Instance.MaterialAsset)
@@ -985,6 +989,15 @@ namespace PulseForge
 		m_PreparedSnapshot = std::move(*Snapshot);
 		m_PreparedEnvironmentTextures = EnvironmentTextures;
 		return {};
+	}
+
+	void SceneRenderer::SetTransientPreviewMesh(const AssetID& Identity, const Mesh* Geometry) noexcept
+	{
+		m_TransientPreviewMeshIdentity = Geometry ? std::optional<AssetID>(Identity) : std::nullopt;
+		m_TransientPreviewMesh = Geometry;
+		m_PreparedSnapshot.reset();
+		m_PreparedMeshResources.clear();
+		m_PreparedMaterialBindings.clear();
 	}
 
 	std::expected<const BindingSet*, SceneRendererError> SceneRenderer::ResolveMaterialBinding(const SceneMeshInstance& Instance)

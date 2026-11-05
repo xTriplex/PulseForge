@@ -26,6 +26,7 @@ namespace PulseForgeEditor
 
 		[[nodiscard]] bool IsDirty(std::string_view Key) const;
 		[[nodiscard]] std::vector<std::string> GetDirtyKeys() const;
+		[[nodiscard]] std::vector<std::string> GetKeys() const;
 		[[nodiscard]] bool CanUndo(std::string_view Key) const;
 		[[nodiscard]] bool CanRedo(std::string_view Key) const;
 		[[nodiscard]] bool BeginEdit(std::string_view Key, const PulseForge::MaterialAssetDesc& InitialState);
@@ -34,6 +35,7 @@ namespace PulseForgeEditor
 		void MarkSaved(std::string_view Key);
 		void MarkSaved(std::string_view Key, std::string SourceBytes);
 		void SetSourceBytes(std::string Key, std::string SourceBytes);
+		void ReplaceDraft(std::string Key, PulseForge::MaterialAssetDesc Draft, std::string SourceBytes);
 		[[nodiscard]] const std::string* FindSourceBytes(std::string_view Key) const;
 		void Forget(std::string_view Key);
 		void ClearProject(std::string_view ProjectKeyPrefix);
