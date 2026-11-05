@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -99,6 +100,9 @@ namespace PulseForgeEditor
 		std::array<PulseForge::RenderTargetHandle, 2> Targets;
 		std::array<uint64_t, 2> TextureIDs{};
 		uint64_t DraftFingerprint = 0;
+		uint64_t RequestedFingerprint = 0;
+		uint64_t AssetRevision = 1;
+		uint64_t PreparedDraftRevision = 0;
 		EditorMaterialPreviewPublication Publication;
 		uint64_t LastTouchedFrame = 0;
 		bool Prepared = false;
@@ -129,13 +133,15 @@ namespace PulseForgeEditor
 
 	void EditorMaterialPreviewService::RefreshProjectAssets() noexcept
 	{
+		if (m_AssetRevision != (std::numeric_limits<uint64_t>::max)()) ++m_AssetRevision;
 		for (auto& [Generation, Preview] : m_Entries)
 		{
 			(void)Generation;
-			if (!Preview->Renderer) continue;
-			Preview->Renderer->RefreshProjectAssets();
+			if (Preview->Renderer) Preview->Renderer->RefreshProjectAssets();
+			Preview->AssetRevision = m_AssetRevision;
 			Preview->Prepared = false;
-			Preview->Publication.Invalidate();
+			Preview->Publication.Invalidate(Preview->AssetRevision);
+			Preview->Error = "Material preview assets were refreshed; preparing a replacement while retaining the last complete preview.";
 		}
 	}
 
@@ -172,6 +178,7 @@ namespace PulseForgeEditor
 		New->Material = Material;
 		New->Runtime = &Runtime;
 		New->Textures = &Textures;
+		New->AssetRevision = m_AssetRevision;
 		auto Renderer = PulseForge::SceneRenderer::Create(Runtime, Project, CompiledShaderDirectory);
 		if (!Renderer)
 		{
@@ -259,7 +266,8 @@ namespace PulseForgeEditor
 			return;
 		}
 		const uint64_t Fingerprint = ComputeEditorMaterialPreviewFingerprint(*Serialized);
-		if (Preview->Publication.IsCurrent(Fingerprint))
+		Preview->RequestedFingerprint = Fingerprint;
+		if (Preview->Publication.IsCurrent(Fingerprint, Preview->AssetRevision))
 		{
 			Preview->Prepared = false;
 			Preview->Error.clear();
@@ -297,36 +305,58 @@ namespace PulseForgeEditor
 			return;
 		}
 		Preview->Prepared = true;
+		Preview->PreparedDraftRevision = DraftRevision;
 		Preview->Error = "A complete material preview candidate is ready.";
 	}
 
 	bool EditorMaterialPreviewService::RequestRetry(uint64_t SessionGeneration) noexcept
 	{
 		const auto Found = m_Entries.find(SessionGeneration);
-		if (Found == m_Entries.end() || Found->second->Publication.HasPublishedFrame()) return false;
-		Found->second->RetryRequested = true;
+		if (Found == m_Entries.end()) return false;
+		Entry& Preview = *Found->second;
+		if (Preview.RequestedFingerprint != 0 &&
+			Preview.Publication.IsCurrent(Preview.RequestedFingerprint, Preview.AssetRevision)) return false;
+		if (!Preview.Publication.HasPublishedFrame())
+		{
+			Preview.RetryRequested = true;
+			return true;
+		}
+		if (!Preview.Renderer) return false;
+		Preview.Renderer->RefreshProjectAssets();
+		if (m_AssetRevision != (std::numeric_limits<uint64_t>::max)()) ++m_AssetRevision;
+		Preview.AssetRevision = m_AssetRevision;
+		Preview.Publication.Invalidate(Preview.AssetRevision);
+		Preview.Prepared = false;
+		Preview.Error = "Retrying material preview preparation; the last complete preview remains available.";
 		return true;
 	}
 
-	bool EditorMaterialPreviewService::Draw(uint64_t SessionGeneration, float Width, float Height)
+	bool EditorMaterialPreviewService::Draw(
+		uint64_t SessionGeneration, uint64_t CurrentDraftRevision, float Width, float Height)
 	{
 		const auto Found = m_Entries.find(SessionGeneration);
 		if (Found == m_Entries.end()) return false;
 		Entry& Preview = *Found->second;
 		Preview.LastTouchedFrame = m_Frame;
-		if (Preview.Prepared && Preview.Renderer)
+		if (Preview.Prepared && Preview.Renderer && Preview.PreparedDraftRevision == CurrentDraftRevision)
 		{
 			const size_t Candidate = Preview.Publication.GetCandidateSlot();
 			auto Rendered = Preview.Renderer->RenderPreparedSceneToOutput(*Preview.Targets[Candidate]);
-			if (Rendered && Rendered->GeometryDrawCount == 1)
+			const size_t GeometryDrawCount = Rendered ? Rendered->GeometryDrawCount : 0;
+			if (Preview.Publication.PublishCandidate(Preview.RequestedFingerprint, Preview.AssetRevision,
+				Preview.PreparedDraftRevision, CurrentDraftRevision, true, Rendered.has_value(), GeometryDrawCount))
 			{
-				Preview.Publication.Publish(Preview.DraftFingerprint);
 				Preview.Error.clear();
 			}
 			else Preview.Error = Rendered
 				? "The candidate rendered without the required material geometry; the last complete preview is retained."
 				: Rendered.error().Message;
 			Preview.Prepared = false;
+		}
+		else if (Preview.Prepared)
+		{
+			Preview.Prepared = false;
+			Preview.Error = "The material draft changed after preview preparation; retaining the last complete preview.";
 		}
 		if (Preview.Publication.HasPublishedFrame() && Preview.TextureIDs[Preview.Publication.GetDisplayedSlot()] != 0)
 		{

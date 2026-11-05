@@ -8,6 +8,8 @@
 #include "Editor/EditorSceneTransitionQueue.h"
 #include "Scene/PropertyMetadata.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
+#include "Editor/EditorLevelCommandDispatch.h"
+#include "Editor/EditorDocumentCommandOwner.h"
 
 #include <algorithm>
 
@@ -620,6 +622,70 @@ namespace
 		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, false, true, false, false));
 		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, false, false, true, false));
 		PF_CHECK(Tests, !CanRouteFocusedDocumentCommand(true, false, false, false, false, true));
+
+		const auto Save = ResolveEditorDocumentShortcut(true, false, false, false, true, false, false);
+		const auto SaveAs = ResolveEditorDocumentShortcut(true, true, false, false, true, false, false);
+		const auto Undo = ResolveEditorDocumentShortcut(true, false, false, false, false, true, false);
+		const auto RedoShiftZ = ResolveEditorDocumentShortcut(true, true, false, false, false, true, false);
+		const auto RedoY = ResolveEditorDocumentShortcut(true, false, false, false, false, false, true);
+		PF_CHECK(Tests, Save == EditorDocumentShortcutCommand::Save);
+		PF_CHECK(Tests, SaveAs == EditorDocumentShortcutCommand::SaveAs);
+		PF_CHECK(Tests, Undo == EditorDocumentShortcutCommand::Undo);
+		PF_CHECK(Tests, RedoShiftZ == EditorDocumentShortcutCommand::Redo);
+		PF_CHECK(Tests, RedoY == EditorDocumentShortcutCommand::Redo);
+		PF_CHECK(Tests, !ResolveEditorDocumentShortcut(false, false, false, false, true, false, false));
+		PF_CHECK(Tests, !ResolveEditorDocumentShortcut(true, false, true, false, true, false, false));
+		PF_CHECK(Tests, !ResolveEditorDocumentShortcut(true, false, false, true, true, false, false));
+
+		int SaveWrites = 0;
+		int SaveAsRequests = 0;
+		int UndoDispatches = 0;
+		int RedoDispatches = 0;
+		const auto Dispatch = [&](EditorDocumentShortcutCommand Command)
+		{
+			switch (Command)
+			{
+			case EditorDocumentShortcutCommand::Save: ++SaveWrites; break;
+			case EditorDocumentShortcutCommand::SaveAs: ++SaveAsRequests; break;
+			case EditorDocumentShortcutCommand::Undo: ++UndoDispatches; break;
+			case EditorDocumentShortcutCommand::Redo: ++RedoDispatches; break;
+			}
+		};
+		const EditorDocumentIdentity LevelIdentity{
+			PulseForge::UUID{ 1, 1 }, PulseForge::AssetID{ 1, 2 }, EditorDocumentKind::Level };
+		const auto LevelOwner = ResolveEditorDocumentCommandOwner(true, false, std::nullopt, LevelIdentity, {});
+		PF_CHECK(Tests, LevelOwner.Document == LevelIdentity);
+		PF_CHECK(Tests, DispatchEditorLevelCommand(LevelOwner.Document, Save, OrdinarySceneFocus, Dispatch) ==
+			EditorLevelCommandDispatchResult::Dispatched);
+		PF_CHECK(Tests, DispatchEditorLevelCommand(LevelOwner.Document, SaveAs, OrdinarySceneFocus, Dispatch) ==
+			EditorLevelCommandDispatchResult::Dispatched);
+		PF_CHECK(Tests, DispatchEditorLevelCommand(LevelOwner.Document, Undo, OrdinarySceneFocus, Dispatch) ==
+			EditorLevelCommandDispatchResult::Dispatched);
+		PF_CHECK(Tests, DispatchEditorLevelCommand(LevelOwner.Document, RedoY, OrdinarySceneFocus, Dispatch) ==
+			EditorLevelCommandDispatchResult::Dispatched);
+		PF_CHECK(Tests, SaveWrites == 1 && SaveAsRequests == 1 && UndoDispatches == 1 && RedoDispatches == 1);
+		for (const EditorShortcutContext Blocked : {
+			EditorShortcutContext{ .SceneAvailable = true, .RuntimeActive = true },
+			EditorShortcutContext{ .SceneAvailable = true, .CameraNavigationActive = true },
+			EditorShortcutContext{ .SceneAvailable = true, .GizmoInteractionActive = true },
+			EditorShortcutContext{ .SceneAvailable = true, .TextInputActive = true },
+			EditorShortcutContext{ .SceneAvailable = true, .ImGuiItemActive = true },
+			EditorShortcutContext{ .SceneAvailable = true, .PopupOpen = true },
+			EditorShortcutContext{ .SceneAvailable = true, .MenuNavigationActive = true },
+			EditorShortcutContext{ .SceneAvailable = true, .WindowNavigationActive = true },
+			EditorShortcutContext{ .SceneAvailable = false } })
+		{
+			for (const auto Command : { Save, SaveAs, Undo, RedoY })
+				PF_CHECK(Tests, DispatchEditorLevelCommand(LevelOwner.Document, Command, Blocked, Dispatch) ==
+					EditorLevelCommandDispatchResult::Suppressed);
+		}
+		PF_CHECK(Tests, SaveWrites == 1 && SaveAsRequests == 1 && UndoDispatches == 1 && RedoDispatches == 1);
+		const EditorDocumentIdentity MaterialIdentity{
+			PulseForge::UUID{ 1, 1 }, PulseForge::AssetID{ 1, 3 }, EditorDocumentKind::Material };
+		PF_CHECK(Tests, DispatchEditorLevelCommand(MaterialIdentity, Save, OrdinarySceneFocus, Dispatch) ==
+			EditorLevelCommandDispatchResult::NotApplicable);
+		PF_CHECK(Tests, CanRouteFocusedDocumentCommand(true, false, false, false, false, false));
+		PF_CHECK(Tests, SaveWrites == 1);
 
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, true, false }, false) == ViewportGizmoPointerOutcome::Continue);
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, true }, false) == ViewportGizmoPointerOutcome::Complete);

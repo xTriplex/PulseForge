@@ -35,7 +35,7 @@ namespace PulseForgeEditor
 		void Prepare(PulseForge::RenderDevice& Runtime, EditorTextureRegistry& Textures, PulseForge::Project& Project,
 			const PulseForge::UUID& Material, uint64_t SessionGeneration, uint64_t DraftRevision,
 			const PulseForge::MaterialAssetDesc& Draft, const std::filesystem::path& CompiledShaderDirectory);
-		[[nodiscard]] bool Draw(uint64_t SessionGeneration, float Width, float Height);
+		[[nodiscard]] bool Draw(uint64_t SessionGeneration, uint64_t CurrentDraftRevision, float Width, float Height);
 		[[nodiscard]] bool RequestRetry(uint64_t SessionGeneration) noexcept;
 		[[nodiscard]] const std::string& GetError(uint64_t SessionGeneration) const noexcept;
 
@@ -47,6 +47,7 @@ namespace PulseForgeEditor
 
 		std::unordered_map<uint64_t, std::unique_ptr<Entry>> m_Entries;
 		uint64_t m_Frame = 0;
+		uint64_t m_AssetRevision = 1;
 		PulseForge::UUID m_ProjectID;
 	};
 }

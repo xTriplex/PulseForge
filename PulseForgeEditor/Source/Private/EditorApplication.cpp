@@ -103,6 +103,7 @@
 #include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorDocumentHostPolicy.h"
+#include "Editor/EditorLevelCommandDispatch.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentTabInteraction.h"
 #include "Editor/EditorDocumentWorkspace.h"
@@ -2140,15 +2141,45 @@ namespace
 			if (Session && (!m_DocumentEditors.IsRegistered(Session->Identity.Kind) || !Session->EditorState)) Session = nullptr;
 			const bool DocumentFocused = MaterialDetailsFocused || Owner.has_value();
 			const ImGuiIO& IO = ImGui::GetIO();
-			const bool DocumentKeyPressed = IO.KeyCtrl && !IO.KeyAlt && !IO.KeySuper &&
-				(ImGui::IsKeyPressed(ImGuiKey_S, false) || ImGui::IsKeyPressed(ImGuiKey_Z, false) ||
-					ImGui::IsKeyPressed(ImGuiKey_Y, false));
+			const auto Shortcut = PulseForgeEditor::ResolveEditorDocumentShortcut(IO.KeyCtrl, IO.KeyShift,
+				IO.KeyAlt, IO.KeySuper, ImGui::IsKeyPressed(ImGuiKey_S, false),
+				ImGui::IsKeyPressed(ImGuiKey_Z, false), ImGui::IsKeyPressed(ImGuiKey_Y, false));
+			const bool DocumentKeyPressed = Shortcut.has_value();
 			if (!DocumentFocused)
 			{
 				// A focus transition with no unambiguous current owner must not fall through to scene shortcuts.
 				m_FocusedDocumentCommandHandled |= DocumentKeyPressed;
 				return;
 			}
+			if (!MaterialDetailsFocused && Owner && Owner->Kind == PulseForgeEditor::EditorDocumentKind::Level)
+			{
+				// A Level chord belongs to the scene route even when Play or a viewport transaction blocks it.
+				m_FocusedDocumentCommandHandled |= DocumentKeyPressed;
+				const auto Result = PulseForgeEditor::DispatchEditorLevelCommand(Owner, Shortcut,
+					{ .SceneAvailable = m_Project.has_value() && m_Scene != nullptr,
+						.RuntimeActive = m_SceneRuntime != nullptr,
+						.CameraNavigationActive = m_ViewportMouseCapture.OwnsMouse(),
+						.GizmoInteractionActive = m_ViewportGizmoInteraction.IsActive(),
+						.TextInputActive = IO.WantTextInput,
+						.ImGuiItemActive = ImGui::IsAnyItemActive(),
+						.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
+						.MenuNavigationActive = GImGui && GImGui->NavLayer == ImGuiNavLayer_Menu,
+						.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr },
+					[this](PulseForgeEditor::EditorDocumentShortcutCommand Command)
+					{
+						switch (Command)
+						{
+						case PulseForgeEditor::EditorDocumentShortcutCommand::Save: (void)SaveScene(); break;
+						case PulseForgeEditor::EditorDocumentShortcutCommand::SaveAs: CreateScene(true); break;
+						case PulseForgeEditor::EditorDocumentShortcutCommand::Undo: UndoSceneEdit(); break;
+						case PulseForgeEditor::EditorDocumentShortcutCommand::Redo: RedoSceneEdit(); break;
+						}
+					});
+				(void)Result;
+				return;
+			}
+			// Once a document owns a recognized chord, do not let an ineligible command fall through to scene handlers.
+			m_FocusedDocumentCommandHandled |= DocumentKeyPressed;
 			if (!PulseForgeEditor::CanRouteFocusedDocumentCommand(
 					DocumentFocused, IO.WantTextInput, ImGui::IsAnyItemActive(),
 					ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
@@ -2156,32 +2187,25 @@ namespace
 					GImGui && GImGui->NavWindowingTarget != nullptr))
 				return;
 
-			if (IO.KeyCtrl && !IO.KeyAlt && !IO.KeySuper && ImGui::IsKeyPressed(ImGuiKey_S, false))
+			if (Shortcut == PulseForgeEditor::EditorDocumentShortcutCommand::Save ||
+				Shortcut == PulseForgeEditor::EditorDocumentShortcutCommand::SaveAs)
 			{
-				m_FocusedDocumentCommandHandled = true;
 				if (MaterialDetailsFocused)
 				{
-					if (IO.KeyShift) SetWarning("Save As is unavailable for Material Details.");
+					if (Shortcut == PulseForgeEditor::EditorDocumentShortcutCommand::SaveAs)
+						SetWarning("Save As is unavailable for Material Details.");
 					else if (m_MaterialDetailsAsset) (void)SaveMaterialDraft(*m_MaterialDetailsAsset);
-				}
-				else if (Owner && Owner->Kind == PulseForgeEditor::EditorDocumentKind::Level)
-				{
-					if (IO.KeyShift) CreateScene(true);
-					else (void)SaveScene();
 				}
 				else if (Session)
 				{
-					if (IO.KeyShift) SetWarning("Save As is unavailable for this document type.");
+					if (Shortcut == PulseForgeEditor::EditorDocumentShortcutCommand::SaveAs)
+						SetWarning("Save As is unavailable for this document type.");
 					else if (m_DocumentEditors.Save(*Session)) m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 				}
 				return;
 			}
-			if (!IO.KeyCtrl || IO.KeyAlt || IO.KeySuper) return;
-			const bool Redo = ImGui::IsKeyPressed(ImGuiKey_Y, false) ||
-				(IO.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false));
-			const bool Undo = !Redo && ImGui::IsKeyPressed(ImGuiKey_Z, false);
-			if (!Redo && !Undo) return;
-			m_FocusedDocumentCommandHandled = true;
+			if (!Shortcut) return;
+			const bool Redo = *Shortcut == PulseForgeEditor::EditorDocumentShortcutCommand::Redo;
 			if (Session)
 				(void)m_DocumentEditors.DispatchFocusedCommand(*Session,
 					Redo ? PulseForgeEditor::EditorDocumentCommand::Redo : PulseForgeEditor::EditorDocumentCommand::Undo);

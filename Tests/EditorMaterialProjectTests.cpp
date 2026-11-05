@@ -316,18 +316,43 @@ namespace
 			const uint64_t FingerprintC = PulseForgeEditor::ComputeEditorMaterialPreviewFingerprint(*BytesC);
 			PF_CHECK(Tests, FingerprintA != FingerprintB && FingerprintA != FingerprintC);
 			PF_CHECK(Tests, !Publication.HasPublishedFrame() && Publication.GetCandidateSlot() == 1);
-			Publication.Publish(FingerprintA);
+			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintA, 1, 1, 1, true, true, 1));
 			const size_t DisplayedA = Publication.GetDisplayedSlot();
-			PF_CHECK(Tests, Publication.HasPublishedFrame() && Publication.IsCurrent(FingerprintA) && DisplayedA == 1);
+			PF_CHECK(Tests, Publication.HasPublishedFrame() && Publication.IsCurrent(FingerprintA, 1) && DisplayedA == 1);
+
+			// The production asset-refresh path invalidates freshness while retaining the displayed image.
+			Publication.Invalidate(2);
+			PF_CHECK(Tests, Publication.HasPublishedFrame() && Publication.GetDisplayedSlot() == DisplayedA);
+			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintA, 2));
 			const size_t CandidateB = Publication.GetCandidateSlot();
 			PF_CHECK(Tests, CandidateB != DisplayedA);
-			// Pending and failed candidate render paths do not call Publish, so the displayed target remains A.
-			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.IsCurrent(FingerprintA));
-			Publication.Publish(FingerprintC);
-			PF_CHECK(Tests, Publication.GetDisplayedSlot() == CandidateB && Publication.IsCurrent(FingerprintC));
-			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintA) && !Publication.IsCurrent(FingerprintB));
-			Publication.Invalidate();
-			PF_CHECK(Tests, !Publication.HasPublishedFrame());
+			// Pending preparation, failed rendering, and a partial render cannot replace A.
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, false, false, 0));
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.HasPublishedFrame());
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, true, false, 0));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 2, 2, true, true, 0));
+			PF_CHECK(Tests, !Publication.PublishCandidate(FingerprintB, 2, 4, 5, true, true, 1));
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == DisplayedA && Publication.HasPublishedFrame());
+			PF_CHECK(Tests, Publication.PublishCandidate(FingerprintC, 2, 5, 5, true, true, 1));
+			PF_CHECK(Tests, Publication.GetDisplayedSlot() == CandidateB && Publication.IsCurrent(FingerprintC, 2));
+			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintA, 2) && !Publication.IsCurrent(FingerprintB, 2));
+			const size_t DisplayedC = Publication.GetDisplayedSlot();
+			PF_CHECK(Tests, Publication.IsCurrent(FingerprintC, 2) && Publication.GetDisplayedSlot() == DisplayedC);
+
+			// Identical material bytes still require a fresh preview after referenced texture content changes.
+			Publication.Invalidate(3);
+			PF_CHECK(Tests, Publication.HasPublishedFrame() && Publication.GetDisplayedSlot() == DisplayedC);
+			PF_CHECK(Tests, !Publication.IsCurrent(FingerprintC, 3));
+
+			PulseForgeEditor::EditorMaterialPreviewPublication OtherMaterial;
+			PF_CHECK(Tests, OtherMaterial.PublishCandidate(FingerprintA, 1, 1, 1, true, true, 1));
+			OtherMaterial.Invalidate(2);
+			PF_CHECK(Tests, OtherMaterial.HasPublishedFrame() && OtherMaterial.GetDisplayedSlot() == 1 &&
+				!OtherMaterial.IsCurrent(FingerprintA, 2));
+
+			PulseForgeEditor::EditorMaterialPreviewPublication NewDocument;
+			NewDocument.Invalidate(2);
+			PF_CHECK(Tests, !NewDocument.HasPublishedFrame());
 		}
 		const auto Identifier = PulseForge::UUID::Generate();
 		PF_CHECK(Tests, Identifier.has_value());
