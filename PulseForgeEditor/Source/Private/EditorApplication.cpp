@@ -1757,6 +1757,7 @@ namespace
 			}
 			DrawWorkspacePanels();
 			AdvanceDocumentWorkspaceSwitchTest();
+			DrawDocumentTabDropPreview();
 			ProcessReleasedDocumentTabDrag();
 			ProcessPendingDocumentTabClose();
 			ProcessPendingDocumentTransfer();
@@ -7205,9 +7206,8 @@ namespace
 				[&Identity](const auto& ExistingIdentity) { return ExistingIdentity.Project == Identity.Project; });
 		}
 
-		void ProcessReleasedDocumentTabDrag()
+		[[nodiscard]] PulseForgeEditor::EditorDocumentTabDragFrame MakeDocumentTabDragFrame(const ImGuiIO& IO) const
 		{
-			const ImGuiIO& IO = ImGui::GetIO();
 			const auto ActiveIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 			const auto* Session = ActiveIdentity ? m_Documents.Find(*ActiveIdentity) : nullptr;
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
@@ -7215,7 +7215,7 @@ namespace
 			uint32_t HoveredRootWindowID = 0;
 			if (HasReliableHoveredViewport && GImGui->HoveredWindow && GImGui->HoveredWindow->RootWindow)
 				HoveredRootWindowID = GImGui->HoveredWindow->RootWindow->ID;
-			const PulseForgeEditor::EditorDocumentTabDragFrame Frame{ .LeftButtonReleased = IO.MouseReleased[ImGuiMouseButton_Left],
+			return PulseForgeEditor::EditorDocumentTabDragFrame{ .LeftButtonReleased = IO.MouseReleased[ImGuiMouseButton_Left],
 				.LeftButtonDown = IO.MouseDown[ImGuiMouseButton_Left],
 				.ImGuiPayloadActive = ImGui::GetDragDropPayload() != nullptr,
 				.HasReliableHoveredViewport = HasReliableHoveredViewport,
@@ -7226,6 +7226,47 @@ namespace
 				.DragThreshold = IO.MouseDragThreshold,
 				.SourceIsMainHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main,
 				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native };
+		}
+
+		void DrawDocumentTabDropPreview()
+		{
+			const ImGuiIO& IO = ImGui::GetIO();
+			if (IO.MouseReleased[ImGuiMouseButton_Left]) return;
+
+			const auto Frame = MakeDocumentTabDragFrame(IO);
+			if (!Frame.LeftButtonDown) return;
+			const auto Preview = m_DocumentTabInteraction.ResolveDropPreview(Frame);
+			if (!Preview) return;
+
+			ImGuiViewport* TargetViewport = nullptr;
+			for (ImGuiViewport* Candidate : ImGui::GetPlatformIO().Viewports)
+				if (Candidate && Candidate->ID == Frame.HoveredViewportID)
+				{
+					TargetViewport = Candidate;
+					break;
+				}
+			if (!TargetViewport) return;
+
+			const ImVec2 Minimum(Preview->Minimum.X, Preview->Minimum.Y);
+			const ImVec2 Maximum(Preview->Maximum.X, Preview->Maximum.Y);
+			const float Scale = TargetViewport->DpiScale > 0.0f ? TargetViewport->DpiScale : 1.0f;
+			const ImVec2 CueTop(Preview->InsertionX, Minimum.y + 3.0f * Scale);
+			const ImVec2 CueBottom(Preview->InsertionX, Maximum.y - 3.0f * Scale);
+			ImDrawList* DrawList = ImGui::GetForegroundDrawList(TargetViewport);
+			DrawList->PushClipRect(Minimum, Maximum, true);
+			DrawList->AddRectFilled(Minimum, Maximum, ImGui::GetColorU32(ImGuiCol_DragDropTargetBg), 3.0f * Scale);
+			DrawList->AddRect(Minimum, Maximum, ImGui::GetColorU32(ImGuiCol_DragDropTarget), 3.0f * Scale, 0,
+				2.0f * Scale);
+			DrawList->AddLine(CueTop, CueBottom, ImGui::GetColorU32(ImGuiCol_DragDropTarget), 3.0f * Scale);
+			DrawList->AddCircleFilled(CueTop, 2.5f * Scale, ImGui::GetColorU32(ImGuiCol_DragDropTarget));
+			DrawList->AddCircleFilled(CueBottom, 2.5f * Scale, ImGui::GetColorU32(ImGuiCol_DragDropTarget));
+			DrawList->PopClipRect();
+		}
+
+		void ProcessReleasedDocumentTabDrag()
+		{
+			const ImGuiIO& IO = ImGui::GetIO();
+			const auto Frame = MakeDocumentTabDragFrame(IO);
 			const auto Released = m_DocumentTabInteraction.UpdateDrag(Frame);
 			if (!Released) return;
 
@@ -7235,7 +7276,9 @@ namespace
 				QueueDocumentTransfer(Released->Identity, Released->DropLocation->HostID, Released->DropLocation->Index);
 				return;
 			}
-			if (Released->Action != PulseForgeEditor::DocumentTabReleaseAction::CreateNativeHost || !Session) return;
+			if (Released->Action != PulseForgeEditor::DocumentTabReleaseAction::CreateNativeHost ||
+				!m_Documents.Find(Released->Identity))
+				return;
 
 			QueueDocumentTransfer(Released->Identity, {}, 0, true,
 				MakeDocumentDropWindowBounds(ImVec2(Released->ReleasePosition.X, Released->ReleasePosition.Y)));
@@ -7349,9 +7392,13 @@ namespace
 				const ImGuiID TabViewportID = TabViewport ? TabViewport->ID : 0;
 				const ImGuiWindow* const StripRootWindow = ImGui::GetCurrentWindow()->RootWindow;
 				const uint32_t StripRootWindowID = StripRootWindow ? StripRootWindow->ID : 0;
+				ImDrawList* const StripDrawList = ImGui::GetWindowDrawList();
+				const ImVec2 TabClipMinimum = StripDrawList->GetClipRectMin();
+				const ImVec2 TabClipMaximum = StripDrawList->GetClipRectMax();
 				const auto CapturedIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 				m_DocumentTabInteraction.RegisterDropTarget({ std::string(HostID), static_cast<uint32_t>(TabViewportID),
-					StripRootWindowID, { TabMinimum.x, TabMinimum.y }, { TabMaximum.x, TabMaximum.y }, Index, Index + 1,
+					StripRootWindowID, { TabMinimum.x, TabMinimum.y }, { TabMaximum.x, TabMaximum.y },
+					{ TabClipMinimum.x, TabClipMinimum.y }, { TabClipMaximum.x, TabClipMaximum.y }, Index, Index + 1,
 					CapturedIdentity && CanTransferDocumentToHost(*CapturedIdentity, HostID) });
 				if (m_DocumentHostTabTearOffTest && Session->Identity == m_DocumentHostTabTearOffTestIdentity)
 				{
@@ -7542,10 +7589,15 @@ namespace
 				const ImGuiViewport* DropViewport = ImGui::GetWindowViewport();
 				const ImGuiWindow* const StripRootWindow = ImGui::GetCurrentWindow()->RootWindow;
 				const uint32_t StripRootWindowID = StripRootWindow ? StripRootWindow->ID : 0;
+				ImDrawList* const StripDrawList = ImGui::GetWindowDrawList();
+				const ImVec2 DropClipMinimum = StripDrawList->GetClipRectMin();
+				const ImVec2 DropClipMaximum = StripDrawList->GetClipRectMax();
 				const auto CapturedIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 				m_DocumentTabInteraction.RegisterDropTarget(
 					{ std::string(HostID), DropViewport ? static_cast<uint32_t>(DropViewport->ID) : 0, StripRootWindowID,
-						{ DropMinimum.x, DropMinimum.y }, { DropMaximum.x, DropMaximum.y }, Documents.size(), Documents.size(),
+						{ DropMinimum.x, DropMinimum.y }, { DropMaximum.x, DropMaximum.y },
+						{ DropClipMinimum.x, DropClipMinimum.y }, { DropClipMaximum.x, DropClipMaximum.y },
+						Documents.size(), Documents.size(),
 						CapturedIdentity && CanTransferDocumentToHost(*CapturedIdentity, HostID) });
 				if (ImGui::BeginDragDropTarget())
 				{

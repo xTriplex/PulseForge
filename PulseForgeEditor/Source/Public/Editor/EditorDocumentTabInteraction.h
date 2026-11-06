@@ -18,6 +18,8 @@ namespace PulseForgeEditor
 		uint32_t RootWindowID = 0;
 		DocumentTabPointerPosition Minimum;
 		DocumentTabPointerPosition Maximum;
+		DocumentTabPointerPosition ClipMinimum;
+		DocumentTabPointerPosition ClipMaximum;
 		size_t BeforeIndex = 0;
 		size_t AfterIndex = 0;
 		bool CanReceiveDrop = true;
@@ -27,6 +29,16 @@ namespace PulseForgeEditor
 	{
 		std::string HostID;
 		size_t Index = 0;
+	};
+
+	struct EditorDocumentTabDropPreview
+	{
+		EditorDocumentIdentity Identity;
+		EditorDocumentTabDropLocation Location;
+		DocumentTabPointerPosition Minimum;
+		DocumentTabPointerPosition Maximum;
+		float InsertionX = 0.0f;
+		bool IsAppend = false;
 	};
 
 	struct EditorDocumentTransferRequest
@@ -66,9 +78,7 @@ namespace PulseForgeEditor
 	public:
 		void BeginFrame(bool LeftButtonClicked = false) noexcept;
 		void RegisterDropTarget(EditorDocumentTabDropTarget Target);
-		[[nodiscard]] std::optional<EditorDocumentTabDropLocation> FindDropTarget(
-			DocumentTabPointerPosition Position, bool HasReliableHoveredViewport, uint32_t HoveredViewportID,
-			uint32_t HoveredRootWindowID) const;
+		[[nodiscard]] std::optional<EditorDocumentTabDropPreview> ResolveDropPreview(const EditorDocumentTabDragFrame& Frame) const;
 
 		void BeginDrag(const EditorDocumentIdentity& Identity, std::optional<DocumentTabPointerPosition> StartPosition,
 			DocumentTabPointerPosition CurrentPosition);

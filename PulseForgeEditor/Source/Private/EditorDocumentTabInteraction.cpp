@@ -1,5 +1,7 @@
 #include "Editor/EditorDocumentTabInteraction.h"
 
+#include <algorithm>
+
 namespace PulseForgeEditor
 {
 	void EditorDocumentTabInteraction::BeginFrame(bool LeftButtonClicked) noexcept
@@ -13,23 +15,48 @@ namespace PulseForgeEditor
 		m_DropTargets.push_back(std::move(Target));
 	}
 
-	std::optional<EditorDocumentTabDropLocation> EditorDocumentTabInteraction::FindDropTarget(
-		DocumentTabPointerPosition Position, bool HasReliableHoveredViewport, uint32_t HoveredViewportID,
-		uint32_t HoveredRootWindowID) const
+	std::optional<EditorDocumentTabDropPreview> EditorDocumentTabInteraction::ResolveDropPreview(
+		const EditorDocumentTabDragFrame& Frame) const
 	{
-		if (!HasReliableHoveredViewport || HoveredViewportID == 0 || HoveredRootWindowID == 0) return std::nullopt;
-		std::optional<EditorDocumentTabDropLocation> Result;
+		if (!m_ActiveDrag || m_ActiveDrag->Kind == EditorDocumentKind::Level ||
+			!CanCreateNativeHostFromDocumentTabDrag(Frame.SourceIsMainHost, Frame.SourceIsNativeHost) ||
+			(!Frame.LeftButtonDown && !Frame.LeftButtonReleased) || !Frame.HasReliableHoveredViewport ||
+			Frame.HoveredViewportID == 0 || Frame.HoveredRootWindowID == 0 ||
+			!IsUsableDocumentTabPointerPosition(Frame.PointerPosition.X, Frame.PointerPosition.Y))
+			return std::nullopt;
+
+		const float DragDistanceSquared = CalculateDocumentTabDragDistanceSquared(
+			m_DragStart.value_or(Frame.PointerPosition), Frame.PointerPosition, m_LastValidDragPosition,
+			Frame.MaximumObservedDistanceSquared);
+		if (!std::isfinite(Frame.DragThreshold) || Frame.DragThreshold < 0.0f ||
+			DragDistanceSquared < Frame.DragThreshold * Frame.DragThreshold)
+			return std::nullopt;
+
+		std::optional<EditorDocumentTabDropPreview> Result;
 		for (const EditorDocumentTabDropTarget& Target : m_DropTargets)
 		{
-			if (!Target.CanReceiveDrop || Target.ViewportID != HoveredViewportID || Target.RootWindowID != HoveredRootWindowID) continue;
-			if (Position.X < Target.Minimum.X || Position.X >= Target.Maximum.X || Position.Y < Target.Minimum.Y ||
-				Position.Y >= Target.Maximum.Y)
+			if (!Target.CanReceiveDrop || Target.ViewportID != Frame.HoveredViewportID ||
+				Target.RootWindowID != Frame.HoveredRootWindowID)
+				continue;
+			const DocumentTabPointerPosition VisibleMinimum{ std::max(Target.Minimum.X, Target.ClipMinimum.X),
+				std::max(Target.Minimum.Y, Target.ClipMinimum.Y) };
+			const DocumentTabPointerPosition VisibleMaximum{ std::min(Target.Maximum.X, Target.ClipMaximum.X),
+				std::min(Target.Maximum.Y, Target.ClipMaximum.Y) };
+			if (!IsUsableDocumentTabPointerPosition(VisibleMinimum.X, VisibleMinimum.Y) ||
+				!IsUsableDocumentTabPointerPosition(VisibleMaximum.X, VisibleMaximum.Y) ||
+				VisibleMinimum.X >= VisibleMaximum.X || VisibleMinimum.Y >= VisibleMaximum.Y ||
+				Frame.PointerPosition.X < VisibleMinimum.X || Frame.PointerPosition.X >= VisibleMaximum.X ||
+				Frame.PointerPosition.Y < VisibleMinimum.Y || Frame.PointerPosition.Y >= VisibleMaximum.Y)
 				continue;
 
-			if (Result) return std::nullopt;
 			const float Midpoint = (Target.Minimum.X + Target.Maximum.X) * 0.5f;
-			const size_t Index = Target.BeforeIndex != Target.AfterIndex && Position.X >= Midpoint ? Target.AfterIndex : Target.BeforeIndex;
-			Result.emplace(EditorDocumentTabDropLocation{ Target.HostID, Index });
+			const bool IsAppend = Target.BeforeIndex == Target.AfterIndex;
+			const size_t Index = !IsAppend && Frame.PointerPosition.X >= Midpoint ? Target.AfterIndex : Target.BeforeIndex;
+			const float Edge = IsAppend || Index == Target.BeforeIndex ? Target.Minimum.X : Target.Maximum.X;
+			const float InsertionX = std::clamp(Edge, VisibleMinimum.X, VisibleMaximum.X);
+			if (Result) return std::nullopt;
+			Result.emplace(EditorDocumentTabDropPreview{ *m_ActiveDrag, { Target.HostID, Index }, VisibleMinimum,
+				VisibleMaximum, InsertionX, IsAppend });
 		}
 		return Result;
 	}
@@ -89,6 +116,7 @@ namespace PulseForgeEditor
 		const EditorDocumentIdentity Identity = *m_ActiveDrag;
 		const std::optional<DocumentTabPointerPosition> LastValidPosition = m_LastValidDragPosition;
 		const std::optional<DocumentTabPointerPosition> StartPosition = m_DragStart;
+		const auto DropPreview = ResolveDropPreview(Frame);
 		CancelDrag();
 
 		const auto ReleasePosition = ResolveDocumentTabReleasePosition(Frame.PointerPosition.X, Frame.PointerPosition.Y, LastValidPosition);
@@ -100,9 +128,7 @@ namespace PulseForgeEditor
 		const float DragDistanceSquared =
 			CalculateDocumentTabDragDistanceSquared(DragStart, CurrentPosition, LastValidPosition, Frame.MaximumObservedDistanceSquared);
 		const bool TransferQueued = m_PendingTransfer && m_PendingTransfer->Identity == Identity;
-		const auto DropLocation = CurrentPosition
-			? FindDropTarget(*CurrentPosition, Frame.HasReliableHoveredViewport, Frame.HoveredViewportID, Frame.HoveredRootWindowID)
-			: std::nullopt;
+		const auto DropLocation = DropPreview ? std::optional<EditorDocumentTabDropLocation>(DropPreview->Location) : std::nullopt;
 		const bool CanCreateNativeHost = CanCreateNativeHostFromDocumentTabDrag(
 			Frame.SourceIsMainHost, Frame.SourceIsNativeHost);
 		const DocumentTabReleaseAction Action = ResolveDocumentTabReleaseAction(true, true, TransferQueued, DragDistanceSquared,
