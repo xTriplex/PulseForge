@@ -21,6 +21,7 @@ if(BUILD_TESTING)
 			"-DPF_TEST_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
 			"-DPF_TEST_LUA_SOURCE_DIR=${PULSEFORGE_LUA_SOURCE_DIR}"
 			"-DPF_TEST_NVRHI_SOURCE_DIR=${pulseforgenvrhi_SOURCE_DIR}"
+			"-DPF_TEST_TRACY_SOURCE_DIR=${PROJECT_SOURCE_DIR}/PulseForge/Vendor/tracy"
 			"-DPF_TEST_WRITER=${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeWritePlayerTemplate.cmake"
 			"-DPF_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/Tests/PlayerTemplateGeneration"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/TestPlayerTemplateGeneration.cmake")

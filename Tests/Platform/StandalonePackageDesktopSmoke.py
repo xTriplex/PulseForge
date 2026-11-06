@@ -267,6 +267,19 @@ def validate_third_party_notices(PackageRoot: Path, Platform: str) -> Path:
     except (OSError, UnicodeError) as Error:
         raise SmokeFailure(f"could not read the package third-party notices file: {Error}") from Error
 
+    RequiredXXHashNotices = (
+        "xxHash 0.8.2 (XXH_VERSION_NUMBER 802; Tracy source revision e792752104c6055020b6ccff3cac60451433f3aa)",
+        "Copyright (C) 2012-2021 Yann Collet",
+        "BSD 2-Clause License",
+        "Redistributions of source code must retain the above copyright",
+        "Redistributions in binary form must reproduce the above",
+        "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS",
+        "EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.",
+    )
+    MissingXXHash = [Text for Text in RequiredXXHashNotices if Text not in NoticeText]
+    if MissingXXHash:
+        raise SmokeFailure("package notices omit xxHash 0.8.2 license material: " + ", ".join(MissingXXHash))
+
     if Platform == "macOS":
         if "Apache License" not in NoticeText:
             raise SmokeFailure("the macOS package notices omit the Apache 2.0 license text")
@@ -1967,11 +1980,27 @@ def self_test() -> None:
         assert "STANDALONE_NATIVE_CLOSE_TARGET_READY; pid=1234" in CloseScript
         assert "id of targetWindow" not in CloseScript
 
+        RuntimeNotices = "\n".join((
+            "xxHash 0.8.2 (XXH_VERSION_NUMBER 802; Tracy source revision e792752104c6055020b6ccff3cac60451433f3aa)",
+            "Copyright (C) 2012-2021 Yann Collet",
+            "BSD 2-Clause License",
+            "Redistributions of source code must retain the above copyright notice",
+            "Redistributions in binary form must reproduce the above copyright notice",
+            "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS",
+            "EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.",
+        ))
         (Root / "ThirdPartyNotices.txt").write_text("MIT runtime notices", encoding="utf-8")
+        try:
+            validate_third_party_notices(Root, "Linux")
+        except SmokeFailure as Error:
+            assert "xxHash 0.8.2 license material" in str(Error)
+        else:
+            raise AssertionError("package notices accepted without the xxHash license")
+        (Root / "ThirdPartyNotices.txt").write_text(RuntimeNotices, encoding="utf-8")
         validate_third_party_notices(Root, "Linux")
         MacNoticePath = Root / "Contents" / "Resources" / "ThirdPartyNotices.txt"
         MacNoticePath.parent.mkdir(parents=True)
-        MacNoticePath.write_text("MIT runtime notices", encoding="utf-8")
+        MacNoticePath.write_text(RuntimeNotices, encoding="utf-8")
         try:
             validate_third_party_notices(Root, "macOS")
         except SmokeFailure as Error:
@@ -1984,7 +2013,7 @@ def self_test() -> None:
             "https://github.com/KhronosGroup/Vulkan-Loader/blob/vulkan-sdk-1.4.350.0/LICENSE.txt",
             "MoltenVK 1.4.1", "https://github.com/KhronosGroup/MoltenVK/blob/v1.4.1/LICENSE",
         ))
-        MacNoticePath.write_text(MacNotices, encoding="utf-8")
+        MacNoticePath.write_text(RuntimeNotices + "\n" + MacNotices, encoding="utf-8")
         validate_third_party_notices(Root, "macOS")
 
     _self_test_windows_read_only_execution()

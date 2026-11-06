@@ -1,6 +1,7 @@
 if(NOT DEFINED PF_TEMPLATE_ROOT OR NOT DEFINED PF_PLAYER_FILE OR NOT DEFINED PF_RESOURCE_DIR OR
 	NOT DEFINED PF_SOURCE_ROOT OR NOT DEFINED PF_LUA_SOURCE_DIR OR NOT DEFINED PF_NVRHI_SOURCE_DIR OR
 	NOT DEFINED PF_FREETYPE_SOURCE_DIR OR
+	NOT DEFINED PF_TRACY_SOURCE_DIR OR
 	NOT DEFINED PF_CONFIGURATION OR NOT DEFINED PF_PLATFORM OR NOT DEFINED PF_ARCHITECTURE OR
 	NOT DEFINED PF_DESCRIPTOR)
 	message(FATAL_ERROR "PulseForge player template descriptor arguments are incomplete")
@@ -9,6 +10,39 @@ if(NOT EXISTS "${PF_PLAYER_FILE}" OR NOT EXISTS "${PF_RESOURCE_DIR}/Shaders")
 	message(FATAL_ERROR "Cooked player template requires its executable and deployed Shaders directory")
 endif()
 set(THIRD_PARTY_NOTICES "PulseForge runtime third-party notices\n")
+set(XXHASH_NOTICE_HEADER "${PF_TRACY_SOURCE_DIR}/server/tracy_xxhash.h")
+if(NOT EXISTS "${XXHASH_NOTICE_HEADER}")
+	message(FATAL_ERROR "Required xxHash license source was not found: ${XXHASH_NOTICE_HEADER}")
+endif()
+file(READ "${XXHASH_NOTICE_HEADER}" XXHASH_HEADER_TEXT)
+string(LENGTH "${XXHASH_HEADER_TEXT}" XXHASH_HEADER_LENGTH)
+if(XXHASH_HEADER_LENGTH LESS 2)
+	message(FATAL_ERROR "Required xxHash license source has an unrecognized opening notice: ${XXHASH_NOTICE_HEADER}")
+endif()
+string(SUBSTRING "${XXHASH_HEADER_TEXT}" 0 2 XXHASH_HEADER_PREFIX)
+string(FIND "${XXHASH_HEADER_TEXT}" "*/" XXHASH_NOTICE_END)
+if(NOT XXHASH_HEADER_PREFIX STREQUAL "/*" OR XXHASH_NOTICE_END LESS 2)
+	message(FATAL_ERROR "Required xxHash license source has an unrecognized opening notice: ${XXHASH_NOTICE_HEADER}")
+endif()
+math(EXPR XXHASH_NOTICE_LENGTH "${XXHASH_NOTICE_END} + 2")
+string(SUBSTRING "${XXHASH_HEADER_TEXT}" 0 ${XXHASH_NOTICE_LENGTH} XXHASH_NOTICE_TEXT)
+foreach(XXHASH_REQUIRED_TEXT IN ITEMS
+		"xxHash - Extremely Fast Hash algorithm"
+		"Copyright (C) 2012-2021 Yann Collet"
+		"BSD 2-Clause License"
+		"Redistributions of source code must retain the above"
+		"Redistributions in binary form must reproduce the above"
+		"THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS"
+		"EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.")
+	string(FIND "${XXHASH_NOTICE_TEXT}" "${XXHASH_REQUIRED_TEXT}" XXHASH_REQUIRED_INDEX)
+	if(XXHASH_REQUIRED_INDEX EQUAL -1)
+		message(FATAL_ERROR "Required xxHash license source is incomplete or unrecognized (${XXHASH_REQUIRED_TEXT}): ${XXHASH_NOTICE_HEADER}")
+	endif()
+endforeach()
+string(APPEND THIRD_PARTY_NOTICES
+	"\n========================================\n"
+	"xxHash 0.8.2 (XXH_VERSION_NUMBER 802; Tracy source revision e792752104c6055020b6ccff3cac60451433f3aa)\n"
+	"========================================\n\n${XXHASH_NOTICE_TEXT}\n")
 set(THIRD_PARTY_LICENSES
 	"GLFW|${PF_SOURCE_ROOT}/PulseForge/Vendor/Glfw/LICENSE.md"
 	"GLM|${PF_SOURCE_ROOT}/PulseForge/Vendor/glm/copying.txt"
