@@ -7,6 +7,7 @@ set(FixtureRoot "${PULSEFORGE_BINARY_ROOT}/RuntimeTargetClosureFixture")
 set(PositiveBuild "${FixtureRoot}/Positive")
 set(NegativeBuild "${FixtureRoot}/Negative")
 set(NoConfigBuild "${FixtureRoot}/NoConfig")
+set(CatalogNegativeBuild "${FixtureRoot}/CatalogNegative")
 file(REMOVE_RECURSE "${FixtureRoot}")
 
 set(GeneratorArguments)
@@ -59,4 +60,19 @@ endif()
 string(FIND "${NoConfigOutput}${NoConfigError}" "must not link" NoConfigRejectionIndex)
 if(NoConfigRejectionIndex EQUAL -1)
 	message(FATAL_ERROR "Imported NOCONFIG dependency failed for an unexpected reason: ${NoConfigOutput}${NoConfigError}")
+endif()
+
+execute_process(
+	COMMAND "${PULSEFORGE_CMAKE_COMMAND}" -S "${FixtureSource}" -B "${CatalogNegativeBuild}"
+		${GeneratorArguments} "-DPULSEFORGE_SOURCE_ROOT=${PULSEFORGE_SOURCE_ROOT}"
+		-DPULSEFORGE_EXPECT_CATALOG_FORBIDDEN=ON
+	RESULT_VARIABLE CatalogResult
+	OUTPUT_VARIABLE CatalogOutput
+	ERROR_VARIABLE CatalogError)
+if(CatalogResult EQUAL 0)
+	message(FATAL_ERROR "Script-metadata authoring catalog dependency was not rejected")
+endif()
+string(FIND "${CatalogOutput}${CatalogError}" "PulseForgeAssetCatalog" CatalogRejectionIndex)
+if(CatalogRejectionIndex EQUAL -1)
+	message(FATAL_ERROR "Catalog dependency failed for an unexpected reason: ${CatalogOutput}${CatalogError}")
 endif()

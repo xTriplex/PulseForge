@@ -1,5 +1,6 @@
 if(NOT DEFINED PF_TEMPLATE_ROOT OR NOT DEFINED PF_PLAYER_FILE OR NOT DEFINED PF_RESOURCE_DIR OR
 	NOT DEFINED PF_SOURCE_ROOT OR NOT DEFINED PF_LUA_SOURCE_DIR OR NOT DEFINED PF_NVRHI_SOURCE_DIR OR
+	NOT DEFINED PF_FREETYPE_SOURCE_DIR OR
 	NOT DEFINED PF_CONFIGURATION OR NOT DEFINED PF_PLATFORM OR NOT DEFINED PF_ARCHITECTURE OR
 	NOT DEFINED PF_DESCRIPTOR)
 	message(FATAL_ERROR "PulseForge player template descriptor arguments are incomplete")
@@ -18,7 +19,11 @@ set(THIRD_PARTY_LICENSES
 	"spdlog|${PF_SOURCE_ROOT}/PulseForge/Vendor/spdlog/LICENSE"
 	"stb|${PF_SOURCE_ROOT}/PulseForge/Vendor/stb/LICENSE"
 	"Lua 5.5.1|${PF_LUA_SOURCE_DIR}/../doc/readme.html"
-	"NVRHI|${PF_NVRHI_SOURCE_DIR}/LICENSE.txt")
+	"NVRHI|${PF_NVRHI_SOURCE_DIR}/LICENSE.txt"
+	"FreeType 2, source revision 67c52a0b68eaeb7ae1f2248202924883c4a232d0: Copyright and license selection|${PF_FREETYPE_SOURCE_DIR}/LICENSE.TXT"
+	"FreeType 2, source revision 67c52a0b68eaeb7ae1f2248202924883c4a232d0: FreeType Project License (FTL)|${PF_FREETYPE_SOURCE_DIR}/docs/FTL.TXT"
+	"FreeType BDF driver notice|${PF_FREETYPE_SOURCE_DIR}/src/bdf/README"
+	"FreeType PCF driver notice|${PF_FREETYPE_SOURCE_DIR}/src/pcf/README")
 if(PF_PLATFORM STREQUAL "macOS")
 	list(APPEND THIRD_PARTY_LICENSES
 		"Khronos Vulkan Loader 1.4.350.0 (Apache 2.0 applies to most files. Some source files use more permissive licenses. Upstream LICENSE.txt: https://github.com/KhronosGroup/Vulkan-Loader/blob/vulkan-sdk-1.4.350.0/LICENSE.txt)|${PF_SOURCE_ROOT}/PulseForge/Vendor/json/LICENSES/Apache-2.0.txt"
@@ -44,13 +49,13 @@ if(PF_PLATFORM STREQUAL "macOS")
 endif()
 file(RELATIVE_PATH PLAYER_RELATIVE "${PF_TEMPLATE_ROOT}" "${PF_PLAYER_FILE}")
 file(TO_CMAKE_PATH "${PLAYER_RELATIVE}" PLAYER_RELATIVE)
-if(PLAYER_RELATIVE MATCHES "^\.\./" OR IS_ABSOLUTE "${PLAYER_RELATIVE}")
+if(PLAYER_RELATIVE MATCHES [[^\.\./]] OR IS_ABSOLUTE "${PLAYER_RELATIVE}")
 	message(FATAL_ERROR "Cooked player executable is outside its template root")
 endif()
 set(RUNTIME_FILES "${PLAYER_RELATIVE}")
 file(RELATIVE_PATH NOTICES_RELATIVE "${PF_TEMPLATE_ROOT}" "${PF_RESOURCE_DIR}/ThirdPartyNotices.txt")
 file(TO_CMAKE_PATH "${NOTICES_RELATIVE}" NOTICES_RELATIVE)
-if(NOTICES_RELATIVE MATCHES "^\.\./" OR IS_ABSOLUTE "${NOTICES_RELATIVE}")
+if(NOTICES_RELATIVE MATCHES [[^\.\./]] OR IS_ABSOLUTE "${NOTICES_RELATIVE}")
 	message(FATAL_ERROR "Runtime notices are outside the player template root")
 endif()
 list(APPEND RUNTIME_FILES "${NOTICES_RELATIVE}")
@@ -59,7 +64,7 @@ foreach(FILE_PATH IN LISTS SHADER_FILES)
 	if(NOT IS_SYMLINK "${FILE_PATH}")
 		file(RELATIVE_PATH RELATIVE_FILE "${PF_TEMPLATE_ROOT}" "${FILE_PATH}")
 		file(TO_CMAKE_PATH "${RELATIVE_FILE}" RELATIVE_FILE)
-		if(RELATIVE_FILE MATCHES "^\.\./" OR IS_ABSOLUTE "${RELATIVE_FILE}")
+		if(RELATIVE_FILE MATCHES [[^\.\./]] OR IS_ABSOLUTE "${RELATIVE_FILE}")
 			message(FATAL_ERROR "Cooked shader is outside its template root")
 		endif()
 		if(RELATIVE_FILE MATCHES "(^|/)EditorImGui(Present)?\\.")

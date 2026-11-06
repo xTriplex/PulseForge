@@ -4,6 +4,7 @@
 #include "Assets/AssetImportProvenance.h"
 
 #include <array>
+#include <limits>
 #include <span>
 #include <utility>
 
@@ -265,6 +266,31 @@ namespace
 		Scene PreservedDestination;
 		constexpr UUID SentinelID{ 0x9500000000000000ull, 95 };
 		PF_CHECK(Tests, PreservedDestination.CreateEntityWithUUID(SentinelID, "Preserve on invalid load").has_value());
+		for (const nlohmann::json& Version : { nlohmann::json(2), nlohmann::json(4294967296ull), nlohmann::json(4294967297ull),
+			nlohmann::json(-4294967295ll), nlohmann::json(std::numeric_limits<int64_t>::min()),
+			nlohmann::json(std::numeric_limits<int64_t>::max()), nlohmann::json(std::numeric_limits<uint64_t>::max()),
+			nlohmann::json(1.0), nlohmann::json("1"), nlohmann::json(true), nlohmann::json(nullptr), nlohmann::json::array(),
+			nlohmann::json::object() })
+		{
+			nlohmann::json InvalidPrefabVersion = Document;
+			nlohmann::json* VersionRoot = FindSerializedEntity(InvalidPrefabVersion, RootEntityID);
+			PF_CHECK(Tests, VersionRoot != nullptr);
+			if (!VersionRoot) return;
+			(*VersionRoot)["prefabInstance"]["version"] = Version;
+			const auto InvalidVersion = SceneSerializer::Deserialize(InvalidPrefabVersion.dump(), PreservedDestination);
+			PF_CHECK(Tests, !InvalidVersion && InvalidVersion.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+			PF_CHECK(Tests, PreservedDestination.GetEntityCount() == 1 && PreservedDestination.FindEntity(SentinelID).has_value());
+		}
+		nlohmann::json MissingPrefabVersion = Document;
+		nlohmann::json* MissingVersionRoot = FindSerializedEntity(MissingPrefabVersion, RootEntityID);
+		PF_CHECK(Tests, MissingVersionRoot != nullptr);
+		if (MissingVersionRoot)
+		{
+			(*MissingVersionRoot)["prefabInstance"].erase("version");
+			const auto MissingVersion = SceneSerializer::Deserialize(MissingPrefabVersion.dump(), PreservedDestination);
+			PF_CHECK(Tests, !MissingVersion && MissingVersion.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+			PF_CHECK(Tests, PreservedDestination.GetEntityCount() == 1 && PreservedDestination.FindEntity(SentinelID).has_value());
+		}
 		const auto InvalidDuplicate = SceneSerializer::Deserialize(DuplicateSourceKey.dump(), PreservedDestination);
 		PF_CHECK(Tests, !InvalidDuplicate && InvalidDuplicate.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, PreservedDestination.GetEntityCount() == 1 && PreservedDestination.FindEntity(SentinelID).has_value());

@@ -14,7 +14,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::json;
-		constexpr std::string_view MetadataMarker = "--[[PulseForgeScript:1";
+		constexpr std::string_view MetadataMarkerPrefix = "--[[PulseForgeScript:";
 		constexpr size_t MaximumMetadataBytes = 64u * 1024u;
 		constexpr size_t MaximumPropertyDeclarations = 64;
 		constexpr size_t MaximumModuleDeclarations = 64;
@@ -110,8 +110,18 @@ namespace PulseForge
 	std::expected<ScriptSourceMetadata, ScriptSourceMetadataError> ParseScriptSourceMetadata(std::string_view Source)
 	{
 		ScriptSourceMetadata Result;
-		if (!Source.starts_with(MetadataMarker)) return Result;
-		size_t JsonStart = MetadataMarker.size();
+		if (!Source.starts_with(MetadataMarkerPrefix)) return Result;
+		const size_t VersionStart = MetadataMarkerPrefix.size();
+		const size_t LineEnding = Source.find_first_of("\r\n", VersionStart);
+		if (LineEnding == std::string_view::npos)
+			return std::unexpected(Error("PulseForge script metadata marker requires a version and line ending"));
+		const std::string_view MarkerVersion = Source.substr(VersionStart, LineEnding - VersionStart);
+		if (MarkerVersion.empty() || !std::all_of(MarkerVersion.begin(), MarkerVersion.end(),
+			[](unsigned char Character) { return Character >= '0' && Character <= '9'; }))
+			return std::unexpected(Error("PulseForge script metadata marker has a malformed version"));
+		if (MarkerVersion != "1")
+			return std::unexpected(Error("Unsupported PulseForge script metadata marker version: " + std::string(MarkerVersion)));
+		size_t JsonStart = LineEnding;
 		if (Source.substr(JsonStart).starts_with("\r\n")) JsonStart += 2;
 		else if (Source.substr(JsonStart).starts_with('\n')) ++JsonStart;
 		else return std::unexpected(Error("Script metadata marker must be followed by a line ending"));
@@ -143,7 +153,10 @@ namespace PulseForge
 		}
 		if (!HasOnlyKeys(Document, { "version", "properties", "modules" }))
 			return std::unexpected(Error("Script metadata must be an object containing only version, properties, and modules"));
-		if (!Document.contains("version") || !Document["version"].is_number_integer() || Document["version"].get<int>() != 1)
+		const Json& Version = Document.value("version", Json{});
+		const bool SupportedVersion = Version.is_number_unsigned() ? Version.get<uint64_t>() == 1 :
+			Version.is_number_integer() && Version.get<int64_t>() == 1;
+		if (!Document.contains("version") || !SupportedVersion)
 			return std::unexpected(Error("Script metadata version must be the integer 1"));
 		Result.HasDeclarations = true;
 

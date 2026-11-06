@@ -283,7 +283,10 @@ namespace PulseForge
 					{ "version", "instance", "asset", "root", "fingerprint", "sourceEntities", "localEntities", "overrides", "conflicts" },
 					"Prefab instance record"); !Fields)
 				return std::unexpected(Fields.error());
-			if (!Value.contains("version") || !Value["version"].is_number_integer() || Value["version"].get<int>() != 1 ||
+			const Json& Version = Value.value("version", Json{});
+			const bool SupportedVersion = Version.is_number_unsigned() ? Version.get<uint64_t>() == 1 :
+				Version.is_number_integer() && Version.get<int64_t>() == 1;
+			if (!Value.contains("version") || !SupportedVersion ||
 				!Value.contains("instance") || !Value["instance"].is_string() || !Value.contains("asset") || !Value["asset"].is_string() ||
 				!Value.contains("root") || !Value["root"].is_string() || !Value.contains("fingerprint") || !Value["fingerprint"].is_string() ||
 				!Value.contains("sourceEntities") || !Value["sourceEntities"].is_array() ||

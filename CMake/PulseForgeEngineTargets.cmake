@@ -61,6 +61,13 @@ add_library(PulseForgeCookedProductCodecs STATIC PulseForge/Source/Private/Asset
 target_include_directories(PulseForgeCookedProductCodecs PUBLIC PulseForge/Source/Public)
 target_link_libraries(PulseForgeCookedProductCodecs PUBLIC PulseForgeCore PulseForgeMeshData PulseForgeImageData)
 set_property(TARGET PulseForgeCookedProductCodecs PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+add_library(PulseForgeAssetFingerprint STATIC PulseForge/Source/Private/Assets/AssetFingerprint.cpp)
+target_include_directories(PulseForgeAssetFingerprint
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/tracy/server
+)
+target_link_libraries(PulseForgeAssetFingerprint PUBLIC PulseForgeCore)
+set_property(TARGET PulseForgeAssetFingerprint PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeRenderMath STATIC
 	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
 	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
@@ -85,13 +92,13 @@ target_include_directories(PulseForgeAssetCatalog
 	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/tracy/server
 )
 target_compile_definitions(PulseForgeAssetCatalog PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
-target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
+target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene PulseForgeAssetFingerprint)
 add_library(PulseForgeScriptAssets STATIC PulseForge/Source/Private/Assets/ScriptSourceMetadata.cpp)
 target_include_directories(PulseForgeScriptAssets
 	PUBLIC PulseForge/Source/Public
 	PRIVATE PulseForge/Vendor/json/include
 )
-target_link_libraries(PulseForgeScriptAssets PUBLIC PulseForgeAssetCatalog)
+target_link_libraries(PulseForgeScriptAssets PRIVATE PulseForgeScene)
 add_library(PulseForgeCookedAssetCatalog STATIC PulseForge/Source/Private/Assets/CookedAssetCatalog.cpp)
 target_include_directories(PulseForgeCookedAssetCatalog
 	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
@@ -195,7 +202,7 @@ target_include_directories(PulseForgeCookedScripting PUBLIC PulseForge/Source/Pu
 target_compile_definitions(PulseForgeCookedScripting PRIVATE PF_COOKED_RUNTIME_ONLY _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeCookedScripting
 	PUBLIC PulseForgeScene
-	PRIVATE PulseForgeScriptAssets PulseForgeCookedRuntimeProvider PulseForgeCookedAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore
+	PRIVATE PulseForgeScriptAssets PulseForgeAssetFingerprint PulseForgeCookedRuntimeProvider PulseForgeCookedAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore
 		PulseForgeLua spdlog::spdlog)
 set_property(TARGET PulseForgeCookedScripting PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 
