@@ -39,6 +39,13 @@
 
 namespace PulseForge
 {
+	struct SceneRenderer::TransientMaterialOverride final
+	{
+		AssetID Material;
+		MaterialAssetDesc Description;
+		uint64_t Revision = 0;
+	};
+
 	namespace
 	{
 		std::expected<std::vector<std::byte>, SceneRendererError> ReadShaderBytecode(
@@ -875,10 +882,13 @@ namespace PulseForge
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
 					*Instance.MaterialAsset, "Referenced material asset is not present in the project registry" });
 
-			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
-			if (!Mesh)
+			const bool HasPreviewMesh = m_TransientPreviewMesh && m_TransientPreviewMeshIdentity == Instance.MeshAsset;
+			auto MeshResult = HasPreviewMesh
+				? std::expected<std::reference_wrapper<const Mesh>, MeshAssetError>(std::cref(*m_TransientPreviewMesh))
+				: m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
+			if (!MeshResult)
 			{
-				if (Mesh.error().Code == MeshAssetErrorCode::Pending)
+				if (MeshResult.error().Code == MeshAssetErrorCode::Pending)
 				{
 					m_AssetPreparationPending = true;
 					continue;
@@ -887,11 +897,12 @@ namespace PulseForge
 					SceneRendererErrorCode::AssetLoadFailed,
 					Instance.Entity,
 					Instance.MeshAsset,
-					"Could not load mesh asset: " + Mesh.error().Message
+				"Could not load mesh asset: " + MeshResult.error().Message
 				});
 			}
 
-			const VertexLayoutDesc& Layout = Mesh->get().GetVertexLayout();
+			const Mesh* const MeshResource = &MeshResult->get();
+			const VertexLayoutDesc& Layout = MeshResource->GetVertexLayout();
 			if (SceneVertexLayout && !SceneRendererPipelineCache::HasSameVertexLayout(*SceneVertexLayout, Layout))
 			{
 				return std::unexpected(SceneRendererError{
@@ -902,13 +913,18 @@ namespace PulseForge
 				});
 			}
 			SceneVertexLayout = Layout;
-			m_PreparedMeshResources.try_emplace(Instance.MeshAsset, &Mesh->get());
+			m_PreparedMeshResources.try_emplace(Instance.MeshAsset, MeshResource);
 
 			std::expected<void, SceneRendererError> Bindings;
 			if (Instance.MaterialAsset)
-				Bindings =
-					m_MaterialBindingCache->EnsureMaterialBindings(*Instance.MaterialAsset, BindingEnvironmentAsset,
-						BindingEnvironmentRevision, *EnvironmentTextures);
+			{
+				const bool HasOverride = m_TransientMaterialOverride &&
+					m_TransientMaterialOverride->Material == *Instance.MaterialAsset;
+				const MaterialAssetDesc* OverrideDescription = HasOverride ? &m_TransientMaterialOverride->Description : nullptr;
+				const uint64_t OverrideRevision = HasOverride ? m_TransientMaterialOverride->Revision : 0;
+				Bindings = m_MaterialBindingCache->EnsureMaterialBindings(*Instance.MaterialAsset, BindingEnvironmentAsset,
+					BindingEnvironmentRevision, *EnvironmentTextures, OverrideDescription, OverrideRevision);
+			}
 			else if (!BindingEnvironmentAsset)
 				Bindings = m_MaterialBindingCache->EnsureDefaultMaterialBindings(*EnvironmentTextures, BindingEnvironmentRevision);
 			if (!Bindings)
@@ -921,8 +937,12 @@ namespace PulseForge
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));
 			}
+			const bool HasOverride = Instance.MaterialAsset && m_TransientMaterialOverride &&
+				m_TransientMaterialOverride->Material == *Instance.MaterialAsset;
+			const MaterialAssetDesc* OverrideDescription = HasOverride ? &m_TransientMaterialOverride->Description : nullptr;
+			const uint64_t OverrideRevision = HasOverride ? m_TransientMaterialOverride->Revision : 0;
 			auto MaterialBinding = m_MaterialBindingCache->ResolveMaterialBinding(
-				Instance, BindingEnvironmentAsset, BindingEnvironmentRevision);
+				Instance, BindingEnvironmentAsset, BindingEnvironmentRevision, OverrideDescription, OverrideRevision);
 			if (!MaterialBinding)
 			{
 				if (MaterialBinding.error().Code == SceneRendererErrorCode::AssetLoadPending)
@@ -971,6 +991,15 @@ namespace PulseForge
 		return {};
 	}
 
+	void SceneRenderer::SetTransientPreviewMesh(const AssetID& Identity, const Mesh* Geometry) noexcept
+	{
+		m_TransientPreviewMeshIdentity = Geometry ? std::optional<AssetID>(Identity) : std::nullopt;
+		m_TransientPreviewMesh = Geometry;
+		m_PreparedSnapshot.reset();
+		m_PreparedMeshResources.clear();
+		m_PreparedMaterialBindings.clear();
+	}
+
 	std::expected<const BindingSet*, SceneRendererError> SceneRenderer::ResolveMaterialBinding(const SceneMeshInstance& Instance)
 	{
 		const BindingSet* Binding = FindPreparedMaterialBinding(Instance.Entity);
@@ -988,7 +1017,9 @@ namespace PulseForge
 
 	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRenderer::ResolveMaterialDescription(const SceneMeshInstance& Instance)
 	{
-		return m_MaterialBindingCache->ResolveMaterialDescription(Instance);
+		const MaterialAssetDesc* OverrideDescription = Instance.MaterialAsset && m_TransientMaterialOverride &&
+			m_TransientMaterialOverride->Material == *Instance.MaterialAsset ? &m_TransientMaterialOverride->Description : nullptr;
+		return m_MaterialBindingCache->ResolveMaterialDescription(Instance, OverrideDescription);
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderShadowCascades()
@@ -1034,6 +1065,44 @@ namespace PulseForge
 
 	void SceneRenderer::RefreshMaterialAssets() noexcept
 	{
+		m_PreparedSnapshot.reset();
+		m_PreparedMaterialBindings.clear();
+		m_MaterialBindingCache->RefreshMaterialAssets();
+	}
+
+	void SceneRenderer::RefreshMaterialAsset(const AssetID& Material) noexcept
+	{
+		m_PreparedSnapshot.reset();
+		m_PreparedMaterialBindings.clear();
+		m_MaterialBindingCache->RefreshMaterialAsset(Material);
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::SetTransientMaterialOverride(
+		const AssetID& Material, const MaterialAssetDesc& Description, uint64_t Revision)
+	{
+		if (Material.IsNil() || Revision == 0)
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, Material,
+				"A transient material preview requires a valid asset and nonzero draft revision" });
+		try
+		{
+			auto Replacement = std::make_unique<TransientMaterialOverride>(TransientMaterialOverride{ Material, Description, Revision });
+			m_TransientMaterialOverride = std::move(Replacement);
+			m_PreparedSnapshot.reset();
+			m_PreparedMaterialBindings.clear();
+			m_MaterialBindingCache->RefreshMaterialAssets();
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, {}, Material,
+				std::string("Could not retain the transient material draft: ") + Exception.what() });
+		}
+	}
+
+	void SceneRenderer::ClearTransientMaterialOverride() noexcept
+	{
+		if (!m_TransientMaterialOverride) return;
+		m_TransientMaterialOverride.reset();
 		m_PreparedSnapshot.reset();
 		m_PreparedMaterialBindings.clear();
 		m_MaterialBindingCache->RefreshMaterialAssets();

@@ -15,10 +15,12 @@
 
 #include <chrono>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -30,13 +32,56 @@ namespace PulseForgeEditor
 	struct EditorAssetPreviewServiceTestAccess
 	{
 		static void ThrowForOneAsset(EditorAssetPreviewService& Service) { Service.m_DecodeOverrideForTesting = &DecodeWithFailure; }
+		static void HoldFirstDecode(EditorAssetPreviewService& Service)
+		{
+			std::scoped_lock Lock(BarrierMutex);
+			DecodeEntered = false;
+			DecodeReleased = false;
+			HeldAsset = "scoped-invalidation";
+			HeldOnce = false;
+			Service.m_DecodeOverrideForTesting = &DecodeWithBarrier;
+		}
+		static bool WaitForHeldDecode()
+		{
+			std::unique_lock Lock(BarrierMutex);
+			return BarrierCondition.wait_for(Lock, std::chrono::seconds(5), [] { return DecodeEntered; });
+		}
+		static void ReleaseHeldDecode()
+		{
+			{
+				std::scoped_lock Lock(BarrierMutex);
+				DecodeReleased = true;
+			}
+			BarrierCondition.notify_all();
+		}
 
 	private:
+		static std::optional<EditorAssetPreviewService::CpuPreview> DecodeWithBarrier(
+			const EditorAssetPreviewService::Request& Work)
+		{
+			auto Result = EditorAssetPreviewService::Decode(Work);
+			if (Work.AssetID != HeldAsset) return Result;
+			std::unique_lock Lock(BarrierMutex);
+			if (HeldOnce) return Result;
+			HeldOnce = true;
+			DecodeEntered = true;
+			BarrierCondition.notify_all();
+			BarrierCondition.wait(Lock, [] { return DecodeReleased; });
+			return Result;
+		}
+
 		static std::optional<EditorAssetPreviewService::CpuPreview> DecodeWithFailure(const EditorAssetPreviewService::Request& Work)
 		{
 			if (Work.AssetID == "decode-throws") throw std::runtime_error("injected preview decode failure");
 			return EditorAssetPreviewService::Decode(Work);
 		}
+
+		inline static std::mutex BarrierMutex;
+		inline static std::condition_variable BarrierCondition;
+		inline static std::string HeldAsset;
+		inline static bool DecodeEntered = false;
+		inline static bool DecodeReleased = false;
+		inline static bool HeldOnce = false;
 	};
 } // namespace PulseForgeEditor
 
@@ -461,6 +506,7 @@ namespace
 		} CleanupTemporary{ Root };
 		const std::filesystem::path TexturePath = Root / "Assets" / "Textures" / "BaseColor.ppm";
 		const std::filesystem::path MaterialPath = Root / "Assets" / "Materials" / "Shared.material";
+		const std::filesystem::path IndependentMaterialPath = Root / "Assets" / "Materials" / "Independent.material";
 		std::error_code Error;
 		std::filesystem::create_directories(TexturePath.parent_path(), Error);
 		std::filesystem::create_directories(MaterialPath.parent_path(), Error);
@@ -480,9 +526,15 @@ namespace
 			MaterialFile.write(MaterialBytes->data(), static_cast<std::streamsize>(MaterialBytes->size()));
 			PF_CHECK(Tests, MaterialFile.good());
 		}
+		{
+			std::ofstream MaterialFile(IndependentMaterialPath, std::ios::binary | std::ios::trunc);
+			MaterialFile.write(MaterialBytes->data(), static_cast<std::streamsize>(MaterialBytes->size()));
+			PF_CHECK(Tests, MaterialFile.good());
+		}
 		const auto MaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(MaterialPath);
-		PF_CHECK(Tests, MaterialMetadata.has_value());
-		if (!MaterialMetadata) return;
+		const auto IndependentMaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(IndependentMaterialPath);
+		PF_CHECK(Tests, MaterialMetadata.has_value() && IndependentMaterialMetadata.has_value());
+		if (!MaterialMetadata || !IndependentMaterialMetadata) return;
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(Root).has_value());
 		auto RegistrySnapshot = std::make_shared<const AssetRegistry>(Registry);
@@ -579,16 +631,20 @@ namespace
 
 		const auto FirstEntityID = UUID::Generate();
 		const auto SecondEntityID = UUID::Generate();
+		const auto IndependentEntityID = UUID::Generate();
 		const auto FirstDefaultEntityID = UUID::Generate();
 		const auto SecondDefaultEntityID = UUID::Generate();
-		PF_CHECK(Tests, FirstEntityID.has_value() && SecondEntityID.has_value() &&
+		PF_CHECK(Tests, FirstEntityID.has_value() && SecondEntityID.has_value() && IndependentEntityID.has_value() &&
 			FirstDefaultEntityID.has_value() && SecondDefaultEntityID.has_value());
-		if (!FirstEntityID || !SecondEntityID || !FirstDefaultEntityID || !SecondDefaultEntityID) return;
+		if (!FirstEntityID || !SecondEntityID || !IndependentEntityID || !FirstDefaultEntityID || !SecondDefaultEntityID) return;
 		SceneMeshInstance FirstInstance;
 		FirstInstance.Entity = *FirstEntityID;
 		FirstInstance.MaterialAsset = MaterialMetadata->ID;
 		SceneMeshInstance SecondInstance = FirstInstance;
 		SecondInstance.Entity = *SecondEntityID;
+		SceneMeshInstance IndependentInstance;
+		IndependentInstance.Entity = *IndependentEntityID;
+		IndependentInstance.MaterialAsset = IndependentMaterialMetadata->ID;
 		SceneMeshInstance FirstDefaultInstance;
 		FirstDefaultInstance.Entity = *FirstDefaultEntityID;
 		SceneMeshInstance SecondDefaultInstance = FirstDefaultInstance;
@@ -609,6 +665,15 @@ namespace
 		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
 		auto SecondBinding = Bindings.ResolveMaterialBinding(SecondInstance, *EnvironmentID, 1);
 		PF_CHECK(Tests, SecondBinding && *SecondBinding == *FirstBinding);
+		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(IndependentMaterialMetadata->ID, *EnvironmentID, 1,
+			*OldEnvironment).has_value());
+		auto IndependentBinding = Bindings.ResolveMaterialBinding(IndependentInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, IndependentBinding && *IndependentBinding != *FirstBinding);
+		const auto* IndependentFakeBinding = IndependentBinding
+			? dynamic_cast<const FakeBindingSet*>(*IndependentBinding) : nullptr;
+		PF_CHECK(Tests, IndependentFakeBinding != nullptr);
+		if (!IndependentFakeBinding) return;
+		const auto IndependentBindingLifetime = IndependentFakeBinding->GetLifetime();
 		const size_t InitialBindingSetCount = Runtime.BindingLifetimes.size();
 		const DiagnosticSnapshot CapturedBindings = Diagnostics.CaptureSnapshot();
 		size_t MaterialCreationScopes = 0;
@@ -620,7 +685,7 @@ namespace
 			if (Event.Owner == "SceneRendererMaterialBindingCache" && Event.Name == "Environment binding creation")
 				++EnvironmentCreationScopes;
 		}
-		PF_CHECK(Tests, MaterialCreationScopes == 1 && EnvironmentCreationScopes == 1);
+		PF_CHECK(Tests, MaterialCreationScopes == 2 && EnvironmentCreationScopes == 1);
 		Diagnostics.SetCaptureEnabled(false);
 		const size_t EventsBeforeWarmResolution = Diagnostics.CaptureSnapshot().Events.size();
 		const std::vector<LogEntry> LogsBeforeWarmResolution = Log::GetRecentEntries();
@@ -671,6 +736,30 @@ namespace
 		auto NewDefaultBinding = Bindings.ResolveMaterialBinding(FirstDefaultInstance, *EnvironmentID, 2);
 		PF_CHECK(Tests, NewDefaultBinding.has_value());
 		PF_CHECK(Tests, !OldMaterialBindingLifetime->Alive && !OldEnvironmentBindingLifetime->Alive);
+		{
+			SceneRendererMaterialBindingCache ScopedBindings(Runtime);
+			PF_CHECK(Tests, ScopedBindings.Initialize({ Materials, Textures, *Layout, **Occlusion,
+				*ObjectConstants, *FrameConstants, *LocalConstants }).has_value());
+			PF_CHECK(Tests, ScopedBindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 2,
+				*NewEnvironment).has_value());
+			PF_CHECK(Tests, ScopedBindings.EnsureMaterialBindings(IndependentMaterialMetadata->ID, *EnvironmentID, 2,
+				*NewEnvironment).has_value());
+			auto ScopedA = ScopedBindings.ResolveMaterialBinding(FirstInstance, *EnvironmentID, 2);
+			auto ScopedB = ScopedBindings.ResolveMaterialBinding(IndependentInstance, *EnvironmentID, 2);
+			PF_CHECK(Tests, ScopedA && ScopedB && *ScopedA != *ScopedB);
+			const auto* ScopedBFake = ScopedB ? dynamic_cast<const FakeBindingSet*>(*ScopedB) : nullptr;
+			PF_CHECK(Tests, ScopedBFake != nullptr);
+			if (ScopedBFake)
+			{
+				const auto ScopedBLifetime = ScopedBFake->GetLifetime();
+				ScopedBindings.RefreshMaterialAsset(MaterialMetadata->ID);
+				PF_CHECK(Tests, ScopedBLifetime->Alive);
+				auto StillScopedB = ScopedBindings.ResolveMaterialBinding(IndependentInstance, *EnvironmentID, 2);
+				PF_CHECK(Tests, StillScopedB && *StillScopedB == *ScopedB);
+				ScopedBindings.RefreshMaterialAsset(IndependentMaterialMetadata->ID);
+				PF_CHECK(Tests, !ScopedBLifetime->Alive);
+			}
+		}
 		Preparation.Shutdown();
 	}
 
@@ -1135,6 +1224,69 @@ namespace
 		PF_CHECK(Tests, std::chrono::steady_clock::now() - ShutdownStart < std::chrono::seconds(5));
 	}
 
+	void TestPreviewAssetInvalidationRejectsInflightReplacement(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "AssetInvalidation");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} CleanupTemporary{ Root };
+
+		const std::filesystem::path ReplacedImage = Root / "replaced.ppm";
+		const std::filesystem::path UnrelatedImage = Root / "unrelated.ppm";
+		PF_CHECK(Tests, WritePpm(ReplacedImage, 1, 1, { char(200), char(20), char(30) }));
+		PF_CHECK(Tests, WritePpm(UnrelatedImage, 1, 1, { char(10), char(210), char(40) }));
+
+		FakeRenderDevice Runtime;
+		FakeTextureRegistry Registry;
+		EditorAssetPreviewService Previews;
+		Previews.Initialize(Runtime, Registry);
+		Previews.SetProject("asset-invalidation-project");
+		Previews.RequestImage("asset-invalidation-project", "unrelated", UnrelatedImage);
+		const bool UnrelatedReady = WaitForPreviewState(
+			Previews, [&](const AssetPreviewStats&) { return Previews.FindPreview("asset-invalidation-project", "unrelated").has_value(); },
+			true);
+		PF_CHECK(Tests, UnrelatedReady);
+
+		EditorAssetPreviewServiceTestAccess::HoldFirstDecode(Previews);
+		Previews.RequestImage("asset-invalidation-project", "scoped-invalidation", ReplacedImage);
+		const bool DecodeHeld = EditorAssetPreviewServiceTestAccess::WaitForHeldDecode();
+		PF_CHECK(Tests, DecodeHeld);
+		if (!DecodeHeld)
+		{
+			EditorAssetPreviewServiceTestAccess::ReleaseHeldDecode();
+			Previews.Shutdown();
+			return;
+		}
+
+		Previews.InvalidateAsset("asset-invalidation-project", "scoped-invalidation");
+		PF_CHECK(Tests, Previews.FindPreview("asset-invalidation-project", "unrelated").has_value());
+		PF_CHECK(Tests, WritePpm(ReplacedImage, 1, 1, { char(20), char(30), char(220) }));
+		Previews.RequestImage("asset-invalidation-project", "scoped-invalidation", ReplacedImage);
+		EditorAssetPreviewServiceTestAccess::ReleaseHeldDecode();
+
+		const bool ReplacementReady = WaitForPreviewState(
+			Previews,
+			[&](const AssetPreviewStats& Stats)
+			{
+				return Stats.StaleResultsDiscarded > 0 &&
+					Previews.FindPreview("asset-invalidation-project", "scoped-invalidation").has_value();
+			}, true);
+		PF_CHECK(Tests, ReplacementReady);
+		PF_CHECK(Tests, Previews.GetStats().StaleResultsDiscarded > 0);
+		PF_CHECK(Tests, Previews.FindPreview("asset-invalidation-project", "unrelated").has_value());
+		PF_CHECK(Tests, Registry.RegistrationAttempts == 2);
+		Previews.Shutdown();
+		PF_CHECK(Tests, Registry.RegisteredCount() == 0);
+	}
+
 	void TestPreviewZeroBudgetsAndDecodeException(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
@@ -1306,6 +1458,7 @@ void RunEditorViewportSceneRenderViewTests(TestRunner& Tests)
 	TestPreviewStatisticsWhileWorkerDecodes(Tests);
 	TestPreviewOversizedResultDoesNotBlockWorker(Tests);
 	TestPreviewBudgetWaitInvalidationAndShutdown(Tests);
+	TestPreviewAssetInvalidationRejectsInflightReplacement(Tests);
 	TestPreviewZeroBudgetsAndDecodeException(Tests);
 #ifdef PF_EDITOR_RENDERER_OPENGL
 	TestOpenGLSceneViewportFallback(Tests);

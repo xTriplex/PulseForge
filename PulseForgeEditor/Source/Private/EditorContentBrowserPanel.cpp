@@ -136,7 +136,12 @@ namespace PulseForgeEditor
 						: Style.SmallButton(EditorIcon::Refresh, "Refresh"))
 				Actions.HandleContentBrowserToolbarAction(EditorContentBrowserToolbarAction::Refresh);
 			ImGui::SameLine();
-			const float SearchWidth = (std::max)(ImGui::GetContentRegionAvail().x - 83.0f, 52.0f);
+			if (Compact ? Style.IconButton(EditorIcon::Material, "New", "NewMaterial", "Create a fixed-PBR material")
+						: Style.SmallButton(EditorIcon::Material, "New Material..."))
+				Actions.HandleContentBrowserToolbarAction(EditorContentBrowserToolbarAction::NewMaterial);
+			ImGui::SameLine();
+			const float SearchReserve = Compact ? 112.0f : 310.0f;
+			const float SearchWidth = (std::max)(ImGui::GetContentRegionAvail().x - SearchReserve, 52.0f);
 			ImGui::SetNextItemWidth(SearchWidth);
 			if (m_FocusSearchNextFrame)
 			{
@@ -180,6 +185,13 @@ namespace PulseForgeEditor
 		}
 		if (State.GridView()) m_AssetView.DrawGrid(State, &Project, SceneAvailable, Previews, Style, AssetActionHandler, DeferredAction);
 		else m_AssetView.DrawList(State, &Project, SceneAvailable, Style, AssetActionHandler, DeferredAction);
+		if (ImGui::BeginPopupContextWindow(
+				"ContentAssetBackground", ImGuiPopupFlags_NoOpenOverItems | ImGuiPopupFlags_NoOpenOverExistingPopup))
+		{
+			if (ImGui::MenuItem("New Material..."))
+				Actions.HandleContentBrowserToolbarAction(EditorContentBrowserToolbarAction::NewMaterial);
+			ImGui::EndPopup();
+		}
 		if ((!VisibleFolders || VisibleFolders->empty()) && State.FilteredAssetIndices().empty())
 			Style.EmptyState(EditorIcon::Search,
 				State.Assets().empty() ? "The project has no managed assets." : "No assets or folders match this location.");

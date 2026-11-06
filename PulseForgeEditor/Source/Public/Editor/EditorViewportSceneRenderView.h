@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetPreparationService.h"
+#include "Assets/AssetID.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/RenderDevice.h"
 #include "Scene/UUID.h"
@@ -49,6 +50,7 @@ namespace PulseForgeEditor
 		void InvalidatePreparedScene() noexcept;
 		void ClearEnvironmentLightingPending() noexcept;
 		void RefreshMaterialAssets() noexcept;
+		void RefreshMaterialAsset(const PulseForge::AssetID& Material) noexcept;
 		void RefreshProjectAssets() noexcept;
 		void ResetTarget() noexcept;
 

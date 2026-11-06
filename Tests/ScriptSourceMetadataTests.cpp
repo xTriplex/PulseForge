@@ -29,6 +29,21 @@ void RunScriptSourceMetadataTests(TestRunner& Tests)
 		"--[[PulseForgeScript:1\r\n{\"version\":1,\"modules\":[\"shared/math\"]}\r\n]]\r\nreturn true\r\n");
 	PF_CHECK(Tests, ParsedWindowsLineEndings && ParsedWindowsLineEndings->Modules.size() == 1 &&
 		ParsedWindowsLineEndings->Modules.front() == "shared/math");
+	const auto ParseVersion = [](std::string_view Version)
+	{
+		return ParseScriptSourceMetadata(std::string("--[[PulseForgeScript:1\n{\"version\":") + std::string(Version) + "}\n]]\nreturn true\n");
+	};
+	PF_CHECK(Tests, ParseVersion("1").has_value());
+	for (const std::string_view Version : { "2", "4294967296", "4294967297", "-1", "-4294967295", "-9223372036854775808",
+		"9223372036854775807", "18446744073709551615", "18446744073709551616", "1.0", "\"1\"", "true", "null", "[]", "{}" })
+		PF_CHECK(Tests, !ParseVersion(Version));
+	PF_CHECK(Tests, !ParseScriptSourceMetadata("--[[PulseForgeScript:1\n{\"properties\":[]}\n]]\n"));
+	const auto FutureMarker = ParseScriptSourceMetadata("--[[PulseForgeScript:2\n{\"version\":2}\n]]\nreturn true\n");
+	PF_CHECK(Tests, !FutureMarker && FutureMarker.error().Message.find("version") != std::string::npos);
+	const auto MalformedMarker = ParseScriptSourceMetadata("--[[PulseForgeScript:future\n{\"version\":1}\n]]\n");
+	PF_CHECK(Tests, !MalformedMarker && MalformedMarker.error().Message.find("version") != std::string::npos);
+	const auto MissingMarkerVersion = ParseScriptSourceMetadata("--[[PulseForgeScript:\n{\"version\":1}\n]]\n");
+	PF_CHECK(Tests, !MissingMarkerVersion);
 	if (Parsed && !Parsed->FloatProperties.empty())
 	{
 		const ScriptFloatPropertyDeclaration& Property = Parsed->FloatProperties.front();

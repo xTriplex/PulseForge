@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorDocumentCommandOwner.h"
 
 #include <new>
 #include <stdexcept>
@@ -283,24 +284,24 @@ namespace
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(false, false, true));
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, true, true));
 		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, false, false));
-		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false, false));
-		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(false, true, false));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, false, false));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(true, false, true));
-		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, true, true));
+		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(true, false));
+		PF_CHECK(Tests, CanCreateNativeHostFromDocumentTabDrag(false, true));
+		PF_CHECK(Tests, !CanCreateNativeHostFromDocumentTabDrag(false, false));
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, false, true, true) ==
 							DocumentTabReleaseAction::TransferToStrip);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, true, true, true) ==
 							DocumentTabReleaseAction::TransferToStrip);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, true, true, false) ==
 							DocumentTabReleaseAction::CreateNativeHost);
-		PF_CHECK(
-			Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, CanCreateNativeHostFromDocumentTabDrag(false, true, false),
-					   true, false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(false, false, false), true, false) == DocumentTabReleaseAction::None);
+							CanCreateNativeHostFromDocumentTabDrag(false, true), true,
+							false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
-							CanCreateNativeHostFromDocumentTabDrag(true, false, false), true, false) == DocumentTabReleaseAction::CreateNativeHost);
+							CanCreateNativeHostFromDocumentTabDrag(false, false), true,
+							false) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+							CanCreateNativeHostFromDocumentTabDrag(true, false), true,
+							false) == DocumentTabReleaseAction::CreateNativeHost);
 		PF_CHECK(
 			Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f, false, true, false) == DocumentTabReleaseAction::None);
 		PF_CHECK(
@@ -357,6 +358,23 @@ namespace
 		const EditorDocumentIdentity TextureCommandDocument{ *Project, *Material, EditorDocumentKind::Texture };
 		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(&TextureCommandDocument, *Project) == EditorDocumentCommandTarget::Unsupported);
 		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(&OtherProjectMaterial, *Project) == EditorDocumentCommandTarget::Unsupported);
+		{
+			const std::array NativeA{ MaterialA };
+			const std::array NativeB{ MaterialB };
+			auto OwnerA = ResolveEditorDocumentCommandOwner(false, false, std::nullopt, Level, NativeA);
+			auto OwnerB = ResolveEditorDocumentCommandOwner(false, false, std::nullopt, Level, NativeB);
+			PF_CHECK(Tests, OwnerA.Document == MaterialA && !OwnerA.MaterialDetailsAsset);
+			PF_CHECK(Tests, OwnerB.Document == MaterialB && !OwnerB.MaterialDetailsAsset);
+			const auto Transition = ResolveEditorDocumentCommandOwner(false, false, std::nullopt, Level, {});
+			PF_CHECK(Tests, !Transition.Document && !Transition.MaterialDetailsAsset);
+			const auto MainLevelOwner = ResolveEditorDocumentCommandOwner(true, false, std::nullopt, Level, {});
+			PF_CHECK(Tests, MainLevelOwner.Document == Level);
+			const auto DetailsOwner = ResolveEditorDocumentCommandOwner(true, true, *Material, Level, {});
+			PF_CHECK(Tests, !DetailsOwner.Document && DetailsOwner.MaterialDetailsAsset == Material);
+			const std::array AmbiguousNative{ MaterialA, MaterialB };
+			const auto Ambiguous = ResolveEditorDocumentCommandOwner(true, false, std::nullopt, Level, AmbiguousNative);
+			PF_CHECK(Tests, !Ambiguous.Document && !Ambiguous.MaterialDetailsAsset);
+		}
 		PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
 		const uint64_t LocationUpdateRevision = Manager.Find(MaterialA)->Revision;
 		const bool LocationUpdated =
@@ -463,7 +481,9 @@ namespace
 		if (DetachOpen && NewMaterialHost)
 		{
 			PF_CHECK(Tests, Manager.MarkEdited(DetachMaterial));
-			const uint64_t DetachRevision = Manager.Find(DetachMaterial)->Revision;
+			EditorDocumentSession* const DetachSession = Manager.Find(DetachMaterial);
+			const uint64_t DetachRevision = DetachSession->Revision;
+			const uint64_t DetachSessionGeneration = DetachSession->SessionGeneration;
 			const auto RejectedDetach = Manager.Transfer(
 				DetachMaterial, *NewMaterialHost, 0, [](const EditorDocumentSession&, const EditorDocumentHost&) { return false; });
 			PF_CHECK(Tests, !RejectedDetach);
@@ -479,10 +499,14 @@ namespace
 					[](const EditorDocumentSession& Session, const EditorDocumentHost& Host)
 					{ return Host.Role == EditorDocumentHostRole::Native && Host.PlacementKind == Session.Identity.Kind; });
 				PF_CHECK(Tests, Detached && Detached->Changed);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial) == DetachSession &&
+									Manager.Find(DetachMaterial)->SessionGeneration == DetachSessionGeneration);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == *PreparedHost);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision && Manager.Find(DetachMaterial)->IsDirty());
 				const auto Reattached = Manager.Transfer(DetachMaterial, EditorDocumentManager::MainHostID, 0);
 				PF_CHECK(Tests, Reattached && Reattached->Changed);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial) == DetachSession &&
+									Manager.Find(DetachMaterial)->SessionGeneration == DetachSessionGeneration);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == EditorDocumentManager::MainHostID);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision && Manager.Find(DetachMaterial)->IsDirty());
 

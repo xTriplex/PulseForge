@@ -22,7 +22,8 @@ namespace PulseForgeEditor
 		DuplicateAsset,
 		CreateScene,
 		SaveSceneAs,
-		CreatePrefab
+		CreatePrefab,
+		CreateMaterial
 	};
 
 	struct EditorAssetDestinationOperation

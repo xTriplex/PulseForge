@@ -53,6 +53,15 @@ namespace PulseForgeEditor
 		InitializeDestination(m_DestinationFolder, "NewPrefab.prefab");
 	}
 
+	void EditorAssetWorkflowState::BeginMaterialDestination(std::string_view Folder)
+	{
+		m_DestinationAsset.reset();
+		m_IsDuplicate = false;
+		m_CreateKind = ProjectAssetDestinationCreateKind::Material;
+		m_PrefabRoot.reset();
+		InitializeDestination(Folder.empty() ? std::string_view("Assets") : Folder, "NewMaterial.material");
+	}
+
 	void EditorAssetWorkflowState::DismissDestination() noexcept
 	{
 		m_DestinationAsset.reset();

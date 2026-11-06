@@ -14,6 +14,7 @@ namespace PulseForgeEditor
 		OpenScene,
 		OpenPrefab,
 		OpenRuntimeUI,
+		OpenMaterialEditor,
 		ShowMaterialDetails
 	};
 
@@ -27,7 +28,7 @@ namespace PulseForgeEditor
 		if (PulseForge::AssetExtensionsEqual(Extension, ".scene")) return AssetBrowserOpenAction::OpenScene;
 		if (PulseForge::AssetExtensionsEqual(Extension, ".prefab")) return AssetBrowserOpenAction::OpenPrefab;
 		if (PulseForge::AssetExtensionsEqual(Extension, ".pfui")) return AssetBrowserOpenAction::OpenRuntimeUI;
-		if (PulseForge::AssetExtensionsEqual(Extension, ".material")) return AssetBrowserOpenAction::ShowMaterialDetails;
+		if (PulseForge::AssetExtensionsEqual(Extension, ".material")) return AssetBrowserOpenAction::OpenMaterialEditor;
 		return AssetBrowserOpenAction::None;
 	}
 

@@ -260,10 +260,16 @@ namespace PulseForge
 		{
 			const Json Root = Json::parse(Text.begin(), Text.end());
 			if (!Root.is_object() || !Root.contains("version") || !Root.contains("designSize") || !Root.contains("elements") ||
-				!Root["version"].is_number_integer() || !Root["elements"].is_array())
+				!Root["elements"].is_array())
 				return std::unexpected(MakeError("UI document root must contain version, designSize, and elements"));
+			const Json& Version = Root["version"];
+			const bool SupportedVersion = Version.is_number_unsigned() ? Version.get<uint64_t>() == RuntimeUIDocument::CurrentVersion :
+				Version.is_number_integer() && Version.get<int64_t>() >= 0 &&
+					static_cast<uint64_t>(Version.get<int64_t>()) == RuntimeUIDocument::CurrentVersion;
+			if (!SupportedVersion)
+				return std::unexpected(MakeError("UI document version is unsupported; expected integer version 1"));
 			RuntimeUIDocument Document;
-			Document.Version = Root["version"].get<uint32_t>();
+			Document.Version = static_cast<uint32_t>(RuntimeUIDocument::CurrentVersion);
 			auto DesignSize = ParseVec2(Root["designSize"], "UI designSize");
 			if (!DesignSize) return std::unexpected(DesignSize.error());
 			Document.DesignSize = *DesignSize;

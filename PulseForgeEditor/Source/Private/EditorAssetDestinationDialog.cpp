@@ -63,11 +63,14 @@ namespace PulseForgeEditor
 			const std::filesystem::path SourcePath = Asset ? Asset->ProjectRelativePath
 													 : Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab
 														 ? std::filesystem::path("Assets/NewPrefab.prefab")
+													 : Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Material
+														 ? std::filesystem::path("Assets/NewMaterial.material")
 														 : std::filesystem::path("Assets/NewScene.scene");
 			std::string OperationLabel;
 			if (Asset) OperationLabel = Workflow.IsDuplicate() ? "Duplicate" : "Move / Rename";
 			else if (Workflow.CreateKind() == ProjectAssetDestinationCreateKind::SaveSceneAs) OperationLabel = "Save Scene As";
 			else if (Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab) OperationLabel = "Create Prefab";
+			else if (Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Material) OperationLabel = "Create Material";
 			else OperationLabel = "Create Scene";
 			ImGui::Text(
 				"%s%s%s", OperationLabel.c_str(), Asset ? " " : "", Asset ? PathToUtf8(Asset->ProjectRelativePath.filename()).c_str() : "");
@@ -153,6 +156,7 @@ namespace PulseForgeEditor
 
 			const char* SubmitLabel = Workflow.IsDuplicate()													? "Duplicate"
 									  : Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab		? "Create Prefab"
+									  : Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Material	? "Create Material"
 									  : Workflow.CreateKind() == ProjectAssetDestinationCreateKind::SaveSceneAs ? "Save Scene As"
 									  : Workflow.CreateKind() == ProjectAssetDestinationCreateKind::NewScene	? "Create Scene"
 																												: "Move";
@@ -238,6 +242,8 @@ namespace PulseForgeEditor
 							Kind = EditorAssetDestinationOperationKind::SaveSceneAs;
 						else if (Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab)
 							Kind = EditorAssetDestinationOperationKind::CreatePrefab;
+						else if (Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Material)
+							Kind = EditorAssetDestinationOperationKind::CreateMaterial;
 						Operation = EditorAssetDestinationOperation{ Kind, Workflow.DestinationAsset(), Target, Workflow.PrefabRoot() };
 						Workflow.DismissDestination();
 						ImGui::CloseCurrentPopup();

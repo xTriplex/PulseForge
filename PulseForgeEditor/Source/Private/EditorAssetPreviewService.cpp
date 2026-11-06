@@ -98,9 +98,14 @@ namespace PulseForgeEditor
 			Entry NewEntry;
 			TouchAssetPreviewEntry(NewEntry.Visible, NewEntry.LastUse, m_UseCounter);
 			NewEntry.Generation = m_Generation;
+			NewEntry.AssetGeneration = m_NextAssetGeneration++;
+			if (m_NextAssetGeneration == 0) m_NextAssetGeneration = 1;
+			const uint64_t AssetGeneration = NewEntry.AssetGeneration;
 			m_Entries.emplace(Key, std::move(NewEntry));
+			m_PendingAssetGenerations[Key] = AssetGeneration;
 			m_Stats.PeakEntries = (std::max)(m_Stats.PeakEntries, m_Entries.size());
-			m_Requests.push_back({ std::string(ProjectID), std::move(AssetID), SourcePath, m_Generation, RequestKind::Image });
+			m_Requests.push_back({ std::string(ProjectID), std::move(AssetID), SourcePath, m_Generation, AssetGeneration,
+				RequestKind::Image });
 		}
 		m_WorkAvailable.notify_one();
 	}
@@ -132,10 +137,15 @@ namespace PulseForgeEditor
 			Entry NewEntry;
 			TouchAssetPreviewEntry(NewEntry.Visible, NewEntry.LastUse, m_UseCounter);
 			NewEntry.Generation = m_Generation;
+			NewEntry.AssetGeneration = m_NextAssetGeneration++;
+			if (m_NextAssetGeneration == 0) m_NextAssetGeneration = 1;
+			const uint64_t AssetGeneration = NewEntry.AssetGeneration;
 			m_Entries.emplace(Key, std::move(NewEntry));
+			m_PendingAssetGenerations[Key] = AssetGeneration;
 			m_Stats.PeakEntries = (std::max)(m_Stats.PeakEntries, m_Entries.size());
 			m_Requests.push_back({
-				std::string(ProjectID), std::move(AssetID), SourcePath, m_Generation, RequestKind::MaterialSwatch });
+				std::string(ProjectID), std::move(AssetID), SourcePath, m_Generation, AssetGeneration,
+				RequestKind::MaterialSwatch });
 		}
 		m_WorkAvailable.notify_one();
 	}
@@ -212,6 +222,7 @@ namespace PulseForgeEditor
 			{
 				m_Requests.clear();
 				m_Completed.clear();
+				m_PendingAssetGenerations.clear();
 				m_QueuedCpuBytes = 0;
 				for (auto& [Key, Entry] : m_Entries)
 				{
@@ -246,7 +257,8 @@ namespace PulseForgeEditor
 			const std::string Key = EntryKey(Preview.ProjectID, Preview.AssetID);
 			auto Found = m_Entries.find(Key);
 			if (Found == m_Entries.end() || !IsCurrentAssetPreviewResult(
-				Preview.Generation, Found->second.Generation, m_Generation, m_Stopping))
+				Preview.Generation, Found->second.Generation, m_Generation, m_Stopping) ||
+				Preview.AssetGeneration != Found->second.AssetGeneration)
 			{
 				m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
 				std::scoped_lock Lock(m_Mutex);
@@ -280,7 +292,8 @@ namespace PulseForgeEditor
 			}
 			Found = m_Entries.find(Key);
 			if (Found == m_Entries.end() || !IsCurrentAssetPreviewResult(
-				Preview.Generation, Found->second.Generation, m_Generation, m_Stopping))
+				Preview.Generation, Found->second.Generation, m_Generation, m_Stopping) ||
+				Preview.AssetGeneration != Found->second.AssetGeneration)
 			{
 				std::scoped_lock Lock(m_Mutex);
 				m_QueuedCpuBytes -= (std::min)(m_QueuedCpuBytes, ByteCount);
@@ -349,10 +362,50 @@ namespace PulseForgeEditor
 			++m_Generation;
 			m_Requests.clear();
 			m_Completed.clear();
+			m_PendingAssetGenerations.clear();
 			m_QueuedCpuBytes = 0;
 		}
 		ClearEntries();
 		m_WorkAvailable.notify_all();
+	}
+
+	void EditorAssetPreviewService::InvalidateAsset(std::string_view ProjectID, std::string_view AssetID) noexcept
+	{
+		try
+		{
+			const std::string Key = EntryKey(ProjectID, AssetID);
+			{
+				std::scoped_lock Lock(m_Mutex);
+				const size_t RequestCount = std::erase_if(m_Requests, [ProjectID, AssetID](const Request& Work)
+				{
+					return Work.ProjectID == ProjectID && Work.AssetID == AssetID;
+				});
+				const size_t CompletedCount = std::erase_if(m_Completed, [this, ProjectID, AssetID](const CpuPreview& Preview)
+				{
+					if (Preview.ProjectID != ProjectID || Preview.AssetID != AssetID) return false;
+					m_QueuedCpuBytes -= (std::min)(m_QueuedCpuBytes, Preview.Pixels.size());
+					return true;
+				});
+				m_PendingAssetGenerations.erase(Key);
+				m_StaleResultsDiscarded.fetch_add(RequestCount + CompletedCount, std::memory_order_relaxed);
+			}
+			const auto Found = m_Entries.find(Key);
+			if (Found != m_Entries.end())
+			{
+				if (Found->second.TextureID != 0 && m_TextureRegistry)
+				{
+					m_TextureRegistry->UnregisterTexture(Found->second.TextureID);
+					++m_Stats.BindingUnregistrations;
+				}
+				m_GpuBudget.Remove(Found->second.GpuBytes);
+				m_Entries.erase(Found);
+			}
+			m_WorkAvailable.notify_all();
+		}
+		catch (...)
+		{
+			InvalidateAll();
+		}
 	}
 
 	void EditorAssetPreviewService::ClearEntries() noexcept
@@ -432,7 +485,10 @@ namespace PulseForgeEditor
 
 				std::unique_lock Lock(m_Mutex);
 				if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
-				if (!IsCurrentAssetPreviewResult(Work.Generation, Work.Generation, m_Generation, m_Stopping))
+				const std::string WorkKey = EntryKey(Work.ProjectID, Work.AssetID);
+				const auto CurrentGeneration = m_PendingAssetGenerations.find(WorkKey);
+				if (!IsCurrentAssetPreviewResult(Work.Generation, Work.Generation, m_Generation, m_Stopping) ||
+					CurrentGeneration == m_PendingAssetGenerations.end() || CurrentGeneration->second != Work.AssetGeneration)
 				{
 					m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
 					continue;
@@ -444,26 +500,35 @@ namespace PulseForgeEditor
 					Failure.ProjectID = Preview ? std::move(Preview->ProjectID) : std::move(Work.ProjectID);
 					Failure.AssetID = Preview ? std::move(Preview->AssetID) : std::move(Work.AssetID);
 					Failure.Generation = Work.Generation;
+					Failure.AssetGeneration = Work.AssetGeneration;
 					m_Completed.push_back(std::move(Failure));
+					m_PendingAssetGenerations.erase(WorkKey);
 					continue;
 				}
 
 				const size_t ResultBytes = Preview->Pixels.size();
 				if (m_QueuedCpuBytes > m_Limits.MaximumCpuBytes - ResultBytes) ++m_Stats.CpuBudgetWaits;
 				m_WorkAvailable.wait(Lock,
-					[this, &Work, ResultBytes]
+					[this, &Work, &WorkKey, ResultBytes]
 					{
-						return m_Stopping || Work.Generation != m_Generation || m_QueuedCpuBytes <= m_Limits.MaximumCpuBytes - ResultBytes;
+						const auto Current = m_PendingAssetGenerations.find(WorkKey);
+						return m_Stopping || Work.Generation != m_Generation ||
+							Current == m_PendingAssetGenerations.end() || Current->second != Work.AssetGeneration ||
+							m_QueuedCpuBytes <= m_Limits.MaximumCpuBytes - ResultBytes;
 					});
 				if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
-				if (Work.Generation != m_Generation)
+				const auto GenerationAfterBudget = m_PendingAssetGenerations.find(WorkKey);
+				if (Work.Generation != m_Generation || GenerationAfterBudget == m_PendingAssetGenerations.end() ||
+					GenerationAfterBudget->second != Work.AssetGeneration)
 				{
 					m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
 					continue;
 				}
 				m_QueuedCpuBytes += ResultBytes;
+				Preview->AssetGeneration = Work.AssetGeneration;
 				m_Stats.PeakQueuedResultCpuBytes = (std::max)(m_Stats.PeakQueuedResultCpuBytes, m_QueuedCpuBytes);
 				m_Completed.push_back(std::move(*Preview));
+				m_PendingAssetGenerations.erase(WorkKey);
 			}
 		}
 		catch (...)
@@ -481,6 +546,7 @@ namespace PulseForgeEditor
 			m_StaleResultsDiscarded.fetch_add(m_Requests.size() + m_Completed.size(), std::memory_order_relaxed);
 			m_Requests.clear();
 			m_Completed.clear();
+			m_PendingAssetGenerations.clear();
 			m_QueuedCpuBytes = 0;
 		}
 		catch (...)
@@ -509,6 +575,7 @@ namespace PulseForgeEditor
 			Result.ProjectID = Work.ProjectID;
 			Result.AssetID = Work.AssetID;
 			Result.Generation = Work.Generation;
+			Result.AssetGeneration = Work.AssetGeneration;
 			Result.Width = 1;
 			Result.Height = 1;
 			const auto Swatch = MakeMaterialBaseColorSwatch(Material->BaseColorFactor.r,
@@ -535,6 +602,7 @@ namespace PulseForgeEditor
 		Result.ProjectID = Work.ProjectID;
 		Result.AssetID = Work.AssetID;
 		Result.Generation = Work.Generation;
+		Result.AssetGeneration = Work.AssetGeneration;
 		Result.Width = Decoded->Width;
 		Result.Height = Decoded->Height;
 		Result.Fingerprint = Decoded->SourceFingerprint;
@@ -553,6 +621,7 @@ namespace PulseForgeEditor
 			++m_Generation;
 			m_Requests.clear();
 			m_Completed.clear();
+			m_PendingAssetGenerations.clear();
 			m_QueuedCpuBytes = 0;
 		}
 		m_WorkAvailable.notify_all();

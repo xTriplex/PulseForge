@@ -1,5 +1,7 @@
 if(NOT DEFINED PF_TEMPLATE_ROOT OR NOT DEFINED PF_PLAYER_FILE OR NOT DEFINED PF_RESOURCE_DIR OR
 	NOT DEFINED PF_SOURCE_ROOT OR NOT DEFINED PF_LUA_SOURCE_DIR OR NOT DEFINED PF_NVRHI_SOURCE_DIR OR
+	NOT DEFINED PF_FREETYPE_SOURCE_DIR OR
+	NOT DEFINED PF_TRACY_SOURCE_DIR OR
 	NOT DEFINED PF_CONFIGURATION OR NOT DEFINED PF_PLATFORM OR NOT DEFINED PF_ARCHITECTURE OR
 	NOT DEFINED PF_DESCRIPTOR)
 	message(FATAL_ERROR "PulseForge player template descriptor arguments are incomplete")
@@ -8,6 +10,39 @@ if(NOT EXISTS "${PF_PLAYER_FILE}" OR NOT EXISTS "${PF_RESOURCE_DIR}/Shaders")
 	message(FATAL_ERROR "Cooked player template requires its executable and deployed Shaders directory")
 endif()
 set(THIRD_PARTY_NOTICES "PulseForge runtime third-party notices\n")
+set(XXHASH_NOTICE_HEADER "${PF_TRACY_SOURCE_DIR}/server/tracy_xxhash.h")
+if(NOT EXISTS "${XXHASH_NOTICE_HEADER}")
+	message(FATAL_ERROR "Required xxHash license source was not found: ${XXHASH_NOTICE_HEADER}")
+endif()
+file(READ "${XXHASH_NOTICE_HEADER}" XXHASH_HEADER_TEXT)
+string(LENGTH "${XXHASH_HEADER_TEXT}" XXHASH_HEADER_LENGTH)
+if(XXHASH_HEADER_LENGTH LESS 2)
+	message(FATAL_ERROR "Required xxHash license source has an unrecognized opening notice: ${XXHASH_NOTICE_HEADER}")
+endif()
+string(SUBSTRING "${XXHASH_HEADER_TEXT}" 0 2 XXHASH_HEADER_PREFIX)
+string(FIND "${XXHASH_HEADER_TEXT}" "*/" XXHASH_NOTICE_END)
+if(NOT XXHASH_HEADER_PREFIX STREQUAL "/*" OR XXHASH_NOTICE_END LESS 2)
+	message(FATAL_ERROR "Required xxHash license source has an unrecognized opening notice: ${XXHASH_NOTICE_HEADER}")
+endif()
+math(EXPR XXHASH_NOTICE_LENGTH "${XXHASH_NOTICE_END} + 2")
+string(SUBSTRING "${XXHASH_HEADER_TEXT}" 0 ${XXHASH_NOTICE_LENGTH} XXHASH_NOTICE_TEXT)
+foreach(XXHASH_REQUIRED_TEXT IN ITEMS
+		"xxHash - Extremely Fast Hash algorithm"
+		"Copyright (C) 2012-2021 Yann Collet"
+		"BSD 2-Clause License"
+		"Redistributions of source code must retain the above"
+		"Redistributions in binary form must reproduce the above"
+		"THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS"
+		"EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.")
+	string(FIND "${XXHASH_NOTICE_TEXT}" "${XXHASH_REQUIRED_TEXT}" XXHASH_REQUIRED_INDEX)
+	if(XXHASH_REQUIRED_INDEX EQUAL -1)
+		message(FATAL_ERROR "Required xxHash license source is incomplete or unrecognized (${XXHASH_REQUIRED_TEXT}): ${XXHASH_NOTICE_HEADER}")
+	endif()
+endforeach()
+string(APPEND THIRD_PARTY_NOTICES
+	"\n========================================\n"
+	"xxHash 0.8.2 (XXH_VERSION_NUMBER 802; Tracy source revision e792752104c6055020b6ccff3cac60451433f3aa)\n"
+	"========================================\n\n${XXHASH_NOTICE_TEXT}\n")
 set(THIRD_PARTY_LICENSES
 	"GLFW|${PF_SOURCE_ROOT}/PulseForge/Vendor/Glfw/LICENSE.md"
 	"GLM|${PF_SOURCE_ROOT}/PulseForge/Vendor/glm/copying.txt"
@@ -18,7 +53,11 @@ set(THIRD_PARTY_LICENSES
 	"spdlog|${PF_SOURCE_ROOT}/PulseForge/Vendor/spdlog/LICENSE"
 	"stb|${PF_SOURCE_ROOT}/PulseForge/Vendor/stb/LICENSE"
 	"Lua 5.5.1|${PF_LUA_SOURCE_DIR}/../doc/readme.html"
-	"NVRHI|${PF_NVRHI_SOURCE_DIR}/LICENSE.txt")
+	"NVRHI|${PF_NVRHI_SOURCE_DIR}/LICENSE.txt"
+	"FreeType 2, source revision 67c52a0b68eaeb7ae1f2248202924883c4a232d0: Copyright and license selection|${PF_FREETYPE_SOURCE_DIR}/LICENSE.TXT"
+	"FreeType 2, source revision 67c52a0b68eaeb7ae1f2248202924883c4a232d0: FreeType Project License (FTL)|${PF_FREETYPE_SOURCE_DIR}/docs/FTL.TXT"
+	"FreeType BDF driver notice|${PF_FREETYPE_SOURCE_DIR}/src/bdf/README"
+	"FreeType PCF driver notice|${PF_FREETYPE_SOURCE_DIR}/src/pcf/README")
 if(PF_PLATFORM STREQUAL "macOS")
 	list(APPEND THIRD_PARTY_LICENSES
 		"Khronos Vulkan Loader 1.4.350.0 (Apache 2.0 applies to most files. Some source files use more permissive licenses. Upstream LICENSE.txt: https://github.com/KhronosGroup/Vulkan-Loader/blob/vulkan-sdk-1.4.350.0/LICENSE.txt)|${PF_SOURCE_ROOT}/PulseForge/Vendor/json/LICENSES/Apache-2.0.txt"
@@ -44,13 +83,13 @@ if(PF_PLATFORM STREQUAL "macOS")
 endif()
 file(RELATIVE_PATH PLAYER_RELATIVE "${PF_TEMPLATE_ROOT}" "${PF_PLAYER_FILE}")
 file(TO_CMAKE_PATH "${PLAYER_RELATIVE}" PLAYER_RELATIVE)
-if(PLAYER_RELATIVE MATCHES "^\.\./" OR IS_ABSOLUTE "${PLAYER_RELATIVE}")
+if(PLAYER_RELATIVE MATCHES [[^\.\./]] OR IS_ABSOLUTE "${PLAYER_RELATIVE}")
 	message(FATAL_ERROR "Cooked player executable is outside its template root")
 endif()
 set(RUNTIME_FILES "${PLAYER_RELATIVE}")
 file(RELATIVE_PATH NOTICES_RELATIVE "${PF_TEMPLATE_ROOT}" "${PF_RESOURCE_DIR}/ThirdPartyNotices.txt")
 file(TO_CMAKE_PATH "${NOTICES_RELATIVE}" NOTICES_RELATIVE)
-if(NOTICES_RELATIVE MATCHES "^\.\./" OR IS_ABSOLUTE "${NOTICES_RELATIVE}")
+if(NOTICES_RELATIVE MATCHES [[^\.\./]] OR IS_ABSOLUTE "${NOTICES_RELATIVE}")
 	message(FATAL_ERROR "Runtime notices are outside the player template root")
 endif()
 list(APPEND RUNTIME_FILES "${NOTICES_RELATIVE}")
@@ -59,7 +98,7 @@ foreach(FILE_PATH IN LISTS SHADER_FILES)
 	if(NOT IS_SYMLINK "${FILE_PATH}")
 		file(RELATIVE_PATH RELATIVE_FILE "${PF_TEMPLATE_ROOT}" "${FILE_PATH}")
 		file(TO_CMAKE_PATH "${RELATIVE_FILE}" RELATIVE_FILE)
-		if(RELATIVE_FILE MATCHES "^\.\./" OR IS_ABSOLUTE "${RELATIVE_FILE}")
+		if(RELATIVE_FILE MATCHES [[^\.\./]] OR IS_ABSOLUTE "${RELATIVE_FILE}")
 			message(FATAL_ERROR "Cooked shader is outside its template root")
 		endif()
 		if(RELATIVE_FILE MATCHES "(^|/)EditorImGui(Present)?\\.")

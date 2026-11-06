@@ -19,7 +19,7 @@ namespace
 	bool IsValidKind(int64_t Value)
 	{
 		return Value >= static_cast<int64_t>(EditorDocumentKind::Level) &&
-			Value <= static_cast<int64_t>(EditorDocumentKind::Texture);
+			Value <= static_cast<int64_t>(EditorDocumentKind::RuntimeUI);
 	}
 
 	bool IsValidHostID(std::string_view ID, EditorDocumentHostRole Role)
@@ -43,7 +43,7 @@ namespace
 
 	std::expected<void, std::string> ValidateWorkspace(const EditorDocumentWorkspaceState& State)
 	{
-		if (State.Version != 3 || State.Project.IsNil() ||
+		if (State.Version != 4 || State.Project.IsNil() ||
 			(State.MaterialDetailsAsset && State.MaterialDetailsAsset->IsNil()))
 			return std::unexpected("Document workspace version or project identity is invalid");
 		if (State.Hosts.empty() || State.Hosts.size() > MaximumWorkspaceHosts)
@@ -57,7 +57,7 @@ namespace
 		for (const EditorDocumentHost& Host : State.Hosts)
 		{
 			if (!IsValidHostID(Host.ID, Host.Role) || !HostIDs.insert(Host.ID).second ||
-				static_cast<uint8_t>(Host.PlacementKind) > static_cast<uint8_t>(EditorDocumentKind::Texture) ||
+				static_cast<uint8_t>(Host.PlacementKind) > static_cast<uint8_t>(EditorDocumentKind::RuntimeUI) ||
 				!IsValidBounds(Host.Bounds))
 				return std::unexpected("Document workspace contains an invalid or duplicate host");
 			if (Host.Role == EditorDocumentHostRole::Main)
@@ -75,7 +75,7 @@ namespace
 			for (const EditorDocumentIdentity& Identity : Host.Documents)
 			{
 				if (Identity.Project != State.Project ||
-					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::Texture) ||
+					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::RuntimeUI) ||
 					(Host.Role == EditorDocumentHostRole::Native && Identity.Kind != Host.PlacementKind) ||
 					(Identity.Kind == EditorDocumentKind::Level &&
 						(Host.Role != EditorDocumentHostRole::Main || !Identity.Asset.IsNil())) ||
@@ -135,9 +135,10 @@ namespace PulseForgeEditor
 	{
 		std::vector<PulseForge::AssetID> Candidates;
 		std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> Added;
-		const auto AddMaterial = [&Candidates, &Added](const EditorDocumentIdentity& Identity)
+		const auto AddMaterial = [&State, &Candidates, &Added](const EditorDocumentIdentity& Identity)
 		{
-			if (Identity.Kind == EditorDocumentKind::Material && Added.insert(Identity.Asset).second)
+			if (State.LegacyMaterialDetailsMigration && Identity.Kind == EditorDocumentKind::Material &&
+				Added.insert(Identity.Asset).second)
 				Candidates.push_back(Identity.Asset);
 		};
 
@@ -148,6 +149,36 @@ namespace PulseForgeEditor
 			for (const EditorDocumentIdentity& Identity : Host.Documents)
 				AddMaterial(Identity);
 
+		return Candidates;
+	}
+
+	std::vector<PulseForge::AssetID> ConsumeLegacyMaterialDetailsEntries(EditorDocumentWorkspaceState& State)
+	{
+		auto Candidates = GetMaterialDetailsMigrationCandidates(State);
+		if (Candidates.empty()) return Candidates;
+		const std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> Consumed(Candidates.begin(), Candidates.end());
+		std::erase_if(State.RememberedPlacements, [](const auto& Placement)
+		{
+			return Placement.first == EditorDocumentKind::Material;
+		});
+		for (EditorDocumentHost& Host : State.Hosts)
+		{
+			const auto WasConsumed = [&Consumed](const EditorDocumentIdentity& Identity)
+			{
+				return Identity.Kind == EditorDocumentKind::Material && Consumed.contains(Identity.Asset);
+			};
+			std::erase_if(Host.Documents, WasConsumed);
+			if (Host.ActiveDocument && WasConsumed(*Host.ActiveDocument))
+				Host.ActiveDocument = Host.Documents.empty()
+					? std::nullopt : std::optional<EditorDocumentIdentity>(Host.Documents.front());
+		}
+		std::erase_if(State.Hosts, [](const EditorDocumentHost& Host)
+		{
+			return Host.Role == EditorDocumentHostRole::Native && Host.Documents.empty();
+		});
+		if (std::none_of(State.Hosts.begin(), State.Hosts.end(), [&State](const EditorDocumentHost& Host)
+			{ return Host.ID == State.FocusedHostID; }))
+			State.FocusedHostID = std::string(EditorDocumentManager::MainHostID);
 		return Candidates;
 	}
 
@@ -231,8 +262,9 @@ namespace PulseForgeEditor
 				return std::unexpected("Document workspace belongs to a different or invalid project");
 			EditorDocumentWorkspaceState State;
 			State.Version = Root["version"].get<uint32_t>();
-			if (State.Version != 1 && State.Version != 2 && State.Version != 3)
+			if (State.Version != 1 && State.Version != 2 && State.Version != 3 && State.Version != 4)
 				return std::unexpected("Document workspace version is unsupported");
+			State.LegacyMaterialDetailsMigration = State.Version <= 3;
 			if (State.Version >= 2)
 			{
 				if (!Root.contains("materialDetailsAsset"))
@@ -387,7 +419,7 @@ namespace PulseForgeEditor
 						EditorDocumentPlacement{ EditorDocumentHostRole::Native, Host->Bounds, std::nullopt });
 				}
 			}
-			State.Version = 3;
+			State.Version = 4;
 
 			auto Valid = ValidateWorkspace(State);
 			if (!Valid)

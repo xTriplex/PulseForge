@@ -19,7 +19,8 @@ namespace PulseForgeEditor
 	enum class EditorContentBrowserToolbarAction
 	{
 		Import,
-		Refresh
+		Refresh,
+		NewMaterial
 	};
 
 	class EditorContentBrowserPanelActions : public EditorContentBrowserNavigationActions

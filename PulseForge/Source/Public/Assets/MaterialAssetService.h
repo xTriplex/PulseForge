@@ -21,10 +21,21 @@ namespace PulseForge
 			const AssetID& MaterialAsset,
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry);
+		[[nodiscard]] static std::expected<MaterialAssetSourceSnapshot, MaterialAssetError> LoadSourceSnapshot(
+			const AssetID& MaterialAsset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry);
 		[[nodiscard]] static std::expected<void, MaterialAssetError> Save(
 			const AssetID& MaterialAsset,
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry,
 			const MaterialAssetDesc& Material);
+		// The source-byte comparison is an observation before atomic publication, not a lock against arbitrary external writers.
+		[[nodiscard]] static std::expected<std::string, MaterialAssetError> SaveIfSourceUnchanged(
+			const AssetID& MaterialAsset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			const MaterialAssetDesc& Material,
+			std::string_view ExpectedSourceBytes);
 	};
 }

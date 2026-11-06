@@ -72,15 +72,49 @@ namespace PulseForgeEditor
 		DrawMaterialActions(*Asset, *ProjectValue, Drafts, Style, Actions);
 	}
 
+	void EditorMaterialDetailsPanel::DrawEditorContents(const PulseForge::Project& ProjectValue, const PulseForge::AssetID& Identifier,
+		const std::vector<PulseForge::AssetRecord>& Assets, EditorMaterialDraftController& Drafts,
+		EditorAssetSelector& AssetSelector, EditorStyle& Style, EditorMaterialDetailsActionSink& Actions, bool ShowActions)
+	{
+		const auto Asset = ProjectValue.GetAssetRegistry().Find(Identifier);
+		if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Material))
+		{
+			Style.EmptyState(EditorIcon::Warning, "This managed material is no longer available.");
+			return;
+		}
+		const std::string Name = PathToUtf8(Asset->ProjectRelativePath.filename());
+		Style.IconText(EditorIcon::Material, Name);
+		ImGui::Separator();
+		(void)DrawMaterialProperties(ProjectValue, *Asset, Assets, Drafts, AssetSelector, Style, Actions);
+		if (ShowActions)
+		{
+			ImGui::Separator();
+			DrawMaterialActions(*Asset, ProjectValue, Drafts, Style, Actions);
+		}
+	}
+
 	bool EditorMaterialDetailsPanel::DrawMaterialProperties(const PulseForge::Project& ProjectValue, const PulseForge::AssetRecord& Asset,
 		const std::vector<PulseForge::AssetRecord>& Assets, EditorMaterialDraftController& Drafts, EditorAssetSelector& AssetSelector,
 		EditorStyle& Style, EditorMaterialDetailsActionSink& Actions)
 	{
 		if (const std::string* Error = Drafts.FindError(ProjectValue, Asset.ID))
 		{
-			ImGui::TextColored(Style.GetColor(EditorColorToken::Error), "Material could not be loaded: %s", Error->c_str());
-			if (ImGui::SmallButton("Retry Material Load")) Drafts.ClearLoadError(ProjectValue, Asset.ID);
-			return false;
+			ImGui::TextColored(Style.GetColor(EditorColorToken::Error), "Material source needs attention: %s", Error->c_str());
+			if (Drafts.FindDraft(ProjectValue, Asset.ID))
+			{
+				if (ImGui::SmallButton("Reload Source") && !Actions.RevertMaterialFromDetails(Asset.ID))
+					ImGui::OpenPopup("MaterialReloadFailed");
+				if (ImGui::BeginPopup("MaterialReloadFailed"))
+				{
+					ImGui::TextUnformatted("The source could not be reloaded; the current draft is preserved.");
+					ImGui::EndPopup();
+				}
+			}
+			else
+			{
+				if (ImGui::SmallButton("Retry Material Load")) Drafts.ClearLoadError(ProjectValue, Asset.ID);
+				return false;
+			}
 		}
 
 		auto Loaded = Drafts.LoadDraft(ProjectValue, Asset.ID);
@@ -262,8 +296,11 @@ namespace PulseForgeEditor
 			"Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
 		ImGui::PopStyleColor();
 
-		if (Changed && Drafts.BeginEdit(ProjectValue, Asset.ID, MaterialBeforeEdit))
-			Actions.MaterialDetailsDraftEdited(ProjectValue.GetDescription().ID, Asset.ID);
+		if (Changed)
+		{
+			const bool NewEdit = Drafts.BeginEdit(ProjectValue, Asset.ID, MaterialBeforeEdit);
+			if (NewEdit) Actions.MaterialDetailsDraftEdited(ProjectValue.GetDescription().ID, Asset.ID);
+		}
 		return true;
 	}
 

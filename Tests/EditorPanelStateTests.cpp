@@ -190,6 +190,15 @@ namespace
 		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab);
 		PF_CHECK(Tests, (Workflow.PrefabRoot() == UUID{ 9, 4 }));
 		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "NewPrefab.prefab");
+
+		Workflow.BeginMaterialDestination("Assets/Materials/Textures");
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Material);
+		PF_CHECK(Tests, Workflow.DestinationFolder() == "Assets/Materials/Textures");
+		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "NewMaterial.material");
+		PF_CHECK(Tests, !Workflow.DestinationAsset() && !Workflow.PrefabRoot() && !Workflow.IsDuplicate());
+		PF_CHECK(Tests, Workflow.TakeDestinationDialogRequest());
+		Workflow.DismissDestination();
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::None);
 		Workflow.DismissDestination();
 		PF_CHECK(Tests, !Workflow.DestinationAsset());
 		PF_CHECK(Tests, !Workflow.PrefabRoot());

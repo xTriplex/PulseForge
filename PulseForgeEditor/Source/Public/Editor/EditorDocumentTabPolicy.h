@@ -73,21 +73,27 @@ namespace PulseForgeEditor
 
 	[[nodiscard]] constexpr bool CanCreateNativeHostFromDocumentTabDrag(
 		bool SourceIsMainHost,
-		bool SourceIsNativeHost,
-		bool ReleaseOverMainEditorViewport) noexcept
+		bool SourceIsNativeHost) noexcept
 	{
-		return (SourceIsMainHost || SourceIsNativeHost) && !ReleaseOverMainEditorViewport;
+		return SourceIsMainHost || SourceIsNativeHost;
 	}
 
-	[[nodiscard]] constexpr bool IsDocumentTabReleaseOverMainViewport(
-		uint32_t MainViewportID,
-		uint32_t HoveredViewportID,
-		bool HasReliableHoveredViewport,
-		bool PointerInsideMainViewportBounds) noexcept
+	[[nodiscard]] constexpr bool ShouldCaptureDocumentTabDragInput(
+		bool HasCapturedDrag,
+		bool CancelledUntilNewPress,
+		bool LeftButtonDown,
+		bool LeftButtonReleased,
+		float MaximumObservedDistanceSquared,
+		float DragThreshold) noexcept
 	{
-		if (HasReliableHoveredViewport && HoveredViewportID != 0)
-			return HoveredViewportID == MainViewportID;
-		return PointerInsideMainViewportBounds;
+		return (HasCapturedDrag || CancelledUntilNewPress) && (LeftButtonDown || LeftButtonReleased) &&
+			std::isfinite(MaximumObservedDistanceSquared) && std::isfinite(DragThreshold) && DragThreshold >= 0.0f &&
+			MaximumObservedDistanceSquared >= DragThreshold * DragThreshold;
+	}
+
+	[[nodiscard]] constexpr bool ShouldSuppressTabPressAfterDrag(bool Pressed, bool DragRelease) noexcept
+	{
+		return Pressed && DragRelease;
 	}
 
 	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(

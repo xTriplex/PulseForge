@@ -73,7 +73,7 @@ namespace
 								MainPlacement->second.Role == EditorDocumentHostRole::Main &&
 								MainPlacement->second.Bounds.MonitorName == "Display-Left" && MainPlacement->second.Bounds.Maximized);
 			const auto Candidates = GetMaterialDetailsMigrationCandidates(*Restored);
-			PF_CHECK(Tests, Candidates.size() == 2 && Candidates[0] == *MaterialB && Candidates[1] == *MaterialA);
+			PF_CHECK(Tests, Candidates.empty());
 		}
 		auto LegacyWorkspace = nlohmann::json::parse(*Serialized);
 		LegacyWorkspace["version"] = 2;
@@ -85,10 +85,22 @@ namespace
 		PF_CHECK(Tests, MigratedLegacy.has_value());
 		if (MigratedLegacy)
 		{
-			PF_CHECK(Tests, MigratedLegacy->Version == 3 && MigratedLegacy->MaterialDetailsAsset == MaterialA);
+			PF_CHECK(Tests, MigratedLegacy->Version == 4 && MigratedLegacy->MaterialDetailsAsset == MaterialA);
 			PF_CHECK(Tests, MigratedLegacy->Hosts[1].Documents.size() == 2);
 			PF_CHECK(Tests,
 				MigratedLegacy->RememberedPlacements.size() == 1 && MigratedLegacy->RememberedPlacements.front().second.Bounds.Maximized);
+			const auto LegacyCandidates = GetMaterialDetailsMigrationCandidates(*MigratedLegacy);
+			PF_CHECK(Tests, LegacyCandidates.size() == 2 && LegacyCandidates[0] == *MaterialB && LegacyCandidates[1] == *MaterialA);
+			auto Consumed = *MigratedLegacy;
+			const auto ConsumedCandidates = ConsumeLegacyMaterialDetailsEntries(Consumed);
+			PF_CHECK(Tests, ConsumedCandidates == LegacyCandidates);
+			PF_CHECK(Tests, Consumed.Hosts.size() == 1 && Consumed.Hosts.front().Role == EditorDocumentHostRole::Main);
+			PF_CHECK(Tests, Consumed.FocusedHostID == EditorDocumentManager::MainHostID);
+			const auto ConsumedSerialized = EditorDocumentWorkspaceCodec::Serialize(Consumed);
+			const auto ConsumedReopened = ConsumedSerialized
+				? EditorDocumentWorkspaceCodec::Deserialize(*ConsumedSerialized, *Project)
+				: std::expected<EditorDocumentWorkspaceState, std::string>(std::unexpected("serialization failed"));
+			PF_CHECK(Tests, ConsumedReopened && GetMaterialDetailsMigrationCandidates(*ConsumedReopened).empty());
 		}
 
 		EditorDocumentWorkspaceState LegacyMainStripState = State;
@@ -114,6 +126,10 @@ namespace
 				const auto Candidates = GetMaterialDetailsMigrationCandidates(*MigratedMainStrip);
 				PF_CHECK(Tests, Candidates.size() == 2 && Candidates[0] == *MaterialB && Candidates[1] == *MaterialA);
 				PF_CHECK(Tests, MigratedMainStrip->Hosts.size() == 1 && MigratedMainStrip->Hosts[0].Documents[0] == Level);
+				auto ModernState = *MigratedMainStrip;
+				ModernState.LegacyMaterialDetailsMigration = false;
+				const auto ModernCandidates = ConsumeLegacyMaterialDetailsEntries(ModernState);
+				PF_CHECK(Tests, ModernCandidates.empty() && ModernState.Hosts.front().Documents.size() == 3);
 			}
 		}
 		const auto OtherProject = UUID::Generate();

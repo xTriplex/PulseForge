@@ -25,6 +25,18 @@ namespace
 void RunRuntimeUITests(TestRunner& Tests)
 {
 	using namespace PulseForge;
+	const auto ParseDocumentVersion = [](std::string_view Version)
+	{
+		return ParseRuntimeUIDocument(std::string("{\"version\":") + std::string(Version) +
+			",\"designSize\":[960,540],\"elements\":[]}");
+	};
+	PF_CHECK(Tests, ParseDocumentVersion("1").has_value());
+	for (const std::string_view Version : { "2", "4294967296", "4294967297", "-1", "-4294967295", "-9223372036854775808",
+		"9223372036854775807", "18446744073709551615", "18446744073709551616", "1.0", "\"1\"", "true", "null", "[]", "{}" })
+		PF_CHECK(Tests, !ParseDocumentVersion(Version));
+	PF_CHECK(Tests, !ParseRuntimeUIDocument("{\"designSize\":[960,540],\"elements\":[]}"));
+	PF_CHECK(Tests, !ParseRuntimeUIDocument("{\"version\":-1,\"designSize\":[960,540],\"elements\":[]}"));
+
 	RuntimeUIDocument Document;
 	Document.Elements.push_back(MakeButton(1, 0, { 100.0f, 80.0f }, { 300.0f, 140.0f }, "start"));
 	Document.Elements.push_back(MakeButton(2, 1, { 100.0f, 80.0f }, { 300.0f, 140.0f }, "covered"));

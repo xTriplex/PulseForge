@@ -36,6 +36,18 @@ namespace PulseForgeEditor
 			!Context.PopupOpen && !Context.MenuNavigationActive && !Context.WindowNavigationActive;
 	}
 
+	[[nodiscard]] constexpr bool CanRouteFocusedDocumentCommand(
+		bool DocumentFocused,
+		bool TextInputActive,
+		bool ImGuiItemActive,
+		bool PopupOpen,
+		bool MenuNavigationActive,
+		bool WindowNavigationActive) noexcept
+	{
+		return DocumentFocused && !TextInputActive && !ImGuiItemActive && !PopupOpen &&
+			!MenuNavigationActive && !WindowNavigationActive;
+	}
+
 	struct ViewportGizmoPointerState
 	{
 		bool InteractionActive = false;

@@ -31,6 +31,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::reference_wrapper<const MaterialAssetDesc>, MaterialAssetError> GetOrLoad(
 			const AssetID& Asset);
 		[[nodiscard]] bool IsRegistered(const AssetID& Asset) const noexcept;
+		void Invalidate(const AssetID& Asset) noexcept { m_Materials.erase(Asset); }
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept { return m_Materials.size(); }
 

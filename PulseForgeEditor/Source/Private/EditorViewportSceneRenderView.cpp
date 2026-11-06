@@ -243,6 +243,11 @@ namespace PulseForgeEditor
 		if (m_SceneRenderer) m_SceneRenderer->RefreshMaterialAssets();
 	}
 
+	void EditorViewportSceneRenderView::RefreshMaterialAsset(const PulseForge::AssetID& Material) noexcept
+	{
+		if (m_SceneRenderer) m_SceneRenderer->RefreshMaterialAsset(Material);
+	}
+
 	void EditorViewportSceneRenderView::RefreshProjectAssets() noexcept
 	{
 		if (!m_SceneRenderer) return;

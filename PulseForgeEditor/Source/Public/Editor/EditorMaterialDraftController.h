@@ -5,6 +5,7 @@
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorMaterialDraftStore.h"
 
+#include <cstdint>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -23,13 +24,15 @@ namespace PulseForgeEditor
 		[[nodiscard]] PulseForge::MaterialAssetDesc* FindDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		[[nodiscard]] bool ContainsDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] DraftResult LoadDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
-		void ReplaceDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset, PulseForge::MaterialAssetDesc Draft);
+		void ReplaceDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset,
+			PulseForge::MaterialAssetDesc Draft, std::string SourceBytes);
 
 		[[nodiscard]] const std::string* FindError(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		void ClearLoadError(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		[[nodiscard]] bool IsDirty(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] bool CanUndo(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] bool CanRedo(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
+		[[nodiscard]] uint64_t GetContentRevision(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] bool BeginEdit(
 			const PulseForge::Project& Project, const PulseForge::AssetID& Asset, const PulseForge::MaterialAssetDesc& InitialState);
 		void FinalizePendingEdits(bool HasActiveImGuiItem);
@@ -41,6 +44,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> Reload(
 			PulseForge::Project& Project, const PulseForge::AssetID& Asset, EditorDocumentManager& Documents);
 		[[nodiscard]] std::vector<PulseForge::AssetID> GetDirtyAssets(const PulseForge::Project& Project) const;
+		void ReconcileProjectSources(PulseForge::Project& Project);
 		void Forget(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		void ClearProject(const PulseForge::Project& Project);
 
