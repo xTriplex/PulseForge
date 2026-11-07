@@ -122,10 +122,9 @@ namespace
 	EditorGraphPropertyEditResult FinishPropertyEdit(GraphDocumentState& State, EditorDocumentManager& Documents,
 		EditorDocumentSession& Session)
 	{
-		const bool HadActiveProperty = State.PropertyEdits.HasActiveEdit();
 		auto Result = State.PropertyEdits.Finish(State.History, State.Schema);
 		if (!Result.Error.empty()) State.Error = Result.Error;
-		if (HadActiveProperty || Result.GraphChanged)
+		if (Result.GraphChanged)
 			ReconcileDirtyState(State, Documents, Session);
 		return Result;
 	}
@@ -497,6 +496,23 @@ namespace PulseForgeEditor
 		return true;
 	}
 
+	EditorGraphPropertyEditResult EditorGraphDocumentEditor::ProcessPropertyEditEvents(EditorDocumentSession& Session,
+		const std::vector<EditorGraphPropertyEditEvent>& Events, bool CancelGesture)
+	{
+		auto* State = GetState(Session);
+		if (!State) return { false, "Graph document state is unavailable" };
+		auto Result = State->PropertyEdits.ProcessFrame(State->History, State->Schema, Events, CancelGesture);
+		if (!Result.Error.empty()) State->Error = Result.Error;
+		if (Result.GraphChanged)
+		{
+			if (Result.Error.empty()) State->Error.clear();
+			ReconcileDirtyState(*State, m_Documents, Session);
+		}
+		Result.PropertyInteractionActive = State->PropertyEdits.HasActiveEdit();
+		Result.TransactionOpen = State->History.HasOpenTransaction();
+		return Result;
+	}
+
 	bool EditorGraphDocumentEditor::UpdateAssetLocation(EditorDocumentSession& Session,
 		const std::filesystem::path& Path, std::string_view DisplayName) const
 	{
@@ -851,12 +867,6 @@ namespace PulseForgeEditor
 		NodeEditor::End();
 		NodeEditor::EnableShortcuts(true);
 		NodeEditor::SetCurrentEditor(nullptr);
-		auto PropertyResult = State->PropertyEdits.ProcessFrame(State->History, State->Schema, PropertyEvents, CancelGesture);
-		if (!PropertyResult.Error.empty()) State->Error = std::move(PropertyResult.Error);
-		if (PropertyResult.GraphChanged)
-		{
-			if (PropertyResult.Error.empty()) State->Error.clear();
-			ReconcileDirtyState(*State, m_Documents, Session);
-		}
+		(void)ProcessPropertyEditEvents(Session, PropertyEvents, CancelGesture);
 	}
 }

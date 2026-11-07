@@ -544,7 +544,7 @@ namespace PulseForgeEditor
 		{
 			if (History.HasOpenTransaction()) History.CancelTransaction();
 			m_ActivePin.reset();
-			return { History.Graph() != Before, {} };
+			return { History.Graph() != Before, {}, false, History.HasOpenTransaction() };
 		}
 
 		std::string Error;
@@ -571,7 +571,7 @@ namespace PulseForgeEditor
 				if (const auto FinishError = FinishActive(History, Schema); !FinishError.empty() && Error.empty())
 					Error = FinishError;
 		}
-		return { History.Graph() != Before, std::move(Error) };
+		return { History.Graph() != Before, std::move(Error), m_ActivePin.has_value(), History.HasOpenTransaction() };
 	}
 
 	EditorGraphPropertyEditResult EditorGraphPropertyEditCoordinator::Finish(EditorGraphCommandHistory& History,
@@ -579,7 +579,7 @@ namespace PulseForgeEditor
 	{
 		const EditorGraph Before = History.Graph();
 		auto Error = FinishActive(History, Schema);
-		return { Before != History.Graph(), std::move(Error) };
+		return { Before != History.Graph(), std::move(Error), m_ActivePin.has_value(), History.HasOpenTransaction() };
 	}
 
 	EditorGraphPropertyEditResult EditorGraphPropertyEditCoordinator::Cancel(EditorGraphCommandHistory& History)
@@ -587,7 +587,7 @@ namespace PulseForgeEditor
 		const EditorGraph Before = History.Graph();
 		if (m_ActivePin && History.HasOpenTransaction()) History.CancelTransaction();
 		m_ActivePin.reset();
-		return { History.Graph() != Before, {} };
+		return { History.Graph() != Before, {}, m_ActivePin.has_value(), History.HasOpenTransaction() };
 	}
 
 	EditorGraphSchema MakeMaterialExpressionFixtureSchema()

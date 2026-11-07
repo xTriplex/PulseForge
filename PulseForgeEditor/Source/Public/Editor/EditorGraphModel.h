@@ -189,6 +189,8 @@ namespace PulseForgeEditor
 	{
 		bool GraphChanged = false;
 		std::string Error;
+		bool PropertyInteractionActive = false;
+		bool TransactionOpen = false;
 	};
 
 	class EditorGraphPropertyEditCoordinator final

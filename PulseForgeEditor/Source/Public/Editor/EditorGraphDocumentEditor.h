@@ -7,9 +7,14 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace PulseForgeEditor
 {
+	struct EditorGraphDocumentEditorTestAccess;
+	struct EditorGraphPropertyEditEvent;
+	struct EditorGraphPropertyEditResult;
+
 	enum class EditorGraphFixtureKind : uint8_t
 	{
 		MaterialExpression,
@@ -36,10 +41,14 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool Save(EditorDocumentSession& Session) const;
 
 	private:
+		friend struct EditorGraphDocumentEditorTestAccess;
+
 		[[nodiscard]] bool IsEligible(const EditorDocumentEditorContext& Context) const;
 		[[nodiscard]] std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string> LoadSession(
 			const EditorDocumentEditorContext& Context) const;
 		void DrawWorkspace(EditorDocumentSession& Session);
+		[[nodiscard]] EditorGraphPropertyEditResult ProcessPropertyEditEvents(EditorDocumentSession& Session,
+			const std::vector<EditorGraphPropertyEditEvent>& Events, bool CancelGesture);
 		[[nodiscard]] bool SaveSession(EditorDocumentSession& Session, uint64_t SavedRevision) const;
 		[[nodiscard]] bool DiscardSession(EditorDocumentSession& Session) const;
 		[[nodiscard]] bool HandleFocusedCommand(EditorDocumentSession& Session, EditorDocumentCommand Command) const;
