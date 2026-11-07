@@ -4,10 +4,12 @@
 #include "Editor/EditorGraphModel.h"
 
 #include <imgui.h>
+#include "../PulseForge/Vendor/imgui-node-editor/imgui_node_editor.h"
 
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <unordered_map>
 
 namespace PulseForgeEditor
 {
@@ -310,10 +312,339 @@ namespace
 		PF_CHECK(Tests, ConflictSession->IsDirty());
 		PF_CHECK(Tests, Editors.Discard(*ConflictSession) && !ConflictSession->IsDirty());
 	}
+
+	void TestGraphCanvasCreateRequestPolling(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		const auto GraphID = UUID::Generate();
+		PF_CHECK(Tests, GraphID.has_value());
+		if (!GraphID) return;
+		auto Schema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = CreateEditorGraph(Schema, *GraphID);
+		PF_CHECK(Tests, Graph.has_value());
+		if (!Graph) return;
+		auto Scalar = CreateEditorGraphNode(Schema, "material.scalar", 80.0, 80.0);
+		auto Multiply = CreateEditorGraphNode(Schema, "material.multiply", 320.0, 80.0);
+		auto Output = CreateEditorGraphNode(Schema, "material.output", 560.0, 80.0);
+		PF_CHECK(Tests, Scalar.has_value() && Multiply.has_value() && Output.has_value());
+		if (!Scalar || !Multiply || !Output) return;
+		Graph->Nodes.push_back(std::move(*Scalar));
+		Graph->Nodes.push_back(std::move(*Multiply));
+		Graph->Nodes.push_back(std::move(*Output));
+		const auto* ScalarValue = FindPin(*Graph, "material.scalar", "value");
+		const auto* MultiplyA = FindPin(*Graph, "material.multiply", "a");
+		const auto* Surface = FindPin(*Graph, "material.output", "surface");
+		PF_CHECK(Tests, ScalarValue && MultiplyA && Surface);
+		if (!ScalarValue || !MultiplyA || !Surface) return;
+
+		const EditorGraphCanvasLinkRequest Compatible{ 11, 22 };
+		const EditorGraphCanvasLinkRequest Incompatible{ 11, 33 };
+		const std::unordered_map<uintptr_t, UUID> Identities{
+			{ Compatible.StartPin, ScalarValue->ID }, { Compatible.EndPin, MultiplyA->ID },
+			{ Incompatible.EndPin, Surface->ID }
+		};
+		EditorGraphCommandHistory History(std::move(*Graph));
+		int BeginCalls = 0;
+		int EndCalls = 0;
+		int QueryCalls = 0;
+		int AcceptCalls = 0;
+		int RejectCalls = 0;
+		const auto ProcessFrame = [&](bool Active, std::optional<EditorGraphCanvasLinkRequest> Request, bool Accept)
+		{
+			int FrameQueryCalls = 0;
+			return PulseForgeEditor::GraphCanvasDetail::ProcessEditorGraphCanvasLinkRequestFrame(
+				[&] { ++BeginCalls; return Active; },
+				[&] { ++EndCalls; },
+				[&]() -> std::optional<EditorGraphCanvasLinkRequest>
+				{
+					++QueryCalls;
+					return ++FrameQueryCalls == 1 ? Request : std::nullopt;
+				},
+				[&](const EditorGraphCanvasLinkRequest& Pins)
+				{
+					const auto Start = Identities.find(Pins.StartPin);
+					const auto End = Identities.find(Pins.EndPin);
+					if (Start == Identities.end() || End == Identities.end())
+						return EditorGraphConnectionDecision{ false, "Pin identity is unavailable", {}, {} };
+					return CanConnectEditorGraphPins(History.Graph(), Schema, Start->second, End->second);
+				},
+				[&] { ++AcceptCalls; return Accept; },
+				[&] { ++RejectCalls; });
+		};
+		const auto CommitAccepted = [&](const EditorGraphCanvasLinkRequestResult& Result)
+		{
+			if (!Result.Accepted) return false;
+			return ConnectEditorGraphPins(History, Schema, Result.Decision.OutputPin, Result.Decision.InputPin).has_value();
+		};
+
+		// No pending item: query once and finish the frame, with no graph command.
+		auto Result = ProcessFrame(true, std::nullopt, false);
+		PF_CHECK(Tests, !Result.SawRequest && !Result.Accepted && QueryCalls == 1 && EndCalls == 1);
+		PF_CHECK(Tests, History.Graph().Connections.empty() && !History.CanUndo());
+
+		// The pinned canvas retains a compatible item during preview and AcceptNewItem()
+		// returns false until the release stage; each frame may query this same request once.
+		Result = ProcessFrame(true, Compatible, false);
+		PF_CHECK(Tests, Result.SawRequest && Result.Decision.Allowed && !Result.Accepted);
+		PF_CHECK(Tests, QueryCalls == 2 && AcceptCalls == 1 && RejectCalls == 0 && EndCalls == 2);
+		PF_CHECK(Tests, History.Graph().Connections.empty() && !History.CanUndo());
+		Result = ProcessFrame(true, Compatible, false);
+		PF_CHECK(Tests, Result.SawRequest && Result.Decision.Allowed && !Result.Accepted);
+		PF_CHECK(Tests, QueryCalls == 3 && AcceptCalls == 2 && EndCalls == 3);
+		PF_CHECK(Tests, History.Graph().Connections.empty() && !History.CanUndo());
+
+		// An incompatible target is rejected once for the frame and leaves graph/history intact.
+		const EditorGraph BeforeReject = History.Graph();
+		Result = ProcessFrame(true, Incompatible, false);
+		PF_CHECK(Tests, Result.SawRequest && !Result.Decision.Allowed && !Result.Accepted);
+		PF_CHECK(Tests, QueryCalls == 4 && RejectCalls == 1 && AcceptCalls == 2 && EndCalls == 4);
+		PF_CHECK(Tests, History.Graph() == BeforeReject && !History.CanUndo());
+
+		// Escape cancels the canvas gesture. BeginCreate can be inactive, but the pinned
+		// API still requires EndCreate to balance BeginCreate; no request is queried or committed.
+		Result = ProcessFrame(false, Compatible, true);
+		PF_CHECK(Tests, !Result.SawRequest && !Result.Accepted && QueryCalls == 4 && EndCalls == 5);
+		PF_CHECK(Tests, History.Graph() == BeforeReject && !History.CanUndo());
+
+		// A fresh valid drag reaches the release stage, commits one model command, then
+		// later empty frames cannot replay or duplicate that accepted request.
+		Result = ProcessFrame(true, Compatible, true);
+		PF_CHECK(Tests, Result.SawRequest && Result.Decision.Allowed && Result.Accepted);
+		PF_CHECK(Tests, QueryCalls == 5 && AcceptCalls == 3 && EndCalls == 6);
+		PF_CHECK(Tests, CommitAccepted(Result));
+		PF_CHECK(Tests, History.Graph().Connections.size() == 1 && History.CanUndo());
+		Result = ProcessFrame(true, std::nullopt, false);
+		PF_CHECK(Tests, !Result.SawRequest && !Result.Accepted && QueryCalls == 6 && EndCalls == 7);
+		PF_CHECK(Tests, History.Graph().Connections.size() == 1 && !History.CanRedo());
+		PF_CHECK(Tests, History.Undo() && History.Graph().Connections.empty());
+		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.size() == 1);
+	}
+
+	void TestPinnedCanvasLinkGesture(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		namespace NodeEditor = ax::NodeEditor;
+
+		ImGuiContextScope ImGuiScope;
+		PF_CHECK(Tests, ImGuiScope.Context != nullptr);
+		if (!ImGuiScope.Context) return;
+		ImGuiIO& IO = ImGui::GetIO();
+		IO.IniFilename = nullptr;
+		IO.LogFilename = nullptr;
+		IO.DisplaySize = ImVec2(1280.0f, 720.0f);
+		IO.DeltaTime = 1.0f / 60.0f;
+		IO.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+
+		const auto GraphID = UUID::Generate();
+		PF_CHECK(Tests, GraphID.has_value());
+		if (!GraphID) return;
+		auto Schema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = CreateEditorGraph(Schema, *GraphID);
+		PF_CHECK(Tests, Graph.has_value());
+		if (!Graph) return;
+		auto Scalar = CreateEditorGraphNode(Schema, "material.scalar", 80.0, 80.0);
+		auto Multiply = CreateEditorGraphNode(Schema, "material.multiply", 360.0, 80.0);
+		auto Output = CreateEditorGraphNode(Schema, "material.output", 640.0, 80.0);
+		PF_CHECK(Tests, Scalar.has_value() && Multiply.has_value() && Output.has_value());
+		if (!Scalar || !Multiply || !Output) return;
+		Graph->Nodes.push_back(std::move(*Scalar));
+		Graph->Nodes.push_back(std::move(*Multiply));
+		Graph->Nodes.push_back(std::move(*Output));
+		const auto* ScalarValue = FindPin(*Graph, "material.scalar", "value");
+		const auto* MultiplyA = FindPin(*Graph, "material.multiply", "a");
+		const auto* Surface = FindPin(*Graph, "material.output", "surface");
+		PF_CHECK(Tests, ScalarValue && MultiplyA && Surface);
+		if (!ScalarValue || !MultiplyA || !Surface) return;
+		const std::unordered_map<uintptr_t, UUID> Identities{
+			{ 11, ScalarValue->ID }, { 22, MultiplyA->ID }, { 33, Surface->ID }
+		};
+		EditorGraphCommandHistory History(std::move(*Graph));
+		NodeEditor::Config Config;
+		Config.SettingsFile = nullptr;
+		auto* Canvas = NodeEditor::CreateEditor(&Config);
+		PF_CHECK(Tests, Canvas != nullptr);
+		if (!Canvas) return;
+		struct CanvasCleanup final
+		{
+			NodeEditor::EditorContext*& Canvas;
+			~CanvasCleanup()
+			{
+				if (!Canvas) return;
+				NodeEditor::SetCurrentEditor(Canvas);
+				NodeEditor::DestroyEditor(Canvas);
+				Canvas = nullptr;
+				NodeEditor::SetCurrentEditor(nullptr);
+			}
+		} Cleanup{ Canvas };
+
+		std::unordered_map<uintptr_t, ImVec2> PinPositions;
+		int FrameIndex = 0;
+		bool NeedsNodePositions = true;
+		int QueryCalls = 0;
+		int QueriesThisFrame = 0;
+		int PreviewFrames = 0;
+		int RejectedFrames = 0;
+		int AcceptedRequests = 0;
+		const auto Frame = [&](std::optional<ImVec2> MousePosition = std::nullopt,
+			std::optional<bool> LeftDown = std::nullopt, bool PressEscape = false)
+		{
+			QueriesThisFrame = 0;
+			if (MousePosition) IO.AddMousePosEvent(MousePosition->x, MousePosition->y);
+			if (LeftDown)
+			{
+				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, *LeftDown);
+				IO.MouseDown[ImGuiMouseButton_Left] = *LeftDown;
+			}
+			if (PressEscape) IO.AddKeyEvent(ImGuiKey_Escape, true);
+			IO.DisplaySize = ImVec2(1280.0f, 720.0f);
+			IO.DeltaTime = 1.0f / 60.0f;
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+			ImGui::SetNextWindowSize(IO.DisplaySize);
+			ImGui::Begin("GraphLinkProtocolHost", nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			if (PressEscape)
+			{
+				NodeEditor::SetCurrentEditor(Canvas);
+				NodeEditor::DestroyEditor(Canvas);
+				NodeEditor::SetCurrentEditor(nullptr);
+				Canvas = NodeEditor::CreateEditor(&Config);
+				NeedsNodePositions = true;
+			}
+			NodeEditor::SetCurrentEditor(Canvas);
+			NodeEditor::Begin("##GraphLinkProtocolCanvas", ImVec2(0.0f, 0.0f));
+			const auto DrawPinNode = [&](uintptr_t NodeID, uintptr_t PinID, NodeEditor::PinKind Kind,
+				const char* Label, float X)
+			{
+				if (NeedsNodePositions) NodeEditor::SetNodePosition(NodeEditor::NodeId(NodeID), ImVec2(X, 90.0f));
+				NodeEditor::BeginNode(NodeEditor::NodeId(NodeID));
+				ImGui::TextUnformatted(Label);
+				NodeEditor::BeginPin(NodeEditor::PinId(PinID), Kind);
+				ImGui::TextUnformatted("Value");
+				const ImVec2 ItemMinimum = ImGui::GetItemRectMin();
+				const ImVec2 ItemMaximum = ImGui::GetItemRectMax();
+				const ImVec2 Center((ItemMinimum.x + ItemMaximum.x) * 0.5f,
+					(ItemMinimum.y + ItemMaximum.y) * 0.5f);
+				NodeEditor::EndPin();
+				PinPositions[PinID] = NodeEditor::CanvasToScreen(Center);
+				NodeEditor::EndNode();
+			};
+			DrawPinNode(1, 11, NodeEditor::PinKind::Output, "Scalar", 80.0f);
+			DrawPinNode(2, 22, NodeEditor::PinKind::Input, "Multiply", 360.0f);
+			DrawPinNode(3, 33, NodeEditor::PinKind::Input, "Output", 640.0f);
+
+			const auto Result = PulseForgeEditor::GraphCanvasDetail::ProcessEditorGraphCanvasLinkRequestFrame(
+				[] { return NodeEditor::BeginCreate(); },
+				[] { NodeEditor::EndCreate(); },
+				[&]() -> std::optional<EditorGraphCanvasLinkRequest>
+				{
+					++QueryCalls;
+					++QueriesThisFrame;
+					NodeEditor::PinId Start;
+					NodeEditor::PinId End;
+					if (!NodeEditor::QueryNewLink(&Start, &End)) return std::nullopt;
+					return EditorGraphCanvasLinkRequest{ Start.Get(), End.Get() };
+				},
+				[&](const EditorGraphCanvasLinkRequest& Pins)
+				{
+					const auto Start = Identities.find(Pins.StartPin);
+					const auto End = Identities.find(Pins.EndPin);
+					if (Start == Identities.end() || End == Identities.end())
+						return EditorGraphConnectionDecision{ false, "Pin identity is unavailable", {}, {} };
+					return CanConnectEditorGraphPins(History.Graph(), Schema, Start->second, End->second);
+				},
+				[] { return NodeEditor::AcceptNewItem(); },
+				[] { NodeEditor::RejectNewItem(); });
+			PF_CHECK(Tests, QueriesThisFrame <= 1);
+			if (Result.SawRequest && Result.Decision.Allowed && !Result.Accepted) ++PreviewFrames;
+			if (Result.SawRequest && !Result.Decision.Allowed) ++RejectedFrames;
+			if (Result.Accepted)
+			{
+				++AcceptedRequests;
+				(void)PulseForgeEditor::ConnectEditorGraphPins(
+					History, Schema, Result.Decision.OutputPin, Result.Decision.InputPin);
+			}
+			NodeEditor::End();
+			NeedsNodePositions = false;
+			NodeEditor::SetCurrentEditor(nullptr);
+			ImGui::End();
+			ImGui::Render();
+			if (ImDrawData* DrawData = ImGui::GetDrawData(); DrawData && DrawData->Textures)
+				for (ImTextureData* Texture : *DrawData->Textures)
+					if (Texture->Status == ImTextureStatus_WantCreate || Texture->Status == ImTextureStatus_WantUpdates)
+					{
+						Texture->SetTexID(static_cast<ImTextureID>(Texture->UniqueID + 1));
+						Texture->SetStatus(ImTextureStatus_OK);
+					}
+			++FrameIndex;
+		};
+		const auto BeginDrag = [&](ImVec2 Start, ImVec2 End)
+		{
+			Frame(Start);
+			Frame();
+			Frame(std::nullopt, true);
+			Frame();
+			for (int Step = 1; Step <= 12; ++Step)
+			{
+				const float T = static_cast<float>(Step) / 12.0f;
+				Frame(ImVec2(Start.x + (End.x - Start.x) * T, Start.y + (End.y - Start.y) * T));
+			}
+			Frame(End);
+		};
+		const auto ReleaseDrag = [&](ImVec2 At)
+		{
+			Frame(At, false);
+			Frame();
+			Frame();
+		};
+		const auto Drag = [&](ImVec2 Start, ImVec2 End)
+		{
+			BeginDrag(Start, End);
+			Frame(std::nullopt, false);
+			Frame();
+			Frame();
+		};
+
+		for (int Index = 0; Index < 3; ++Index) Frame();
+		PF_CHECK(Tests, PinPositions.contains(11) && PinPositions.contains(22) && PinPositions.contains(33));
+		if (!PinPositions.contains(11) || !PinPositions.contains(22) || !PinPositions.contains(33)) return;
+		const auto ScalarPosition = PinPositions.at(11);
+		const auto MultiplyPosition = PinPositions.at(22);
+		const auto OutputPosition = PinPositions.at(33);
+		BeginDrag(ScalarPosition, MultiplyPosition);
+		PF_CHECK(Tests, PreviewFrames > 0 && AcceptedRequests == 0 && History.Graph().Connections.empty());
+		Frame(ImVec2(1000.0f, 650.0f));
+		ReleaseDrag(ImVec2(1000.0f, 650.0f));
+		BeginDrag(ScalarPosition, OutputPosition);
+		PF_CHECK(Tests, RejectedFrames > 0 && AcceptedRequests == 0 && History.Graph().Connections.empty());
+		Frame(std::nullopt, std::nullopt, true);
+		ReleaseDrag(OutputPosition);
+		PF_CHECK(Tests, AcceptedRequests == 0 && History.Graph().Connections.empty());
+
+		BeginDrag(ScalarPosition, MultiplyPosition);
+		Frame(std::nullopt, std::nullopt, true);
+		ReleaseDrag(MultiplyPosition);
+		PF_CHECK(Tests, AcceptedRequests == 0 && History.Graph().Connections.empty());
+
+		const int PreviousAccepts = AcceptedRequests;
+		Drag(ScalarPosition, MultiplyPosition);
+		PF_CHECK(Tests, AcceptedRequests == PreviousAccepts + 1);
+		PF_CHECK(Tests, History.Graph().Connections.size() == 1 && History.CanUndo());
+		const int CompletedQueries = QueryCalls;
+		for (int Index = 0; Index < 5; ++Index) Frame();
+		PF_CHECK(Tests, AcceptedRequests == PreviousAccepts + 1 && QueryCalls == CompletedQueries);
+		PF_CHECK(Tests, History.Undo() && History.Graph().Connections.empty());
+		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.size() == 1);
+	}
 }
 
 void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 {
 	TestGraphDocumentLifecycle(Tests);
 	TestGraphDocumentSaveRevisionAccounting(Tests);
+	TestGraphCanvasCreateRequestPolling(Tests);
+	TestPinnedCanvasLinkGesture(Tests);
 }

@@ -729,25 +729,30 @@ namespace PulseForgeEditor
 
 		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> CreatedLink;
 		bool SawNewLinkRequest = false;
-		NodeEditor::BeginCreate();
-		NodeEditor::PinId StartPin;
-		NodeEditor::PinId EndPin;
-		while (NodeEditor::QueryNewLink(&StartPin, &EndPin))
-		{
-			SawNewLinkRequest = true;
-			const auto Start = State->Identities.find(StartPin.Get());
-			const auto End = State->Identities.find(EndPin.Get());
-			EditorGraphConnectionDecision Decision{ false, "The dragged pin no longer exists", {}, {} };
-			if (Start != State->Identities.end() && End != State->Identities.end())
-				Decision = CanConnectEditorGraphPins(State->History.Graph(), State->Schema, Start->second, End->second);
-			State->Error = Decision.Reason;
-			if (Decision.Allowed)
+		const auto CreateRequest = GraphCanvasDetail::ProcessEditorGraphCanvasLinkRequestFrame(
+			[] { return NodeEditor::BeginCreate(); },
+			[] { NodeEditor::EndCreate(); },
+			[]() -> std::optional<EditorGraphCanvasLinkRequest>
 			{
-				if (NodeEditor::AcceptNewItem()) CreatedLink = std::pair{ Decision.OutputPin, Decision.InputPin };
-			}
-			else NodeEditor::RejectNewItem();
-		}
-		NodeEditor::EndCreate();
+				NodeEditor::PinId StartPin;
+				NodeEditor::PinId EndPin;
+				if (!NodeEditor::QueryNewLink(&StartPin, &EndPin)) return std::nullopt;
+				return EditorGraphCanvasLinkRequest{ StartPin.Get(), EndPin.Get() };
+			},
+			[State](const EditorGraphCanvasLinkRequest& Request)
+			{
+				const auto Start = State->Identities.find(Request.StartPin);
+				const auto End = State->Identities.find(Request.EndPin);
+				if (Start == State->Identities.end() || End == State->Identities.end())
+					return EditorGraphConnectionDecision{ false, "The dragged pin no longer exists", {}, {} };
+				return CanConnectEditorGraphPins(State->History.Graph(), State->Schema, Start->second, End->second);
+			},
+			[] { return NodeEditor::AcceptNewItem(); },
+			[] { NodeEditor::RejectNewItem(); });
+		SawNewLinkRequest = CreateRequest.SawRequest;
+		if (SawNewLinkRequest) State->Error = CreateRequest.Decision.Reason;
+		if (CreateRequest.Accepted)
+			CreatedLink = std::pair{ CreateRequest.Decision.OutputPin, CreateRequest.Decision.InputPin };
 
 		std::vector<PulseForge::UUID> DeletedLinks;
 		std::vector<PulseForge::UUID> DeletedNodes;
