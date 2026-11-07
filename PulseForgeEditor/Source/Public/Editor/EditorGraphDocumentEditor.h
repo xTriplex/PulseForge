@@ -30,8 +30,50 @@ namespace PulseForgeEditor
 		EditorGraphConnectionDecision Decision;
 	};
 
+	struct EditorGraphCanvasPinInput
+	{
+		PulseForge::UUID HoveredPin;
+		bool Focused = false;
+		bool Alt = false;
+		bool LeftClicked = false;
+		bool TextInputOwned = false;
+		bool PopupOpen = false;
+		bool EmbeddedWidgetHovered = false;
+	};
+
+	struct EditorGraphStraightenInput
+	{
+		bool Focused = false;
+		bool CanvasActive = false;
+		bool KeyPressed = false;
+		bool TextInputOwned = false;
+		bool OtherInputOwned = false;
+		bool PopupOpen = false;
+		bool MouseButtonDown = false;
+		bool NodeMoveTransaction = false;
+		bool GraphTransaction = false;
+		bool PropertyEditActive = false;
+		bool PropertyWidgetHovered = false;
+	};
+
 	namespace GraphCanvasDetail
 	{
+		[[nodiscard]] inline std::optional<PulseForge::UUID> ResolveAltPinUnlink(
+			const EditorGraphCanvasPinInput& Input)
+		{
+			if (!Input.Focused || !Input.Alt || !Input.LeftClicked || Input.TextInputOwned ||
+				Input.PopupOpen || Input.EmbeddedWidgetHovered || Input.HoveredPin.IsNil()) return std::nullopt;
+			return Input.HoveredPin;
+		}
+
+		[[nodiscard]] inline bool ShouldStraightenSelection(const EditorGraphStraightenInput& Input)
+		{
+			return Input.Focused && Input.CanvasActive && Input.KeyPressed && !Input.TextInputOwned &&
+				!Input.OtherInputOwned && !Input.PopupOpen && !Input.MouseButtonDown &&
+				!Input.NodeMoveTransaction && !Input.GraphTransaction && !Input.PropertyEditActive &&
+				!Input.PropertyWidgetHovered;
+		}
+
 		template <typename EndCreate>
 		struct EditorGraphCreateEnd final
 		{

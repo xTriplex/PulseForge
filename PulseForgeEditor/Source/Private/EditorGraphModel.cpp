@@ -1,4 +1,5 @@
 #include "Editor/EditorGraphModel.h"
+#include "Editor/EditorGraphLayout.h"
 
 #include <nlohmann/json.hpp>
 
@@ -1013,6 +1014,27 @@ namespace PulseForgeEditor
 		return {};
 	}
 
+	std::expected<void, std::string> DisconnectEditorGraphPin(EditorGraphCommandHistory& History,
+		const EditorGraphSchema& Schema, PulseForge::UUID PinID)
+	{
+		const auto PinExists = std::any_of(History.Graph().Nodes.begin(), History.Graph().Nodes.end(),
+			[PinID](const auto& Node)
+				{ return std::any_of(Node.Pins.begin(), Node.Pins.end(), [PinID](const auto& Pin) { return Pin.ID == PinID; }); });
+		if (!PinExists) return std::unexpected("The graph pin no longer exists");
+		const auto HasConnections = std::any_of(History.Graph().Connections.begin(), History.Graph().Connections.end(),
+			[PinID](const auto& Connection) { return Connection.OutputPin == PinID || Connection.InputPin == PinID; });
+		if (!HasConnections) return {};
+		std::string Error;
+		if (!History.Execute(Schema, [PinID](EditorGraph& Graph) -> std::expected<void, std::string>
+		{
+			Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(),
+				[PinID](const auto& Connection) { return Connection.OutputPin == PinID || Connection.InputPin == PinID; }),
+				Graph.Connections.end());
+			return {};
+		}, Error)) return std::unexpected(Error);
+		return {};
+	}
+
 	std::expected<void, std::string> ReconnectEditorGraphConnection(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID ConnectionID, PulseForge::UUID FirstPin, PulseForge::UUID SecondPin)
 	{
@@ -1082,5 +1104,116 @@ namespace PulseForgeEditor
 			return {};
 		}, Error)) return std::unexpected(Error);
 		return {};
+	}
+
+	std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>> CalculateEditorGraphStraightenedLayout(
+		const std::vector<EditorGraphLayoutNode>& Nodes,
+		const std::vector<EditorGraphPinAnchor>& PinAnchors,
+		const std::vector<EditorGraphConnection>& Connections,
+		const std::vector<PulseForge::UUID>& SelectedNodeIDs)
+	{
+		std::unordered_map<PulseForge::UUID, EditorGraphLayoutNode, PulseForge::UUIDHash> NodeByID;
+		for (const auto& Node : Nodes)
+			if (std::isfinite(Node.Position.X) && std::isfinite(Node.Position.Y)) NodeByID.emplace(Node.ID, Node);
+		std::vector<PulseForge::UUID> Selected;
+		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> SelectedSet;
+		for (const auto ID : SelectedNodeIDs)
+			if (NodeByID.contains(ID) && SelectedSet.insert(ID).second) Selected.push_back(ID);
+		std::sort(Selected.begin(), Selected.end(), [&NodeByID](const auto Left, const auto Right)
+		{
+			const auto& A = NodeByID.at(Left).Position;
+			const auto& B = NodeByID.at(Right).Position;
+			if (A.X != B.X) return A.X < B.X;
+			if (A.Y != B.Y) return A.Y < B.Y;
+			return Left < Right;
+		});
+		if (Selected.size() < 2) return {};
+
+		std::unordered_map<PulseForge::UUID, double, PulseForge::UUIDHash> OffsetByPin;
+		std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> NodeByPin;
+		for (const auto& Anchor : PinAnchors)
+			if (std::isfinite(Anchor.OffsetY) && SelectedSet.contains(Anchor.NodeID))
+			{
+				OffsetByPin.emplace(Anchor.PinID, Anchor.OffsetY);
+				NodeByPin.emplace(Anchor.PinID, Anchor.NodeID);
+			}
+
+		struct Constraint { PulseForge::UUID Other; double Delta = 0.0; };
+		std::unordered_map<PulseForge::UUID, std::vector<Constraint>, PulseForge::UUIDHash> Adjacency;
+		for (const auto& Connection : Connections)
+		{
+			const auto OutputNode = NodeByPin.find(Connection.OutputPin);
+			const auto InputNode = NodeByPin.find(Connection.InputPin);
+			const auto OutputOffset = OffsetByPin.find(Connection.OutputPin);
+			const auto InputOffset = OffsetByPin.find(Connection.InputPin);
+			if (OutputNode == NodeByPin.end() || InputNode == NodeByPin.end() ||
+				OutputOffset == OffsetByPin.end() || InputOffset == OffsetByPin.end() ||
+				OutputNode->second == InputNode->second) continue;
+			const double Delta = OutputOffset->second - InputOffset->second;
+			Adjacency[OutputNode->second].push_back({ InputNode->second, Delta });
+			Adjacency[InputNode->second].push_back({ OutputNode->second, -Delta });
+		}
+		for (auto& [ID, Edges] : Adjacency)
+		{
+			(void)ID;
+			std::sort(Edges.begin(), Edges.end(), [](const auto& Left, const auto& Right)
+			{
+				if (Left.Other != Right.Other) return Left.Other < Right.Other;
+				return Left.Delta < Right.Delta;
+			});
+		}
+
+		bool HasInternalConnection = false;
+		for (const auto ID : Selected)
+			if (const auto It = Adjacency.find(ID); It != Adjacency.end() && !It->second.empty())
+				HasInternalConnection = true;
+
+		std::unordered_map<PulseForge::UUID, double, PulseForge::UUIDHash> TargetY;
+		if (!HasInternalConnection)
+		{
+			const auto Reference = *std::min_element(Selected.begin(), Selected.end(), [&NodeByID](const auto Left, const auto Right)
+			{
+				const auto& A = NodeByID.at(Left).Position;
+				const auto& B = NodeByID.at(Right).Position;
+				if (A.Y != B.Y) return A.Y < B.Y;
+				if (A.X != B.X) return A.X < B.X;
+				return Left < Right;
+			});
+			const double RowY = NodeByID.at(Reference).Position.Y;
+			for (const auto ID : Selected) TargetY.emplace(ID, RowY);
+		}
+		else
+		{
+			// Stable left-to-right roots and sorted edges make conflicting cycles a
+			// bounded, deterministic best effort. First assigned constraint wins.
+			for (const auto Root : Selected)
+			{
+				if (TargetY.contains(Root)) continue;
+				TargetY.emplace(Root, NodeByID.at(Root).Position.Y);
+				std::vector<PulseForge::UUID> Pending{ Root };
+				for (size_t Index = 0; Index < Pending.size(); ++Index)
+				{
+					const auto Current = Pending[Index];
+					const auto Edges = Adjacency.find(Current);
+					if (Edges == Adjacency.end()) continue;
+					for (const auto& Edge : Edges->second)
+						if (!TargetY.contains(Edge.Other))
+						{
+							TargetY.emplace(Edge.Other, TargetY.at(Current) + Edge.Delta);
+							Pending.push_back(Edge.Other);
+						}
+				}
+			}
+		}
+
+		std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>> Result;
+		for (const auto ID : Selected)
+		{
+			const auto Position = NodeByID.at(ID).Position;
+			const auto NewY = TargetY.at(ID);
+			if (std::isfinite(NewY) && std::abs(NewY - Position.Y) > 0.01)
+				Result.emplace_back(ID, EditorGraphVector3{ Position.X, NewY, Position.Z });
+		}
+		return Result;
 	}
 }

@@ -1,8 +1,10 @@
 #include "Editor/EditorGraphDocumentEditor.h"
 
+#include "Editor/EditorGraphLayout.h"
 #include "Editor/EditorGraphModel.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_node_editor.h>
 #include <nlohmann/json.hpp>
 
@@ -32,6 +34,12 @@ namespace
 	constexpr size_t MaximumCanvasHandles = 32'768;
 
 	struct GraphDocumentState;
+	struct PinAnchorMeasurement
+	{
+		PulseForge::UUID NodeID;
+		PulseForge::UUID PinID;
+		double CanvasY = 0.0;
+	};
 	bool SaveCanvasSettings(const char* Data, size_t Size, NodeEditor::SaveReasonFlags, void* UserPointer);
 	size_t LoadCanvasSettings(char* Data, void* UserPointer);
 
@@ -73,6 +81,8 @@ namespace
 		bool NeedsCanvasSync = true;
 		bool WasFocused = false;
 		bool NodeMoveTransaction = false;
+		PulseForge::UUID LastHoveredPin;
+		bool LastPinWidgetHovered = false;
 		EditorGraphPropertyEditCoordinator PropertyEdits;
 	};
 
@@ -558,6 +568,17 @@ namespace PulseForgeEditor
 			CancelCanvasInteraction(*State);
 		}
 		State->WasFocused = Focused;
+		const ImGuiIO& Input = ImGui::GetIO();
+		const bool OtherInputOwner = ImGui::IsAnyItemActive();
+		const bool CapturedAltPinClick = Focused && !Input.WantTextInput && !OtherInputOwner &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && Input.KeyAlt &&
+			ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
+		if (Focused && !Input.WantTextInput && !State->LastHoveredPin.IsNil() &&
+			!OtherInputOwner && !State->LastPinWidgetHovered && Input.KeyAlt &&
+			ImGui::IsMouseDown(ImGuiMouseButton_Left))
+			// The pin is an invisible item created at canvas End(), so claim its
+			// gesture through ImGui's input-owner API before the canvas processes it.
+			ImGui::SetKeyOwner(ImGuiKey_MouseLeft, ImGuiKeyOwner_Any, ImGuiInputFlags_LockUntilRelease);
 
 		if (ImGui::Button("Add Node")) ImGui::OpenPopup("GraphNodeTypes");
 		if (ImGui::BeginPopup("GraphNodeTypes"))
@@ -641,6 +662,8 @@ namespace PulseForgeEditor
 			return Handle;
 		};
 		std::vector<EditorGraphPropertyEditEvent> PropertyEvents;
+		std::vector<PinAnchorMeasurement> PinAnchorScreenY;
+		bool PropertyWidgetHovered = false;
 		for (const auto& Node : State->History.Graph().Nodes)
 		{
 			LiveIDs.insert(Node.ID);
@@ -712,9 +735,15 @@ namespace PulseForgeEditor
 					}
 					const bool Activated = ImGui::IsItemActivated();
 					const bool Deactivated = ImGui::IsItemDeactivated();
+					PropertyWidgetHovered |= ImGui::IsItemHovered();
 					PropertyEvents.push_back({ PinID, std::move(Value), Activated, Changed, Deactivated });
 				}
 				NodeEditor::EndPin();
+				const ImVec2 PinMinimum = ImGui::GetItemRectMin();
+				const ImVec2 PinMaximum = ImGui::GetItemRectMax();
+				const ImVec2 PinCenterCanvas = NodeEditor::ScreenToCanvas(
+					ImVec2((PinMinimum.x + PinMaximum.x) * 0.5f, (PinMinimum.y + PinMaximum.y) * 0.5f));
+				if (std::isfinite(PinCenterCanvas.y)) PinAnchorScreenY.push_back({ Node.ID, Pin.ID, PinCenterCanvas.y });
 			}
 			NodeEditor::EndNode();
 		}
@@ -871,6 +900,74 @@ namespace PulseForgeEditor
 		NodeEditor::EnableShortcuts(!IO.WantTextInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup));
 		NodeEditor::End();
 		NodeEditor::EnableShortcuts(true);
+		const auto HoveredCanvasPin = NodeEditor::GetHoveredPin();
+		PulseForge::UUID HoveredPinID;
+		if (HoveredCanvasPin.Get() != 0)
+			if (const auto It = State->Identities.find(HoveredCanvasPin.Get()); It != State->Identities.end())
+				HoveredPinID = It->second;
+		const auto UnlinkPin = GraphCanvasDetail::ResolveAltPinUnlink({ HoveredPinID, Focused,
+			Input.KeyAlt, CapturedAltPinClick, Input.WantTextInput || OtherInputOwner,
+			ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup), PropertyWidgetHovered });
+		if (UnlinkPin)
+		{
+			const EditorGraph BeforeUnlink = State->History.Graph();
+			auto Unlinked = DisconnectEditorGraphPin(State->History, State->Schema, *UnlinkPin);
+			if (!Unlinked) State->Error = Unlinked.error();
+			else if (State->History.Graph() != BeforeUnlink)
+			{
+				State->Error.clear();
+				ReconcileDirtyState(*State, m_Documents, Session);
+			}
+		}
+		State->LastHoveredPin = HoveredPinID;
+		State->LastPinWidgetHovered = PropertyWidgetHovered;
+
+		if (GraphCanvasDetail::ShouldStraightenSelection({ Focused, NodeEditor::IsActive(),
+			ImGui::IsKeyPressed(ImGuiKey_Q, false), IO.WantTextInput, OtherInputOwner,
+			ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup), ImGui::IsMouseDown(ImGuiMouseButton_Left),
+			State->NodeMoveTransaction, State->History.HasOpenTransaction(),
+			State->PropertyEdits.HasActiveEdit(), PropertyWidgetHovered }))
+		{
+			const int Count = NodeEditor::GetSelectedObjectCount();
+			std::vector<NodeEditor::NodeId> SelectedHandles(static_cast<size_t>(std::max(Count, 0)));
+			const int SelectedCount = Count > 0 ? NodeEditor::GetSelectedNodes(SelectedHandles.data(), Count) : 0;
+			std::vector<PulseForge::UUID> SelectedNodeIDs;
+			for (int Index = 0; Index < SelectedCount; ++Index)
+				if (const auto It = State->Identities.find(SelectedHandles[static_cast<size_t>(Index)].Get());
+					It != State->Identities.end()) SelectedNodeIDs.push_back(It->second);
+
+			std::vector<EditorGraphLayoutNode> LayoutNodes;
+			LayoutNodes.reserve(State->History.Graph().Nodes.size());
+			std::unordered_map<PulseForge::UUID, double, PulseForge::UUIDHash> NodeCanvasY;
+			for (const auto& Node : State->History.Graph().Nodes)
+				if (const auto It = State->Handles.find(Node.ID); It != State->Handles.end())
+				{
+					const auto Position = NodeEditor::GetNodePosition(NodeEditor::NodeId(It->second));
+					if (std::isfinite(Position.x) && std::isfinite(Position.y))
+					{
+						LayoutNodes.push_back({ Node.ID, { Position.x, Position.y, 0.0 } });
+						NodeCanvasY.emplace(Node.ID, Position.y);
+					}
+				}
+			std::vector<EditorGraphPinAnchor> Anchors;
+			for (const auto& Measurement : PinAnchorScreenY)
+				if (const auto It = NodeCanvasY.find(Measurement.NodeID); It != NodeCanvasY.end())
+					Anchors.push_back({ Measurement.NodeID, Measurement.PinID, Measurement.CanvasY - It->second });
+			const auto Positions = CalculateEditorGraphStraightenedLayout(LayoutNodes, Anchors,
+				State->History.Graph().Connections, SelectedNodeIDs);
+			if (!Positions.empty())
+			{
+				const EditorGraph BeforeLayout = State->History.Graph();
+				auto Moved = MoveEditorGraphNodes(State->History, State->Schema, Positions);
+				if (!Moved) State->Error = Moved.error();
+				else if (State->History.Graph() != BeforeLayout)
+				{
+					State->Error.clear();
+					(void)m_Documents.MarkEdited(Session.Identity);
+					State->NeedsCanvasSync = true;
+				}
+			}
+		}
 		NodeEditor::SetCurrentEditor(nullptr);
 		(void)ProcessPropertyEditEvents(Session, PropertyEvents, CancelGesture);
 	}

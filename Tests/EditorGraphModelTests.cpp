@@ -1,6 +1,7 @@
 #include "TestSupport.h"
 
 #include "Editor/EditorGraphModel.h"
+#include "Editor/EditorGraphLayout.h"
 
 #include <algorithm>
 #include <array>
@@ -413,6 +414,143 @@ namespace
 		PF_CHECK(Tests, History.Graph() == BeforeRejected && ValidateEditorGraph(History.Graph(), Schema).empty());
 	}
 
+	void TestReusableGraphLayoutAndPinCommands(TestRunner& Tests)
+	{
+		const EditorGraphSchema Schema{ "test.named-unlike-fixtures", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true,
+			{
+				{ "test.source-vertex", "Source Vertex", {
+					{ "outgoing-signal", "Signal", EditorGraphPinDirection::Output, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Multiple, 0.0 },
+					{ "execution-out", "Pulse", EditorGraphPinDirection::Output, EditorGraphPinType::Execution,
+						EditorGraphPinCardinality::Multiple, {} } } },
+				{ "test.target-vertex", "Target Vertex", {
+					{ "incoming-signal", "Signal In", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Single, 3.0 },
+					{ "event-in", "Pulse In", EditorGraphPinDirection::Input, EditorGraphPinType::Execution,
+						EditorGraphPinCardinality::Single, {} },
+					{ "returned-signal", "Signal Out", EditorGraphPinDirection::Output, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Multiple, 0.0 } } }
+			} };
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "test.source-vertex", 10.0) &&
+			AppendNode(*Graph, Schema, "test.target-vertex", 240.0) &&
+			AppendNode(*Graph, Schema, "test.target-vertex", 460.0) &&
+			AppendNode(*Graph, Schema, "test.target-vertex", 680.0));
+		if (!Graph) return;
+		Graph->Nodes[0].Y = 20.0;
+		Graph->Nodes[1].Y = 120.0;
+		Graph->Nodes[2].Y = 260.0;
+		Graph->Nodes[3].Y = 400.0;
+		const auto SourceOutput = Graph->Nodes[0].Pins[0].ID;
+		const auto FirstInput = Graph->Nodes[1].Pins[0].ID;
+		const auto SecondInput = Graph->Nodes[2].Pins[0].ID;
+		const auto FirstOutput = Graph->Nodes[1].Pins[2].ID;
+		const auto ThirdInput = Graph->Nodes[3].Pins[0].ID;
+		const auto ExecOutput = Graph->Nodes[0].Pins[1].ID;
+		const auto ExecInput = Graph->Nodes[1].Pins[1].ID;
+		EditorGraphCommandHistory History(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, SourceOutput, FirstInput));
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, SourceOutput, SecondInput));
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, FirstOutput, ThirdInput));
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, ExecOutput, ExecInput));
+		const auto BeforeUnlink = History.Graph();
+		const auto RemovedIDs = [&]
+		{
+			std::vector<PulseForge::UUID> IDs;
+			for (const auto& Connection : History.Graph().Connections)
+				if (Connection.OutputPin == SourceOutput || Connection.InputPin == SourceOutput) IDs.push_back(Connection.ID);
+			std::sort(IDs.begin(), IDs.end());
+			return IDs;
+		}();
+		PF_CHECK(Tests, RemovedIDs.size() == 2);
+		PF_CHECK(Tests, DisconnectEditorGraphPin(History, Schema, SourceOutput));
+		PF_CHECK(Tests, History.Graph().Connections.size() == 2);
+		PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeUnlink);
+		PF_CHECK(Tests, DisconnectEditorGraphPin(History, Schema, FirstInput));
+		PF_CHECK(Tests, History.Graph().Connections.size() == 3);
+		PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeUnlink);
+		PF_CHECK(Tests, DisconnectEditorGraphPin(History, Schema, ExecInput));
+		PF_CHECK(Tests, History.Graph().Connections.size() == 3);
+		const auto AfterExecRemoval = History.Graph();
+		PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeUnlink);
+		PF_CHECK(Tests, History.Redo() && History.Graph() == AfterExecRemoval);
+		const auto* DefaultInput = [&]() -> const EditorGraphPin*
+			{ return FindPin(History.Graph().Nodes[1], "incoming-signal"); }();
+		PF_CHECK(Tests, DefaultInput && DefaultInput->DefaultValue == EditorGraphValue{ 3.0 });
+		PF_CHECK(Tests, !DisconnectEditorGraphPin(History, Schema, ID(999999)));
+		EditorGraphCommandHistory NoOpHistory(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(NoOpHistory, Schema, SourceOutput, FirstInput));
+		PF_CHECK(Tests, NoOpHistory.Undo() && NoOpHistory.CanRedo());
+		const auto UnconnectedPin = Graph->Nodes[2].Pins[1].ID;
+		const auto NoOpGraph = NoOpHistory.Graph();
+		PF_CHECK(Tests, DisconnectEditorGraphPin(NoOpHistory, Schema, UnconnectedPin));
+		PF_CHECK(Tests, NoOpHistory.Graph() == NoOpGraph && NoOpHistory.CanRedo());
+
+		const auto Current = History.Graph();
+		std::vector<EditorGraphLayoutNode> Nodes;
+		for (const auto& Node : Current.Nodes) Nodes.push_back({ Node.ID, { Node.X, Node.Y, 0.0 } });
+		const auto SourceNode = Current.Nodes[0].ID;
+		const auto SelectedNode = Current.Nodes[1].ID;
+		const auto UnselectedNode = Current.Nodes[2].ID;
+		const auto ChainEndNode = Current.Nodes[3].ID;
+		const auto Connections = Current.Connections;
+		const auto Layout = CalculateEditorGraphStraightenedLayout(Nodes,
+			{ { SourceNode, SourceOutput, 50.0 }, { SelectedNode, FirstInput, 20.0 },
+				{ SelectedNode, FirstOutput, 42.0 }, { UnselectedNode, SecondInput, 20.0 },
+				{ ChainEndNode, ThirdInput, 10.0 } }, Connections, { ChainEndNode, SelectedNode, SourceNode });
+		PF_CHECK(Tests, Layout.size() == 2);
+		const auto SourcePlacement = std::find_if(Layout.begin(), Layout.end(), [SourceNode](const auto& Item) { return Item.first == SourceNode; });
+		const auto TargetPlacement = std::find_if(Layout.begin(), Layout.end(), [SelectedNode](const auto& Item) { return Item.first == SelectedNode; });
+		const auto ChainEndPlacement = std::find_if(Layout.begin(), Layout.end(), [ChainEndNode](const auto& Item) { return Item.first == ChainEndNode; });
+		PF_CHECK(Tests, SourcePlacement == Layout.end() && TargetPlacement != Layout.end() && ChainEndPlacement != Layout.end());
+		if (TargetPlacement != Layout.end() && ChainEndPlacement != Layout.end())
+		{
+			PF_CHECK(Tests, std::abs((Nodes[0].Position.Y + 50.0) - (TargetPlacement->second.Y + 20.0)) < 0.01);
+			PF_CHECK(Tests, std::abs((TargetPlacement->second.Y + 42.0) - (ChainEndPlacement->second.Y + 10.0)) < 0.01);
+		}
+		const auto ReorderedLayout = CalculateEditorGraphStraightenedLayout(Nodes,
+			{ { SourceNode, SourceOutput, 50.0 }, { SelectedNode, FirstInput, 20.0 },
+				{ SelectedNode, FirstOutput, 42.0 }, { UnselectedNode, SecondInput, 20.0 },
+				{ ChainEndNode, ThirdInput, 10.0 } }, Connections, { SourceNode, ChainEndNode, SelectedNode });
+		PF_CHECK(Tests, Layout == ReorderedLayout);
+		PF_CHECK(Tests, std::none_of(Layout.begin(), Layout.end(), [UnselectedNode](const auto& Item)
+			{ return Item.first == UnselectedNode; }));
+		const auto AppliedBefore = History.Graph();
+		PF_CHECK(Tests, MoveEditorGraphNodes(History, Schema, Layout));
+		const auto AppliedAfter = History.Graph();
+		PF_CHECK(Tests, History.Graph().Connections == Current.Connections);
+		PF_CHECK(Tests, AppliedBefore != AppliedAfter && History.Undo() && History.Graph() == AppliedBefore);
+		PF_CHECK(Tests, History.Redo() && History.Graph() == AppliedAfter);
+		const auto LayoutSource = SerializeEditorGraph(History.Graph(), Schema);
+		const auto LayoutReloaded = LayoutSource ? DeserializeEditorGraph(*LayoutSource, Schema)
+			: std::expected<EditorGraph, std::string>(std::unexpected("Graph serialization failed"));
+		PF_CHECK(Tests, LayoutReloaded.has_value());
+		if (LayoutReloaded)
+		{
+			for (const auto& Node : History.Graph().Nodes)
+			{
+				const auto ReloadedNode = std::find_if(LayoutReloaded->Nodes.begin(), LayoutReloaded->Nodes.end(),
+					[&Node](const auto& Candidate) { return Candidate.ID == Node.ID; });
+				PF_CHECK(Tests, ReloadedNode != LayoutReloaded->Nodes.end() &&
+					ReloadedNode->X == Node.X && ReloadedNode->Y == Node.Y);
+			}
+		}
+		std::vector<EditorGraphLayoutNode> CurrentNodes;
+		for (const auto& Node : History.Graph().Nodes) CurrentNodes.push_back({ Node.ID, { Node.X, Node.Y, 0.0 } });
+		const auto Repeat = CalculateEditorGraphStraightenedLayout(CurrentNodes,
+			{ { SourceNode, SourceOutput, 50.0 }, { SelectedNode, FirstInput, 20.0 } },
+			History.Graph().Connections, { SourceNode, SelectedNode });
+		PF_CHECK(Tests, Repeat.empty());
+
+		const auto Disconnected = CalculateEditorGraphStraightenedLayout(Nodes, {}, {},
+			{ UnselectedNode, ChainEndNode, SelectedNode, SourceNode });
+		PF_CHECK(Tests, Disconnected.size() == 3);
+		for (const auto& [IDValue, Position] : Disconnected)
+			if (IDValue != SourceNode) PF_CHECK(Tests, Position.Y == Nodes[0].Position.Y);
+		PF_CHECK(Tests, CalculateEditorGraphStraightenedLayout(Nodes, {}, {}, { SourceNode }).empty());
+	}
+
 	void TestMixedTypeCyclePolicies(TestRunner& Tests)
 	{
 		const auto Schema = MakeMixedTypeCycleSchema();
@@ -522,5 +660,6 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 	TestMaterialSchemaAndSerialization(Tests);
 	TestGameplaySchemaAndTransactions(Tests);
 	TestPropertyEditCoordinator(Tests);
+	TestReusableGraphLayoutAndPinCommands(Tests);
 	TestMixedTypeCyclePolicies(Tests);
 }

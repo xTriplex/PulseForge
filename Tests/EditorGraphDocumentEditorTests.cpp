@@ -4,6 +4,7 @@
 #include "Editor/EditorGraphModel.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include "../PulseForge/Vendor/imgui-node-editor/imgui_node_editor.h"
 
 #include <algorithm>
@@ -422,6 +423,54 @@ namespace
 		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.size() == 1);
 	}
 
+	void TestAltPinUnlinkInputOwnership(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const PulseForge::UUID Pin{ 0x4752415048000000ull, 707 };
+		const auto Resolve = [Pin](bool Focused, bool Alt, bool Clicked, bool TextInput,
+			bool Popup, bool Embedded, PulseForge::UUID Hovered = PulseForge::UUID{})
+		{
+			if (Hovered.IsNil() && Focused && Alt && Clicked && !TextInput && !Popup && !Embedded)
+				Hovered = Pin;
+			return GraphCanvasDetail::ResolveAltPinUnlink(
+				{ Hovered, Focused, Alt, Clicked, TextInput, Popup, Embedded });
+		};
+		PF_CHECK(Tests, Resolve(true, true, true, false, false, false) == Pin);
+		PF_CHECK(Tests, !Resolve(false, true, true, false, false, false));
+		PF_CHECK(Tests, !Resolve(true, false, true, false, false, false));
+		PF_CHECK(Tests, !Resolve(true, true, false, false, false, false));
+		PF_CHECK(Tests, !Resolve(true, true, true, true, false, false));
+		PF_CHECK(Tests, !Resolve(true, true, true, false, true, false));
+		PF_CHECK(Tests, !Resolve(true, true, true, false, false, true));
+		PF_CHECK(Tests, !GraphCanvasDetail::ResolveAltPinUnlink(
+			{ {}, true, true, true, false, false, false }));
+	}
+
+	void TestGraphStraightenShortcutOwnership(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const EditorGraphStraightenInput Available{ true, true, true, false, false, false, false,
+			false, false, false, false };
+		PF_CHECK(Tests, GraphCanvasDetail::ShouldStraightenSelection(Available));
+		const auto Rejected = [&Available](auto Mutate)
+		{
+			auto Input = Available;
+			Mutate(Input);
+			return !GraphCanvasDetail::ShouldStraightenSelection(Input);
+		};
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.TextInputOwned = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.OtherInputOwned = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.PopupOpen = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.MouseButtonDown = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.NodeMoveTransaction = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.GraphTransaction = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.PropertyEditActive = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.PropertyWidgetHovered = true; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.Focused = false; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.CanvasActive = false; }));
+		PF_CHECK(Tests, Rejected([](auto& Input) { Input.KeyPressed = false; }));
+	}
+
 	void TestPinnedCanvasLinkGesture(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -488,8 +537,11 @@ namespace
 		int PreviewFrames = 0;
 		int RejectedFrames = 0;
 		int AcceptedRequests = 0;
+		int UnlinkRequests = 0;
+		uintptr_t LastHoveredPin = 0;
 		const auto Frame = [&](std::optional<ImVec2> MousePosition = std::nullopt,
-			std::optional<bool> LeftDown = std::nullopt, bool PressEscape = false)
+			std::optional<bool> LeftDown = std::nullopt, bool PressEscape = false,
+			std::optional<bool> AltDown = std::nullopt)
 		{
 			QueriesThisFrame = 0;
 			if (MousePosition) IO.AddMousePosEvent(MousePosition->x, MousePosition->y);
@@ -499,13 +551,19 @@ namespace
 				IO.MouseDown[ImGuiMouseButton_Left] = *LeftDown;
 			}
 			if (PressEscape) IO.AddKeyEvent(ImGuiKey_Escape, true);
+			if (AltDown) IO.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Alt), *AltDown);
 			IO.DisplaySize = ImVec2(1280.0f, 720.0f);
 			IO.DeltaTime = 1.0f / 60.0f;
 			ImGui::NewFrame();
+			if (AltDown) IO.KeyAlt = *AltDown;
 			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
 			ImGui::SetNextWindowSize(IO.DisplaySize);
 			ImGui::Begin("GraphLinkProtocolHost", nullptr,
 				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			const bool CapturedAltClick = AltDown.value_or(false) && LeftDown.value_or(false) &&
+				LastHoveredPin != 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
+			if (IO.KeyAlt && IO.MouseDown[ImGuiMouseButton_Left] && LastHoveredPin != 0)
+				ImGui::SetKeyOwner(ImGuiKey_MouseLeft, ImGuiKeyOwner_Any, ImGuiInputFlags_LockUntilRelease);
 			if (PressEscape)
 			{
 				NodeEditor::SetCurrentEditor(Canvas);
@@ -568,6 +626,17 @@ namespace
 					History, Schema, Result.Decision.OutputPin, Result.Decision.InputPin);
 			}
 			NodeEditor::End();
+			const auto HoveredPin = NodeEditor::GetHoveredPin();
+			LastHoveredPin = HoveredPin.Get();
+			const auto HoveredIdentity = Identities.find(LastHoveredPin);
+			const UUID HoveredPinID = HoveredIdentity == Identities.end() ? UUID{} : HoveredIdentity->second;
+			if (const auto Unlink = GraphCanvasDetail::ResolveAltPinUnlink({ HoveredPinID,
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows), IO.KeyAlt, CapturedAltClick,
+				IO.WantTextInput, ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup), false }))
+			{
+				++UnlinkRequests;
+				(void)DisconnectEditorGraphPin(History, Schema, *Unlink);
+			}
 			NeedsNodePositions = false;
 			NodeEditor::SetCurrentEditor(nullptr);
 			ImGui::End();
@@ -638,6 +707,16 @@ namespace
 		PF_CHECK(Tests, AcceptedRequests == PreviousAccepts + 1 && QueryCalls == CompletedQueries);
 		PF_CHECK(Tests, History.Undo() && History.Graph().Connections.empty());
 		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.size() == 1);
+		const int AcceptedBeforeUnlink = AcceptedRequests;
+		Frame(ScalarPosition);
+		Frame(ScalarPosition, true, false, true);
+		PF_CHECK(Tests, UnlinkRequests == 1 && History.Graph().Connections.empty());
+		Frame(ScalarPosition, false, false, false);
+		PF_CHECK(Tests, AcceptedRequests == AcceptedBeforeUnlink);
+		PF_CHECK(Tests, History.Undo() && History.Graph().Connections.size() == 1);
+		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.empty());
+		Drag(ScalarPosition, MultiplyPosition);
+		PF_CHECK(Tests, AcceptedRequests == AcceptedBeforeUnlink + 1 && History.Graph().Connections.size() == 1);
 	}
 }
 
@@ -646,5 +725,7 @@ void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 	TestGraphDocumentLifecycle(Tests);
 	TestGraphDocumentSaveRevisionAccounting(Tests);
 	TestGraphCanvasCreateRequestPolling(Tests);
+	TestAltPinUnlinkInputOwnership(Tests);
+	TestGraphStraightenShortcutOwnership(Tests);
 	TestPinnedCanvasLinkGesture(Tests);
 }

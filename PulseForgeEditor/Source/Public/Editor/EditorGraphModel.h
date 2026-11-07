@@ -245,6 +245,9 @@ namespace PulseForgeEditor
 	[[nodiscard]] std::expected<void, std::string> DisconnectEditorGraphConnection(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID ConnectionID);
+	[[nodiscard]] std::expected<void, std::string> DisconnectEditorGraphPin(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		PulseForge::UUID PinID);
 	[[nodiscard]] std::expected<void, std::string> ReconnectEditorGraphConnection(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID ConnectionID, PulseForge::UUID FirstPin, PulseForge::UUID SecondPin);
