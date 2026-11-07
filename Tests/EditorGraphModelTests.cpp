@@ -3,6 +3,7 @@
 #include "Editor/EditorGraphModel.h"
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <unordered_set>
 
@@ -41,6 +42,44 @@ namespace
 		if (!Node) return false;
 		Graph.Nodes.push_back(std::move(*Node));
 		return true;
+	}
+
+	EditorGraphSchema MakeMixedTypeCycleSchema()
+	{
+		const auto ValueFor = [](EditorGraphPinType Type) -> EditorGraphValue
+		{
+			switch (Type)
+			{
+			case EditorGraphPinType::Float: return 0.0;
+			case EditorGraphPinType::Vector3: return EditorGraphVector3{};
+			case EditorGraphPinType::Boolean: return false;
+			case EditorGraphPinType::String: return std::string{};
+			case EditorGraphPinType::Execution: return {};
+			}
+			return {};
+		};
+		const auto Input = [&ValueFor](std::string Key, EditorGraphPinType Type)
+			{ return EditorGraphPinDefinition{ std::move(Key), "input", EditorGraphPinDirection::Input, Type,
+				EditorGraphPinCardinality::Single, ValueFor(Type) }; };
+		const auto Output = [&ValueFor](std::string Key, EditorGraphPinType Type)
+			{ return EditorGraphPinDefinition{ std::move(Key), "output", EditorGraphPinDirection::Output, Type,
+				EditorGraphPinCardinality::Multiple, ValueFor(Type) }; };
+		return { "test.mixed-data-cycle", 1, EditorGraphCyclePolicy::Reject, EditorGraphCyclePolicy::Allow, true,
+			{
+				{ "test.a", "A", { Input("float-in", EditorGraphPinType::Float), Output("vector-out", EditorGraphPinType::Vector3),
+					Input("bool-in", EditorGraphPinType::Boolean) } },
+				{ "test.b", "B", { Input("vector-in", EditorGraphPinType::Vector3), Output("float-out", EditorGraphPinType::Float),
+					Output("bool-out", EditorGraphPinType::Boolean) } },
+				{ "test.c", "C", { Input("bool-in", EditorGraphPinType::Boolean), Output("float-out", EditorGraphPinType::Float) } }
+			} };
+	}
+
+	const EditorGraphPin* FindPin(const EditorGraph& Graph, std::string_view NodeType, std::string_view Key, size_t Occurrence = 0)
+	{
+		for (const auto& Node : Graph.Nodes)
+			if (Node.TypeKey == NodeType && Occurrence-- == 0)
+				return FindPin(Node, Key);
+		return nullptr;
 	}
 
 	void TestMaterialSchemaAndSerialization(TestRunner& Tests)
@@ -257,10 +296,231 @@ namespace
 		PF_CHECK(Tests, !PasteEditorGraphClipboard(History, Schema, "{\"format\":\"PulseForgeGraphClipboard\",\"version\":4294967297}", 0.0, 0.0));
 		PF_CHECK(Tests, History.Graph() == Current);
 	}
+
+	void TestPropertyEditCoordinator(TestRunner& Tests)
+	{
+		EditorGraphSchema Schema{ "test.properties", 1, EditorGraphCyclePolicy::Reject, EditorGraphCyclePolicy::Reject, true,
+			{
+				{ "test.properties", "Properties", {
+					{ "float", "Float", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Single, 1.0 },
+					{ "vector", "Vector", EditorGraphPinDirection::Input, EditorGraphPinType::Vector3,
+						EditorGraphPinCardinality::Single, EditorGraphVector3{} },
+					{ "boolean", "Boolean", EditorGraphPinDirection::Input, EditorGraphPinType::Boolean,
+						EditorGraphPinCardinality::Single, false },
+					{ "string", "String", EditorGraphPinDirection::Input, EditorGraphPinType::String,
+						EditorGraphPinCardinality::Single, std::string{} }
+				} }
+			} };
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "test.properties", 0.0) &&
+			AppendNode(*Graph, Schema, "test.properties", 260.0));
+		if (!Graph) return;
+		const EditorGraph Initial = *Graph;
+		EditorGraphCommandHistory History(*Graph);
+		EditorGraphPropertyEditCoordinator Coordinator;
+		const auto* FloatPin = FindPin(History.Graph(), "test.properties", "float");
+		const auto* VectorPin = FindPin(History.Graph(), "test.properties", "vector");
+		const auto* BooleanPin = FindPin(History.Graph(), "test.properties", "boolean");
+		const auto* StringPin = FindPin(History.Graph(), "test.properties", "string");
+		PF_CHECK(Tests, FloatPin && VectorPin && BooleanPin && StringPin);
+		if (!FloatPin || !VectorPin || !BooleanPin || !StringPin) return;
+		const auto FloatID = FloatPin->ID;
+		const auto VectorID = VectorPin->ID;
+		const auto BooleanID = BooleanPin->ID;
+		const auto StringID = StringPin->ID;
+
+		// Build a complete frame of copied UUID/value requests while traversing both nodes.
+		// The production adapter applies these only after its canvas traversal has ended.
+		std::vector<EditorGraphPropertyEditEvent> Frame;
+		for (const auto& Node : History.Graph().Nodes)
+			for (const auto& PinValue : Node.Pins)
+				Frame.push_back({ PinValue.ID, PinValue.DefaultValue, PinValue.ID == FloatID, PinValue.ID == FloatID,
+					false });
+		const auto FirstEdit = std::find_if(Frame.begin(), Frame.end(), [FloatID](const auto& Event)
+			{ return Event.PinID == FloatID; });
+		PF_CHECK(Tests, FirstEdit != Frame.end() && Frame.size() == 8);
+		if (FirstEdit == Frame.end()) return;
+		FirstEdit->Value = 2.0;
+		auto Processed = Coordinator.ProcessFrame(History, Schema, Frame, false);
+		PF_CHECK(Tests, Processed.GraphChanged && Processed.Error.empty() && History.HasOpenTransaction());
+		PF_CHECK(Tests, FindPin(History.Graph(), "test.properties", "float")->DefaultValue == EditorGraphValue{ 2.0 });
+		PF_CHECK(Tests, ValidateEditorGraph(History.Graph(), Schema).empty());
+
+		Frame.clear();
+		for (const auto& Node : History.Graph().Nodes)
+			for (const auto& PinValue : Node.Pins)
+				Frame.push_back({ PinValue.ID, PinValue.DefaultValue, false, PinValue.ID == FloatID, false });
+		auto LatestFloat = std::find_if(Frame.begin(), Frame.end(), [FloatID](const auto& Event) { return Event.PinID == FloatID; });
+		PF_CHECK(Tests, LatestFloat != Frame.end());
+		if (LatestFloat != Frame.end()) LatestFloat->Value = 3.0;
+		Processed = Coordinator.ProcessFrame(History, Schema, Frame, false);
+		PF_CHECK(Tests, Processed.GraphChanged && History.HasOpenTransaction());
+		Frame.clear();
+		for (const auto& Node : History.Graph().Nodes)
+			for (const auto& PinValue : Node.Pins)
+				Frame.push_back({ PinValue.ID, PinValue.DefaultValue, false, false, PinValue.ID == FloatID });
+		Processed = Coordinator.ProcessFrame(History, Schema, Frame, false);
+		const EditorGraph FinalFloat = History.Graph();
+		PF_CHECK(Tests, !History.HasOpenTransaction() && History.IsDirty());
+		PF_CHECK(Tests, History.Undo() && History.Graph() == Initial);
+		PF_CHECK(Tests, History.Redo() && History.Graph() == FinalFloat);
+
+		// An unchanged activation/deactivation must not add history or clear the redo branch.
+		PF_CHECK(Tests, History.Undo() && History.CanRedo());
+		const auto VectorValue = FindPin(History.Graph(), "test.properties", "vector")->DefaultValue;
+		Processed = Coordinator.ProcessFrame(History, Schema,
+			{ { VectorID, VectorValue, true, false, false } }, false);
+		PF_CHECK(Tests, Processed.Error.empty() && History.HasOpenTransaction());
+		Processed = Coordinator.ProcessFrame(History, Schema,
+			{ { VectorID, VectorValue, false, false, true } }, false);
+		PF_CHECK(Tests, Processed.Error.empty() && !History.HasOpenTransaction() && !History.IsDirty());
+		PF_CHECK(Tests, !History.CanUndo() && History.CanRedo());
+		PF_CHECK(Tests, SerializeEditorGraph(History.Graph(), Schema).has_value());
+		PF_CHECK(Tests, History.Redo() && History.Graph() == FinalFloat);
+		PF_CHECK(Tests, History.Undo() && History.CanRedo());
+
+		const auto EditAndUndo = [&](PulseForge::UUID PinID, EditorGraphValue Value)
+		{
+			const EditorGraph Before = History.Graph();
+			std::vector<EditorGraphPropertyEditEvent> Events{ { PinID, Value, true, true, false } };
+			auto Result = Coordinator.ProcessFrame(History, Schema, Events, false);
+			Events[0].Activated = false;
+			Events[0].Changed = false;
+			Events[0].Deactivated = true;
+			Result = Coordinator.ProcessFrame(History, Schema, Events, false);
+			const EditorGraph After = History.Graph();
+			PF_CHECK(Tests, Result.Error.empty() && !History.HasOpenTransaction() && After != Before);
+			PF_CHECK(Tests, History.Undo() && History.Graph() == Before);
+			PF_CHECK(Tests, History.Redo() && History.Graph() == After);
+		};
+		EditAndUndo(VectorID, EditorGraphVector3{ 1.0, 2.0, 3.0 });
+		EditAndUndo(BooleanID, true);
+		EditAndUndo(StringID, std::string("edited"));
+
+		const EditorGraph BeforeCancel = History.Graph();
+		Processed = Coordinator.ProcessFrame(History, Schema,
+			{ { FloatID, 9.0, true, true, false } }, false);
+		PF_CHECK(Tests, History.HasOpenTransaction());
+		Processed = Coordinator.ProcessFrame(History, Schema, {}, true); // Escape/focus loss cancellation path.
+		PF_CHECK(Tests, Processed.GraphChanged && !History.HasOpenTransaction() && !Coordinator.HasActiveEdit());
+		PF_CHECK(Tests, History.Graph() == BeforeCancel);
+
+		const EditorGraph BeforeRejected = History.Graph();
+		Processed = Coordinator.ProcessFrame(History, Schema,
+			{ { FloatID, std::string("wrong type"), true, true, true } }, false);
+		PF_CHECK(Tests, !Processed.Error.empty() && !History.HasOpenTransaction());
+		PF_CHECK(Tests, History.Graph() == BeforeRejected && ValidateEditorGraph(History.Graph(), Schema).empty());
+	}
+
+	void TestMixedTypeCyclePolicies(TestRunner& Tests)
+	{
+		const auto Schema = MakeMixedTypeCycleSchema();
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "test.a", 0.0) &&
+			AppendNode(*Graph, Schema, "test.b", 200.0) && AppendNode(*Graph, Schema, "test.c", 400.0));
+		if (!Graph) return;
+		const auto* AVector = FindPin(*Graph, "test.a", "vector-out");
+		const auto* AFloat = FindPin(*Graph, "test.a", "float-in");
+		const auto* ABool = FindPin(*Graph, "test.a", "bool-in");
+		const auto* BVector = FindPin(*Graph, "test.b", "vector-in");
+		const auto* BFloat = FindPin(*Graph, "test.b", "float-out");
+		const auto* BBool = FindPin(*Graph, "test.b", "bool-out");
+		const auto* CBool = FindPin(*Graph, "test.c", "bool-in");
+		const auto* CFloat = FindPin(*Graph, "test.c", "float-out");
+		PF_CHECK(Tests, AVector && AFloat && ABool && BVector && BFloat && BBool && CBool && CFloat);
+		if (!AVector || !AFloat || !ABool || !BVector || !BFloat || !BBool || !CBool || !CFloat) return;
+		const auto IDs = std::array{ AVector->ID, AFloat->ID, ABool->ID, BVector->ID,
+			BFloat->ID, BBool->ID, CBool->ID, CFloat->ID };
+		EditorGraphCommandHistory History(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, IDs[0], IDs[3]).has_value());
+		const auto TwoNodeCycle = CanConnectEditorGraphPins(History.Graph(), Schema, IDs[4], IDs[1]);
+		PF_CHECK(Tests, !TwoNodeCycle.Allowed && TwoNodeCycle.Reason.find("cycle") != std::string::npos);
+		const EditorGraph BeforeRejected = History.Graph();
+		const bool HadUndo = History.CanUndo();
+		PF_CHECK(Tests, !ConnectEditorGraphPins(History, Schema, IDs[4], IDs[1]));
+		PF_CHECK(Tests, History.Graph() == BeforeRejected && History.CanUndo() == HadUndo);
+
+		EditorGraphCommandHistory LongHistory(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(LongHistory, Schema, IDs[0], IDs[3]).has_value());
+		PF_CHECK(Tests, ConnectEditorGraphPins(LongHistory, Schema, IDs[5], IDs[6]).has_value());
+		PF_CHECK(Tests, ValidateEditorGraph(LongHistory.Graph(), Schema).empty());
+		PF_CHECK(Tests, !CanConnectEditorGraphPins(LongHistory.Graph(), Schema, IDs[7], IDs[1]).Allowed);
+		const EditorGraph BeforeLongReject = LongHistory.Graph();
+		PF_CHECK(Tests, !ConnectEditorGraphPins(LongHistory, Schema, IDs[7], IDs[1]));
+		PF_CHECK(Tests, LongHistory.Graph() == BeforeLongReject);
+
+		// Reconnecting the existing A->B edge removes it first. Without that omission,
+		// the old path A->B->C would incorrectly reject the valid C->A replacement.
+		EditorGraphCommandHistory ReconnectHistory(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(ReconnectHistory, Schema, IDs[0], IDs[3]).has_value());
+		PF_CHECK(Tests, ConnectEditorGraphPins(ReconnectHistory, Schema, IDs[5], IDs[6]).has_value());
+		const auto ReplacedID = ReconnectHistory.Graph().Connections.front().ID;
+		PF_CHECK(Tests, CanConnectEditorGraphPins(ReconnectHistory.Graph(), Schema, IDs[7], IDs[1], ReplacedID).Allowed);
+		PF_CHECK(Tests, ReconnectEditorGraphConnection(ReconnectHistory, Schema, ReplacedID, IDs[7], IDs[1]).has_value());
+		PF_CHECK(Tests, ValidateEditorGraph(ReconnectHistory.Graph(), Schema).empty());
+
+		// Full-source validation must reject the otherwise well-formed mixed-type cycle.
+		EditorGraphCommandHistory SerializedHistory(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(SerializedHistory, Schema, IDs[0], IDs[3]).has_value());
+		auto Source = SerializeEditorGraph(SerializedHistory.Graph(), Schema);
+		PF_CHECK(Tests, Source.has_value());
+		if (Source)
+		{
+			const std::string ArrayEnd = "\n  ]";
+			const auto Position = Source->rfind(ArrayEnd);
+			PF_CHECK(Tests, Position != std::string::npos);
+			if (Position != std::string::npos)
+			{
+				const auto CycleConnectionID = ID(700).ToString();
+				Source->insert(Position, "    ,\n    {\"id\":\"" + CycleConnectionID + "\",\"output\":\"" +
+					ID(701).ToString() + "\",\"input\":\"" + ID(702).ToString() + "\"}\n");
+				// Replace the synthetic pin IDs with the actual B.Float -> A.Float endpoints.
+				const std::string Synthetic = "\"output\":\"" + ID(701).ToString() + "\",\"input\":\"" + ID(702).ToString() + "\"";
+				const auto SyntheticPosition = Source->find(Synthetic);
+				PF_CHECK(Tests, SyntheticPosition != std::string::npos);
+				if (SyntheticPosition != std::string::npos)
+					Source->replace(SyntheticPosition, Synthetic.size(), "\"output\":\"" + IDs[4].ToString() +
+						"\",\"input\":\"" + IDs[1].ToString() + "\"");
+				PF_CHECK(Tests, !DeserializeEditorGraph(*Source, Schema));
+			}
+		}
+
+		// A mixed-type acyclic chain remains valid, while execution cycles stay governed
+		// by the gameplay fixture's independent Allow policy.
+		PF_CHECK(Tests, ValidateEditorGraph(LongHistory.Graph(), Schema).empty());
+		const auto Gameplay = MakeGameplayEventFixtureSchema();
+		auto GameplayGraph = FixtureGraph(Gameplay);
+		PF_CHECK(Tests, GameplayGraph && AppendNode(*GameplayGraph, Gameplay, "gameplay.flow.branch", 0.0) &&
+			AppendNode(*GameplayGraph, Gameplay, "gameplay.flow.branch", 200.0));
+		if (GameplayGraph)
+		{
+			const auto* BranchA = FindNode(*GameplayGraph, "gameplay.flow.branch");
+			const auto* BranchB = FindNode(*GameplayGraph, "gameplay.flow.branch", 1);
+			PF_CHECK(Tests, BranchA && BranchB);
+			if (BranchA && BranchB)
+			{
+				const auto* OutA = FindPin(*BranchA, "true");
+				const auto* InA = FindPin(*BranchA, "exec-in");
+				const auto* OutB = FindPin(*BranchB, "true");
+				const auto* InB = FindPin(*BranchB, "exec-in");
+				PF_CHECK(Tests, OutA && InA && OutB && InB);
+				if (OutA && InA && OutB && InB)
+				{
+					EditorGraphCommandHistory ExecutionHistory(*GameplayGraph);
+					PF_CHECK(Tests, ConnectEditorGraphPins(ExecutionHistory, Gameplay, OutA->ID, InB->ID).has_value());
+					PF_CHECK(Tests, ConnectEditorGraphPins(ExecutionHistory, Gameplay, OutB->ID, InA->ID).has_value());
+					PF_CHECK(Tests, ValidateEditorGraph(ExecutionHistory.Graph(), Gameplay).empty());
+				}
+			}
+		}
+	}
 }
 
 void RunEditorGraphModelTests(TestRunner& Tests)
 {
 	TestMaterialSchemaAndSerialization(Tests);
 	TestGameplaySchemaAndTransactions(Tests);
+	TestPropertyEditCoordinator(Tests);
+	TestMixedTypeCyclePolicies(Tests);
 }

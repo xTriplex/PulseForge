@@ -25,6 +25,11 @@ int main(int ArgumentCount, char** Arguments)
 		RunEditorRuntimeUIDocumentEditorTests(Tests);
 		return Tests.Finish();
 	}
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--graph-document")
+	{
+		RunEditorGraphDocumentEditorTests(Tests);
+		return Tests.Finish();
+	}
 	RunEditorHistoryTests(Tests);
 	RunEditorViewportTests(Tests);
 	RunEditorBuildProfileControllerTests(Tests);

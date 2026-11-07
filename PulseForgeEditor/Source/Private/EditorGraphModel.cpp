@@ -246,7 +246,8 @@ namespace
 	}
 
 	bool HasPath(const EditorGraph& Graph, PulseForge::UUID FromNode, PulseForge::UUID ToNode,
-		EditorGraphPinType Type, std::optional<PulseForge::UUID> OmitConnection)
+		bool Execution, std::optional<PulseForge::UUID> OmitConnection,
+		std::optional<PulseForge::UUID> ReplacedInput)
 	{
 		std::vector<PulseForge::UUID> Stack{ FromNode };
 		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Seen;
@@ -259,15 +260,58 @@ namespace
 			for (const auto& Connection : Graph.Connections)
 			{
 				if (OmitConnection && Connection.ID == *OmitConnection) continue;
+				if (ReplacedInput && Connection.InputPin == *ReplacedInput) continue;
 				const EditorGraphPin* Output = nullptr;
 				const EditorGraphPin* Input = nullptr;
 				const auto* Source = FindNodeForPin(Graph, Connection.OutputPin, &Output);
 				const auto* Target = FindNodeForPin(Graph, Connection.InputPin, &Input);
-				if (Source && Target && Output && Input && Output->Type == Type && Input->Type == Type && Source->ID == Current)
+				if (Source && Target && Output && Input &&
+					(Output->Type == EditorGraphPinType::Execution) == Execution &&
+					Input->Type == Output->Type && Source->ID == Current)
 					Stack.push_back(Target->ID);
 			}
 		}
 		return false;
+	}
+
+	bool HasCycle(const EditorGraph& Graph, bool Execution)
+	{
+		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> InDegree;
+		for (const auto& Node : Graph.Nodes) InDegree.emplace(Node.ID, 0);
+		for (const auto& Connection : Graph.Connections)
+		{
+			const EditorGraphPin* Output = nullptr;
+			const EditorGraphPin* Input = nullptr;
+			const auto* Source = FindNodeForPin(Graph, Connection.OutputPin, &Output);
+			const auto* Target = FindNodeForPin(Graph, Connection.InputPin, &Input);
+			if (Source && Target && Output && Input && Output->Direction == EditorGraphPinDirection::Output &&
+				Input->Direction == EditorGraphPinDirection::Input && Input->Type == Output->Type &&
+				(Output->Type == EditorGraphPinType::Execution) == Execution)
+				++InDegree[Target->ID];
+		}
+		std::queue<PulseForge::UUID> Ready;
+		for (const auto& [NodeID, Degree] : InDegree)
+			if (Degree == 0) Ready.push(NodeID);
+		size_t Visited = 0;
+		while (!Ready.empty())
+		{
+			const auto Current = Ready.front();
+			Ready.pop();
+			++Visited;
+			for (const auto& Connection : Graph.Connections)
+			{
+				const EditorGraphPin* Output = nullptr;
+				const EditorGraphPin* Input = nullptr;
+				const auto* Source = FindNodeForPin(Graph, Connection.OutputPin, &Output);
+				const auto* Target = FindNodeForPin(Graph, Connection.InputPin, &Input);
+				if (Source && Target && Output && Input && Source->ID == Current &&
+					Output->Direction == EditorGraphPinDirection::Output && Input->Direction == EditorGraphPinDirection::Input &&
+					Input->Type == Output->Type && (Output->Type == EditorGraphPinType::Execution) == Execution &&
+					--InDegree[Target->ID] == 0)
+					Ready.push(Target->ID);
+			}
+		}
+		return Visited != InDegree.size();
 	}
 
 	EditorGraphPinDefinition Pin(std::string Key, std::string Label, EditorGraphPinDirection Direction,
@@ -455,6 +499,97 @@ namespace PulseForgeEditor
 		}
 	}
 
+	std::string EditorGraphPropertyEditCoordinator::FinishActive(EditorGraphCommandHistory& History,
+		const EditorGraphSchema& Schema)
+	{
+		if (!m_ActivePin) return {};
+		m_ActivePin.reset();
+		if (!History.HasOpenTransaction()) return {};
+		std::string Error;
+		if (!History.CommitTransaction(Schema, Error)) return Error;
+		return {};
+	}
+
+	bool EditorGraphPropertyEditCoordinator::Begin(EditorGraphCommandHistory& History, PulseForge::UUID PinID,
+		std::string& Error)
+	{
+		if (m_ActivePin == PinID && History.HasOpenTransaction()) return true;
+		if (m_ActivePin)
+		{
+			Error = "A previous graph property edit could not be finished";
+			return false;
+		}
+		if (History.HasOpenTransaction())
+		{
+			Error = "Another graph gesture is still active";
+			return false;
+		}
+		if (!History.BeginTransaction())
+		{
+			Error = "Could not begin the graph property edit";
+			return false;
+		}
+		m_ActivePin = PinID;
+		return true;
+	}
+
+	EditorGraphPropertyEditResult EditorGraphPropertyEditCoordinator::ProcessFrame(EditorGraphCommandHistory& History,
+		const EditorGraphSchema& Schema, const std::vector<EditorGraphPropertyEditEvent>& Events, bool CancelEdit)
+	{
+		const EditorGraph Before = History.Graph();
+		if (CancelEdit) return Cancel(History);
+
+		if (m_ActivePin && std::none_of(Events.begin(), Events.end(), [this](const auto& Event)
+			{ return Event.PinID == *m_ActivePin; }))
+		{
+			if (History.HasOpenTransaction()) History.CancelTransaction();
+			m_ActivePin.reset();
+			return { History.Graph() != Before, {} };
+		}
+
+		std::string Error;
+		for (const auto& Event : Events)
+		{
+			if (Event.Activated && m_ActivePin != Event.PinID)
+			{
+				if (const auto FinishError = FinishActive(History, Schema); !FinishError.empty() && Error.empty())
+					Error = FinishError;
+				if (!Begin(History, Event.PinID, Error)) continue;
+			}
+			if (Event.Changed)
+			{
+				if (m_ActivePin != Event.PinID)
+				{
+					if (const auto FinishError = FinishActive(History, Schema); !FinishError.empty() && Error.empty())
+						Error = FinishError;
+					if (!Begin(History, Event.PinID, Error)) continue;
+				}
+				auto Changed = SetEditorGraphPinDefaultValue(History, Schema, Event.PinID, Event.Value);
+				if (!Changed && Error.empty()) Error = Changed.error();
+			}
+			if (Event.Deactivated && m_ActivePin == Event.PinID)
+				if (const auto FinishError = FinishActive(History, Schema); !FinishError.empty() && Error.empty())
+					Error = FinishError;
+		}
+		return { History.Graph() != Before, std::move(Error) };
+	}
+
+	EditorGraphPropertyEditResult EditorGraphPropertyEditCoordinator::Finish(EditorGraphCommandHistory& History,
+		const EditorGraphSchema& Schema)
+	{
+		const EditorGraph Before = History.Graph();
+		auto Error = FinishActive(History, Schema);
+		return { Before != History.Graph(), std::move(Error) };
+	}
+
+	EditorGraphPropertyEditResult EditorGraphPropertyEditCoordinator::Cancel(EditorGraphCommandHistory& History)
+	{
+		const EditorGraph Before = History.Graph();
+		if (m_ActivePin && History.HasOpenTransaction()) History.CancelTransaction();
+		m_ActivePin.reset();
+		return { History.Graph() != Before, {} };
+	}
+
 	EditorGraphSchema MakeMaterialExpressionFixtureSchema()
 	{
 		return EditorGraphSchema{
@@ -581,41 +716,10 @@ namespace PulseForgeEditor
 			if (++InputCounts[Connection.InputPin] > 1 && Input.Cardinality == EditorGraphPinCardinality::Single)
 				Add("connection.cardinality", "A single-cardinality input has multiple connections", Connection.ID);
 		}
-		for (const auto Type : { EditorGraphPinType::Float, EditorGraphPinType::Vector3, EditorGraphPinType::Boolean,
-			EditorGraphPinType::String, EditorGraphPinType::Execution })
-		{
-			const auto Policy = Type == EditorGraphPinType::Execution ? Schema.ExecutionCyclePolicy : Schema.DataCyclePolicy;
-			if (Policy == EditorGraphCyclePolicy::Allow) continue;
-			std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> InDegree;
-			for (const auto& Node : Graph.Nodes) InDegree.emplace(Node.ID, 0);
-			for (const auto& Connection : Graph.Connections)
-			{
-				const EditorGraphPin* Output = nullptr;
-				const EditorGraphPin* Input = nullptr;
-				const auto* Source = FindNodeForPin(Graph, Connection.OutputPin, &Output);
-				const auto* Target = FindNodeForPin(Graph, Connection.InputPin, &Input);
-				if (Source && Target && Output && Input && Output->Type == Type && Input->Type == Type) ++InDegree[Target->ID];
-			}
-			std::queue<PulseForge::UUID> Ready;
-			for (const auto& [NodeID, Degree] : InDegree) if (Degree == 0) Ready.push(NodeID);
-			size_t Visited = 0;
-			while (!Ready.empty())
-			{
-				const auto Current = Ready.front(); Ready.pop(); ++Visited;
-				for (const auto& Connection : Graph.Connections)
-				{
-					const EditorGraphPin* Output = nullptr;
-					const EditorGraphPin* Input = nullptr;
-					const auto* Source = FindNodeForPin(Graph, Connection.OutputPin, &Output);
-					const auto* Target = FindNodeForPin(Graph, Connection.InputPin, &Input);
-					if (Source && Target && Output && Input && Source->ID == Current && Output->Type == Type && Input->Type == Type)
-						if (--InDegree[Target->ID] == 0) Ready.push(Target->ID);
-				}
-			}
-			if (Visited != InDegree.size())
-				Add("connection.cycle", Type == EditorGraphPinType::Execution ? "Gameplay execution cycle violates this schema policy" :
-					"Material/data cycle violates this schema policy", Graph.ID);
-		}
+		if (Schema.DataCyclePolicy == EditorGraphCyclePolicy::Reject && HasCycle(Graph, false))
+			Add("connection.cycle", "Material/data dependency cycle violates this schema policy", Graph.ID);
+		if (Schema.ExecutionCyclePolicy == EditorGraphCyclePolicy::Reject && HasCycle(Graph, true))
+			Add("connection.cycle", "Gameplay execution cycle violates this schema policy", Graph.ID);
 		return Diagnostics;
 	}
 
@@ -652,7 +756,11 @@ namespace PulseForgeEditor
 				if (Existing.InputPin == InputID && (!ReplacingConnection || Existing.ID != *ReplacingConnection))
 					return { false, "This input already has a connection; disconnect it before creating another", OutputID, InputID };
 		}
-		if (CyclePolicy == EditorGraphCyclePolicy::Reject && HasPath(Graph, InputNode->ID, OutputNode->ID, Output->Type, ReplacingConnection))
+		const auto ReplacedInput = Input->Cardinality == EditorGraphPinCardinality::Single && Schema.ReplaceOccupiedInput
+			? std::optional<PulseForge::UUID>{ InputID } : std::nullopt;
+		if (CyclePolicy == EditorGraphCyclePolicy::Reject &&
+			HasPath(Graph, InputNode->ID, OutputNode->ID, Output->Type == EditorGraphPinType::Execution,
+				ReplacingConnection, ReplacedInput))
 			return { false, "This connection would create a cycle rejected by the active schema", OutputID, InputID };
 		return { true, "Connection is valid", OutputID, InputID };
 	}

@@ -73,7 +73,7 @@ namespace
 		bool NeedsCanvasSync = true;
 		bool WasFocused = false;
 		bool NodeMoveTransaction = false;
-		std::optional<PulseForge::UUID> PropertyEditTransaction;
+		EditorGraphPropertyEditCoordinator PropertyEdits;
 	};
 
 	bool SaveCanvasSettings(const char* Data, size_t Size, NodeEditor::SaveReasonFlags, void* UserPointer)
@@ -110,6 +110,24 @@ namespace
 	GraphDocumentState* GetState(EditorDocumentSession& Session)
 	{
 		return dynamic_cast<GraphDocumentState*>(Session.EditorState.get());
+	}
+
+	void ReconcileDirtyState(GraphDocumentState& State, EditorDocumentManager& Documents,
+		EditorDocumentSession& Session)
+	{
+		if (State.History.IsDirty()) (void)Documents.MarkEdited(Session.Identity);
+		else (void)Documents.MarkSaved(Session.Identity, Session.Revision);
+	}
+
+	EditorGraphPropertyEditResult FinishPropertyEdit(GraphDocumentState& State, EditorDocumentManager& Documents,
+		EditorDocumentSession& Session)
+	{
+		const bool HadActiveProperty = State.PropertyEdits.HasActiveEdit();
+		auto Result = State.PropertyEdits.Finish(State.History, State.Schema);
+		if (!Result.Error.empty()) State.Error = Result.Error;
+		if (HadActiveProperty || Result.GraphChanged)
+			ReconcileDirtyState(State, Documents, Session);
+		return Result;
 	}
 
 	const EditorGraphNodeDefinition* FindNodeDefinition(const EditorGraphSchema& Schema, std::string_view Key)
@@ -420,7 +438,9 @@ namespace PulseForgeEditor
 	bool EditorGraphDocumentEditor::SaveSession(EditorDocumentSession& Session, uint64_t SavedRevision) const
 	{
 		auto* State = GetState(Session);
-		if (!State || State->History.HasOpenTransaction()) return false;
+		if (!State) return false;
+		const auto Finished = FinishPropertyEdit(*State, m_Documents, Session);
+		if (!Finished.Error.empty() || State->History.HasOpenTransaction()) return false;
 		auto Source = SerializeEditorGraph(State->History.Graph(), State->Schema);
 		if (!Source) { State->Error = Source.error(); return false; }
 		auto Published = PublishGraphSource(State->SourcePath, State->SavedBytes, *Source, false);
@@ -448,6 +468,8 @@ namespace PulseForgeEditor
 		}
 		State->History.Reset(std::move(*Graph));
 		State->Schema = std::move(*Schema);
+		State->PropertyEdits.Reset();
+		State->NodeMoveTransaction = false;
 		State->SavedBytes = std::move(*Source);
 		State->Error.clear();
 		State->NeedsCanvasSync = true;
@@ -463,7 +485,9 @@ namespace PulseForgeEditor
 	bool EditorGraphDocumentEditor::HandleFocusedCommand(EditorDocumentSession& Session, EditorDocumentCommand Command) const
 	{
 		auto* State = GetState(Session);
-		if (!State || State->History.HasOpenTransaction()) return false;
+		if (!State) return false;
+		(void)FinishPropertyEdit(*State, m_Documents, Session);
+		if (State->History.HasOpenTransaction()) return false;
 		const bool Changed = Command == EditorDocumentCommand::Undo ? State->History.Undo() : State->History.Redo();
 		if (!Changed) return true;
 		State->NeedsCanvasSync = true;
@@ -485,7 +509,7 @@ namespace PulseForgeEditor
 	std::expected<void, std::string> EditorGraphDocumentEditor::PrepareClose(const EditorDocumentCloseContext& Context) const
 	{
 		if (const auto* State = dynamic_cast<const GraphDocumentState*>(Context.EditorState);
-			State && State->History.HasOpenTransaction())
+			State && State->History.HasOpenTransaction() && !State->PropertyEdits.HasActiveEdit())
 			return std::unexpected("Finish or cancel the active graph gesture before closing this document");
 		return {};
 	}
@@ -511,11 +535,10 @@ namespace PulseForgeEditor
 			if (State->History.HasOpenTransaction())
 			{
 				State->History.CancelTransaction();
-				State->NodeMoveTransaction = false;
-				State->PropertyEditTransaction.reset();
-				if (State->History.IsDirty()) (void)m_Documents.MarkEdited(Session.Identity);
-				else (void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
+				ReconcileDirtyState(*State, m_Documents, Session);
 			}
+			State->NodeMoveTransaction = false;
+			State->PropertyEdits.Reset();
 			CancelCanvasInteraction(*State);
 		}
 		State->WasFocused = Focused;
@@ -534,18 +557,24 @@ namespace PulseForgeEditor
 			ImGui::EndPopup();
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Undo") && State->History.Undo())
+		if (ImGui::Button("Undo"))
 		{
-			State->NeedsCanvasSync = true;
-			if (State->History.IsDirty()) (void)m_Documents.MarkEdited(Session.Identity);
-			else (void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
+			(void)FinishPropertyEdit(*State, m_Documents, Session);
+			if (State->History.Undo())
+			{
+				State->NeedsCanvasSync = true;
+				ReconcileDirtyState(*State, m_Documents, Session);
+			}
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Redo") && State->History.Redo())
+		if (ImGui::Button("Redo"))
 		{
-			State->NeedsCanvasSync = true;
-			if (State->History.IsDirty()) (void)m_Documents.MarkEdited(Session.Identity);
-			else (void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
+			(void)FinishPropertyEdit(*State, m_Documents, Session);
+			if (State->History.Redo())
+			{
+				State->NeedsCanvasSync = true;
+				ReconcileDirtyState(*State, m_Documents, Session);
+			}
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Copy Selection"))
@@ -595,6 +624,7 @@ namespace PulseForgeEditor
 			State->Identities.emplace(Handle, ID);
 			return Handle;
 		};
+		std::vector<EditorGraphPropertyEditEvent> PropertyEvents;
 		for (const auto& Node : State->History.Graph().Nodes)
 		{
 			LiveIDs.insert(Node.ID);
@@ -624,6 +654,7 @@ namespace PulseForgeEditor
 			ImGui::TextUnformatted(ReadableNodeLabel(State->Schema, Node.TypeKey).c_str());
 			for (const auto& Pin : Node.Pins)
 			{
+				const PulseForge::UUID PinID = Pin.ID;
 				const uintptr_t PinHandle = RegisterHandle(Pin.ID);
 				if (!PinHandle) continue;
 				NodeEditor::BeginPin(NodeEditor::PinId(PinHandle), Pin.Direction == EditorGraphPinDirection::Input
@@ -664,26 +695,8 @@ namespace PulseForgeEditor
 						if (Changed) Value = std::string(Buffer.data());
 					}
 					const bool Activated = ImGui::IsItemActivated();
-					const bool Deactivated = ImGui::IsItemDeactivatedAfterEdit();
-					if (Activated && !State->History.HasOpenTransaction())
-					{
-						(void)State->History.BeginTransaction();
-						State->PropertyEditTransaction = Pin.ID;
-					}
-					if (Changed)
-					{
-						auto Result = SetEditorGraphPinDefaultValue(State->History, State->Schema, Pin.ID, std::move(Value));
-						if (!Result) State->Error = Result.error();
-						else (void)m_Documents.MarkEdited(Session.Identity);
-					}
-					if (Deactivated && State->History.HasOpenTransaction() && State->PropertyEditTransaction == Pin.ID)
-					{
-						std::string Error;
-						if (!State->History.CommitTransaction(State->Schema, Error)) State->Error = std::move(Error);
-						if (State->History.IsDirty()) (void)m_Documents.MarkEdited(Session.Identity);
-						else (void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
-						State->PropertyEditTransaction.reset();
-					}
+					const bool Deactivated = ImGui::IsItemDeactivated();
+					PropertyEvents.push_back({ PinID, std::move(Value), Activated, Changed, Deactivated });
 				}
 				NodeEditor::EndPin();
 			}
@@ -838,5 +851,12 @@ namespace PulseForgeEditor
 		NodeEditor::End();
 		NodeEditor::EnableShortcuts(true);
 		NodeEditor::SetCurrentEditor(nullptr);
+		auto PropertyResult = State->PropertyEdits.ProcessFrame(State->History, State->Schema, PropertyEvents, CancelGesture);
+		if (!PropertyResult.Error.empty()) State->Error = std::move(PropertyResult.Error);
+		if (PropertyResult.GraphChanged)
+		{
+			if (PropertyResult.Error.empty()) State->Error.clear();
+			ReconcileDirtyState(*State, m_Documents, Session);
+		}
 	}
 }

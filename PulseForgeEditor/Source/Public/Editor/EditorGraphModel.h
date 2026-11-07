@@ -176,6 +176,38 @@ namespace PulseForgeEditor
 		std::optional<EditorGraph> m_Transaction;
 	};
 
+	struct EditorGraphPropertyEditEvent
+	{
+		PulseForge::UUID PinID;
+		EditorGraphValue Value;
+		bool Activated = false;
+		bool Changed = false;
+		bool Deactivated = false;
+	};
+
+	struct EditorGraphPropertyEditResult
+	{
+		bool GraphChanged = false;
+		std::string Error;
+	};
+
+	class EditorGraphPropertyEditCoordinator final
+	{
+	public:
+		[[nodiscard]] EditorGraphPropertyEditResult ProcessFrame(EditorGraphCommandHistory& History,
+			const EditorGraphSchema& Schema, const std::vector<EditorGraphPropertyEditEvent>& Events, bool Cancel);
+		[[nodiscard]] EditorGraphPropertyEditResult Finish(EditorGraphCommandHistory& History,
+			const EditorGraphSchema& Schema);
+		[[nodiscard]] EditorGraphPropertyEditResult Cancel(EditorGraphCommandHistory& History);
+		[[nodiscard]] bool HasActiveEdit() const noexcept { return m_ActivePin.has_value(); }
+		void Reset() noexcept { m_ActivePin.reset(); }
+
+	private:
+		[[nodiscard]] std::string FinishActive(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema);
+		[[nodiscard]] bool Begin(EditorGraphCommandHistory& History, PulseForge::UUID PinID, std::string& Error);
+		std::optional<PulseForge::UUID> m_ActivePin;
+	};
+
 	[[nodiscard]] EditorGraphSchema MakeMaterialExpressionFixtureSchema();
 	[[nodiscard]] EditorGraphSchema MakeGameplayEventFixtureSchema();
 	[[nodiscard]] std::expected<EditorGraph, std::string> CreateEditorGraph(
