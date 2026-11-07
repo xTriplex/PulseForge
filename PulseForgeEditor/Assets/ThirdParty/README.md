@@ -47,3 +47,11 @@ generated.
   editor target; the engine and game runtime do not depend on it.
 - License: FreeType Project License. The license text from the pinned source is included in `FreeType/FTL.txt` and
   copied with the editor package.
+
+## imgui-node-editor
+
+- Upstream: [thedmd/imgui-node-editor](https://github.com/thedmd/imgui-node-editor) at commit
+  `1e0e494f1a86885eb332ca518543108ccd88d13e`.
+- Purpose: editor-only graph canvas used by the G21 authoring fixtures. It is not linked into the cooked player.
+- License: MIT; copyright 2019 Michał Cichoń. The complete license from the pinned source is included in
+  `imgui-node-editor/LICENSE.txt` and copied with the editor package.

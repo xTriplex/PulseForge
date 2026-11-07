@@ -91,6 +91,7 @@
 #include "Editor/EditorDocumentEditorRegistry.h"
 #include "Editor/EditorDocumentHostTestEditor.h"
 #include "Editor/EditorPrefabDocumentEditor.h"
+#include "Editor/EditorGraphDocumentEditor.h"
 #include "Editor/EditorRuntimeUIDocumentEditor.h"
 #include "Editor/EditorPrefabInstanceController.h"
 #include "Editor/EditorPrefabInstancePanel.h"
@@ -887,6 +888,9 @@ namespace
 			m_MaterialDocumentEditor->SetPreviewService(&m_MaterialPreviews);
 			if (auto Result = m_MaterialDocumentEditor->Register(); !Result)
 				PF_ERROR("Could not register the fixed-PBR material document editor: {}", Result.error());
+			m_GraphDocumentEditor = std::make_unique<PulseForgeEditor::EditorGraphDocumentEditor>(m_Documents, m_DocumentEditors);
+			if (auto Result = m_GraphDocumentEditor->Register(); !Result)
+				PF_ERROR("Could not register the graph authoring fixture editor: {}", Result.error());
 			m_PrefabInstanceController = std::make_unique<PulseForgeEditor::EditorPrefabInstanceController>(*this);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DiagnosticsCaptureSmokeOutput) m_DiagnosticsSmokeStartedAt = std::chrono::steady_clock::now();
@@ -4326,6 +4330,11 @@ namespace
 						}
 						DisplayName = "Host Test Fixture " + std::to_string(*FixtureIndex + 1);
 					}
+					else if (Identity.Kind == PulseForgeEditor::EditorDocumentKind::Graph && m_GraphDocumentEditor)
+					{
+						RelativePath = PulseForgeEditor::EditorGraphDocumentEditor::GetFixturePath(Identity.Asset);
+						DisplayName = "Graph Fixture — authoring only";
+					}
 					else if (const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset))
 					{
 						RelativePath = Asset->ProjectRelativePath;
@@ -5274,6 +5283,46 @@ namespace
 		void OpenMaterialEditor(const PulseForge::AssetID& Identifier)
 		{
 			QueueAssetOperation([this, Identifier] { OpenMaterialEditorNow(Identifier); });
+		}
+
+		void OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind Kind)
+		{
+			if (!m_Project || !m_GraphDocumentEditor)
+			{
+				SetError("Open a project before opening a graph authoring fixture.");
+				return;
+			}
+			auto Fixture = m_GraphDocumentEditor->CreateFixture(m_Project->GetRootPath(), Kind);
+			if (!Fixture)
+			{
+				SetError("Graph fixture creation failed: " + Fixture.error());
+				return;
+			}
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Fixture->GraphID, PulseForgeEditor::EditorDocumentKind::Graph };
+			auto Opened = m_Documents.Open(Identity, Fixture->ProjectRelativePath, Fixture->DisplayName,
+				m_Documents.GetOpeningPreference());
+			if (!Opened)
+			{
+				SetError("The graph fixture was created, but its document could not be opened: " + Opened.error());
+				return;
+			}
+			auto* Session = m_Documents.Find(Identity);
+			const auto Context = MakeDocumentEditorContext(Identity, Fixture->ProjectRelativePath, Fixture->DisplayName);
+			if (!Session || (!Session->EditorState && !m_GraphDocumentEditor->Open(*Session, Context)))
+			{
+				SetError("The graph fixture file was created, but the graph editor could not load it.");
+				if (Opened->Created)
+					(void)m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard, {}, {});
+				return;
+			}
+			if (!m_Documents.Activate(Identity))
+			{
+				SetError("The graph fixture loaded but could not be activated.");
+				return;
+			}
+			MarkDocumentWorkspaceDirty();
+			SetStatus("Opened " + Fixture->DisplayName + ". Graph authoring does not compile or execute this fixture.");
 		}
 
 		bool OpenMaterialEditorNow(const PulseForge::AssetID& Identifier)
@@ -6368,6 +6417,12 @@ namespace
 				break;
 			case EditorMainMenuActionKind::OpenScene:
 				if (Action.Asset) OpenScene(*Action.Asset);
+				break;
+			case EditorMainMenuActionKind::OpenMaterialGraphFixture:
+				OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind::MaterialExpression);
+				break;
+			case EditorMainMenuActionKind::OpenGameplayGraphFixture:
+				OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind::GameplayEvent);
 				break;
 			case EditorMainMenuActionKind::SetPanelVisible:
 				(void)SetEditorPanelVisible(Action.Panel, Action.PanelVisible);
@@ -10026,6 +10081,7 @@ namespace
 		std::unique_ptr<PulseForgeEditor::EditorPrefabDocumentEditor> m_PrefabDocumentEditor;
 		std::unique_ptr<PulseForgeEditor::EditorRuntimeUIDocumentEditor> m_RuntimeUIDocumentEditor;
 		std::unique_ptr<PulseForgeEditor::EditorMaterialDocumentEditor> m_MaterialDocumentEditor;
+		std::unique_ptr<PulseForgeEditor::EditorGraphDocumentEditor> m_GraphDocumentEditor;
 		std::unique_ptr<PulseForgeEditor::EditorPrefabInstanceController> m_PrefabInstanceController;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;

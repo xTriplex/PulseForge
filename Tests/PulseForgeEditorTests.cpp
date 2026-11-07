@@ -9,6 +9,7 @@ void RunEditorAssetEditSchedulingTests(TestRunner& Tests);
 void RunEditorInspectorRegressionTests(TestRunner& Tests);
 void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests);
 void RunEditorRuntimeUIDocumentEditorTests(TestRunner& Tests);
+void RunEditorGraphDocumentEditorTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
 #endif
@@ -45,6 +46,7 @@ int main(int ArgumentCount, char** Arguments)
 	RunEditorInspectorRegressionTests(Tests);
 	RunEditorScriptAuthoringInspectorTests(Tests);
 	RunEditorRuntimeUIDocumentEditorTests(Tests);
+	RunEditorGraphDocumentEditorTests(Tests);
 	RunProjectRuntimeTests(Tests);
 	return Tests.Finish();
 }

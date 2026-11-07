@@ -112,6 +112,14 @@ namespace PulseForgeEditor
 		if (ImGui::BeginMenu("Window"))
 		{
 			if (ImGui::MenuItem("Performance", nullptr, State.PerformancePanelVisible)) Result.TogglePerformancePanel = true;
+			if (ImGui::BeginMenu("Graph Authoring Fixtures", State.ProjectOpen))
+			{
+				if (ImGui::MenuItem("Material Expression Fixture — authoring only") && !Result.Action)
+					Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::OpenMaterialGraphFixture, State.FocusedCommandTarget);
+				if (ImGui::MenuItem("Gameplay Event Fixture — authoring only") && !Result.Action)
+					Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::OpenGameplayGraphFixture, State.FocusedCommandTarget);
+				ImGui::EndMenu();
+			}
 			ImGui::Separator();
 			for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)
 			{
