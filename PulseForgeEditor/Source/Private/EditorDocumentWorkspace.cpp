@@ -19,7 +19,7 @@ namespace
 	bool IsValidKind(int64_t Value)
 	{
 		return Value >= static_cast<int64_t>(EditorDocumentKind::Level) &&
-			Value <= static_cast<int64_t>(EditorDocumentKind::RuntimeUI);
+			Value <= static_cast<int64_t>(EditorDocumentKind::Graph);
 	}
 
 	bool IsValidHostID(std::string_view ID, EditorDocumentHostRole Role)
@@ -57,7 +57,7 @@ namespace
 		for (const EditorDocumentHost& Host : State.Hosts)
 		{
 			if (!IsValidHostID(Host.ID, Host.Role) || !HostIDs.insert(Host.ID).second ||
-				static_cast<uint8_t>(Host.PlacementKind) > static_cast<uint8_t>(EditorDocumentKind::RuntimeUI) ||
+				static_cast<uint8_t>(Host.PlacementKind) > static_cast<uint8_t>(EditorDocumentKind::Graph) ||
 				!IsValidBounds(Host.Bounds))
 				return std::unexpected("Document workspace contains an invalid or duplicate host");
 			if (Host.Role == EditorDocumentHostRole::Main)
@@ -75,7 +75,7 @@ namespace
 			for (const EditorDocumentIdentity& Identity : Host.Documents)
 			{
 				if (Identity.Project != State.Project ||
-					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::RuntimeUI) ||
+					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::Graph) ||
 					(Host.Role == EditorDocumentHostRole::Native && Identity.Kind != Host.PlacementKind) ||
 					(Identity.Kind == EditorDocumentKind::Level &&
 						(Host.Role != EditorDocumentHostRole::Main || !Identity.Asset.IsNil())) ||

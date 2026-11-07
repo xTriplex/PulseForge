@@ -41,6 +41,8 @@ namespace PulseForgeEditor
 		SaveScene,
 		SaveSceneAs,
 		OpenScene,
+		OpenMaterialGraphFixture,
+		OpenGameplayGraphFixture,
 		SetPanelVisible,
 		SetOpeningPreference,
 		ResetLayout

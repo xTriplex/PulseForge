@@ -95,6 +95,9 @@ namespace PulseForgeEditor
 			return EditorDocumentCommandTarget::Unsupported;
 		case EditorDocumentKind::Prefab:
 			return EditorDocumentCommandTarget::Unsupported;
+		case EditorDocumentKind::RuntimeUI:
+		case EditorDocumentKind::Graph:
+			return EditorDocumentCommandTarget::Unsupported;
 		}
 		return EditorDocumentCommandTarget::Unsupported;
 	}

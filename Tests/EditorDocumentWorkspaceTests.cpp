@@ -20,8 +20,9 @@ namespace
 		const auto Project = UUID::Generate();
 		const auto MaterialA = UUID::Generate();
 		const auto MaterialB = UUID::Generate();
-		PF_CHECK(Tests, Project && MaterialA && MaterialB);
-		if (!Project || !MaterialA || !MaterialB) return;
+		const auto GraphFixture = UUID::Generate();
+		PF_CHECK(Tests, Project && MaterialA && MaterialB && GraphFixture);
+		if (!Project || !MaterialA || !MaterialB || !GraphFixture) return;
 
 		const EditorDocumentIdentity Level{ *Project, UUID{}, EditorDocumentKind::Level };
 		const EditorDocumentIdentity Amber{ *Project, *MaterialA, EditorDocumentKind::Material };
@@ -75,6 +76,23 @@ namespace
 			const auto Candidates = GetMaterialDetailsMigrationCandidates(*Restored);
 			PF_CHECK(Tests, Candidates.empty());
 		}
+		EditorDocumentWorkspaceState GraphState = State;
+		const EditorDocumentIdentity GraphIdentity{ *Project, *GraphFixture, EditorDocumentKind::Graph };
+		EditorDocumentHost GraphNative = Native;
+		GraphNative.ID = "native:" + GraphFixture->ToString();
+		GraphNative.PlacementKind = EditorDocumentKind::Graph;
+		GraphNative.Documents = { GraphIdentity };
+		GraphNative.ActiveDocument = GraphIdentity;
+		GraphState.Hosts.push_back(GraphNative);
+		GraphState.RememberedPlacements.emplace_back(
+			EditorDocumentKind::Graph, EditorDocumentPlacement{ EditorDocumentHostRole::Native, GraphNative.Bounds, std::nullopt });
+		const auto GraphWorkspace = EditorDocumentWorkspaceCodec::Serialize(GraphState);
+		const auto RestoredGraphWorkspace = GraphWorkspace
+			? EditorDocumentWorkspaceCodec::Deserialize(*GraphWorkspace, *Project)
+			: std::expected<EditorDocumentWorkspaceState, std::string>(std::unexpected("graph workspace serialization failed"));
+		PF_CHECK(Tests, RestoredGraphWorkspace && RestoredGraphWorkspace->Hosts.size() == 3 &&
+			RestoredGraphWorkspace->Hosts.back().PlacementKind == EditorDocumentKind::Graph &&
+			RestoredGraphWorkspace->Hosts.back().ActiveDocument == GraphIdentity);
 		auto LegacyWorkspace = nlohmann::json::parse(*Serialized);
 		LegacyWorkspace["version"] = 2;
 		LegacyWorkspace.erase("rememberedPlacements");

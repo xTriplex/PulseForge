@@ -308,6 +308,7 @@ if(BUILD_TESTING)
 			Tests/PulseForgeEditorCoreTests.cpp
 			Tests/EditorDocumentCloseRequestTests.cpp
 			Tests/EditorDocumentTabInteractionTests.cpp
+			Tests/EditorGraphModelTests.cpp
 			Tests/EditorSceneEntityCommandTests.cpp
 			Tests/EditorSceneViewportInteractionTests.cpp
 			Tests/EditorViewportGizmoGeometryTests.cpp
@@ -363,6 +364,7 @@ if(BUILD_TESTING)
 			Tests/EditorInspectorRegressionTests.cpp
 			Tests/EditorScriptAuthoringInspectorTests.cpp
 			Tests/EditorRuntimeUIDocumentEditorTests.cpp
+			Tests/EditorGraphDocumentEditorTests.cpp
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp

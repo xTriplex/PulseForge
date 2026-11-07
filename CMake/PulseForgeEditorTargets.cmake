@@ -1,4 +1,26 @@
 if(PULSEFORGE_BUILD_EDITOR)
+	add_library(PulseForgeImGuiNodeEditor STATIC
+		PulseForge/Vendor/imgui-node-editor/crude_json.cpp
+		PulseForge/Vendor/imgui-node-editor/imgui_canvas.cpp
+		PulseForge/Vendor/imgui-node-editor/imgui_node_editor.cpp
+		PulseForge/Vendor/imgui-node-editor/imgui_node_editor_api.cpp
+	)
+	target_include_directories(PulseForgeImGuiNodeEditor SYSTEM PUBLIC PulseForge/Vendor/imgui-node-editor)
+	target_link_libraries(PulseForgeImGuiNodeEditor PUBLIC PulseForgeImGui)
+	# The pinned crude_json source uses std::terminate without including <exception>.
+	# Supply the standard declaration from the editor-owned dependency target on every compiler.
+	if(MSVC)
+		target_compile_options(PulseForgeImGuiNodeEditor PRIVATE /FIexception)
+	else()
+		target_compile_options(PulseForgeImGuiNodeEditor PRIVATE -include exception)
+	endif()
+	set_source_files_properties(
+		PulseForge/Vendor/imgui-node-editor/crude_json.cpp
+		PulseForge/Vendor/imgui-node-editor/imgui_canvas.cpp
+		PulseForge/Vendor/imgui-node-editor/imgui_node_editor.cpp
+		PulseForge/Vendor/imgui-node-editor/imgui_node_editor_api.cpp
+		PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
 	set(PULSEFORGE_BUILD_IDENTIFIER "source-archive" CACHE STRING "Build identifier written to diagnostics captures")
 	if(PULSEFORGE_BUILD_IDENTIFIER STREQUAL "source-archive")
 		find_package(Git QUIET)
@@ -35,6 +57,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorInspectorPanel.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDocumentEditor.cpp
+		PulseForgeEditor/Source/Private/EditorGraphDocumentEditor.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorStatusPanel.cpp
 		PulseForgeEditor/Source/Private/EditorViewportMouseCapture.cpp
@@ -82,7 +105,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeAssetDependencyCatalog PulseForgeScriptAssets PulseForgeAudioAssets
 			PulseForgeBuildProfiles
-			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
+			PulseForgeImGui PulseForgeImGuiNodeEditor PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")

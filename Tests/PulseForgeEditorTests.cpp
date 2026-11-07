@@ -9,6 +9,7 @@ void RunEditorAssetEditSchedulingTests(TestRunner& Tests);
 void RunEditorInspectorRegressionTests(TestRunner& Tests);
 void RunEditorScriptAuthoringInspectorTests(TestRunner& Tests);
 void RunEditorRuntimeUIDocumentEditorTests(TestRunner& Tests);
+void RunEditorGraphDocumentEditorTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
 #endif
@@ -22,6 +23,11 @@ int main(int ArgumentCount, char** Arguments)
 	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--runtime-ui-document")
 	{
 		RunEditorRuntimeUIDocumentEditorTests(Tests);
+		return Tests.Finish();
+	}
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--graph-document")
+	{
+		RunEditorGraphDocumentEditorTests(Tests);
 		return Tests.Finish();
 	}
 	RunEditorHistoryTests(Tests);
@@ -45,6 +51,7 @@ int main(int ArgumentCount, char** Arguments)
 	RunEditorInspectorRegressionTests(Tests);
 	RunEditorScriptAuthoringInspectorTests(Tests);
 	RunEditorRuntimeUIDocumentEditorTests(Tests);
+	RunEditorGraphDocumentEditorTests(Tests);
 	RunProjectRuntimeTests(Tests);
 	return Tests.Finish();
 }
