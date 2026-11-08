@@ -372,12 +372,24 @@ namespace PulseForgeEditor
 	}
 
 	bool CanAutoHideEditorGraphPin(const EditorGraphPin& Pin,
-		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept
+		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount, bool NodeConnected) noexcept
 	{
-		if (!CanHideEditorGraphPin(Definition) || IncidentConnectionCount != 0) return false;
+		if (!NodeConnected || !CanHideEditorGraphPin(Definition) || IncidentConnectionCount != 0) return false;
 		if (Pin.Direction == EditorGraphPinDirection::Input && Pin.DefaultValue != Definition.DefaultValue)
 			return false;
 		return true;
+	}
+
+	bool IsEditorGraphNodeConnected(const EditorGraph& Graph, PulseForge::UUID NodeID)
+	{
+		const auto Node = std::find_if(Graph.Nodes.begin(), Graph.Nodes.end(), [NodeID](const auto& Candidate)
+			{ return Candidate.ID == NodeID; });
+		if (Node == Graph.Nodes.end()) return false;
+		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> PinIDs;
+		PinIDs.reserve(Node->Pins.size());
+		for (const auto& Pin : Node->Pins) PinIDs.insert(Pin.ID);
+		return std::any_of(Graph.Connections.begin(), Graph.Connections.end(), [&PinIDs](const auto& Connection)
+			{ return PinIDs.contains(Connection.OutputPin) || PinIDs.contains(Connection.InputPin); });
 	}
 
 	EditorGraphCommandHistory::EditorGraphCommandHistory(EditorGraph InitialGraph)
@@ -1018,11 +1030,13 @@ namespace PulseForgeEditor
 		return Text;
 	}
 
-	std::expected<void, std::string> PasteEditorGraphClipboard(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
-		std::string_view Source, double OffsetX, double OffsetY)
+	std::expected<std::vector<PulseForge::UUID>, std::string> PasteEditorGraphClipboard(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		std::string_view Source, double TargetGroupOriginX, double TargetGroupOriginY)
 	{
-		if (Source.size() > MaximumClipboardBytes || !IsFiniteCoordinate(OffsetX) || !IsFiniteCoordinate(OffsetY))
-			return std::unexpected("Graph clipboard payload or paste offset is invalid");
+		if (Source.size() > MaximumClipboardBytes || !IsFiniteCoordinate(TargetGroupOriginX) ||
+			!IsFiniteCoordinate(TargetGroupOriginY))
+			return std::unexpected("Graph clipboard payload or paste placement target is invalid");
 		try
 		{
 			const Json Document = Json::parse(Source);
@@ -1059,11 +1073,23 @@ namespace PulseForgeEditor
 			EditorGraph Copied{ History.Graph().ID, Schema.Key, Schema.Version, Parsed.Nodes, Parsed.Connections };
 			const auto ClipboardDiagnostics = ValidateEditorGraph(Copied, Schema);
 			if (!ClipboardDiagnostics.empty()) return std::unexpected("Clipboard subgraph is invalid: " + ClipboardDiagnostics.front().Message);
+			double MinimumX = Parsed.Nodes.front().X;
+			double MinimumY = Parsed.Nodes.front().Y;
+			for (const auto& Node : Parsed.Nodes)
+			{
+				MinimumX = std::min(MinimumX, Node.X);
+				MinimumY = std::min(MinimumY, Node.Y);
+			}
+			const double DeltaX = std::floor(TargetGroupOriginX) - MinimumX;
+			const double DeltaY = std::floor(TargetGroupOriginY) - MinimumY;
 			std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> PinRemapped;
+			std::vector<PulseForge::UUID> CreatedNodeIDs;
+			CreatedNodeIDs.reserve(Parsed.Nodes.size());
 			for (auto& Node : Parsed.Nodes)
 			{
 				auto NewNode = NewID(); if (!NewNode) return std::unexpected(NewNode.error());
-				Node.ID = *NewNode; Node.X += OffsetX; Node.Y += OffsetY;
+				Node.ID = *NewNode; Node.X += DeltaX; Node.Y += DeltaY;
+				CreatedNodeIDs.push_back(Node.ID);
 				for (auto& PinValue : Node.Pins)
 				{
 					const auto OldPin = PinValue.ID;
@@ -1082,12 +1108,33 @@ namespace PulseForgeEditor
 			}
 			std::string Error;
 			if (!History.Replace(std::move(Candidate), Schema, Error)) return std::unexpected(Error);
-			return {};
+			return CreatedNodeIDs;
 		}
 		catch (const Json::exception& Error)
 		{
 			return std::unexpected(std::string("Graph clipboard is malformed: ") + Error.what());
 		}
+	}
+
+	std::expected<std::vector<PulseForge::UUID>, std::string> DuplicateEditorGraphSubgraph(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		const std::vector<PulseForge::UUID>& NodeIDs, double OffsetX, double OffsetY)
+	{
+		if (NodeIDs.empty()) return std::vector<PulseForge::UUID>{};
+		if (!IsFiniteCoordinate(OffsetX) || !IsFiniteCoordinate(OffsetY))
+			return std::unexpected("Graph duplicate offset is invalid");
+		const auto Clipboard = CopyEditorGraphSubgraph(History.Graph(), NodeIDs);
+		if (Clipboard.Nodes.empty()) return std::vector<PulseForge::UUID>{};
+		const auto Payload = SerializeEditorGraphClipboard(Clipboard);
+		if (!Payload) return std::unexpected(Payload.error());
+		double MinimumX = Clipboard.Nodes.front().X;
+		double MinimumY = Clipboard.Nodes.front().Y;
+		for (const auto& Node : Clipboard.Nodes)
+		{
+			MinimumX = std::min(MinimumX, Node.X);
+			MinimumY = std::min(MinimumY, Node.Y);
+		}
+		return PasteEditorGraphClipboard(History, Schema, *Payload, MinimumX + OffsetX, MinimumY + OffsetY);
 	}
 
 	std::expected<void, std::string> AddEditorGraphNode(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,

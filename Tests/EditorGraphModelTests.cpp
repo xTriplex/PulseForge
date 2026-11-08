@@ -254,23 +254,33 @@ namespace
 		const auto* Condition = FindPin(*BranchA, "condition");
 		PF_CHECK(Tests, Begin && BranchAInput && BranchAOut && BranchBInput && BranchBOut && LogInput && Condition);
 		if (!Begin || !BranchAInput || !BranchAOut || !BranchBInput || !BranchBOut || !LogInput || !Condition) return;
-		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, Begin->ID, BranchAInput->ID).has_value());
-		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BranchAOut->ID, BranchBInput->ID).has_value());
-		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BranchBOut->ID, BranchAInput->ID).has_value());	// Execution cycles are deliberately allowed in this fixture.
-		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BranchBOut->ID, LogInput->ID).has_value());
+		const auto BranchAID = BranchA->ID;
+		const auto BranchBID = BranchB->ID;
+		const auto BeginID = Begin->ID;
+		const auto BranchAInputID = BranchAInput->ID;
+		const auto BranchAOutputID = BranchAOut->ID;
+		const auto BranchBInputID = BranchBInput->ID;
+		const auto BranchBOutputID = BranchBOut->ID;
+		const auto LogInputID = LogInput->ID;
+		const auto ConditionID = Condition->ID;
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BeginID, BranchAInputID).has_value());
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BranchAOutputID, BranchBInputID).has_value());
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BranchBOutputID, BranchAInputID).has_value());	// Execution cycles are deliberately allowed in this fixture.
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, BranchBOutputID, LogInputID).has_value());
 		const auto* TextPin = FindPin(*LogNode, "message");
 		PF_CHECK(Tests, TextPin != nullptr);
 		if (!TextPin) return;
-		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, TextPin->ID, std::string("authoring fixture" )).has_value());
-		PF_CHECK(Tests, !SetEditorGraphPinDefaultValue(History, Schema, Condition->ID, 2.0));
+		const auto TextPinID = TextPin->ID;
+		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, TextPinID, std::string("authoring fixture" )).has_value());
+		PF_CHECK(Tests, !SetEditorGraphPinDefaultValue(History, Schema, ConditionID, 2.0));
 		const EditorGraph BeforeMove = History.Graph();
 		PF_CHECK(Tests, History.BeginTransaction());
 		PF_CHECK(Tests, MoveEditorGraphNodes(History, Schema, {
-			{ BranchA->ID, EditorGraphVector3{ 235.0, 90.0, 0.0 } },
-			{ BranchB->ID, EditorGraphVector3{ 465.0, 160.0, 0.0 } } }).has_value());
+			{ BranchAID, EditorGraphVector3{ 235.0, 90.0, 0.0 } },
+			{ BranchBID, EditorGraphVector3{ 465.0, 160.0, 0.0 } } }).has_value());
 		PF_CHECK(Tests, MoveEditorGraphNodes(History, Schema, {
-			{ BranchA->ID, EditorGraphVector3{ 250.0, 100.0, 0.0 } },
-			{ BranchB->ID, EditorGraphVector3{ 480.0, 180.0, 0.0 } } }).has_value());
+			{ BranchAID, EditorGraphVector3{ 250.0, 100.0, 0.0 } },
+			{ BranchBID, EditorGraphVector3{ 480.0, 180.0, 0.0 } } }).has_value());
 		std::string Error;
 		PF_CHECK(Tests, History.CommitTransaction(Schema, Error));
 		const auto AfterMove = History.Graph();
@@ -281,24 +291,41 @@ namespace
 		PF_CHECK(Tests, History.Undo());
 		PF_CHECK(Tests, History.BeginTransaction());
 		PF_CHECK(Tests, MoveEditorGraphNodes(History, Schema, {
-			{ BranchA->ID, EditorGraphVector3{ 999.0, 999.0, 0.0 } } }).has_value());
+			{ BranchAID, EditorGraphVector3{ 999.0, 999.0, 0.0 } } }).has_value());
 		History.CancelTransaction();
 		PF_CHECK(Tests, History.Graph() == BeforeMove && History.CanRedo());
 		PF_CHECK(Tests, History.Redo() && History.Graph() == AfterMove);
 		PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeMove);
-		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, Condition->ID, true).has_value());
+		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, ConditionID, true).has_value());
 		PF_CHECK(Tests, !History.CanRedo());
-		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, Condition->ID, false).has_value());
+		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, ConditionID, false).has_value());
 
-		const auto Clipboard = CopyEditorGraphSubgraph(History.Graph(), { BranchA->ID, BranchB->ID });
+		const auto Clipboard = CopyEditorGraphSubgraph(History.Graph(), { BranchAID, BranchBID });
 		PF_CHECK(Tests, Clipboard.Nodes.size() == 2 && Clipboard.Connections.size() == 2);
 		const auto ClipboardText = SerializeEditorGraphClipboard(Clipboard);
 		PF_CHECK(Tests, ClipboardText.has_value());
 		if (!ClipboardText) return;
 		const auto BeforePaste = History.Graph();
-		PF_CHECK(Tests, PasteEditorGraphClipboard(History, Schema, *ClipboardText, 40.0, 60.0).has_value());
+		auto FirstPaste = PasteEditorGraphClipboard(History, Schema, *ClipboardText, 40.0, 60.0);
+		PF_CHECK(Tests, FirstPaste.has_value() && FirstPaste->size() == 2);
+		if (!FirstPaste || FirstPaste->size() != 2) return;
 		PF_CHECK(Tests, History.Graph().Nodes.size() == BeforePaste.Nodes.size() + 2);
 		PF_CHECK(Tests, History.Graph().Connections.size() == BeforePaste.Connections.size() + 2);
+		std::vector<const EditorGraphNode*> FirstPastedNodes;
+		for (const auto& Node : History.Graph().Nodes)
+			if (std::find(FirstPaste->begin(), FirstPaste->end(), Node.ID) != FirstPaste->end())
+				FirstPastedNodes.push_back(&Node);
+		PF_CHECK(Tests, FirstPastedNodes.size() == 2);
+		if (FirstPastedNodes.size() == 2)
+		{
+			const auto Left = *std::min_element(FirstPastedNodes.begin(), FirstPastedNodes.end(),
+				[](const auto* A, const auto* B) { return A->X < B->X; });
+			const auto Right = *std::max_element(FirstPastedNodes.begin(), FirstPastedNodes.end(),
+				[](const auto* A, const auto* B) { return A->X < B->X; });
+			PF_CHECK(Tests, std::abs(Left->X - 40.0) < 0.001 && std::abs(Left->Y - 60.0) < 0.001);
+			PF_CHECK(Tests, std::abs((Right->X - Left->X) - 200.0) < 0.001 &&
+				std::abs(Right->Y - Left->Y) < 0.001);
+		}
 		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> ExistingNodeIDs;
 		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> ExistingPinIDs;
 		for (const auto& Node : BeforePaste.Nodes)
@@ -312,12 +339,44 @@ namespace
 				for (const auto& PinValue : Node.Pins) PF_CHECK(Tests, !ExistingPinIDs.contains(PinValue.ID));
 			}
 		const auto PastedGraph = History.Graph();
+		PF_CHECK(Tests, History.Undo() && History.Graph() == BeforePaste);
+		PF_CHECK(Tests, History.Redo() && History.Graph() == PastedGraph);
 		PF_CHECK(Tests, PasteEditorGraphClipboard(History, Schema, *ClipboardText, 80.0, 100.0).has_value());
 		PF_CHECK(Tests, History.Graph().Nodes.size() == PastedGraph.Nodes.size() + 2);
 		PF_CHECK(Tests, !PasteEditorGraphClipboard(History, MakeMaterialExpressionFixtureSchema(), *ClipboardText, 0.0, 0.0));
+		const auto BeforeDuplicate = History.Graph();
+		auto Duplicated = DuplicateEditorGraphSubgraph(History, Schema, { BranchAID, BranchBID });
+		PF_CHECK(Tests, Duplicated.has_value() && Duplicated->size() == 2);
+		if (Duplicated && Duplicated->size() == 2)
+		{
+			const auto DuplicateA = std::find_if(History.Graph().Nodes.begin(), History.Graph().Nodes.end(),
+				[&Duplicated](const auto& Node) { return Node.ID == (*Duplicated)[0]; });
+			const auto DuplicateB = std::find_if(History.Graph().Nodes.begin(), History.Graph().Nodes.end(),
+				[&Duplicated](const auto& Node) { return Node.ID == (*Duplicated)[1]; });
+			const auto SourceA = std::find_if(BeforeDuplicate.Nodes.begin(), BeforeDuplicate.Nodes.end(),
+				[BranchAID](const auto& Node) { return Node.ID == BranchAID; });
+			const auto SourceB = std::find_if(BeforeDuplicate.Nodes.begin(), BeforeDuplicate.Nodes.end(),
+				[BranchBID](const auto& Node) { return Node.ID == BranchBID; });
+			PF_CHECK(Tests, DuplicateA != History.Graph().Nodes.end() && DuplicateB != History.Graph().Nodes.end());
+			PF_CHECK(Tests, SourceA != BeforeDuplicate.Nodes.end() && SourceB != BeforeDuplicate.Nodes.end());
+			if (DuplicateA != History.Graph().Nodes.end() && DuplicateB != History.Graph().Nodes.end() &&
+				SourceA != BeforeDuplicate.Nodes.end() && SourceB != BeforeDuplicate.Nodes.end())
+			{
+				const double SourceMinimumX = std::min(SourceA->X, SourceB->X);
+				const double SourceMaximumX = std::max(SourceA->X, SourceB->X);
+				const double DuplicateMinimumX = std::min(DuplicateA->X, DuplicateB->X);
+				const double DuplicateMaximumX = std::max(DuplicateA->X, DuplicateB->X);
+				PF_CHECK(Tests, std::abs((DuplicateMaximumX - DuplicateMinimumX) -
+					(SourceMaximumX - SourceMinimumX)) < 0.001 &&
+					std::abs(DuplicateMinimumX - std::floor(SourceMinimumX + 32.0)) < 0.001);
+			}
+		}
+		const auto DuplicatedGraph = History.Graph();
+		PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeDuplicate);
+		PF_CHECK(Tests, History.Redo() && History.Graph() == DuplicatedGraph);
 
 		const auto BeforeDelete = History.Graph();
-		PF_CHECK(Tests, DeleteEditorGraphNodes(History, Schema, { BranchA->ID }).has_value());
+		PF_CHECK(Tests, DeleteEditorGraphNodes(History, Schema, { BranchAID }).has_value());
 		PF_CHECK(Tests, History.Graph().Connections.size() < BeforeDelete.Connections.size());
 		PF_CHECK(Tests, History.Undo());
 		PF_CHECK(Tests, History.Graph() == BeforeDelete);
@@ -868,12 +927,44 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 		PF_CHECK(Tests, ShouldShowEditorGraphPinDefault(Pin, Definition, 0));
 		PF_CHECK(Tests, !ShouldShowEditorGraphPinDefault(Pin, Definition, 1));
 		PF_CHECK(Tests, CanHideEditorGraphPin(Definition));
-		PF_CHECK(Tests, CanAutoHideEditorGraphPin(Pin, Definition, 0));
+		PF_CHECK(Tests, !CanAutoHideEditorGraphPin(Pin, Definition, 0, false));
+		PF_CHECK(Tests, CanAutoHideEditorGraphPin(Pin, Definition, 0, true));
 		Pin.DefaultValue = 3.0;
-		PF_CHECK(Tests, !CanAutoHideEditorGraphPin(Pin, Definition, 0));
+		PF_CHECK(Tests, !CanAutoHideEditorGraphPin(Pin, Definition, 0, true));
 		Definition.DefaultControl = EditorGraphPinDefaultControl::Always;
 		PF_CHECK(Tests, ShouldShowEditorGraphPinDefault(Pin, Definition, 1));
 		Definition.Required = true;
 		PF_CHECK(Tests, !CanHideEditorGraphPin(Definition));
+	}
+	{
+		using namespace PulseForgeEditor;
+		const auto Schema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = CreateEditorGraph(Schema, ID(0x701));
+		PF_CHECK(Tests, Graph.has_value());
+		if (Graph)
+		{
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "material.scalar", 0.0));
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "material.multiply", 240.0));
+			EditorGraphCommandHistory History(*Graph);
+			const auto* Scalar = FindNode(*Graph, "material.scalar");
+			const auto* Multiply = FindNode(*Graph, "material.multiply");
+			const auto* Output = Scalar ? FindPin(*Scalar, "value") : nullptr;
+			const auto* Input = Multiply ? FindPin(*Multiply, "a") : nullptr;
+			PF_CHECK(Tests, Scalar && Multiply && Output && Input);
+			if (Scalar && Multiply && Output && Input)
+			{
+				PF_CHECK(Tests, !IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, Output->ID, Input->ID).has_value());
+				PF_CHECK(Tests, IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, History.Undo() && !IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, History.Redo() && IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, DisconnectEditorGraphPin(History, Schema, Input->ID).has_value());
+				PF_CHECK(Tests, !IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, History.Undo() && IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, DeleteEditorGraphNodes(History, Schema, { Scalar->ID }).has_value());
+				PF_CHECK(Tests, !IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+				PF_CHECK(Tests, History.Undo() && IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+			}
+		}
 	}
 }

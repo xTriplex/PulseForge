@@ -99,12 +99,14 @@ namespace PulseForgeEditor
 		EditorGraphValue DefaultValue;
 		friend bool operator==(const EditorGraphPin&, const EditorGraphPin&) = default;
 	};
+	struct EditorGraph;
 
 	[[nodiscard]] bool ShouldShowEditorGraphPinDefault(const EditorGraphPin& Pin,
 		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept;
 	[[nodiscard]] bool CanHideEditorGraphPin(const EditorGraphPinDefinition& Definition) noexcept;
 	[[nodiscard]] bool CanAutoHideEditorGraphPin(const EditorGraphPin& Pin,
-		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept;
+		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount, bool NodeConnected) noexcept;
+	[[nodiscard]] bool IsEditorGraphNodeConnected(const EditorGraph& Graph, PulseForge::UUID NodeID);
 
 	struct EditorGraphNode
 	{
@@ -268,9 +270,12 @@ namespace PulseForgeEditor
 		const EditorGraph& Graph, const std::vector<PulseForge::UUID>& NodeIDs);
 	[[nodiscard]] std::expected<std::string, std::string> SerializeEditorGraphClipboard(
 		const EditorGraphClipboard& Clipboard);
-	[[nodiscard]] std::expected<void, std::string> PasteEditorGraphClipboard(
+	[[nodiscard]] std::expected<std::vector<PulseForge::UUID>, std::string> PasteEditorGraphClipboard(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
-		std::string_view Source, double OffsetX, double OffsetY);
+		std::string_view Source, double TargetGroupOriginX, double TargetGroupOriginY);
+	[[nodiscard]] std::expected<std::vector<PulseForge::UUID>, std::string> DuplicateEditorGraphSubgraph(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		const std::vector<PulseForge::UUID>& NodeIDs, double OffsetX = 32.0, double OffsetY = 32.0);
 	[[nodiscard]] std::expected<void, std::string> AddEditorGraphNode(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		std::string_view TypeKey, double X, double Y);

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iterator>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace PulseForgeEditor
@@ -60,6 +61,35 @@ namespace PulseForgeEditor
 			Editor.SetPinHiddenForTesting(Session, PinID, Hidden);
 		}
 
+		static EditorGraph GetGraph(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetGraphForTesting(Session);
+		}
+
+		static void SetSelectedNodes(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			const std::vector<PulseForge::UUID>& NodeIDs)
+		{
+			Editor.SetSelectedNodesForTesting(Session, NodeIDs);
+		}
+
+		static bool HandleCommand(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			EditorDocumentCommand Command)
+		{
+			return Editor.HandleFocusedCommand(Session, Command);
+		}
+
+		static std::vector<PulseForge::UUID> GetSelectedNodes(EditorGraphDocumentEditor& Editor,
+			EditorDocumentSession& Session)
+		{
+			return Editor.GetSelectedNodesForTesting(Session);
+		}
+
+		static EditorGraphCanvasPoint ScreenToCanvas(EditorGraphDocumentEditor& Editor,
+			EditorDocumentSession& Session, EditorGraphScreenPoint ScreenPoint)
+		{
+			return Editor.ScreenToCanvasForTesting(Session, ScreenPoint);
+		}
+
 		static auto CapturePinVisibility(EditorGraphDocumentEditor& Editor, const EditorDocumentSession& Session)
 		{
 			return Editor.CapturePinVisibility(Session);
@@ -92,6 +122,22 @@ namespace PulseForgeEditor
 
 namespace
 {
+	std::string GraphTestClipboard;
+	bool GraphTestClipboardRejectWrites = false;
+	bool GraphShortcutSyntheticCtrlObserved = false;
+	bool GraphShortcutSyntheticKeyObserved = false;
+	bool GraphShortcutSyntheticHostFocused = false;
+
+	const char* GetGraphTestClipboard(ImGuiContext*)
+	{
+		return GraphTestClipboard.c_str();
+	}
+
+	void SetGraphTestClipboard(ImGuiContext*, const char* Text)
+	{
+		if (!GraphTestClipboardRejectWrites) GraphTestClipboard = Text ? Text : "";
+	}
+
 	struct TemporaryGraphProject final
 	{
 		std::filesystem::path Path;
@@ -279,10 +325,15 @@ namespace
 		auto MaterialSchema = MakeMaterialExpressionFixtureSchema();
 		auto Scalar = CreateEditorGraphNode(MaterialSchema, "material.scalar", 760.0, 300.0);
 		auto Multiply = CreateEditorGraphNode(MaterialSchema, "material.multiply", 1040.0, 300.0);
-		PF_CHECK(Tests, Scalar && Multiply);
-		if (!Scalar || !Multiply) return;
+		auto IsolatedMultiply = CreateEditorGraphNode(MaterialSchema, "material.multiply", 1400.0, 560.0);
+		PF_CHECK(Tests, Scalar && Multiply && IsolatedMultiply);
+		if (!Scalar || !Multiply || !IsolatedMultiply) return;
 		MaterialGraph->Nodes.push_back(std::move(*Scalar));
 		MaterialGraph->Nodes.push_back(std::move(*Multiply));
+		const UUID IsolatedNodeID = IsolatedMultiply->ID;
+		std::vector<UUID> IsolatedPinIDs;
+		for (const auto& Pin : IsolatedMultiply->Pins) IsolatedPinIDs.push_back(Pin.ID);
+		MaterialGraph->Nodes.push_back(std::move(*IsolatedMultiply));
 		const auto* ScalarValue = FindPin(*MaterialGraph, "material.scalar", "value");
 		const auto* MultiplyA = FindPin(*MaterialGraph, "material.multiply", "a");
 		PF_CHECK(Tests, ScalarValue && MultiplyA);
@@ -293,6 +344,8 @@ namespace
 		const EditorGraph MaterialGraphForLayout = *MaterialGraph;
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *MaterialSession,
 			std::move(*MaterialGraph), MaterialSchema);
+		for (const auto PinID : IsolatedPinIDs)
+			EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, PinID, true);
 
 		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *MaterialSession, true);
 		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *GameplaySession, true);
@@ -314,18 +367,29 @@ namespace
 				: EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *GameplaySession);
 		};
 		const auto DrawInputFrame = [&](EditorDocumentSession& Session, std::string_view Host, float Width,
-			ImVec2 HostOrigin, ImVec2 MousePosition, bool LeftDown, bool Escape = false)
+			ImVec2 HostOrigin, ImVec2 MousePosition, bool LeftDown, bool Escape = false,
+			ImGuiKey PressedKey = ImGuiKey_None, bool Control = false)
 		{
 			IO.DisplaySize = ImVec2(Width, 900.0f);
 			IO.AddMousePosEvent(MousePosition.x, MousePosition.y);
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
+			IO.AddKeyEvent(ImGuiMod_Ctrl, Control);
+			for (const ImGuiKey Key : { ImGuiKey_C, ImGuiKey_V, ImGuiKey_X, ImGuiKey_D })
+				IO.AddKeyEvent(Key, Key == PressedKey);
 			ImGui::NewFrame();
+			if (Host == "GraphShortcutHost") ImGui::SetNextWindowFocus();
 			ImGui::SetNextWindowPos(HostOrigin);
 			ImGui::SetNextWindowSize(ImVec2(Width - HostOrigin.x, 900.0f - HostOrigin.y));
 			const std::string Name(Host);
 			ImGui::Begin(Name.c_str(), nullptr,
 				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			if (Host == "GraphShortcutHost" && PressedKey != ImGuiKey_None)
+			{
+				GraphShortcutSyntheticCtrlObserved |= IO.KeyCtrl;
+				GraphShortcutSyntheticKeyObserved |= ImGui::IsKeyPressed(PressedKey, false);
+				GraphShortcutSyntheticHostFocused |= ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+			}
 			EditorGraphDocumentEditorTestAccess::Draw(GraphEditor, Session);
 			ImGui::End();
 			ImGui::Render();
@@ -515,7 +579,72 @@ namespace
 					ClickAt(*NodeMetrics.PinsButtonScreenBounds);
 					return EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
 				};
-				auto PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				EditorGraphPinVisibilityPopupPresentation PopupMetrics;
+				for (const auto PinID : IsolatedPinIDs)
+					EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, PinID, true);
+				auto IsolatedMetrics = ReadNodeMetrics(IsolatedNodeID);
+			PF_CHECK(Tests, IsolatedMetrics.HiddenPinCount == 0 && IsolatedMetrics.Pins.size() == IsolatedPinIDs.size());
+			PF_CHECK(Tests, std::all_of(IsolatedMetrics.Pins.begin(), IsolatedMetrics.Pins.end(),
+				[](const auto& Pin) { return Pin.Visible; }));
+			PopupMetrics = OpenPopupFor(IsolatedNodeID);
+			PF_CHECK(Tests, PopupMetrics.NodeID == IsolatedNodeID && !PopupMetrics.HideUnusedEnabled);
+			if (PopupMetrics.PinsSubmenuScreenBounds)
+			{
+				PopupMetrics = HoverAt(*PopupMetrics.PinsSubmenuScreenBounds);
+				PF_CHECK(Tests, PopupMetrics.PinItems.size() == IsolatedPinIDs.size());
+				PF_CHECK(Tests, std::all_of(PopupMetrics.PinItems.begin(), PopupMetrics.PinItems.end(),
+					[](const auto& Item) { return Item.Visible && !Item.Enabled; }));
+			}
+			if (PopupMetrics.HideUnusedScreenBounds)
+			{
+				const auto HideBounds = PopupMetrics.HideUnusedScreenBounds;
+				HoverAt(*HideBounds);
+				ClickAt(*HideBounds);
+				PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+				PF_CHECK(Tests, !PopupMetrics.HideUnusedActivated);
+			}
+			(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+				ImVec2(-1000.0f, -1000.0f), false, true);
+			(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+				ImVec2(-1000.0f, -1000.0f), false, false);
+
+			// Saved hide preferences become effective only while at least one committed edge exists.
+			auto ReconnectedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *MaterialSession);
+			EditorGraphCommandHistory ReconnectedHistory(ReconnectedGraph);
+			const auto IsolatedNode = std::find_if(ReconnectedHistory.Graph().Nodes.begin(),
+				ReconnectedHistory.Graph().Nodes.end(), [IsolatedNodeID](const auto& Node) { return Node.ID == IsolatedNodeID; });
+			const EditorGraphPin* IsolatedInputA = nullptr;
+			if (IsolatedNode != ReconnectedHistory.Graph().Nodes.end())
+				if (const auto Pin = std::find_if(IsolatedNode->Pins.begin(), IsolatedNode->Pins.end(),
+					[](const auto& Candidate) { return Candidate.Key == "a"; }); Pin != IsolatedNode->Pins.end())
+					IsolatedInputA = &*Pin;
+			PF_CHECK(Tests, IsolatedInputA != nullptr);
+			if (IsolatedInputA && ScalarValue)
+			{
+				PF_CHECK(Tests, ConnectEditorGraphPins(ReconnectedHistory, MaterialSchema,
+					ScalarValue->ID, IsolatedInputA->ID).has_value());
+				EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *MaterialSession,
+					ReconnectedHistory.Graph(), MaterialSchema);
+				IsolatedMetrics = ReadNodeMetrics(IsolatedNodeID);
+				PF_CHECK(Tests, IsolatedMetrics.HiddenPinCount == IsolatedPinIDs.size() - 1);
+				PF_CHECK(Tests, IsolatedMetrics.Pins.size() == 1 && IsolatedMetrics.Pins.front().Connected);
+				auto DisconnectedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *MaterialSession);
+				EditorGraphCommandHistory DisconnectedHistory(DisconnectedGraph);
+				PF_CHECK(Tests, DisconnectEditorGraphPin(DisconnectedHistory, MaterialSchema,
+					IsolatedInputA->ID).has_value());
+				EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *MaterialSession,
+					DisconnectedHistory.Graph(), MaterialSchema);
+				IsolatedMetrics = ReadNodeMetrics(IsolatedNodeID);
+				PF_CHECK(Tests, IsolatedMetrics.HiddenPinCount == 0 && IsolatedMetrics.Pins.size() == IsolatedPinIDs.size());
+				PF_CHECK(Tests, std::all_of(IsolatedMetrics.Pins.begin(), IsolatedMetrics.Pins.end(),
+					[](const auto& Pin) { return Pin.Visible; }));
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *MaterialSession).size() >=
+					IsolatedPinIDs.size());
+			}
+			for (const auto PinID : IsolatedPinIDs)
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, PinID, false);
+
+				PopupMetrics = OpenPopupFor(MultiplyNode->ID);
 				PF_CHECK(Tests, PopupMetrics.NodeID == MultiplyNode->ID);
 				PF_CHECK(Tests, PopupMetrics.ContextValid && PopupMetrics.OpenSubmitted && PopupMetrics.PopupVisible &&
 					PopupMetrics.PopupOpenAfterSubmit && PopupMetrics.PopupScreenBounds.has_value() && PopupMetrics.NoMove);
@@ -778,6 +907,124 @@ namespace
 		}
 		CheckViewportStability(*GameplaySession, TestOnlyGraphForTest, TestOnlySchema,
 			"LongLabelLayoutHost", 700.0);
+
+		// Exercise graph clipboard shortcuts through the registered adapter and pinned canvas input path.
+		auto& Platform = ImGui::GetPlatformIO();
+		Platform.Platform_GetClipboardTextFn = GetGraphTestClipboard;
+		Platform.Platform_SetClipboardTextFn = SetGraphTestClipboard;
+		GraphTestClipboard.clear();
+		GraphTestClipboardRejectWrites = false;
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *GameplaySession, TestOnlyGraphForTest, TestOnlySchema);
+		ImGui::ClearActiveID();
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *GameplaySession,
+			"{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.65}}");
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1000.0f, 700.0f), false);
+		const UUID SourceNodeID = TestOnlyGraphForTest.Nodes[0].ID;
+		const UUID ConsumerNodeID = TestOnlyGraphForTest.Nodes[1].ID;
+		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession,
+			{ SourceNodeID, ConsumerNodeID });
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1000.0f, 700.0f), false, false, ImGuiKey_C, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1000.0f, 700.0f), false, false, ImGuiKey_C, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1000.0f, 700.0f), false);
+		const std::string CopiedPayload = GraphTestClipboard;
+		PF_CHECK(Tests, GraphShortcutSyntheticCtrlObserved);
+		PF_CHECK(Tests, GraphShortcutSyntheticKeyObserved);
+		PF_CHECK(Tests, GraphShortcutSyntheticHostFocused);
+		PF_CHECK(Tests, CopiedPayload.find("PulseForgeGraphClipboard") != std::string::npos);
+		const EditorGraph BeforeShortcutPaste = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		const ImVec2 PasteScreenPoint(1010.0f, 720.0f);
+		const auto ExpectedPastePoint = EditorGraphDocumentEditorTestAccess::ScreenToCanvas(GraphEditor, *GameplaySession,
+			EditorGraphScreenPoint{ PasteScreenPoint.x, PasteScreenPoint.y });
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			PasteScreenPoint, false, false, ImGuiKey_V, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			PasteScreenPoint, false, false, ImGuiKey_V, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1220.0f, 760.0f), false);
+		auto AfterShortcutPaste = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		PF_CHECK(Tests, AfterShortcutPaste.Nodes.size() == BeforeShortcutPaste.Nodes.size() + 2 &&
+			AfterShortcutPaste.Connections.size() == BeforeShortcutPaste.Connections.size() + 1);
+		std::unordered_set<UUID, UUIDHash> OriginalIDs;
+		for (const auto& Node : BeforeShortcutPaste.Nodes) OriginalIDs.insert(Node.ID);
+		std::vector<const EditorGraphNode*> PastedShortcutNodes;
+		for (const auto& Node : AfterShortcutPaste.Nodes)
+			if (!OriginalIDs.contains(Node.ID)) PastedShortcutNodes.push_back(&Node);
+		PF_CHECK(Tests, PastedShortcutNodes.size() == 2);
+		if (PastedShortcutNodes.size() == 2)
+		{
+			const auto OriginalSource = std::find_if(BeforeShortcutPaste.Nodes.begin(), BeforeShortcutPaste.Nodes.end(),
+				[SourceNodeID](const auto& Node) { return Node.ID == SourceNodeID; });
+			const auto OriginalConsumer = std::find_if(BeforeShortcutPaste.Nodes.begin(), BeforeShortcutPaste.Nodes.end(),
+				[ConsumerNodeID](const auto& Node) { return Node.ID == ConsumerNodeID; });
+			const auto PastedSource = std::find_if(PastedShortcutNodes.begin(), PastedShortcutNodes.end(),
+				[](const auto* Node) { return Node->TypeKey == "test.layout.source"; });
+			const auto PastedConsumer = std::find_if(PastedShortcutNodes.begin(), PastedShortcutNodes.end(),
+				[](const auto* Node) { return Node->TypeKey == "test.layout.consumer"; });
+			PF_CHECK(Tests, OriginalSource != BeforeShortcutPaste.Nodes.end() && OriginalConsumer != BeforeShortcutPaste.Nodes.end() &&
+				PastedSource != PastedShortcutNodes.end() && PastedConsumer != PastedShortcutNodes.end());
+			if (OriginalSource != BeforeShortcutPaste.Nodes.end() && OriginalConsumer != BeforeShortcutPaste.Nodes.end() &&
+				PastedSource != PastedShortcutNodes.end() && PastedConsumer != PastedShortcutNodes.end())
+			{
+				PF_CHECK(Tests, std::abs((*PastedSource)->X - std::floor(ExpectedPastePoint.X)) < 0.01 &&
+					std::abs((*PastedSource)->Y - std::floor(ExpectedPastePoint.Y)) < 0.01);
+				PF_CHECK(Tests, std::abs(((*PastedConsumer)->X - (*PastedSource)->X) -
+					(OriginalConsumer->X - OriginalSource->X)) < 0.01 &&
+					std::abs(((*PastedConsumer)->Y - (*PastedSource)->Y) -
+					(OriginalConsumer->Y - OriginalSource->Y)) < 0.01);
+			}
+		}
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetSelectedNodes(GraphEditor, *GameplaySession).size() == 2);
+
+		const auto ClipboardBeforeDuplicate = GraphTestClipboard;
+		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession,
+			{ SourceNodeID, ConsumerNodeID });
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_D, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_D, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false);
+		auto AfterShortcutDuplicate = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		PF_CHECK(Tests, AfterShortcutDuplicate.Nodes.size() == AfterShortcutPaste.Nodes.size() + 2 &&
+			AfterShortcutDuplicate.Connections.size() == AfterShortcutPaste.Connections.size() + 1 &&
+			GraphTestClipboard == ClipboardBeforeDuplicate);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetSelectedNodes(GraphEditor, *GameplaySession).size() == 2);
+
+		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession,
+			{ SourceNodeID, ConsumerNodeID });
+		GraphTestClipboard = "preserve-on-failure";
+		GraphTestClipboardRejectWrites = true;
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_X, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_X, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutDuplicate &&
+			GraphTestClipboard == "preserve-on-failure");
+		GraphTestClipboardRejectWrites = false;
+		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession, { ConsumerNodeID });
+		const auto BeforeSuccessfulCut = AfterShortcutDuplicate;
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_X, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_X, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(900.0f, 700.0f), false);
+		const auto AfterShortcutCut = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		PF_CHECK(Tests, AfterShortcutCut.Nodes.size() == AfterShortcutDuplicate.Nodes.size() - 1 &&
+			AfterShortcutCut.Connections.size() == AfterShortcutDuplicate.Connections.size() - 1 &&
+			GraphTestClipboard.find("PulseForgeGraphClipboard") != std::string::npos);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == BeforeSuccessfulCut);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutCut);
 	}
 
 	void TestGraphDocumentSaveRevisionAccounting(TestRunner& Tests)

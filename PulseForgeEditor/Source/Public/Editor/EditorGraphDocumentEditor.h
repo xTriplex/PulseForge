@@ -70,6 +70,7 @@ namespace PulseForgeEditor
 		PulseForge::UUID NodeID;
 		EditorGraphCanvasPoint Position;
 		EditorGraphCanvasPoint Size;
+		size_t HiddenPinCount = 0;
 		double Zoom = 1.0;
 		double InputColumnWidth = 0.0;
 		double OutputColumnWidth = 0.0;
@@ -83,6 +84,8 @@ namespace PulseForgeEditor
 	{
 		PulseForge::UUID PinID;
 		EditorGraphCanvasRect Bounds;
+		bool Visible = true;
+		bool Enabled = true;
 	};
 
 	struct EditorGraphPinVisibilityPopupPresentation
@@ -103,6 +106,7 @@ namespace PulseForgeEditor
 		bool PopupWindowHovered = false;
 		bool ShowAllHovered = false;
 		bool HideUnusedHovered = false;
+		bool HideUnusedEnabled = true;
 		bool ResetVisibilityHovered = false;
 		bool PinsSubmenuHovered = false;
 		bool ShowAllActivated = false;
@@ -402,6 +406,11 @@ namespace PulseForgeEditor
 		[[nodiscard]] EditorGraphPinVisibilityPopupPresentation GetPinVisibilityPopupForTesting(
 			EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
+		[[nodiscard]] EditorGraph GetGraphForTesting(EditorDocumentSession& Session);
+		void SetSelectedNodesForTesting(EditorDocumentSession& Session, const std::vector<PulseForge::UUID>& NodeIDs);
+		[[nodiscard]] std::vector<PulseForge::UUID> GetSelectedNodesForTesting(EditorDocumentSession& Session);
+		[[nodiscard]] EditorGraphCanvasPoint ScreenToCanvasForTesting(
+			EditorDocumentSession& Session, EditorGraphScreenPoint ScreenPoint);
 
 		EditorDocumentManager& m_Documents;
 		EditorDocumentEditorRegistry& m_Editors;
