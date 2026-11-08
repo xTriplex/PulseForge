@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <iostream>
 #include <string>
 #include <unordered_set>
 
@@ -912,6 +914,117 @@ namespace
 	}
 }
 
+namespace
+{
+	void TestIndexedTraversalAndEndpointInvariants(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+#if defined(NDEBUG)
+		constexpr const char* BuildFlavor = "optimized";
+#else
+		constexpr const char* BuildFlavor = "debug";
+#endif
+		EditorGraphSchema ChainSchema{ "test.indexed-chain", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, { { "test.step", "Step", {
+				{ "input", "Input", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+					EditorGraphPinCardinality::Single, 0.0 },
+				{ "output", "Output", EditorGraphPinDirection::Output, EditorGraphPinType::Float,
+					EditorGraphPinCardinality::Multiple, 0.0 } } } } };
+		auto LongGraph = CreateEditorGraph(ChainSchema, ID(0xabc));
+		PF_CHECK(Tests, LongGraph.has_value());
+		if (!LongGraph) return;
+		constexpr size_t NodeCount = 1000;
+		LongGraph->Nodes.reserve(NodeCount);
+		for (size_t Index = 0; Index < NodeCount; ++Index)
+		{
+			auto Node = CreateEditorGraphNode(ChainSchema, "test.step", static_cast<double>(Index * 40), 20.0);
+			PF_CHECK(Tests, Node.has_value());
+			if (!Node) return;
+			LongGraph->Nodes.push_back(std::move(*Node));
+		}
+		LongGraph->Connections.reserve(NodeCount - 1);
+		for (size_t Index = 0; Index + 1 < NodeCount; ++Index)
+			LongGraph->Connections.push_back({ ID(0x100000 + Index), LongGraph->Nodes[Index].Pins[1].ID,
+				LongGraph->Nodes[Index + 1].Pins[0].ID });
+		EditorGraphWorkStats ValidationWork;
+		PF_CHECK(Tests, ValidateEditorGraph(*LongGraph, ChainSchema, &ValidationWork).empty());
+		PF_CHECK(Tests, ValidationWork.NodeVisits == NodeCount && ValidationWork.PinVisits == NodeCount * 2 &&
+			ValidationWork.ConnectionVisits == NodeCount - 1 && ValidationWork.TraversedEdges <= (NodeCount - 1) * 2);
+		EditorGraphWorkStats DecisionWork;
+		const auto Cycle = CanConnectEditorGraphPins(*LongGraph, ChainSchema,
+			LongGraph->Nodes.back().Pins[1].ID, LongGraph->Nodes.front().Pins[0].ID, std::nullopt, &DecisionWork);
+		PF_CHECK(Tests, !Cycle.Allowed && DecisionWork.NodeVisits == NodeCount &&
+			DecisionWork.PinVisits == NodeCount * 2 && DecisionWork.ConnectionVisits == NodeCount - 1 &&
+			DecisionWork.TraversedEdges <= NodeCount - 1);
+		EditorGraphWorkStats DiscoveryWork;
+		const auto Actions = DiscoverEditorGraphNodeActions(*LongGraph, ChainSchema,
+			LongGraph->Nodes.front().Pins[1].ID, &DiscoveryWork);
+		PF_CHECK(Tests, !Actions.empty() && DiscoveryWork.NodeVisits == NodeCount &&
+			DiscoveryWork.PinVisits == NodeCount * 2 && DiscoveryWork.ConnectionVisits == NodeCount - 1);
+		for (const size_t Count : { size_t{ 100 }, size_t{ 500 }, size_t{ 1000 } })
+		{
+			EditorGraph Sample = *LongGraph;
+			Sample.Nodes.resize(Count);
+			Sample.Connections.resize(Count - 1);
+			const auto ValidateStart = std::chrono::steady_clock::now();
+			const auto Diagnostics = ValidateEditorGraph(Sample, ChainSchema);
+			const auto ValidateEnd = std::chrono::steady_clock::now();
+			const auto DecisionStart = std::chrono::steady_clock::now();
+			const auto ClosingEdge = CanConnectEditorGraphPins(Sample, ChainSchema,
+				Sample.Nodes.back().Pins[1].ID, Sample.Nodes.front().Pins[0].ID);
+			const auto DecisionEnd = std::chrono::steady_clock::now();
+			PF_CHECK(Tests, Diagnostics.empty() && !ClosingEdge.Allowed);
+			const auto ValidateMs = std::chrono::duration<double, std::milli>(ValidateEnd - ValidateStart).count();
+			const auto DecisionMs = std::chrono::duration<double, std::milli>(DecisionEnd - DecisionStart).count();
+			std::cout << "Graph traversal benchmark [" << BuildFlavor << "] " << Count
+				<< " nodes: validate=" << ValidateMs << " ms, cycle-decision=" << DecisionMs << " ms\n";
+		}
+
+		EditorGraphSchema SingleOutputSchema = ChainSchema;
+		SingleOutputSchema.Key = "test.single-output";
+		SingleOutputSchema.Nodes[0].Pins[1].Cardinality = EditorGraphPinCardinality::Single;
+		auto SmallGraph = CreateEditorGraph(SingleOutputSchema, ID(0xdef));
+		PF_CHECK(Tests, SmallGraph && AppendNode(*SmallGraph, SingleOutputSchema, "test.step", 0.0) &&
+			AppendNode(*SmallGraph, SingleOutputSchema, "test.step", 200.0) &&
+			AppendNode(*SmallGraph, SingleOutputSchema, "test.step", 400.0));
+		if (!SmallGraph) return;
+		EditorGraphCommandHistory History(*SmallGraph);
+		const auto SourcePin = History.Graph().Nodes[0].Pins[1].ID;
+		const auto InputA = History.Graph().Nodes[1].Pins[0].ID;
+		const auto InputB = History.Graph().Nodes[2].Pins[0].ID;
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, SingleOutputSchema, SourcePin, InputA).has_value());
+		const EditorGraph BeforeRejected = History.Graph();
+		PF_CHECK(Tests, !CanConnectEditorGraphPins(History.Graph(), SingleOutputSchema, SourcePin, InputB).Allowed);
+		PF_CHECK(Tests, !ConnectEditorGraphPins(History, SingleOutputSchema, SourcePin, InputB));
+		PF_CHECK(Tests, History.Graph() == BeforeRejected && ValidateEditorGraph(History.Graph(), SingleOutputSchema).empty());
+		const auto ExistingID = History.Graph().Connections.front().ID;
+		PF_CHECK(Tests, CanConnectEditorGraphPins(History.Graph(), SingleOutputSchema, SourcePin, InputA, ExistingID).Allowed);
+		PF_CHECK(Tests, ReconnectEditorGraphConnection(History, SingleOutputSchema, ExistingID, SourcePin, InputA).has_value());
+		EditorGraph DuplicatePair = History.Graph();
+		DuplicatePair.Connections.push_back({ ID(0x777777), SourcePin, InputA });
+		const auto DuplicateDiagnostics = ValidateEditorGraph(DuplicatePair, SingleOutputSchema);
+		PF_CHECK(Tests, std::any_of(DuplicateDiagnostics.begin(), DuplicateDiagnostics.end(),
+			[](const auto& Diagnostic) { return Diagnostic.Code == "connection.duplicate"; }));
+		PF_CHECK(Tests, !SerializeEditorGraph(DuplicatePair, SingleOutputSchema));
+		const auto ValidSource = SerializeEditorGraph(History.Graph(), SingleOutputSchema);
+		PF_CHECK(Tests, ValidSource.has_value());
+		if (ValidSource)
+		{
+			std::string DuplicateSource = *ValidSource;
+			const auto& Existing = History.Graph().Connections.front();
+			const std::string Record = "    ,\n    {\"id\":\"" + ID(0x777778).ToString() + "\",\"output\":\"" +
+				Existing.OutputPin.ToString() + "\",\"input\":\"" + Existing.InputPin.ToString() + "\"}\n";
+			const auto ConnectionsEnd = DuplicateSource.rfind("\n  ]");
+			PF_CHECK(Tests, ConnectionsEnd != std::string::npos);
+			if (ConnectionsEnd != std::string::npos)
+			{
+				DuplicateSource.insert(ConnectionsEnd, Record);
+				PF_CHECK(Tests, !DeserializeEditorGraph(DuplicateSource, SingleOutputSchema));
+			}
+		}
+	}
+}
+
 void RunEditorGraphModelTests(TestRunner& Tests)
 {
 	TestMaterialSchemaAndSerialization(Tests);
@@ -920,6 +1033,7 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 	TestReusableGraphLayoutAndPinCommands(Tests);
 	TestNodeActionDiscoverySearchAndAtomicAutowire(Tests);
 	TestMixedTypeCyclePolicies(Tests);
+	TestIndexedTraversalAndEndpointInvariants(Tests);
 	{
 		using namespace PulseForgeEditor;
 		EditorGraphPinDefinition Definition{ "socket", "Socket", EditorGraphPinDirection::Input,

@@ -369,11 +369,14 @@ namespace PulseForgeEditor
 			std::function<void()> PresentationChanged = {});
 
 		[[nodiscard]] std::expected<void, std::string> Register();
+		[[nodiscard]] std::expected<void, std::string> RegisterSchema(EditorGraphSchema Schema);
 		[[nodiscard]] std::expected<EditorGraphFixtureLocation, std::string> CreateFixture(
 			const std::filesystem::path& ProjectRoot, EditorGraphFixtureKind Kind) const;
 		[[nodiscard]] static std::filesystem::path GetFixturePath(const PulseForge::UUID& GraphID);
 		[[nodiscard]] bool Open(EditorDocumentSession& Session, const EditorDocumentEditorContext& Context) const;
 		[[nodiscard]] bool Save(EditorDocumentSession& Session) const;
+		[[nodiscard]] std::expected<PulseForge::UUID, std::string> AddNode(
+			EditorDocumentSession& Session, std::string_view NodeTypeKey, double CanvasX, double CanvasY) const;
 		[[nodiscard]] std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> CapturePinVisibility(
 			const EditorDocumentSession& Session) const;
 		[[nodiscard]] std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> CaptureWorkspacePinVisibility() const;
@@ -416,6 +419,7 @@ namespace PulseForgeEditor
 		EditorDocumentEditorRegistry& m_Editors;
 		std::function<void()> m_PresentationChanged;
 		std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> m_PinVisibilitySettings;
+		EditorGraphSchemaRegistry m_SchemaRegistry;
 		bool m_Registered = false;
 	};
 }

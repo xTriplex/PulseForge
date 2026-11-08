@@ -88,6 +88,8 @@ namespace
 		PulseForge::UUID GraphID;
 		std::optional<PulseForge::UUID> SourcePin;
 		EditorGraphVector3 Placement;
+		uint64_t DiscoveryRevision = 0;
+		std::vector<EditorGraphNodeCreationAction> Actions;
 		std::array<char, 256> Search{};
 		int SelectedResult = 0;
 	};
@@ -277,10 +279,14 @@ namespace
 	}
 
 	void ReconcileDirtyState(GraphDocumentState& State, EditorDocumentManager& Documents,
-		EditorDocumentSession& Session)
+		EditorDocumentSession& Session, bool ContentChanged = true)
 	{
-		if (State.History.IsDirty()) (void)Documents.MarkEdited(Session.Identity);
-		else (void)Documents.MarkSaved(Session.Identity, Session.Revision);
+		if (State.History.IsDirty())
+		{
+			if (ContentChanged) (void)Documents.MarkEdited(Session.Identity);
+		}
+		else if (Session.IsDirty())
+			(void)Documents.MarkSaved(Session.Identity, Session.Revision);
 	}
 
 	EditorGraphPropertyEditResult FinishPropertyEdit(GraphDocumentState& State, EditorDocumentManager& Documents,
@@ -445,17 +451,28 @@ namespace
 		return {};
 	}
 
-	std::expected<EditorGraphSchema, std::string> ReadSchema(std::string_view Source)
+	std::expected<EditorGraphSchema, std::string> ReadSchema(
+		std::string_view Source, const EditorGraphSchemaRegistry& Registry)
 	{
 		try
 		{
 			const Json Document = Json::parse(Source);
-			if (!Document.is_object() || !Document.contains("schema") || !Document["schema"].is_string())
-				return std::unexpected("Graph source has no valid schema identifier");
+			if (!Document.is_object() || !Document.contains("schema") || !Document["schema"].is_string() ||
+				!Document.contains("schemaVersion"))
+				return std::unexpected("Graph source has no valid schema identifier or version");
 			const std::string Key = Document["schema"].get<std::string>();
-			if (Key == "pulseforge.material-expression-fixture") return MakeMaterialExpressionFixtureSchema();
-			if (Key == "pulseforge.gameplay-event-fixture") return MakeGameplayEventFixtureSchema();
-			return std::unexpected("Unknown graph schema '" + Key + "'; this source remains untouched");
+			uint64_t Version = 0;
+			if (Document["schemaVersion"].is_number_unsigned()) Version = Document["schemaVersion"].get<uint64_t>();
+			else if (Document["schemaVersion"].is_number_integer())
+			{
+				const int64_t Signed = Document["schemaVersion"].get<int64_t>();
+				if (Signed < 0) return std::unexpected("Graph schema version cannot be negative");
+				Version = static_cast<uint64_t>(Signed);
+			}
+			else return std::unexpected("Graph schema version must be an integer");
+			if (Version > std::numeric_limits<uint32_t>::max())
+				return std::unexpected("Graph schema version is outside the supported integer range");
+			return Registry.Resolve(Key, static_cast<uint32_t>(Version));
 		}
 		catch (const Json::exception& Error)
 		{
@@ -548,6 +565,10 @@ namespace PulseForgeEditor
 	std::expected<void, std::string> EditorGraphDocumentEditor::Register()
 	{
 		if (m_Registered) return std::unexpected("The graph document editor is already registered");
+		if (!m_SchemaRegistry.Contains("pulseforge.material-expression-fixture"))
+			if (auto Added = m_SchemaRegistry.Register(MakeMaterialExpressionFixtureSchema()); !Added) return Added;
+		if (!m_SchemaRegistry.Contains("pulseforge.gameplay-event-fixture"))
+			if (auto Added = m_SchemaRegistry.Register(MakeGameplayEventFixtureSchema()); !Added) return Added;
 		EditorDocumentEditorAdapter Adapter;
 		Adapter.Kind = EditorDocumentKind::Graph;
 		Adapter.IsEligible = [this](const auto& Context) { return IsEligible(Context); };
@@ -565,6 +586,12 @@ namespace PulseForgeEditor
 		return {};
 	}
 
+	std::expected<void, std::string> EditorGraphDocumentEditor::RegisterSchema(EditorGraphSchema Schema)
+	{
+		if (m_Registered) return std::unexpected("Graph schemas must be registered before the graph document editor");
+		return m_SchemaRegistry.Register(std::move(Schema));
+	}
+
 	bool EditorGraphDocumentEditor::IsEligible(const EditorDocumentEditorContext& Context) const
 	{
 		return m_Registered && Context.Identity.Kind == EditorDocumentKind::Graph && !Context.Identity.Asset.IsNil() &&
@@ -578,7 +605,7 @@ namespace PulseForgeEditor
 		const auto SourcePath = Context.ProjectRoot / Context.ProjectRelativePath;
 		auto Source = ReadFile(SourcePath);
 		if (!Source) return std::unexpected(Source.error());
-		auto Schema = ReadSchema(*Source);
+		auto Schema = ReadSchema(*Source, m_SchemaRegistry);
 		if (!Schema) return std::unexpected(Schema.error());
 		auto Graph = DeserializeEditorGraph(*Source, *Schema);
 		if (!Graph) return std::unexpected(Graph.error());
@@ -596,6 +623,26 @@ namespace PulseForgeEditor
 	bool EditorGraphDocumentEditor::Save(EditorDocumentSession& Session) const
 	{
 		return m_Registered && Session.Identity.Kind == EditorDocumentKind::Graph && m_Editors.Save(Session);
+	}
+
+	std::expected<PulseForge::UUID, std::string> EditorGraphDocumentEditor::AddNode(
+		EditorDocumentSession& Session, std::string_view NodeTypeKey, double CanvasX, double CanvasY) const
+	{
+		auto* State = GetState(Session);
+		if (!m_Registered || Session.Identity.Kind != EditorDocumentKind::Graph || !State)
+			return std::unexpected("The focused graph document is unavailable");
+		const auto Finished = FinishPropertyEdit(*State, m_Documents, Session);
+		if (!Finished.Error.empty()) return std::unexpected(Finished.Error);
+		if (State->History.HasOpenTransaction()) return std::unexpected("Finish the active graph gesture before creating a node");
+		const EditorGraph Before = State->History.Graph();
+		if (auto Added = AddEditorGraphNode(State->History, State->Schema, NodeTypeKey, CanvasX, CanvasY); !Added)
+			return std::unexpected(Added.error());
+		if (State->History.Graph() == Before) return std::unexpected("The node command did not change the graph");
+		const PulseForge::UUID CreatedID = State->History.Graph().Nodes.back().ID;
+		State->NeedsCanvasSync = true;
+		State->Error.clear();
+		ReconcileDirtyState(*State, m_Documents, Session);
+		return CreatedID;
 	}
 
 	std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> EditorGraphDocumentEditor::CapturePinVisibility(
@@ -684,7 +731,7 @@ namespace PulseForgeEditor
 		if (!State) return false;
 		auto Source = ReadFile(State->SourcePath);
 		if (!Source) { State->Error = Source.error(); return false; }
-		auto Schema = ReadSchema(*Source);
+		auto Schema = ReadSchema(*Source, m_SchemaRegistry);
 		if (!Schema) { State->Error = Schema.error(); return false; }
 		auto Graph = DeserializeEditorGraph(*Source, *Schema);
 		if (!Graph || Graph->ID != Session.Identity.Asset)
@@ -836,8 +883,7 @@ namespace PulseForgeEditor
 		if (!Changed) return true;
 		State->NeedsCanvasSync = true;
 		State->Error.clear();
-		if (State->History.IsDirty()) (void)m_Documents.MarkEdited(Session.Identity);
-		else (void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
+		ReconcileDirtyState(*State, m_Documents, Session);
 		return true;
 	}
 
@@ -1208,10 +1254,15 @@ namespace PulseForgeEditor
 			constexpr float MaxOutputLabelWidth = 260.0f;
 			const auto MeasureLabel = [](std::string_view Text, float Limit)
 				{ return std::min(ImGui::CalcTextSize(Text.data(), Text.data() + Text.size()).x, Limit); };
-			for (const auto& Pin : Node.Pins)
+			const auto* NodeDefinition = FindNodeDefinition(State->Schema, Node.TypeKey);
+			if (!NodeDefinition) continue;
+			for (const auto& PinDefinition : NodeDefinition->Pins)
 			{
-				const auto* Definition = FindPinDefinition(State->Schema, Node.TypeKey, Pin.Key);
-				if (!Definition) continue;
+				const auto PinIt = std::find_if(Node.Pins.begin(), Node.Pins.end(), [&PinDefinition](const auto& Candidate)
+					{ return Candidate.Key == PinDefinition.Key; });
+				if (PinIt == Node.Pins.end()) continue;
+				const auto& Pin = *PinIt;
+				const auto* Definition = &PinDefinition;
 				const size_t Incidents = ConnectionCount(Pin.ID);
 				const bool Connected = Incidents != 0;
 				const bool Visible = !NodeConnected || Connected || Definition->Required || !Definition->Hideable ||
@@ -1550,7 +1601,7 @@ namespace PulseForgeEditor
 		if (GraphChanged)
 		{
 			State->Error.clear();
-			(void)m_Documents.MarkEdited(Session.Identity);
+			ReconcileDirtyState(*State, m_Documents, Session);
 		}
 
 		if (State->NeedsCanvasSync) State->NeedsCanvasSync = false;
@@ -1569,6 +1620,7 @@ namespace PulseForgeEditor
 		}
 		if (!Positions.empty())
 		{
+			const EditorGraph BeforeMove = State->History.Graph();
 			if (!State->History.HasOpenTransaction())
 			{
 				(void)State->History.BeginTransaction();
@@ -1576,14 +1628,14 @@ namespace PulseForgeEditor
 			}
 			auto Moved = MoveEditorGraphNodes(State->History, State->Schema, Positions);
 			if (!Moved) State->Error = Moved.error();
-			else (void)m_Documents.MarkEdited(Session.Identity);
+			else if (State->History.Graph() != BeforeMove)
+				ReconcileDirtyState(*State, m_Documents, Session);
 		}
 		if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && State->NodeMoveTransaction && State->History.HasOpenTransaction())
 		{
 			std::string Error;
 			if (!State->History.CommitTransaction(State->Schema, Error)) State->Error = std::move(Error);
-			if (State->History.IsDirty()) (void)m_Documents.MarkEdited(Session.Identity);
-			else (void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
+			ReconcileDirtyState(*State, m_Documents, Session, false);
 			State->NodeMoveTransaction = false;
 		}
 
@@ -1772,8 +1824,13 @@ namespace PulseForgeEditor
 					if (SearchChanged) State->NodeSearch.SelectedResult = 0;
 					State->NodeSearch.FocusSearch = false;
 
-					const auto Actions = DiscoverEditorGraphNodeActions(State->History.Graph(), State->Schema,
-						State->NodeSearch.SourcePin);
+					if (State->NodeSearch.DiscoveryRevision != State->History.GraphRevision())
+					{
+						State->NodeSearch.Actions = DiscoverEditorGraphNodeActions(State->History.Graph(), State->Schema,
+							State->NodeSearch.SourcePin);
+						State->NodeSearch.DiscoveryRevision = State->History.GraphRevision();
+					}
+					const auto& Actions = State->NodeSearch.Actions;
 					const auto Matches = SearchEditorGraphNodeActions(Actions, State->NodeSearch.Search.data());
 					const auto Navigation = GraphCanvasDetail::ResolveNodeSearchNavigation({ Matches.size(),
 						State->NodeSearch.SelectedResult, SearchChanged,
@@ -1892,7 +1949,7 @@ namespace PulseForgeEditor
 						else
 						{
 							State->Error.clear();
-							(void)m_Documents.MarkEdited(Session.Identity);
+							ReconcileDirtyState(*State, m_Documents, Session);
 							State->NeedsCanvasSync = true;
 							NodeEditor::SetCurrentEditor(State->Canvas);
 							NodeEditor::ClearSelection();
@@ -1935,7 +1992,7 @@ namespace PulseForgeEditor
 					else if (!Pasted->empty())
 					{
 						State->Error.clear();
-						(void)m_Documents.MarkEdited(Session.Identity);
+						ReconcileDirtyState(*State, m_Documents, Session);
 						State->NeedsCanvasSync = true;
 						NodeEditor::SetCurrentEditor(State->Canvas);
 						NodeEditor::ClearSelection();
@@ -1948,6 +2005,7 @@ namespace PulseForgeEditor
 		if (PendingNodeCreation)
 		{
 			std::expected<void, std::string> Added;
+			bool DirtyStateReconciled = false;
 			if (PendingNodeCreation->Action.ConnectPinKey && PendingNodeCreation->SourcePin)
 			{
 				auto Created = CreateEditorGraphNodeAndConnect(State->History, State->Schema,
@@ -1956,13 +2014,18 @@ namespace PulseForgeEditor
 				if (!Created) Added = std::unexpected(Created.error());
 				else Added = {};
 			}
-			else Added = AddEditorGraphNode(State->History, State->Schema, PendingNodeCreation->Action.NodeTypeKey,
-				PendingNodeCreation->Placement.X, PendingNodeCreation->Placement.Y);
+			else
+			{
+				auto Created = AddNode(Session, PendingNodeCreation->Action.NodeTypeKey,
+					PendingNodeCreation->Placement.X, PendingNodeCreation->Placement.Y);
+				if (!Created) Added = std::unexpected(Created.error());
+				else { Added = {}; DirtyStateReconciled = true; }
+			}
 			if (!Added) State->Error = Added.error();
 			else
 			{
 				State->Error.clear();
-				(void)m_Documents.MarkEdited(Session.Identity);
+				if (!DirtyStateReconciled) ReconcileDirtyState(*State, m_Documents, Session);
 				State->NeedsCanvasSync = true;
 			}
 		}
@@ -2037,7 +2100,7 @@ namespace PulseForgeEditor
 				else if (State->History.Graph() != BeforeLayout)
 				{
 					State->Error.clear();
-					(void)m_Documents.MarkEdited(Session.Identity);
+					ReconcileDirtyState(*State, m_Documents, Session);
 					State->NeedsCanvasSync = true;
 				}
 			}

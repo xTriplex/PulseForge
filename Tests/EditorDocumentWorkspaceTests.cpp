@@ -4,6 +4,7 @@
 #include "Editor/EditorDocumentWorkspaceRead.h"
 
 #include <sstream>
+#include <limits>
 
 namespace
 {
@@ -62,6 +63,26 @@ namespace
 
 		const auto Restored = EditorDocumentWorkspaceCodec::Deserialize(*Serialized, *Project);
 		PF_CHECK(Tests, Restored.has_value());
+		if (Serialized)
+		{
+			auto VersionProbe = nlohmann::json::parse(*Serialized);
+			for (const auto Version : { nlohmann::json(3), nlohmann::json(4), nlohmann::json(5) })
+			{
+				VersionProbe["version"] = Version;
+				PF_CHECK(Tests, EditorDocumentWorkspaceCodec::Deserialize(VersionProbe.dump(), *Project).has_value());
+			}
+			for (const auto Version : { nlohmann::json(6), nlohmann::json(uint64_t{ 4294967301ull }),
+				nlohmann::json(std::numeric_limits<uint64_t>::max()), nlohmann::json(-1), nlohmann::json(5.0),
+				nlohmann::json(true), nlohmann::json("5"), nlohmann::json(nullptr) })
+			{
+				VersionProbe["version"] = Version;
+				PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(VersionProbe.dump(), *Project));
+			}
+			const std::string BeyondUnsigned = Serialized->substr(0, Serialized->find("\"version\": 5")) +
+				"\"version\": 18446744073709551616" +
+				Serialized->substr(Serialized->find("\"version\": 5") + std::string("\"version\": 5").size());
+			PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(BeyondUnsigned, *Project));
+		}
 		if (Restored)
 		{
 			PF_CHECK(Tests, Restored->Hosts.size() == 2 && Restored->Hosts[1].Documents.size() == 2);

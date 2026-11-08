@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
 
 namespace
@@ -16,6 +17,22 @@ namespace
 	constexpr size_t MaximumWorkspaceHosts = 64;
 	constexpr size_t MaximumWorkspaceDocuments = 512;
 	constexpr size_t MaximumGraphPinVisibility = 32'768;
+
+	std::expected<uint32_t, std::string> ReadWorkspaceVersion(const Json& Value)
+	{
+		uint64_t FullWidth = 0;
+		if (Value.is_number_unsigned()) FullWidth = Value.get<uint64_t>();
+		else if (Value.is_number_integer())
+		{
+			const int64_t Signed = Value.get<int64_t>();
+			if (Signed < 0) return std::unexpected("Document workspace version cannot be negative");
+			FullWidth = static_cast<uint64_t>(Signed);
+		}
+		else return std::unexpected("Document workspace version must be an integer");
+		if (FullWidth > std::numeric_limits<uint32_t>::max())
+			return std::unexpected("Document workspace version is outside the supported integer range");
+		return static_cast<uint32_t>(FullWidth);
+	}
 
 	bool IsValidKind(int64_t Value)
 	{
@@ -282,7 +299,9 @@ namespace PulseForgeEditor
 			if (!Project || *Project != ExpectedProject)
 				return std::unexpected("Document workspace belongs to a different or invalid project");
 			EditorDocumentWorkspaceState State;
-			State.Version = Root["version"].get<uint32_t>();
+			const auto Version = ReadWorkspaceVersion(Root["version"]);
+			if (!Version) return std::unexpected(Version.error());
+			State.Version = *Version;
 			if (State.Version != 1 && State.Version != 2 && State.Version != 3 && State.Version != 4 && State.Version != 5)
 				return std::unexpected("Document workspace version is unsupported");
 			State.LegacyMaterialDetailsMigration = State.Version <= 3;

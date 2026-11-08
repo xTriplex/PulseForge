@@ -211,11 +211,140 @@ namespace
 		EditorDocumentManager Documents;
 		EditorDocumentEditorRegistry Editors;
 		EditorGraphDocumentEditor GraphEditor(Documents, Editors);
+		EditorGraphSchema FutureSchema{ "test.future-document", 3, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, {
+				{ "custom.emitter", "Emitter", { { "text-out", "Text", EditorGraphPinDirection::Output,
+					EditorGraphPinType::String, EditorGraphPinCardinality::Multiple, std::string{} } } },
+				{ "custom.archive", "Archive", { { "text-in", "Text", EditorGraphPinDirection::Input,
+					EditorGraphPinType::String, EditorGraphPinCardinality::Single, std::string{} } } },
+				{ "custom.blocked", "Blocked", { { "blocked-in", "Blocked", EditorGraphPinDirection::Input,
+					EditorGraphPinType::String, EditorGraphPinCardinality::Single, std::string{} } } }
+			} };
+		FutureSchema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphPin&, const EditorGraphPin& Input)
+			-> std::optional<std::string>
+			{ return Input.Key == "blocked-in" ? std::optional<std::string>("This document policy rejects the blocked input") : std::nullopt; };
+		FutureSchema.GraphValidationPolicy = [](const EditorGraph& Graph) -> std::optional<EditorGraphDiagnostic>
+			{ return Graph.Nodes.empty() ? std::optional<EditorGraphDiagnostic>(EditorGraphDiagnostic{
+				"domain.required", "This graph requires at least one node", Graph.ID }) : std::nullopt; };
+		PF_CHECK(Tests, GraphEditor.RegisterSchema(FutureSchema).has_value());
+		auto FutureID = UUID::Generate();
+		PF_CHECK(Tests, FutureID.has_value());
+		std::optional<EditorGraphFixtureLocation> FutureFixture;
+		if (FutureID)
+		{
+			auto FutureGraph = CreateEditorGraph(FutureSchema, *FutureID);
+			PF_CHECK(Tests, FutureGraph.has_value());
+			if (FutureGraph)
+			{
+				PF_CHECK(Tests, !ValidateEditorGraph(*FutureGraph, FutureSchema).empty());
+				EditorGraphCommandHistory FutureHistory(std::move(*FutureGraph));
+				PF_CHECK(Tests, AddEditorGraphNode(FutureHistory, FutureSchema, "custom.emitter", 24.0, 48.0).has_value());
+				const auto SourcePin = FutureHistory.Graph().Nodes.front().Pins.front().ID;
+				const auto Actions = DiscoverEditorGraphNodeActions(FutureHistory.Graph(), FutureSchema, SourcePin);
+				PF_CHECK(Tests, Actions.size() == 1 && Actions.front().NodeTypeKey == "custom.archive");
+				PF_CHECK(Tests, AddEditorGraphNode(FutureHistory, FutureSchema, "custom.archive", 120.0, 48.0).has_value());
+				const auto ArchivePin = FutureHistory.Graph().Nodes.back().Pins.front().ID;
+				PF_CHECK(Tests, ConnectEditorGraphPins(FutureHistory, FutureSchema, SourcePin, ArchivePin).has_value());
+				PF_CHECK(Tests, AddEditorGraphNode(FutureHistory, FutureSchema, "custom.blocked", 100.0, 48.0).has_value());
+				const auto BlockedPin = FutureHistory.Graph().Nodes.back().Pins.front().ID;
+				PF_CHECK(Tests, !ConnectEditorGraphPins(FutureHistory, FutureSchema, SourcePin, BlockedPin));
+				auto Bytes = SerializeEditorGraph(FutureHistory.Graph(), FutureSchema);
+				PF_CHECK(Tests, Bytes.has_value());
+				if (Bytes)
+				{
+					const auto RelativePath = EditorGraphDocumentEditor::GetFixturePath(*FutureID);
+					std::error_code FuturePathError;
+					std::filesystem::create_directories((Project->GetRootPath() / RelativePath).parent_path(), FuturePathError);
+					PF_CHECK(Tests, !FuturePathError);
+					PF_CHECK(Tests, WriteBytes(Project->GetRootPath() / RelativePath, *Bytes));
+					FutureFixture = EditorGraphFixtureLocation{ *FutureID, RelativePath, "Custom test graph" };
+				}
+			}
+		}
 		PF_CHECK(Tests, GraphEditor.Register().has_value());
 		const auto Material = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::MaterialExpression);
 		const auto Gameplay = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::GameplayEvent);
 		PF_CHECK(Tests, Material.has_value() && Gameplay.has_value());
 		if (!Material || !Gameplay) return;
+		if (FutureFixture)
+		{
+			const EditorDocumentIdentity FutureIdentity{ Project->GetDescription().ID, FutureFixture->GraphID,
+				EditorDocumentKind::Graph };
+			auto FutureSessionResult = Documents.Open(FutureIdentity, FutureFixture->ProjectRelativePath,
+				FutureFixture->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+			PF_CHECK(Tests, FutureSessionResult.has_value());
+			auto* FutureSession = Documents.Find(FutureIdentity);
+			const EditorDocumentEditorContext FutureContext{ FutureIdentity, Project->GetRootPath(),
+				FutureFixture->ProjectRelativePath, FutureFixture->DisplayName, nullptr };
+			PF_CHECK(Tests, FutureSession && Editors.Load(*FutureSession, FutureContext));
+			PF_CHECK(Tests, FutureSession && FutureSession->EditorState && !FutureSession->IsDirty());
+			if (FutureSession)
+			{
+				const auto LoadedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *FutureSession);
+				const auto LoadedSource = std::find_if(LoadedGraph.Nodes.begin(), LoadedGraph.Nodes.end(),
+					[](const auto& Node) { return Node.TypeKey == "custom.emitter"; });
+				PF_CHECK(Tests, LoadedSource != LoadedGraph.Nodes.end());
+				const auto LoadedActions = LoadedSource == LoadedGraph.Nodes.end()
+					? std::vector<EditorGraphNodeCreationAction>{}
+					: DiscoverEditorGraphNodeActions(LoadedGraph, FutureSchema, LoadedSource->Pins.front().ID);
+				PF_CHECK(Tests, LoadedActions.size() == 1 && LoadedActions.front().NodeTypeKey == "custom.archive");
+				const UUID StableSourceNode = LoadedSource == LoadedGraph.Nodes.end() ? UUID{} : LoadedSource->ID;
+				const auto AddedNode = GraphEditor.AddNode(*FutureSession, "custom.archive", 320.0, 96.0);
+				PF_CHECK(Tests, AddedNode && FutureSession->IsDirty());
+				const auto EditedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *FutureSession);
+				PF_CHECK(Tests, EditedGraph.Nodes.size() == LoadedGraph.Nodes.size() + 1 &&
+					std::any_of(EditedGraph.Nodes.begin(), EditedGraph.Nodes.end(), [&AddedNode](const auto& Node)
+						{ return AddedNode && Node.ID == *AddedNode && Node.TypeKey == "custom.archive"; }));
+				PF_CHECK(Tests, GraphEditor.Save(*FutureSession) && !FutureSession->IsDirty());
+				PF_CHECK(Tests, Editors.Discard(*FutureSession) && !FutureSession->IsDirty());
+				const auto ReopenedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *FutureSession);
+				const auto EditedCanonical = SerializeEditorGraph(EditedGraph, FutureSchema);
+				const auto ReopenedCanonical = SerializeEditorGraph(ReopenedGraph, FutureSchema);
+				PF_CHECK(Tests, EditedCanonical && ReopenedCanonical && *EditedCanonical == *ReopenedCanonical &&
+					ReopenedGraph.Connections.size() == EditedGraph.Connections.size() &&
+					std::any_of(ReopenedGraph.Nodes.begin(), ReopenedGraph.Nodes.end(), [&StableSourceNode](const auto& Node)
+						{ return Node.ID == StableSourceNode; }));
+				const auto FuturePath = Project->GetRootPath() / FutureFixture->ProjectRelativePath;
+				const auto BeforeBadSchema = ReadBytes(FuturePath);
+				if (BeforeBadSchema)
+				{
+					auto Unsupported = *BeforeBadSchema;
+					const auto VersionField = Unsupported.find("\"schemaVersion\": 3");
+					PF_CHECK(Tests, VersionField != std::string::npos);
+					if (VersionField != std::string::npos) Unsupported.replace(VersionField, std::string("\"schemaVersion\": 3").size(), "\"schemaVersion\": 4");
+					PF_CHECK(Tests, WriteBytes(FuturePath, Unsupported));
+					EditorDocumentManager RejectionDocuments;
+					EditorDocumentEditorRegistry RejectionEditors;
+					EditorGraphDocumentEditor RejectionGraphEditor(RejectionDocuments, RejectionEditors);
+					PF_CHECK(Tests, RejectionGraphEditor.RegisterSchema(FutureSchema).has_value());
+					PF_CHECK(Tests, RejectionGraphEditor.Register().has_value());
+					auto RejectionSessionResult = RejectionDocuments.Open(FutureIdentity, FutureFixture->ProjectRelativePath,
+						FutureFixture->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+					auto* RejectionSession = RejectionDocuments.Find(FutureIdentity);
+					PF_CHECK(Tests, RejectionSessionResult && RejectionSession && !RejectionEditors.Load(*RejectionSession, FutureContext));
+					PF_CHECK(Tests, RejectionSession && !RejectionSession->EditorState);
+					PF_CHECK(Tests, WriteBytes(FuturePath, *BeforeBadSchema));
+					auto Unknown = *BeforeBadSchema;
+					const auto SchemaField = Unknown.find("\"schema\": \"test.future-document\"");
+					PF_CHECK(Tests, SchemaField != std::string::npos);
+					if (SchemaField != std::string::npos)
+						Unknown.replace(SchemaField, std::string("\"schema\": \"test.future-document\"").size(),
+							"\"schema\": \"test.unregistered-document\"");
+					PF_CHECK(Tests, WriteBytes(FuturePath, Unknown));
+					EditorDocumentManager UnknownDocuments;
+					EditorDocumentEditorRegistry UnknownEditors;
+					EditorGraphDocumentEditor UnknownGraphEditor(UnknownDocuments, UnknownEditors);
+					PF_CHECK(Tests, UnknownGraphEditor.RegisterSchema(FutureSchema).has_value());
+					PF_CHECK(Tests, UnknownGraphEditor.Register().has_value());
+					auto UnknownOpen = UnknownDocuments.Open(FutureIdentity, FutureFixture->ProjectRelativePath,
+						FutureFixture->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+					auto* UnknownSession = UnknownDocuments.Find(FutureIdentity);
+					PF_CHECK(Tests, UnknownOpen && UnknownSession && !UnknownEditors.Load(*UnknownSession, FutureContext));
+					PF_CHECK(Tests, UnknownSession && !UnknownSession->EditorState);
+					PF_CHECK(Tests, WriteBytes(FuturePath, *BeforeBadSchema));
+				}
+			}
+		}
 
 		const UUID ProjectID = Project->GetDescription().ID;
 		const EditorDocumentIdentity MaterialIdentity{ ProjectID, Material->GraphID, EditorDocumentKind::Graph };
@@ -417,6 +546,8 @@ namespace
 					{ return Candidate.ID == Node.NodeID; });
 				PF_CHECK(Tests, ModelNode != Graph.Nodes.end());
 				if (ModelNode == Graph.Nodes.end()) continue;
+				const auto NodeDefinitionForOrdering = std::find_if(Schema.Nodes.begin(), Schema.Nodes.end(), [&ModelNode](const auto& Definition)
+					{ return Definition.TypeKey == ModelNode->TypeKey; });
 				for (const auto& PinMetric : Node.Pins)
 				{
 					const auto Pin = std::find_if(ModelNode->Pins.begin(), ModelNode->Pins.end(), [&PinMetric](const auto& Candidate)
@@ -477,6 +608,21 @@ namespace
 					else if (Pin->Direction == EditorGraphPinDirection::Input && Pin->Type != EditorGraphPinType::Execution)
 						PF_CHECK(Tests, !PinMetric.PropertyControl.has_value());
 				}
+				if (NodeDefinitionForOrdering != Schema.Nodes.end())
+					for (const auto Direction : { EditorGraphPinDirection::Input, EditorGraphPinDirection::Output })
+					{
+						std::vector<std::string> ExpectedOrder;
+						std::vector<std::string> ActualOrder;
+						for (const auto& Definition : NodeDefinitionForOrdering->Pins)
+							if (Definition.Direction == Direction) ExpectedOrder.push_back(Definition.Key);
+						for (const auto& Metric : Node.Pins)
+						{
+							const auto Pin = std::find_if(ModelNode->Pins.begin(), ModelNode->Pins.end(), [&Metric](const auto& Candidate)
+								{ return Candidate.ID == Metric.PinID; });
+							if (Pin != ModelNode->Pins.end() && Pin->Direction == Direction) ActualOrder.push_back(Pin->Key);
+						}
+						PF_CHECK(Tests, ActualOrder == ExpectedOrder);
+					}
 				if (HasInput && HasOutput)
 				{
 					const auto Input = std::find_if(Node.Pins.begin(), Node.Pins.end(), [&](const auto& Metric)
@@ -1254,6 +1400,14 @@ namespace
 		PF_CHECK(Tests, GraphEditor.Save(*Session));
 		PF_CHECK(Tests, SourceValue(ReadBytes(SourcePath)) == std::optional<EditorGraphVector3>(Middle));
 		PF_CHECK(Tests, !Session->IsDirty());
+
+		// Returning an edit to the exact saved graph through the registered Undo route
+		// must reconcile the session to clean instead of leaving a false dirty revision.
+		Edit = Process(Final, true, true, true);
+		PF_CHECK(Tests, Edit.Error.empty() && Edit.GraphChanged && Session->IsDirty());
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, !Session->IsDirty());
+		PF_CHECK(Tests, SourceValue(ReadBytes(SourcePath)) == std::optional<EditorGraphVector3>(Middle));
 
 		int CloseSaveCalls = 0;
 		const auto CloseResult = Documents.Close(Identity, EditorDocumentCloseChoice::Save,

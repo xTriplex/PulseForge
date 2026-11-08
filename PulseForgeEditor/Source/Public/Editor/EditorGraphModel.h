@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -78,6 +79,9 @@ namespace PulseForgeEditor
 		std::string Label;
 		std::vector<EditorGraphPinDefinition> Pins;
 	};
+	struct EditorGraph;
+	struct EditorGraphPin;
+	struct EditorGraphDiagnostic;
 
 	struct EditorGraphSchema
 	{
@@ -87,6 +91,10 @@ namespace PulseForgeEditor
 		EditorGraphCyclePolicy ExecutionCyclePolicy = EditorGraphCyclePolicy::Reject;
 		bool ReplaceOccupiedInput = true;
 		std::vector<EditorGraphNodeDefinition> Nodes;
+		// Optional graph-language policy. It receives immutable graph and endpoint views.
+		std::function<std::optional<std::string>(const EditorGraph&, const EditorGraphPin&, const EditorGraphPin&)>
+			ConnectionPolicy;
+		std::function<std::optional<EditorGraphDiagnostic>(const EditorGraph&)> GraphValidationPolicy;
 	};
 
 	struct EditorGraphPin
@@ -99,7 +107,23 @@ namespace PulseForgeEditor
 		EditorGraphValue DefaultValue;
 		friend bool operator==(const EditorGraphPin&, const EditorGraphPin&) = default;
 	};
-	struct EditorGraph;
+	struct EditorGraphWorkStats
+	{
+		size_t NodeVisits = 0;
+		size_t PinVisits = 0;
+		size_t ConnectionVisits = 0;
+		size_t TraversedEdges = 0;
+	};
+
+	class EditorGraphSchemaRegistry final
+	{
+	public:
+		[[nodiscard]] std::expected<void, std::string> Register(EditorGraphSchema Schema);
+		[[nodiscard]] std::expected<EditorGraphSchema, std::string> Resolve(std::string_view Key, uint32_t Version) const;
+		[[nodiscard]] bool Contains(std::string_view Key) const;
+	private:
+		std::unordered_map<std::string, EditorGraphSchema> m_Schemas;
+	};
 
 	[[nodiscard]] bool ShouldShowEditorGraphPinDefault(const EditorGraphPin& Pin,
 		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept;
@@ -184,6 +208,7 @@ namespace PulseForgeEditor
 		explicit EditorGraphCommandHistory(EditorGraph InitialGraph);
 
 		[[nodiscard]] const EditorGraph& Graph() const noexcept { return m_Graph; }
+		[[nodiscard]] uint64_t GraphRevision() const noexcept { return m_GraphRevision; }
 		[[nodiscard]] bool CanUndo() const noexcept { return !m_Undo.empty() && !m_Transaction; }
 		[[nodiscard]] bool CanRedo() const noexcept { return !m_Redo.empty() && !m_Transaction; }
 		[[nodiscard]] bool HasOpenTransaction() const noexcept { return m_Transaction.has_value(); }
@@ -202,12 +227,14 @@ namespace PulseForgeEditor
 	private:
 		void PushUndo(EditorGraph Snapshot);
 		void TrimHistory();
+		void BumpGraphRevision() noexcept { if (++m_GraphRevision == 0) ++m_GraphRevision; }
 
 		EditorGraph m_Graph;
 		EditorGraph m_SavedGraph;
 		std::vector<EditorGraph> m_Undo;
 		std::vector<EditorGraph> m_Redo;
 		std::optional<EditorGraph> m_Transaction;
+		uint64_t m_GraphRevision = 1;
 	};
 
 	struct EditorGraphPropertyEditEvent
@@ -252,14 +279,14 @@ namespace PulseForgeEditor
 	[[nodiscard]] std::expected<EditorGraphNode, std::string> CreateEditorGraphNode(
 		const EditorGraphSchema& Schema, std::string_view TypeKey, double X, double Y);
 	[[nodiscard]] std::vector<EditorGraphDiagnostic> ValidateEditorGraph(
-		const EditorGraph& Graph, const EditorGraphSchema& Schema);
+		const EditorGraph& Graph, const EditorGraphSchema& Schema, EditorGraphWorkStats* Stats = nullptr);
 	[[nodiscard]] EditorGraphConnectionDecision CanConnectEditorGraphPins(
 		const EditorGraph& Graph, const EditorGraphSchema& Schema,
 		PulseForge::UUID FirstPin, PulseForge::UUID SecondPin,
-		std::optional<PulseForge::UUID> ReplacingConnection = std::nullopt);
+		std::optional<PulseForge::UUID> ReplacingConnection = std::nullopt, EditorGraphWorkStats* Stats = nullptr);
 	[[nodiscard]] std::vector<EditorGraphNodeCreationAction> DiscoverEditorGraphNodeActions(
 		const EditorGraph& Graph, const EditorGraphSchema& Schema,
-		std::optional<PulseForge::UUID> SourcePin = std::nullopt);
+		std::optional<PulseForge::UUID> SourcePin = std::nullopt, EditorGraphWorkStats* Stats = nullptr);
 	[[nodiscard]] std::vector<EditorGraphNodeCreationAction> SearchEditorGraphNodeActions(
 		const std::vector<EditorGraphNodeCreationAction>& Actions, std::string_view Query);
 	[[nodiscard]] std::expected<std::string, std::string> SerializeEditorGraph(const EditorGraph& Graph,
