@@ -225,6 +225,13 @@ namespace
 		FutureSchema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
 			-> std::optional<std::string>
 			{
+				if (!Context.Output.IsProspective && (!Context.Output.PinID || !Context.Output.OwnerNodeID ||
+					Context.Output.OwnerNodeTypeKey != "custom.emitter" || Context.Output.PinKey != "text-out"))
+					return "The live output must retain its registered owner and pin identity";
+				if (Context.Input.IsProspective
+					? (Context.Input.PinID.has_value() || Context.Input.OwnerNodeID.has_value())
+					: (!Context.Input.PinID.has_value() || !Context.Input.OwnerNodeID.has_value()))
+					return "Prospective pins have no persistent identity; live pins must have one";
 				if (Context.Input.OwnerNodeTypeKey == "custom.alternate-archive")
 					return "This schema requires the primary archive node";
 				return Context.Input.PinKey == "blocked-in"
