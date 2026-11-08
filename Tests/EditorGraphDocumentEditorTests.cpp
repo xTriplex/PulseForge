@@ -217,12 +217,19 @@ namespace
 					EditorGraphPinType::String, EditorGraphPinCardinality::Multiple, std::string{} } } },
 				{ "custom.archive", "Archive", { { "text-in", "Text", EditorGraphPinDirection::Input,
 					EditorGraphPinType::String, EditorGraphPinCardinality::Single, std::string{} } } },
+				{ "custom.alternate-archive", "Alternate archive", { { "text-in", "Text", EditorGraphPinDirection::Input,
+					EditorGraphPinType::String, EditorGraphPinCardinality::Single, std::string{} } } },
 				{ "custom.blocked", "Blocked", { { "blocked-in", "Blocked", EditorGraphPinDirection::Input,
 					EditorGraphPinType::String, EditorGraphPinCardinality::Single, std::string{} } } }
 			} };
-		FutureSchema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphPin&, const EditorGraphPin& Input)
+		FutureSchema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
 			-> std::optional<std::string>
-			{ return Input.Key == "blocked-in" ? std::optional<std::string>("This document policy rejects the blocked input") : std::nullopt; };
+			{
+				if (Context.Input.OwnerNodeTypeKey == "custom.alternate-archive")
+					return "This schema requires the primary archive node";
+				return Context.Input.PinKey == "blocked-in"
+					? std::optional<std::string>("This document policy rejects the blocked input") : std::nullopt;
+			};
 		FutureSchema.GraphValidationPolicy = [](const EditorGraph& Graph) -> std::optional<EditorGraphDiagnostic>
 			{ return Graph.Nodes.empty() ? std::optional<EditorGraphDiagnostic>(EditorGraphDiagnostic{
 				"domain.required", "This graph requires at least one node", Graph.ID }) : std::nullopt; };
@@ -242,6 +249,13 @@ namespace
 				const auto SourcePin = FutureHistory.Graph().Nodes.front().Pins.front().ID;
 				const auto Actions = DiscoverEditorGraphNodeActions(FutureHistory.Graph(), FutureSchema, SourcePin);
 				PF_CHECK(Tests, Actions.size() == 1 && Actions.front().NodeTypeKey == "custom.archive");
+				const auto BeforeFilteredCreate = FutureHistory.Graph();
+				const auto BeforeFilteredRevision = FutureHistory.GraphRevision();
+				const bool BeforeFilteredUndo = FutureHistory.CanUndo();
+				PF_CHECK(Tests, !CreateEditorGraphNodeAndConnect(FutureHistory, FutureSchema,
+					"custom.alternate-archive", "text-in", SourcePin, 80.0, 48.0));
+				PF_CHECK(Tests, FutureHistory.Graph() == BeforeFilteredCreate &&
+					FutureHistory.GraphRevision() == BeforeFilteredRevision && FutureHistory.CanUndo() == BeforeFilteredUndo);
 				PF_CHECK(Tests, AddEditorGraphNode(FutureHistory, FutureSchema, "custom.archive", 120.0, 48.0).has_value());
 				const auto ArchivePin = FutureHistory.Graph().Nodes.back().Pins.front().ID;
 				PF_CHECK(Tests, ConnectEditorGraphPins(FutureHistory, FutureSchema, SourcePin, ArchivePin).has_value());

@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <queue>
@@ -19,9 +20,9 @@ namespace
 	using Json = nlohmann::ordered_json;
 	constexpr size_t MaximumSourceBytes = 2 * 1024 * 1024;
 	constexpr size_t MaximumClipboardBytes = 512 * 1024;
-	constexpr size_t MaximumNodes = 2048;
+	constexpr size_t MaximumNodes = EditorGraphMaximumNodes;
 	constexpr size_t MaximumPinsPerNode = 64;
-	constexpr size_t MaximumConnections = 8192;
+	constexpr size_t MaximumConnections = EditorGraphMaximumConnections;
 	constexpr double MaximumCoordinate = 1'000'000.0;
 
 	std::string IdText(const PulseForge::UUID& ID)
@@ -251,6 +252,7 @@ namespace
 		std::unordered_map<PulseForge::UUID, PinOwner, PulseForge::UUIDHash> Pins;
 		std::unordered_map<PulseForge::UUID, std::vector<IndexedEdge>, PulseForge::UUIDHash> Outgoing;
 		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> IncidentCounts;
+		std::unordered_map<PulseForge::UUID, std::vector<PulseForge::UUID>, PulseForge::UUIDHash> IncidentConnections;
 	};
 
 	GraphIndex BuildGraphIndex(const EditorGraph& Graph, EditorGraphWorkStats* Stats = nullptr,
@@ -272,6 +274,8 @@ namespace
 			if (Stats) ++Stats->ConnectionVisits;
 			++Index.IncidentCounts[Connection.OutputPin];
 			++Index.IncidentCounts[Connection.InputPin];
+			Index.IncidentConnections[Connection.OutputPin].push_back(Connection.ID);
+			Index.IncidentConnections[Connection.InputPin].push_back(Connection.ID);
 			if ((OmitConnection && Connection.ID == *OmitConnection) ||
 				(ReplacedInput && Connection.InputPin == *ReplacedInput)) continue;
 			const auto Output = Index.Pins.find(Connection.OutputPin);
@@ -284,6 +288,38 @@ namespace
 				{ Connection.ID, Connection.InputPin, Input->second.Node->ID, Output->second.Pin->Type });
 		}
 		return Index;
+	}
+
+	EditorGraphPolicyEndpoint MakePolicyEndpoint(const GraphIndex& Index, PulseForge::UUID PinID)
+	{
+		const auto It = Index.Pins.find(PinID);
+		if (It == Index.Pins.end()) return {};
+		const auto& Owner = *It->second.Node;
+		const auto& PinValue = *It->second.Pin;
+		return { false, PinValue.ID, Owner.ID, Owner.TypeKey, PinValue.Key, PinValue.Direction, PinValue.Type,
+			PinValue.Cardinality, PinValue.DefaultValue };
+	}
+
+	EditorGraphPolicyEndpoint MakeProspectivePolicyEndpoint(const EditorGraphNodeDefinition& Owner,
+		const EditorGraphPinDefinition& Pin)
+	{
+		return { true, std::nullopt, std::nullopt, Owner.TypeKey, Pin.Key, Pin.Direction, Pin.Type,
+			Pin.Cardinality, Pin.DefaultValue };
+	}
+
+	bool IsRemoved(std::span<const PulseForge::UUID> Removed, PulseForge::UUID ID)
+	{
+		return !Removed.empty() && std::find(Removed.begin(), Removed.end(), ID) != Removed.end();
+	}
+
+	void AppendOccupiedInputReplacements(const GraphIndex& Index, PulseForge::UUID InputID,
+		bool InputIsSingle, bool ReplacementAllowed, std::vector<PulseForge::UUID>& Removed)
+	{
+		if (!InputIsSingle || !ReplacementAllowed) return;
+		const auto It = Index.IncidentConnections.find(InputID);
+		if (It == Index.IncidentConnections.end()) return;
+		for (const auto ID : It->second)
+			if (!IsRemoved(Removed, ID)) Removed.push_back(ID);
 	}
 
 	const EditorGraphNode* FindNodeForPin(const EditorGraph& Graph, PulseForge::UUID PinID,
@@ -843,9 +879,20 @@ namespace PulseForgeEditor
 			if (!EndpointPairs.insert(PairKey).second)
 				Add("connection.duplicate", "Duplicate connections between the same endpoint pins are unsupported", Connection.ID);
 			if (Schema.ConnectionPolicy && Output.Direction == EditorGraphPinDirection::Output &&
-				Input.Direction == EditorGraphPinDirection::Input && Output.Type == Input.Type)
-				if (auto Reason = Schema.ConnectionPolicy(Graph, Output, Input))
+				Input.Direction == EditorGraphPinDirection::Input && Output.Type == Input.Type &&
+				OutputOwner != Index.Pins.end() && InputOwner != Index.Pins.end())
+			{
+				const std::array Removed{ Connection.ID };
+				EditorGraphConnectionPolicyContext Context;
+				Context.Purpose = EditorGraphConnectionPolicyPurpose::StoredConnectionValidation;
+				Context.Output = MakePolicyEndpoint(Index, Connection.OutputPin);
+				Context.Input = MakePolicyEndpoint(Index, Connection.InputPin);
+				Context.RemovedConnectionIDs = Removed;
+				Context.ProposedConnectionID = Connection.ID;
+				Context.ProposedConnectionIsStored = true;
+				if (auto Reason = Schema.ConnectionPolicy(Graph, Context))
 					Add("connection.schema", *Reason, Connection.ID);
+			}
 		}
 		if (Schema.DataCyclePolicy == EditorGraphCyclePolicy::Reject && HasCycle(Graph, Index, false, Stats))
 			Add("connection.cycle", "Material/data dependency cycle violates this schema policy", Graph.ID);
@@ -879,34 +926,52 @@ namespace PulseForgeEditor
 		const auto* OutputNode = AIsOutput ? NodeA : NodeB;
 		const auto* InputNode = AIsOutput ? NodeB : NodeA;
 		if (Output->Type != Input->Type) return { false, "Pin types must match exactly; implicit conversions are not supported", OutputID, InputID };
+		if (ReplacingConnection && std::none_of(Graph.Connections.begin(), Graph.Connections.end(),
+			[ReplacingConnection](const auto& Existing) { return Existing.ID == *ReplacingConnection; }))
+			return { false, "The connection being replaced no longer exists", OutputID, InputID };
 		const auto CyclePolicy = Output->Type == EditorGraphPinType::Execution ? Schema.ExecutionCyclePolicy : Schema.DataCyclePolicy;
 		if (OutputNode->ID == InputNode->ID &&
 			(Output->Type != EditorGraphPinType::Execution || CyclePolicy == EditorGraphCyclePolicy::Reject))
 			return { false, "A node cannot connect to itself in this fixture schema", OutputID, InputID };
+		std::vector<PulseForge::UUID> RemovedConnectionIDs;
+		if (ReplacingConnection) RemovedConnectionIDs.push_back(*ReplacingConnection);
 		for (const auto& Existing : Graph.Connections)
-			if ((!ReplacingConnection || Existing.ID != *ReplacingConnection) &&
-				Existing.OutputPin == OutputID && Existing.InputPin == InputID)
+			if (!IsRemoved(RemovedConnectionIDs, Existing.ID) && Existing.OutputPin == OutputID && Existing.InputPin == InputID)
 				return { false, "These pins are already connected", OutputID, InputID };
+		AppendOccupiedInputReplacements(Index, InputID,
+			Input->Cardinality == EditorGraphPinCardinality::Single, Schema.ReplaceOccupiedInput, RemovedConnectionIDs);
 		if (Output->Cardinality == EditorGraphPinCardinality::Single)
 			for (const auto& Existing : Graph.Connections)
-				if (Existing.OutputPin == OutputID && (!ReplacingConnection || Existing.ID != *ReplacingConnection))
+				if (Existing.OutputPin == OutputID && !IsRemoved(RemovedConnectionIDs, Existing.ID))
 					return { false, "This output already has a connection and does not allow fan-out", OutputID, InputID };
 		if (Input->Cardinality == EditorGraphPinCardinality::Single && !Schema.ReplaceOccupiedInput)
 		{
 			for (const auto& Existing : Graph.Connections)
-				if (Existing.InputPin == InputID && (!ReplacingConnection || Existing.ID != *ReplacingConnection))
+				if (Existing.InputPin == InputID && !IsRemoved(RemovedConnectionIDs, Existing.ID))
 					return { false, "This input already has a connection; disconnect it before creating another", OutputID, InputID };
+		}
+		const size_t EffectiveConnectionCount = Graph.Connections.size() - RemovedConnectionIDs.size();
+		if (EffectiveConnectionCount >= MaximumConnections)
+			return { false, "The graph has reached its supported connection limit", OutputID, InputID };
+		if (Schema.ConnectionPolicy)
+		{
+			EditorGraphConnectionPolicyContext Context;
+			Context.Purpose = EditorGraphConnectionPolicyPurpose::ProposedOperation;
+			Context.Output = MakePolicyEndpoint(Index, OutputID);
+			Context.Input = MakePolicyEndpoint(Index, InputID);
+			Context.RemovedConnectionIDs = RemovedConnectionIDs;
+			Context.ProposedConnectionID = ReplacingConnection;
+			Context.ProposedConnectionIsStored = false;
+			if (auto Reason = Schema.ConnectionPolicy(Graph, Context))
+				return { false, std::move(*Reason), OutputID, InputID };
 		}
 		const auto ReplacedInput = Input->Cardinality == EditorGraphPinCardinality::Single && Schema.ReplaceOccupiedInput
 			? std::optional<PulseForge::UUID>{ InputID } : std::nullopt;
-		if (Schema.ConnectionPolicy)
-			if (auto Reason = Schema.ConnectionPolicy(Graph, *Output, *Input))
-				return { false, std::move(*Reason), OutputID, InputID };
 		if (CyclePolicy == EditorGraphCyclePolicy::Reject &&
 			HasPath(Index, InputNode->ID, OutputNode->ID, Output->Type == EditorGraphPinType::Execution,
 				ReplacedInput, Stats))
 			return { false, "This connection would create a cycle rejected by the active schema", OutputID, InputID };
-		return { true, "Connection is valid", OutputID, InputID };
+		return { true, "Connection is valid", OutputID, InputID, std::move(RemovedConnectionIDs) };
 	}
 
 	std::vector<EditorGraphNodeCreationAction> DiscoverEditorGraphNodeActions(const EditorGraph& Graph,
@@ -915,6 +980,7 @@ namespace PulseForgeEditor
 		if (Stats) *Stats = {};
 		std::vector<EditorGraphNodeCreationAction> Actions;
 		if (Graph.SchemaKey != Schema.Key || Graph.SchemaVersion != Schema.Version) return Actions;
+		if (Graph.Nodes.size() >= MaximumNodes) return Actions;
 		GraphIndex Index;
 		const EditorGraphPin* SourcePin = nullptr;
 		const EditorGraphNode* SourceNode = nullptr;
@@ -942,18 +1008,30 @@ namespace PulseForgeEditor
 				const auto* SourceDefinition = SourceNodeDefinition
 					? FindPinDefinition(*SourceNodeDefinition, SourcePin->Key) : nullptr;
 				if (!SourceDefinition) continue;
-				const auto& Output = Pin.Direction == EditorGraphPinDirection::Output ? Pin : *SourceDefinition;
-				const auto& Input = Pin.Direction == EditorGraphPinDirection::Input ? Pin : *SourceDefinition;
-				if (Schema.ConnectionPolicy)
-				{
-					EditorGraphPin OutView{ {}, Output.Key, Output.Direction, Output.Type, Output.Cardinality, Output.DefaultValue };
-					EditorGraphPin InView{ {}, Input.Key, Input.Direction, Input.Type, Input.Cardinality, Input.DefaultValue };
-					if (Schema.ConnectionPolicy(Graph, OutView, InView)) continue;
-				}
+				const bool CandidateIsOutput = Pin.Direction == EditorGraphPinDirection::Output;
+				const auto& OutputDefinition = CandidateIsOutput ? Pin : *SourceDefinition;
+				const auto& InputDefinition = CandidateIsOutput ? *SourceDefinition : Pin;
+				std::vector<PulseForge::UUID> RemovedConnectionIDs;
+				if (CandidateIsOutput && SourcePin->Direction == EditorGraphPinDirection::Input)
+					AppendOccupiedInputReplacements(Index, *SourcePinID,
+						SourcePin->Cardinality == EditorGraphPinCardinality::Single, Schema.ReplaceOccupiedInput,
+						RemovedConnectionIDs);
 				if (SourcePin->Cardinality == EditorGraphPinCardinality::Single)
 				{
 					const bool IsOccupied = Index.IncidentCounts.contains(*SourcePinID) && Index.IncidentCounts.at(*SourcePinID) != 0;
 					if (IsOccupied && !(SourcePin->Direction == EditorGraphPinDirection::Input && Schema.ReplaceOccupiedInput)) continue;
+				}
+				if (Graph.Connections.size() - RemovedConnectionIDs.size() >= MaximumConnections) continue;
+				if (Schema.ConnectionPolicy)
+				{
+					EditorGraphConnectionPolicyContext Context;
+					Context.Purpose = EditorGraphConnectionPolicyPurpose::NodeActionDiscovery;
+					Context.Output = CandidateIsOutput
+						? MakeProspectivePolicyEndpoint(Definition, Pin) : MakePolicyEndpoint(Index, *SourcePinID);
+					Context.Input = CandidateIsOutput
+						? MakePolicyEndpoint(Index, *SourcePinID) : MakeProspectivePolicyEndpoint(Definition, Pin);
+					Context.RemovedConnectionIDs = RemovedConnectionIDs;
+					if (Schema.ConnectionPolicy(Graph, Context)) continue;
 				}
 				Actions.push_back({ Definition.TypeKey, Definition.Label, Pin.Key, Pin.Label });
 			}
@@ -1264,11 +1342,9 @@ namespace PulseForgeEditor
 				Graph.Nodes.push_back(std::move(Node));
 				const auto Decision = CanConnectEditorGraphPins(Graph, Schema, SourcePinID, NewPinID);
 				if (!Decision.Allowed) return std::unexpected(Decision.Reason);
-				const EditorGraphPin* InputPin = nullptr;
-				(void)FindNodeForPin(Graph, Decision.InputPin, &InputPin);
-				if (InputPin && InputPin->Cardinality == EditorGraphPinCardinality::Single && Schema.ReplaceOccupiedInput)
-					Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(),
-						[&Decision](const auto& Existing) { return Existing.InputPin == Decision.InputPin; }), Graph.Connections.end());
+				Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(),
+					[&Decision](const auto& Existing) { return IsRemoved(Decision.RemovedConnectionIDs, Existing.ID); }),
+					Graph.Connections.end());
 				Graph.Connections.push_back({ ConnectionID, Decision.OutputPin, Decision.InputPin });
 				return {};
 			}, Error))
@@ -1300,17 +1376,14 @@ namespace PulseForgeEditor
 	std::expected<void, std::string> ConnectEditorGraphPins(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID FirstPin, PulseForge::UUID SecondPin)
 	{
-		const auto Decision = CanConnectEditorGraphPins(History.Graph(), Schema, FirstPin, SecondPin);
-		if (!Decision.Allowed) return std::unexpected(Decision.Reason);
 		auto ID = NewID(); if (!ID) return std::unexpected(ID.error());
 		std::string Error;
-		if (!History.Execute(Schema, [Decision, ConnectionID = *ID](EditorGraph& Graph) -> std::expected<void, std::string>
+		if (!History.Execute(Schema, [&Schema, FirstPin, SecondPin, ConnectionID = *ID](EditorGraph& Graph) -> std::expected<void, std::string>
 		{
-			const EditorGraphPin* TargetPin = nullptr;
-			(void)FindNodeForPin(Graph, Decision.InputPin, &TargetPin);
-			if (TargetPin && TargetPin->Cardinality == EditorGraphPinCardinality::Single)
-				Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(), [&Decision](const auto& Existing)
-					{ return Existing.InputPin == Decision.InputPin; }), Graph.Connections.end());
+			const auto Decision = CanConnectEditorGraphPins(Graph, Schema, FirstPin, SecondPin);
+			if (!Decision.Allowed) return std::unexpected(Decision.Reason);
+			Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(), [&Decision](const auto& Existing)
+				{ return IsRemoved(Decision.RemovedConnectionIDs, Existing.ID); }), Graph.Connections.end());
 			Graph.Connections.push_back({ ConnectionID, Decision.OutputPin, Decision.InputPin });
 			return {};
 		}, Error))
@@ -1355,23 +1428,17 @@ namespace PulseForgeEditor
 	std::expected<void, std::string> ReconnectEditorGraphConnection(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID ConnectionID, PulseForge::UUID FirstPin, PulseForge::UUID SecondPin)
 	{
-		const auto Existing = std::find_if(History.Graph().Connections.begin(), History.Graph().Connections.end(),
-			[ConnectionID](const auto& Item) { return Item.ID == ConnectionID; });
-		if (Existing == History.Graph().Connections.end()) return std::unexpected("The graph connection no longer exists");
-		const auto Decision = CanConnectEditorGraphPins(History.Graph(), Schema, FirstPin, SecondPin, ConnectionID);
-		if (!Decision.Allowed) return std::unexpected(Decision.Reason);
 		std::string Error;
-		if (!History.Execute(Schema, [ConnectionID, Decision](EditorGraph& Graph) -> std::expected<void, std::string>
+		if (!History.Execute(Schema, [&Schema, ConnectionID, FirstPin, SecondPin](EditorGraph& Graph) -> std::expected<void, std::string>
 		{
 			auto It = std::find_if(Graph.Connections.begin(), Graph.Connections.end(), [ConnectionID](const auto& Item) { return Item.ID == ConnectionID; });
 			if (It == Graph.Connections.end()) return std::unexpected("The graph connection changed before reconnection");
-			const EditorGraphPin* TargetPin = nullptr;
-			(void)FindNodeForPin(Graph, Decision.InputPin, &TargetPin);
-			if (TargetPin && TargetPin->Cardinality == EditorGraphPinCardinality::Single)
-				Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(),
-					[ConnectionID, &Decision](const auto& Item) { return Item.ID != ConnectionID && Item.InputPin == Decision.InputPin; }),
-					Graph.Connections.end());
+			const auto Decision = CanConnectEditorGraphPins(Graph, Schema, FirstPin, SecondPin, ConnectionID);
+			if (!Decision.Allowed) return std::unexpected(Decision.Reason);
+			Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(), [&Decision, ConnectionID](const auto& Item)
+				{ return Item.ID != ConnectionID && IsRemoved(Decision.RemovedConnectionIDs, Item.ID); }), Graph.Connections.end());
 			It = std::find_if(Graph.Connections.begin(), Graph.Connections.end(), [ConnectionID](const auto& Item) { return Item.ID == ConnectionID; });
+			if (It == Graph.Connections.end()) return std::unexpected("The connection being reconnected was unexpectedly removed");
 			It->OutputPin = Decision.OutputPin;
 			It->InputPin = Decision.InputPin;
 			return {};

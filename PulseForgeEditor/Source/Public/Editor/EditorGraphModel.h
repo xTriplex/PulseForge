@@ -4,9 +4,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <expected>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +18,9 @@
 
 namespace PulseForgeEditor
 {
+	inline constexpr size_t EditorGraphMaximumNodes = 2048;
+	inline constexpr size_t EditorGraphMaximumConnections = 8192;
+
 	struct EditorGraphVector3
 	{
 		double X = 0.0;
@@ -82,6 +87,7 @@ namespace PulseForgeEditor
 	struct EditorGraph;
 	struct EditorGraphPin;
 	struct EditorGraphDiagnostic;
+	struct EditorGraphConnectionPolicyContext;
 
 	struct EditorGraphSchema
 	{
@@ -91,8 +97,10 @@ namespace PulseForgeEditor
 		EditorGraphCyclePolicy ExecutionCyclePolicy = EditorGraphCyclePolicy::Reject;
 		bool ReplaceOccupiedInput = true;
 		std::vector<EditorGraphNodeDefinition> Nodes;
-		// Optional graph-language policy. It receives immutable graph and endpoint views.
-		std::function<std::optional<std::string>(const EditorGraph&, const EditorGraphPin&, const EditorGraphPin&)>
+		// Policies are read-only and deterministic for the lifetime of a registered schema; mutable
+		// external policy state is unsupported. The context distinguishes live from prospective pins
+		// and lists edges removed before the candidate pair is considered.
+		std::function<std::optional<std::string>(const EditorGraph&, const EditorGraphConnectionPolicyContext&)>
 			ConnectionPolicy;
 		std::function<std::optional<EditorGraphDiagnostic>(const EditorGraph&)> GraphValidationPolicy;
 	};
@@ -160,6 +168,44 @@ namespace PulseForgeEditor
 		friend bool operator==(const EditorGraph&, const EditorGraph&) = default;
 	};
 
+	enum class EditorGraphConnectionPolicyPurpose : uint8_t
+	{
+		ProposedOperation,
+		StoredConnectionValidation,
+		NodeActionDiscovery
+	};
+
+	struct EditorGraphPolicyEndpoint
+	{
+		bool IsProspective = false;
+		std::optional<PulseForge::UUID> PinID;
+		std::optional<PulseForge::UUID> OwnerNodeID;
+		std::string OwnerNodeTypeKey;
+		std::string PinKey;
+		EditorGraphPinDirection Direction = EditorGraphPinDirection::Input;
+		EditorGraphPinType Type = EditorGraphPinType::Float;
+		EditorGraphPinCardinality Cardinality = EditorGraphPinCardinality::Single;
+		EditorGraphValue CurrentValue;
+	};
+
+	struct EditorGraphConnectionPolicyContext
+	{
+		EditorGraphConnectionPolicyPurpose Purpose = EditorGraphConnectionPolicyPurpose::ProposedOperation;
+		EditorGraphPolicyEndpoint Output;
+		EditorGraphPolicyEndpoint Input;
+		// The callback sees the original immutable graph, excludes these IDs, then treats Output and Input
+		// as the proposed pair. StoredConnectionValidation removes the stored edge being checked before
+		// supplying that same pair, so domain rules evaluate the effective result without counting it twice.
+		std::span<const PulseForge::UUID> RemovedConnectionIDs;
+		std::optional<PulseForge::UUID> ProposedConnectionID;
+		bool ProposedConnectionIsStored = false;
+
+		[[nodiscard]] bool RemovesConnection(PulseForge::UUID ConnectionID) const noexcept
+		{
+			return std::find(RemovedConnectionIDs.begin(), RemovedConnectionIDs.end(), ConnectionID) != RemovedConnectionIDs.end();
+		}
+	};
+
 	struct EditorGraphDiagnostic
 	{
 		std::string Code;
@@ -173,6 +219,7 @@ namespace PulseForgeEditor
 		std::string Reason;
 		PulseForge::UUID OutputPin;
 		PulseForge::UUID InputPin;
+		std::vector<PulseForge::UUID> RemovedConnectionIDs;
 	};
 
 	struct EditorGraphNodeCreationAction

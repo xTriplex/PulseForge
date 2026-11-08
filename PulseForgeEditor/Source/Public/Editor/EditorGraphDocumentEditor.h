@@ -369,6 +369,8 @@ namespace PulseForgeEditor
 			std::function<void()> PresentationChanged = {});
 
 		[[nodiscard]] std::expected<void, std::string> Register();
+		// Schemas are registered before Register() and remain immutable for all document sessions.
+		// Per-session action-discovery caches therefore key catalog state by stable schema key/version.
 		[[nodiscard]] std::expected<void, std::string> RegisterSchema(EditorGraphSchema Schema);
 		[[nodiscard]] std::expected<EditorGraphFixtureLocation, std::string> CreateFixture(
 			const std::filesystem::path& ProjectRoot, EditorGraphFixtureKind Kind) const;

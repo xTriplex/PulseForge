@@ -89,6 +89,10 @@ namespace
 		std::optional<PulseForge::UUID> SourcePin;
 		EditorGraphVector3 Placement;
 		uint64_t DiscoveryRevision = 0;
+		PulseForge::UUID DiscoveryGraphID;
+		std::optional<PulseForge::UUID> DiscoverySourcePin;
+		std::string DiscoverySchemaKey;
+		uint32_t DiscoverySchemaVersion = 0;
 		std::vector<EditorGraphNodeCreationAction> Actions;
 		std::array<char, 256> Search{};
 		int SelectedResult = 0;
@@ -1824,11 +1828,19 @@ namespace PulseForgeEditor
 					if (SearchChanged) State->NodeSearch.SelectedResult = 0;
 					State->NodeSearch.FocusSearch = false;
 
-					if (State->NodeSearch.DiscoveryRevision != State->History.GraphRevision())
+					if (State->NodeSearch.DiscoveryRevision != State->History.GraphRevision() ||
+						State->NodeSearch.DiscoveryGraphID != State->History.Graph().ID ||
+						State->NodeSearch.DiscoverySourcePin != State->NodeSearch.SourcePin ||
+						State->NodeSearch.DiscoverySchemaKey != State->Schema.Key ||
+						State->NodeSearch.DiscoverySchemaVersion != State->Schema.Version)
 					{
 						State->NodeSearch.Actions = DiscoverEditorGraphNodeActions(State->History.Graph(), State->Schema,
 							State->NodeSearch.SourcePin);
 						State->NodeSearch.DiscoveryRevision = State->History.GraphRevision();
+						State->NodeSearch.DiscoveryGraphID = State->History.Graph().ID;
+						State->NodeSearch.DiscoverySourcePin = State->NodeSearch.SourcePin;
+						State->NodeSearch.DiscoverySchemaKey = State->Schema.Key;
+						State->NodeSearch.DiscoverySchemaVersion = State->Schema.Version;
 					}
 					const auto& Actions = State->NodeSearch.Actions;
 					const auto Matches = SearchEditorGraphNodeActions(Actions, State->NodeSearch.Search.data());
@@ -1842,7 +1854,12 @@ namespace PulseForgeEditor
 
 					std::optional<EditorGraphNodeCreationAction> ChosenAction;
 					if (Navigation.ActivateResult) ChosenAction = Matches[*Navigation.ActivateResult];
-					if (Actions.empty() && State->NodeSearch.SourcePin)
+					if (Actions.empty() && State->History.Graph().Nodes.size() >= EditorGraphMaximumNodes)
+						ImGui::TextDisabled("Graph has reached its node limit");
+					else if (Actions.empty() && State->NodeSearch.SourcePin &&
+						State->History.Graph().Connections.size() >= EditorGraphMaximumConnections)
+						ImGui::TextDisabled("Graph has reached its connection limit");
+					else if (Actions.empty() && State->NodeSearch.SourcePin)
 						ImGui::TextDisabled("No compatible nodes");
 					else if (Matches.empty())
 						ImGui::TextDisabled("No matching nodes");

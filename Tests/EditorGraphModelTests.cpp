@@ -967,14 +967,15 @@ namespace
 		// a schema policy decision.
 		EditorGraphSchema ContextActionSchema = ChainSchema;
 		ContextActionSchema.Key = "test.context-actions";
-		ContextActionSchema.ConnectionPolicy = [](const EditorGraph& Graph, const EditorGraphPin& Output,
-			const EditorGraphPin& Input)
+		ContextActionSchema.ConnectionPolicy = [](const EditorGraph& Graph, const EditorGraphConnectionPolicyContext& Context)
 			-> std::optional<std::string>
 			{
-				if (std::any_of(Graph.Connections.begin(), Graph.Connections.end(), [&Output, &Input](const auto& Connection)
-					{ return Connection.OutputPin == Output.ID && Connection.InputPin == Input.ID; })) return std::nullopt;
-				return Graph.Connections.empty() ? std::nullopt
-					: std::optional<std::string>("No additional links in this context");
+				if (std::any_of(Graph.Connections.begin(), Graph.Connections.end(), [&Context](const auto& Connection)
+					{ return !Context.RemovesConnection(Connection.ID) && Context.Output.PinID == Connection.OutputPin &&
+						Context.Input.PinID == Connection.InputPin; })) return std::nullopt;
+				return std::any_of(Graph.Connections.begin(), Graph.Connections.end(), [&Context](const auto& Connection)
+					{ return !Context.RemovesConnection(Connection.ID); })
+					? std::optional<std::string>("No additional links in this context") : std::nullopt;
 			};
 		auto ContextGraph = CreateEditorGraph(ContextActionSchema, ID(0xabd));
 		PF_CHECK(Tests, ContextGraph && AppendNode(*ContextGraph, ContextActionSchema, "test.step", 0.0) &&
@@ -1023,6 +1024,10 @@ namespace
 		const auto InputA = History.Graph().Nodes[1].Pins[0].ID;
 		const auto InputB = History.Graph().Nodes[2].Pins[0].ID;
 		PF_CHECK(Tests, ConnectEditorGraphPins(History, SingleOutputSchema, SourcePin, InputA).has_value());
+		PF_CHECK(Tests, !CanConnectEditorGraphPins(History.Graph(), SingleOutputSchema, SourcePin, InputA).Allowed);
+		const auto BeforeDuplicateConnect = History.Graph();
+		PF_CHECK(Tests, !ConnectEditorGraphPins(History, SingleOutputSchema, SourcePin, InputA));
+		PF_CHECK(Tests, History.Graph() == BeforeDuplicateConnect);
 		const EditorGraph BeforeRejected = History.Graph();
 		PF_CHECK(Tests, !CanConnectEditorGraphPins(History.Graph(), SingleOutputSchema, SourcePin, InputB).Allowed);
 		PF_CHECK(Tests, !ConnectEditorGraphPins(History, SingleOutputSchema, SourcePin, InputB));
@@ -1053,6 +1058,256 @@ namespace
 			}
 		}
 	}
+
+	void TestConnectionPolicyContextsAndCapacity(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const auto FloatPin = [](std::string Key, EditorGraphPinDirection Direction,
+			EditorGraphPinCardinality Cardinality = EditorGraphPinCardinality::Single)
+		{
+			return EditorGraphPinDefinition{ std::move(Key), "Value", Direction, EditorGraphPinType::Float,
+				Cardinality, 0.0 };
+		};
+		EditorGraphSchema ContextSchema{ "test.policy-context", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, {
+				{ "test.live-output", "Live output", { FloatPin("shared", EditorGraphPinDirection::Output,
+					EditorGraphPinCardinality::Multiple) } },
+				{ "test.live-input", "Live input", { FloatPin("shared", EditorGraphPinDirection::Input) } },
+				{ "test.allowed-target", "Allowed target", { FloatPin("shared", EditorGraphPinDirection::Input) } },
+				{ "test.denied-target", "Denied target", { FloatPin("shared", EditorGraphPinDirection::Input) } },
+				{ "test.allowed-source", "Allowed source", { FloatPin("shared", EditorGraphPinDirection::Output,
+					EditorGraphPinCardinality::Multiple) } },
+				{ "test.denied-source", "Denied source", { FloatPin("shared", EditorGraphPinDirection::Output,
+					EditorGraphPinCardinality::Multiple) } }
+			} };
+		ContextSchema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
+			-> std::optional<std::string>
+		{
+			if ((Context.Output.IsProspective && Context.Output.OwnerNodeTypeKey != "test.allowed-source") ||
+				Context.Output.OwnerNodeTypeKey == "test.denied-source")
+				return "Only the registered source node is permitted";
+			if ((Context.Input.IsProspective && Context.Input.OwnerNodeTypeKey != "test.allowed-target") ||
+				Context.Input.OwnerNodeTypeKey == "test.denied-target")
+				return "Only the registered target node is permitted";
+			const auto IsOutOfRange = [](const EditorGraphPolicyEndpoint& Endpoint)
+				{ return !Endpoint.IsProspective && std::holds_alternative<double>(Endpoint.CurrentValue) &&
+					std::get<double>(Endpoint.CurrentValue) > 3.0; };
+			if (IsOutOfRange(Context.Output) || IsOutOfRange(Context.Input))
+				return "The live endpoint value exceeds the domain range";
+			return std::nullopt;
+		};
+		auto ContextGraph = CreateEditorGraph(ContextSchema, ID(0xc01));
+		PF_CHECK(Tests, ContextGraph && AppendNode(*ContextGraph, ContextSchema, "test.live-output", 0.0) &&
+			AppendNode(*ContextGraph, ContextSchema, "test.live-input", 100.0) &&
+			AppendNode(*ContextGraph, ContextSchema, "test.allowed-target", 200.0) &&
+			AppendNode(*ContextGraph, ContextSchema, "test.denied-target", 300.0) &&
+			AppendNode(*ContextGraph, ContextSchema, "test.allowed-source", 400.0) &&
+			AppendNode(*ContextGraph, ContextSchema, "test.denied-source", 500.0));
+		if (!ContextGraph) return;
+		ContextGraph->Nodes[0].Pins[0].DefaultValue = 2.5;
+		ContextGraph->Nodes[1].Pins[0].DefaultValue = 2.5;
+		const auto LiveOutputID = ContextGraph->Nodes[0].Pins[0].ID;
+		const auto LiveInputID = ContextGraph->Nodes[1].Pins[0].ID;
+		const auto TargetActions = DiscoverEditorGraphNodeActions(*ContextGraph, ContextSchema, LiveOutputID);
+		PF_CHECK(Tests, TargetActions.size() == 1 && TargetActions.front().NodeTypeKey == "test.allowed-target" &&
+			TargetActions.front().ConnectPinKey == "shared");
+		const auto SourceActions = DiscoverEditorGraphNodeActions(*ContextGraph, ContextSchema, LiveInputID);
+		PF_CHECK(Tests, SourceActions.size() == 1 && SourceActions.front().NodeTypeKey == "test.allowed-source");
+		EditorGraphCommandHistory ContextHistory(*ContextGraph);
+		auto CreatedTarget = CreateEditorGraphNodeAndConnect(ContextHistory, ContextSchema,
+			"test.allowed-target", "shared", LiveOutputID, 700.0, 50.0);
+		PF_CHECK(Tests, CreatedTarget && ValidateEditorGraph(ContextHistory.Graph(), ContextSchema).empty());
+		if (CreatedTarget) PF_CHECK(Tests, ContextHistory.Graph().Connections.back().OutputPin == LiveOutputID);
+		const auto BeforeForbiddenCreation = ContextHistory.Graph();
+		const auto BeforeForbiddenRevision = ContextHistory.GraphRevision();
+		const bool BeforeForbiddenUndo = ContextHistory.CanUndo();
+		PF_CHECK(Tests, !CreateEditorGraphNodeAndConnect(ContextHistory, ContextSchema,
+			"test.denied-target", "shared", LiveOutputID, 800.0, 50.0));
+		PF_CHECK(Tests, ContextHistory.Graph() == BeforeForbiddenCreation &&
+			ContextHistory.GraphRevision() == BeforeForbiddenRevision && ContextHistory.CanUndo() == BeforeForbiddenUndo);
+		const auto LiveSourceNodeID = ContextHistory.Graph().Nodes.front().ID;
+		PF_CHECK(Tests, DeleteEditorGraphNodes(ContextHistory, ContextSchema, { LiveSourceNodeID }));
+		PF_CHECK(Tests, DiscoverEditorGraphNodeActions(ContextHistory.Graph(), ContextSchema, LiveOutputID).empty());
+		auto CreatedSource = CreateEditorGraphNodeAndConnect(ContextHistory, ContextSchema,
+			"test.allowed-source", "shared", LiveInputID, 900.0, 50.0);
+		PF_CHECK(Tests, CreatedSource && ValidateEditorGraph(ContextHistory.Graph(), ContextSchema).empty());
+		if (CreatedSource)
+		{
+			const auto NewOutput = std::find_if(ContextHistory.Graph().Nodes.begin(), ContextHistory.Graph().Nodes.end(),
+				[&CreatedSource](const auto& Node) { return Node.ID == CreatedSource->NodeID; });
+			PF_CHECK(Tests, NewOutput != ContextHistory.Graph().Nodes.end() &&
+				ContextHistory.Graph().Connections.back().InputPin == LiveInputID);
+		}
+		auto OutOfRangeGraph = *ContextGraph;
+		OutOfRangeGraph.Nodes[0].Pins[0].DefaultValue = 4.0;
+		PF_CHECK(Tests, DiscoverEditorGraphNodeActions(OutOfRangeGraph, ContextSchema, LiveOutputID).empty());
+		EditorGraphCommandHistory OutOfRangeHistory(OutOfRangeGraph);
+		const auto OutOfRangeBefore = OutOfRangeHistory.Graph();
+		PF_CHECK(Tests, !CreateEditorGraphNodeAndConnect(OutOfRangeHistory, ContextSchema,
+			"test.allowed-target", "shared", LiveOutputID, 600.0, 40.0));
+		PF_CHECK(Tests, OutOfRangeHistory.Graph() == OutOfRangeBefore && !OutOfRangeHistory.CanUndo());
+
+		EditorGraphSchema ReplacementSchema{ "test.policy-replacement", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, {
+				{ "test.source", "Source", { FloatPin("out", EditorGraphPinDirection::Output,
+					EditorGraphPinCardinality::Multiple) } },
+				{ "test.sink", "Sink", { FloatPin("a", EditorGraphPinDirection::Input),
+					FloatPin("b", EditorGraphPinDirection::Input) } }
+			} };
+		ReplacementSchema.ConnectionPolicy = [](const EditorGraph& Graph, const EditorGraphConnectionPolicyContext& Context)
+			-> std::optional<std::string>
+		{
+			if (!Context.Input.OwnerNodeID) return std::nullopt;
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> ConnectedInputs;
+			for (const auto& Connection : Graph.Connections)
+			{
+				if (Context.RemovesConnection(Connection.ID)) continue;
+				for (const auto& Node : Graph.Nodes)
+					for (const auto& Pin : Node.Pins)
+						if (Pin.ID == Connection.InputPin && Node.ID == *Context.Input.OwnerNodeID)
+							ConnectedInputs.insert(Pin.ID);
+			}
+			if (!Context.Input.IsProspective && Context.Input.PinID)
+				ConnectedInputs.insert(*Context.Input.PinID);
+			return ConnectedInputs.size() > 1
+				? std::optional<std::string>("Only one input on a node may be connected") : std::nullopt;
+		};
+		auto ReplacementGraph = CreateEditorGraph(ReplacementSchema, ID(0xc02));
+		PF_CHECK(Tests, ReplacementGraph && AppendNode(*ReplacementGraph, ReplacementSchema, "test.source", 0.0) &&
+			AppendNode(*ReplacementGraph, ReplacementSchema, "test.source", 100.0) &&
+			AppendNode(*ReplacementGraph, ReplacementSchema, "test.sink", 200.0) &&
+			AppendNode(*ReplacementGraph, ReplacementSchema, "test.sink", 300.0));
+		if (ReplacementGraph)
+		{
+			EditorGraphCommandHistory ReplacementHistory(*ReplacementGraph);
+			const auto SourceA = ReplacementHistory.Graph().Nodes[0].Pins[0].ID;
+			const auto SourceB = ReplacementHistory.Graph().Nodes[1].Pins[0].ID;
+			const auto InputA = ReplacementHistory.Graph().Nodes[2].Pins[0].ID;
+			const auto InputB = ReplacementHistory.Graph().Nodes[2].Pins[1].ID;
+			const auto InputC = ReplacementHistory.Graph().Nodes[3].Pins[0].ID;
+			const auto StalePreview = CanConnectEditorGraphPins(ReplacementHistory.Graph(), ReplacementSchema, SourceB, InputB);
+			PF_CHECK(Tests, StalePreview.Allowed);
+			PF_CHECK(Tests, ConnectEditorGraphPins(ReplacementHistory, ReplacementSchema, SourceA, InputA));
+			const auto AfterFirstConnection = ReplacementHistory.Graph();
+			const auto AfterFirstRevision = ReplacementHistory.GraphRevision();
+			const bool AfterFirstUndo = ReplacementHistory.CanUndo();
+			PF_CHECK(Tests, !ConnectEditorGraphPins(ReplacementHistory, ReplacementSchema, SourceB, InputB));
+			PF_CHECK(Tests, ReplacementHistory.Graph() == AfterFirstConnection &&
+				ReplacementHistory.GraphRevision() == AfterFirstRevision && ReplacementHistory.CanUndo() == AfterFirstUndo);
+			const auto StableConnectionID = ReplacementHistory.Graph().Connections.front().ID;
+			const auto ReconnectDecision = CanConnectEditorGraphPins(ReplacementHistory.Graph(), ReplacementSchema,
+				SourceA, InputB, StableConnectionID);
+			PF_CHECK(Tests, ReconnectDecision.Allowed && ReconnectDecision.RemovedConnectionIDs.size() == 1 &&
+				ReconnectDecision.RemovedConnectionIDs.front() == StableConnectionID);
+			PF_CHECK(Tests, ReconnectEditorGraphConnection(ReplacementHistory, ReplacementSchema,
+				StableConnectionID, SourceA, InputB));
+			PF_CHECK(Tests, ReplacementHistory.Graph().Connections.size() == 1 &&
+				ReplacementHistory.Graph().Connections.front().ID == StableConnectionID &&
+				ReplacementHistory.Graph().Connections.front().InputPin == InputB &&
+				ValidateEditorGraph(ReplacementHistory.Graph(), ReplacementSchema).empty());
+			const auto BeforeExtra = ReplacementHistory.Graph();
+			PF_CHECK(Tests, !ConnectEditorGraphPins(ReplacementHistory, ReplacementSchema, SourceB, InputA));
+			PF_CHECK(Tests, ReplacementHistory.Graph() == BeforeExtra);
+			PF_CHECK(Tests, ReplacementHistory.Undo() && ReplacementHistory.Graph().Connections.front().InputPin == InputA);
+			PF_CHECK(Tests, ReplacementHistory.Redo() && ReplacementHistory.Graph().Connections.front().InputPin == InputB &&
+				ReplacementHistory.Graph().Connections.front().ID == StableConnectionID);
+
+			const auto SourceCNode = CreateEditorGraphNode(ReplacementSchema, "test.source", 300.0, 0.0);
+			PF_CHECK(Tests, SourceCNode.has_value());
+			if (SourceCNode)
+			{
+				const auto SourceC = SourceCNode->Pins.front().ID;
+				std::string AddError;
+				PF_CHECK(Tests, ReplacementHistory.Execute(ReplacementSchema,
+					[Node = *SourceCNode](EditorGraph& Graph) mutable -> std::expected<void, std::string>
+					{ Graph.Nodes.push_back(std::move(Node)); return {}; }, AddError));
+				PF_CHECK(Tests, ConnectEditorGraphPins(ReplacementHistory, ReplacementSchema, SourceB, InputC));
+				const auto ReplacedID = std::find_if(ReplacementHistory.Graph().Connections.begin(),
+					ReplacementHistory.Graph().Connections.end(), [InputC](const auto& Connection) { return Connection.InputPin == InputC; })->ID;
+				const auto ReplacingDecision = CanConnectEditorGraphPins(ReplacementHistory.Graph(), ReplacementSchema,
+					SourceC, InputC);
+				PF_CHECK(Tests, ReplacingDecision.Allowed && ReplacingDecision.RemovedConnectionIDs.size() == 1 &&
+					ReplacingDecision.RemovedConnectionIDs.front() == ReplacedID);
+				PF_CHECK(Tests, ConnectEditorGraphPins(ReplacementHistory, ReplacementSchema, SourceC, InputC));
+				PF_CHECK(Tests, ReplacementHistory.Graph().Connections.size() == 2 &&
+					std::none_of(ReplacementHistory.Graph().Connections.begin(), ReplacementHistory.Graph().Connections.end(),
+						[ReplacedID](const auto& Connection) { return Connection.ID == ReplacedID; }));
+			}
+			ReplacementSchema.ReplaceOccupiedInput = false;
+			PF_CHECK(Tests, !CanConnectEditorGraphPins(ReplacementHistory.Graph(), ReplacementSchema, SourceA, InputC).Allowed);
+		}
+
+		EditorGraphSchema ConnectionLimitSchema{ "test.connection-capacity", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, {
+				{ "test.many-outputs", "Many outputs", [&FloatPin]()
+					{ std::vector<EditorGraphPinDefinition> Pins; for (size_t I = 0; I < 64; ++I)
+						Pins.push_back(FloatPin("out-" + std::to_string(I), EditorGraphPinDirection::Output,
+							EditorGraphPinCardinality::Multiple)); return Pins; }() },
+				{ "test.many-inputs", "Many inputs", [&FloatPin]()
+					{ std::vector<EditorGraphPinDefinition> Pins; for (size_t I = 0; I < 64; ++I)
+						Pins.push_back(FloatPin("in-" + std::to_string(I), EditorGraphPinDirection::Input,
+							EditorGraphPinCardinality::Single)); return Pins; }() }
+			} };
+		auto AtConnectionLimit = CreateEditorGraph(ConnectionLimitSchema, ID(0xc04));
+		PF_CHECK(Tests, AtConnectionLimit.has_value());
+		if (AtConnectionLimit)
+		{
+			for (size_t NodeIndex = 0; NodeIndex < 256; ++NodeIndex)
+			{
+				auto Node = CreateEditorGraphNode(ConnectionLimitSchema,
+					NodeIndex < 128 ? "test.many-outputs" : "test.many-inputs", static_cast<double>(NodeIndex), 0.0);
+				PF_CHECK(Tests, Node.has_value());
+				if (Node) AtConnectionLimit->Nodes.push_back(std::move(*Node));
+			}
+			if (AtConnectionLimit->Nodes.size() == 256)
+			{
+				for (size_t OutputNode = 0; OutputNode < 128; ++OutputNode)
+					for (size_t PinIndex = 0; PinIndex < 64; ++PinIndex)
+						AtConnectionLimit->Connections.push_back({ ID(0xd00000 + OutputNode * 64 + PinIndex),
+							AtConnectionLimit->Nodes[OutputNode].Pins[PinIndex].ID,
+							AtConnectionLimit->Nodes[128 + OutputNode].Pins[PinIndex].ID });
+				PF_CHECK(Tests, AtConnectionLimit->Connections.size() == EditorGraphMaximumConnections &&
+					ValidateEditorGraph(*AtConnectionLimit, ConnectionLimitSchema).empty());
+				const PulseForge::UUID ExistingInput = AtConnectionLimit->Nodes[128].Pins[0].ID;
+				const PulseForge::UUID ExistingOutput = AtConnectionLimit->Nodes[0].Pins[0].ID;
+				PF_CHECK(Tests, DiscoverEditorGraphNodeActions(*AtConnectionLimit, ConnectionLimitSchema, ExistingOutput).empty());
+				auto OneBelow = *AtConnectionLimit;
+				OneBelow.Connections.pop_back();
+				PF_CHECK(Tests, !DiscoverEditorGraphNodeActions(OneBelow, ConnectionLimitSchema, ExistingOutput).empty());
+				const auto InputOriginActions = DiscoverEditorGraphNodeActions(*AtConnectionLimit,
+					ConnectionLimitSchema, ExistingInput);
+				PF_CHECK(Tests, !InputOriginActions.empty());
+				EditorGraphCommandHistory CapacityHistory(*AtConnectionLimit);
+				const auto ExistingConnectionID = CapacityHistory.Graph().Connections.front().ID;
+				auto Replacement = CreateEditorGraphNodeAndConnect(CapacityHistory, ConnectionLimitSchema,
+					"test.many-outputs", "out-0", ExistingInput, 3000.0, 0.0);
+				PF_CHECK(Tests, Replacement && CapacityHistory.Graph().Connections.size() == EditorGraphMaximumConnections &&
+					std::none_of(CapacityHistory.Graph().Connections.begin(), CapacityHistory.Graph().Connections.end(),
+						[ExistingConnectionID](const auto& Connection) { return Connection.ID == ExistingConnectionID; }));
+			}
+		}
+
+		EditorGraphSchema NodeLimitSchema{ "test.node-capacity", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, { { "test.empty", "Empty", {} } } };
+		auto AtNodeLimit = CreateEditorGraph(NodeLimitSchema, ID(0xc03));
+		PF_CHECK(Tests, AtNodeLimit.has_value());
+		if (AtNodeLimit)
+		{
+			AtNodeLimit->Nodes.reserve(EditorGraphMaximumNodes);
+			for (size_t Index = 0; Index < EditorGraphMaximumNodes; ++Index)
+			{
+				auto Node = CreateEditorGraphNode(NodeLimitSchema, "test.empty", static_cast<double>(Index), 0.0);
+				if (!Node) { PF_CHECK(Tests, false); return; }
+				AtNodeLimit->Nodes.push_back(std::move(*Node));
+			}
+			PF_CHECK(Tests, DiscoverEditorGraphNodeActions(*AtNodeLimit, NodeLimitSchema).empty());
+			EditorGraphCommandHistory FullNodeHistory(*AtNodeLimit);
+			PF_CHECK(Tests, !AddEditorGraphNode(FullNodeHistory, NodeLimitSchema, "test.empty", 0.0, 0.0) &&
+				FullNodeHistory.Graph().Nodes.size() == EditorGraphMaximumNodes && !FullNodeHistory.CanUndo());
+			AtNodeLimit->Nodes.pop_back();
+			PF_CHECK(Tests, DiscoverEditorGraphNodeActions(*AtNodeLimit, NodeLimitSchema).size() == 1);
+		}
+	}
 }
 
 void RunEditorGraphModelTests(TestRunner& Tests)
@@ -1064,6 +1319,7 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 	TestNodeActionDiscoverySearchAndAtomicAutowire(Tests);
 	TestMixedTypeCyclePolicies(Tests);
 	TestIndexedTraversalAndEndpointInvariants(Tests);
+	TestConnectionPolicyContextsAndCapacity(Tests);
 	{
 		using namespace PulseForgeEditor;
 		EditorGraphPinDefinition Definition{ "socket", "Socket", EditorGraphPinDirection::Input,
