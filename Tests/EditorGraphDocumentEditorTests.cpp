@@ -8,9 +8,11 @@
 #include "../PulseForge/Vendor/imgui-node-editor/imgui_node_editor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <unordered_map>
+#include <utility>
 
 namespace PulseForgeEditor
 {
@@ -423,6 +425,101 @@ namespace
 		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.size() == 1);
 	}
 
+	void TestGraphCanvasNodeCreationRequestPolling(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		int BeginCalls = 0;
+		int EndCalls = 0;
+		int LinkQueries = 0;
+		int NodeQueries = 0;
+		int LinkAccepts = 0;
+		int LinkRejects = 0;
+		int NodeAccepts = 0;
+		int NodeRejects = 0;
+		bool LinkPending = false;
+		bool NodePending = false;
+		bool SourceAvailable = true;
+		const auto Frame = [&](bool Active)
+		{
+			return GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
+				[&] { ++BeginCalls; return Active; },
+				[&] { ++EndCalls; },
+				[&]() -> std::optional<EditorGraphCanvasLinkRequest>
+				{
+					++LinkQueries;
+					if (!std::exchange(LinkPending, false)) return std::nullopt;
+					return EditorGraphCanvasLinkRequest{ 1, 2 };
+				},
+				[](const EditorGraphCanvasLinkRequest&) { return EditorGraphConnectionDecision{ false,
+					"incompatible", {}, {} }; },
+				[&] { ++LinkAccepts; return true; },
+				[&] { ++LinkRejects; },
+				[&]() -> std::optional<uintptr_t>
+				{
+					++NodeQueries;
+					if (!std::exchange(NodePending, false)) return std::nullopt;
+					return 77;
+				},
+				[&](uintptr_t Source) { return Source == 77 && SourceAvailable; },
+				[&] { ++NodeAccepts; return false; },
+				[&] { ++NodeRejects; });
+		};
+
+		const auto Empty = Frame(true);
+		PF_CHECK(Tests, !Empty.SawLinkRequest && !Empty.SawNodeRequest && LinkQueries == 1 && NodeQueries == 1);
+		NodePending = true;
+		const auto Preview = Frame(true);
+		PF_CHECK(Tests, Preview.SawNodeRequest && !Preview.AcceptedNode && Preview.SourcePin == 77 && NodeAccepts == 1);
+		PF_CHECK(Tests, EndCalls == 2 && LinkQueries == 2 && NodeQueries == 2);
+		SourceAvailable = false;
+		NodePending = true;
+		const auto InvalidSource = Frame(true);
+		PF_CHECK(Tests, InvalidSource.SawNodeRequest && !InvalidSource.AcceptedNode && NodeRejects == 1);
+		SourceAvailable = true;
+		NodePending = true;
+		const auto Accepted = GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
+			[&] { ++BeginCalls; return true; }, [&] { ++EndCalls; },
+			[]() -> std::optional<EditorGraphCanvasLinkRequest> { return std::nullopt; },
+			[](const auto&) { return EditorGraphConnectionDecision{}; },
+			[] { return false; }, [] {},
+			[&]() -> std::optional<uintptr_t> { ++NodeQueries; return std::exchange(NodePending, false) ? std::optional<uintptr_t>{77} : std::nullopt; },
+			[&](uintptr_t Source) { return Source == 77 && SourceAvailable; },
+			[&] { ++NodeAccepts; return true; }, [&] { ++NodeRejects; });
+		PF_CHECK(Tests, Accepted.SawNodeRequest && Accepted.AcceptedNode && Accepted.SourcePin == 77 &&
+			NodeAccepts == 2 && EndCalls == 4);
+		const int AcceptedBeforeEmptyFrames = NodeAccepts;
+		PF_CHECK(Tests, !Frame(true).SawNodeRequest && NodeAccepts == AcceptedBeforeEmptyFrames);
+		LinkPending = true;
+		const auto RejectedLink = Frame(true);
+		PF_CHECK(Tests, RejectedLink.SawLinkRequest && !RejectedLink.LinkDecision.Allowed &&
+			LinkRejects == 1 && !RejectedLink.SawNodeRequest);
+		NodePending = true;
+		const auto Cancelled = Frame(false);
+		PF_CHECK(Tests, !Cancelled.SawNodeRequest && NodeRejects == 1 && EndCalls == BeginCalls);
+		NodePending = true;
+		const auto Fresh = Frame(true);
+		PF_CHECK(Tests, Fresh.SawNodeRequest && !Fresh.AcceptedNode && NodeAccepts == 3 && EndCalls == BeginCalls);
+		PF_CHECK(Tests, LinkAccepts == 0 && BeginCalls == 8);
+	}
+
+	void TestGraphNodeSearchNavigation(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor::GraphCanvasDetail;
+		const auto Wrapped = ResolveNodeSearchNavigation({ 3, 2, false, false, true, false, false });
+		PF_CHECK(Tests, Wrapped.SelectedResult == 0 && !Wrapped.ActivateResult && !Wrapped.Cancelled);
+		const auto Filtered = ResolveNodeSearchNavigation({ 1, 2, true, false, false, true, false });
+		PF_CHECK(Tests, Filtered.SelectedResult == 0 && Filtered.ActivateResult == 0);
+		const auto EmptyEnter = ResolveNodeSearchNavigation({ 0, 1, false, false, false, true, false });
+		PF_CHECK(Tests, EmptyEnter.SelectedResult == 0 && !EmptyEnter.ActivateResult && !EmptyEnter.Cancelled);
+		const auto Cancel = ResolveNodeSearchNavigation({ 2, 1, false, false, false, true, true });
+		PF_CHECK(Tests, Cancel.Cancelled && !Cancel.ActivateResult);
+		const auto CancelEmpty = ResolveNodeSearchNavigation({ 0, 0, false, false, false, true, true });
+		PF_CHECK(Tests, CancelEmpty.Cancelled && !CancelEmpty.ActivateResult);
+		const auto FreshResults = ResolveNodeSearchNavigation({ 2, 0, false, false, false, true, false });
+		PF_CHECK(Tests, FreshResults.ActivateResult == 0 && !FreshResults.Cancelled);
+	}
+
 	void TestAltPinUnlinkInputOwnership(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
@@ -534,21 +631,32 @@ namespace
 		bool NeedsNodePositions = true;
 		int QueryCalls = 0;
 		int QueriesThisFrame = 0;
+		int NodeQueryCalls = 0;
+		int NodeQueriesThisFrame = 0;
 		int PreviewFrames = 0;
 		int RejectedFrames = 0;
 		int AcceptedRequests = 0;
+		int AcceptedNodeRequests = 0;
+		int BackgroundMenuRequests = 0;
 		int UnlinkRequests = 0;
 		uintptr_t LastHoveredPin = 0;
+		std::optional<EditorGraphVector3> AcceptedNodeDrop;
 		const auto Frame = [&](std::optional<ImVec2> MousePosition = std::nullopt,
 			std::optional<bool> LeftDown = std::nullopt, bool PressEscape = false,
-			std::optional<bool> AltDown = std::nullopt)
+			std::optional<bool> AltDown = std::nullopt, std::optional<bool> RightDown = std::nullopt)
 		{
 			QueriesThisFrame = 0;
+			NodeQueriesThisFrame = 0;
 			if (MousePosition) IO.AddMousePosEvent(MousePosition->x, MousePosition->y);
 			if (LeftDown)
 			{
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, *LeftDown);
 				IO.MouseDown[ImGuiMouseButton_Left] = *LeftDown;
+			}
+			if (RightDown)
+			{
+				IO.AddMouseButtonEvent(ImGuiMouseButton_Right, *RightDown);
+				IO.MouseDown[ImGuiMouseButton_Right] = *RightDown;
 			}
 			if (PressEscape) IO.AddKeyEvent(ImGuiKey_Escape, true);
 			if (AltDown) IO.AddKeyEvent(static_cast<ImGuiKey>(ImGuiMod_Alt), *AltDown);
@@ -594,7 +702,7 @@ namespace
 			DrawPinNode(2, 22, NodeEditor::PinKind::Input, "Multiply", 360.0f);
 			DrawPinNode(3, 33, NodeEditor::PinKind::Input, "Output", 640.0f);
 
-			const auto Result = PulseForgeEditor::GraphCanvasDetail::ProcessEditorGraphCanvasLinkRequestFrame(
+			const auto Result = PulseForgeEditor::GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
 				[] { return NodeEditor::BeginCreate(); },
 				[] { NodeEditor::EndCreate(); },
 				[&]() -> std::optional<EditorGraphCanvasLinkRequest>
@@ -615,16 +723,43 @@ namespace
 					return CanConnectEditorGraphPins(History.Graph(), Schema, Start->second, End->second);
 				},
 				[] { return NodeEditor::AcceptNewItem(); },
+				[] { NodeEditor::RejectNewItem(); },
+				[&]() -> std::optional<uintptr_t>
+				{
+					++NodeQueryCalls;
+					++NodeQueriesThisFrame;
+					NodeEditor::PinId SourcePin;
+					if (!NodeEditor::QueryNewNode(&SourcePin)) return std::nullopt;
+					return SourcePin.Get();
+				},
+				[&](uintptr_t SourceHandle) { return Identities.contains(SourceHandle); },
+				[] { return NodeEditor::AcceptNewItem(); },
 				[] { NodeEditor::RejectNewItem(); });
 			PF_CHECK(Tests, QueriesThisFrame <= 1);
-			if (Result.SawRequest && Result.Decision.Allowed && !Result.Accepted) ++PreviewFrames;
-			if (Result.SawRequest && !Result.Decision.Allowed) ++RejectedFrames;
-			if (Result.Accepted)
+			PF_CHECK(Tests, NodeQueriesThisFrame <= 1);
+			if (Result.SawLinkRequest && Result.LinkDecision.Allowed && !Result.AcceptedLink) ++PreviewFrames;
+			if (Result.SawLinkRequest && !Result.LinkDecision.Allowed) ++RejectedFrames;
+			if (Result.AcceptedLink)
 			{
 				++AcceptedRequests;
 				(void)PulseForgeEditor::ConnectEditorGraphPins(
-					History, Schema, Result.Decision.OutputPin, Result.Decision.InputPin);
+					History, Schema, Result.LinkDecision.OutputPin, Result.LinkDecision.InputPin);
 			}
+			if (Result.SawNodeRequest && Result.AcceptedNode)
+			{
+				++AcceptedNodeRequests;
+				const auto Source = Identities.find(Result.SourcePin);
+				PF_CHECK(Tests, Source != Identities.end());
+				if (Source != Identities.end())
+				{
+					const ImVec2 Drop = NodeEditor::ScreenToCanvas(IO.MousePos);
+					PF_CHECK(Tests, std::isfinite(Drop.x) && std::isfinite(Drop.y));
+					AcceptedNodeDrop = EditorGraphVector3{ Drop.x, Drop.y, 0.0 };
+				}
+			}
+			NodeEditor::Suspend();
+			const bool BackgroundMenuRequested = NodeEditor::ShowBackgroundContextMenu();
+			NodeEditor::Resume();
 			NodeEditor::End();
 			const auto HoveredPin = NodeEditor::GetHoveredPin();
 			LastHoveredPin = HoveredPin.Get();
@@ -637,6 +772,7 @@ namespace
 				++UnlinkRequests;
 				(void)DisconnectEditorGraphPin(History, Schema, *Unlink);
 			}
+			if (BackgroundMenuRequested) ++BackgroundMenuRequests;
 			NeedsNodePositions = false;
 			NodeEditor::SetCurrentEditor(nullptr);
 			ImGui::End();
@@ -717,6 +853,53 @@ namespace
 		PF_CHECK(Tests, History.Redo() && History.Graph().Connections.empty());
 		Drag(ScalarPosition, MultiplyPosition);
 		PF_CHECK(Tests, AcceptedRequests == AcceptedBeforeUnlink + 1 && History.Graph().Connections.size() == 1);
+
+		const int PriorNodeAccepts = AcceptedNodeRequests;
+		const ImVec2 EmptyCanvasPosition(1030.0f, 630.0f);
+		BeginDrag(ScalarPosition, EmptyCanvasPosition);
+		ReleaseDrag(EmptyCanvasPosition);
+		PF_CHECK(Tests, AcceptedNodeRequests == PriorNodeAccepts + 1 && AcceptedNodeDrop.has_value());
+		const auto* SourceValue = FindPin(History.Graph(), "material.scalar", "value");
+		PF_CHECK(Tests, SourceValue != nullptr);
+		const auto BeforeAutoCreate = History.Graph();
+		if (SourceValue && AcceptedNodeDrop)
+		{
+			const auto CompatibleActions = DiscoverEditorGraphNodeActions(History.Graph(), Schema, SourceValue->ID);
+			const auto MultiplyAAction = std::find_if(CompatibleActions.begin(), CompatibleActions.end(), [](const auto& Action)
+				{ return Action.NodeTypeKey == "material.multiply" && Action.ConnectPinKey == "a"; });
+			PF_CHECK(Tests, MultiplyAAction != CompatibleActions.end());
+			if (MultiplyAAction != CompatibleActions.end())
+			{
+				auto Created = CreateEditorGraphNodeAndConnect(History, Schema, MultiplyAAction->NodeTypeKey,
+					*MultiplyAAction->ConnectPinKey, SourceValue->ID, AcceptedNodeDrop->X, AcceptedNodeDrop->Y);
+				PF_CHECK(Tests, Created.has_value() && History.Graph().Nodes.size() == BeforeAutoCreate.Nodes.size() + 1 &&
+					History.Graph().Connections.size() == BeforeAutoCreate.Connections.size() + 1);
+				if (Created)
+				{
+					const auto AfterAutoCreate = History.Graph();
+					PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeAutoCreate);
+					PF_CHECK(Tests, History.Redo() && History.Graph() == AfterAutoCreate);
+				}
+			}
+		}
+
+		const int PreviousBackgroundRequests = BackgroundMenuRequests;
+		const ImVec2 BackgroundPosition(1110.0f, 610.0f);
+		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, true);
+		Frame(ImVec2(1160.0f, 645.0f));
+		Frame(ImVec2(1160.0f, 645.0f), std::nullopt, false, std::nullopt, false);
+		Frame();
+		PF_CHECK(Tests, BackgroundMenuRequests == PreviousBackgroundRequests);
+		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, true);
+		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, false);
+		Frame();
+		PF_CHECK(Tests, BackgroundMenuRequests == PreviousBackgroundRequests + 1);
+		for (int Index = 0; Index < 3; ++Index) Frame();
+		PF_CHECK(Tests, BackgroundMenuRequests == PreviousBackgroundRequests + 1);
+		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, true);
+		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, false);
+		Frame();
+		PF_CHECK(Tests, BackgroundMenuRequests == PreviousBackgroundRequests + 2);
 	}
 }
 
@@ -725,6 +908,8 @@ void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 	TestGraphDocumentLifecycle(Tests);
 	TestGraphDocumentSaveRevisionAccounting(Tests);
 	TestGraphCanvasCreateRequestPolling(Tests);
+	TestGraphCanvasNodeCreationRequestPolling(Tests);
+	TestGraphNodeSearchNavigation(Tests);
 	TestAltPinUnlinkInputOwnership(Tests);
 	TestGraphStraightenShortcutOwnership(Tests);
 	TestPinnedCanvasLinkGesture(Tests);

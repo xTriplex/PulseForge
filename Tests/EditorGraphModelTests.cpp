@@ -551,6 +551,174 @@ namespace
 		PF_CHECK(Tests, CalculateEditorGraphStraightenedLayout(Nodes, {}, {}, { SourceNode }).empty());
 	}
 
+	void TestNodeActionDiscoverySearchAndAtomicAutowire(TestRunner& Tests)
+	{
+		const EditorGraphSchema Schema{ "test.node-discovery", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true,
+			{
+				{ "test.origin", "Origin Source", {
+					{ "boolean-out", "Boolean Out", EditorGraphPinDirection::Output, EditorGraphPinType::Boolean,
+						EditorGraphPinCardinality::Multiple, false },
+					{ "numeric-out", "Numeric Out", EditorGraphPinDirection::Output, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Multiple, 1.0 },
+					{ "vector-out", "Vector Out", EditorGraphPinDirection::Output, EditorGraphPinType::Vector3,
+						EditorGraphPinCardinality::Multiple, EditorGraphVector3{} },
+					{ "text-out", "Text Out", EditorGraphPinDirection::Output, EditorGraphPinType::String,
+						EditorGraphPinCardinality::Multiple, std::string{} },
+					{ "flow-out", "Flow Out", EditorGraphPinDirection::Output, EditorGraphPinType::Execution,
+						EditorGraphPinCardinality::Multiple, {} } } },
+				{ "test.mixed", "Mixed Branch", {
+					{ "choice-first", "Choice One", EditorGraphPinDirection::Input, EditorGraphPinType::Boolean,
+						EditorGraphPinCardinality::Single, false },
+					{ "choice-second", "Choice Two", EditorGraphPinDirection::Input, EditorGraphPinType::Boolean,
+						EditorGraphPinCardinality::Single, true },
+					{ "amount", "Amount", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Single, 0.0 },
+					{ "direction", "Direction", EditorGraphPinDirection::Input, EditorGraphPinType::Vector3,
+						EditorGraphPinCardinality::Single, EditorGraphVector3{} },
+					{ "caption", "Caption", EditorGraphPinDirection::Input, EditorGraphPinType::String,
+						EditorGraphPinCardinality::Single, std::string{} },
+					{ "pulse", "Pulse", EditorGraphPinDirection::Input, EditorGraphPinType::Execution,
+						EditorGraphPinCardinality::Single, {} },
+					{ "result", "Result", EditorGraphPinDirection::Output, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Multiple, 0.0 } } },
+				{ "test.pair", "Number Pair", {
+					{ "first", "First Number", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Single, 0.0 },
+					{ "second", "Second Number", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Single, 0.0 },
+					{ "combined", "Combined", EditorGraphPinDirection::Output, EditorGraphPinType::Float,
+						EditorGraphPinCardinality::Multiple, 0.0 } } },
+				{ "test.text-origin", "Text Emitter", {
+					{ "text", "Text", EditorGraphPinDirection::Output, EditorGraphPinType::String,
+						EditorGraphPinCardinality::Multiple, std::string{} } } },
+				{ "test.flow-target", "Flow Target", {
+					{ "flow-in", "Flow In", EditorGraphPinDirection::Input, EditorGraphPinType::Execution,
+						EditorGraphPinCardinality::Single, {} } } }
+			} };
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "test.origin", 0.0) &&
+			AppendNode(*Graph, Schema, "test.mixed", 200.0));
+		if (!Graph) return;
+		const auto Original = *Graph;
+		const auto* BooleanOut = FindPin(*Graph, "test.origin", "boolean-out");
+		const auto* NumberOut = FindPin(*Graph, "test.origin", "numeric-out");
+		const auto* VectorOut = FindPin(*Graph, "test.origin", "vector-out");
+		const auto* TextOut = FindPin(*Graph, "test.origin", "text-out");
+		const auto* FlowOut = FindPin(*Graph, "test.origin", "flow-out");
+		const auto* MixedNumber = FindPin(*Graph, "test.mixed", "amount");
+		const auto* MixedText = FindPin(*Graph, "test.mixed", "caption");
+		PF_CHECK(Tests, BooleanOut && NumberOut && VectorOut && TextOut && FlowOut && MixedNumber && MixedText);
+		if (!BooleanOut || !NumberOut || !VectorOut || !TextOut || !FlowOut || !MixedNumber || !MixedText) return;
+
+		const auto BooleanActions = DiscoverEditorGraphNodeActions(*Graph, Schema, BooleanOut->ID);
+		PF_CHECK(Tests, BooleanActions == DiscoverEditorGraphNodeActions(*Graph, Schema, BooleanOut->ID));
+		PF_CHECK(Tests, BooleanActions.size() == 2);
+		PF_CHECK(Tests, std::all_of(BooleanActions.begin(), BooleanActions.end(), [](const auto& Action)
+			{ return Action.NodeTypeKey == "test.mixed" && Action.ConnectPinKey &&
+				(*Action.ConnectPinKey == "choice-first" || *Action.ConnectPinKey == "choice-second"); }));
+		const auto NumberActions = DiscoverEditorGraphNodeActions(*Graph, Schema, NumberOut->ID);
+		PF_CHECK(Tests, std::count_if(NumberActions.begin(), NumberActions.end(), [](const auto& Action)
+			{ return Action.NodeTypeKey == "test.pair" && Action.ConnectPinKey.has_value(); }) == 2);
+		const auto VectorActions = DiscoverEditorGraphNodeActions(*Graph, Schema, VectorOut->ID);
+		PF_CHECK(Tests, VectorActions.size() == 1 && VectorActions.front().NodeTypeKey == "test.mixed" &&
+			VectorActions.front().ConnectPinKey == "direction");
+		const auto FlowActions = DiscoverEditorGraphNodeActions(*Graph, Schema, FlowOut->ID);
+		PF_CHECK(Tests, std::any_of(FlowActions.begin(), FlowActions.end(), [](const auto& Action)
+			{ return Action.NodeTypeKey == "test.flow-target" && Action.ConnectPinKey == "flow-in"; }));
+		const auto InputActions = DiscoverEditorGraphNodeActions(*Graph, Schema, MixedText->ID);
+		PF_CHECK(Tests, std::any_of(InputActions.begin(), InputActions.end(), [](const auto& Action)
+			{ return Action.NodeTypeKey == "test.text-origin" && Action.ConnectPinKey == "text"; }));
+		PF_CHECK(Tests, Graph == Original);
+
+		const auto BackgroundActions = DiscoverEditorGraphNodeActions(*Graph, Schema);
+		PF_CHECK(Tests, BackgroundActions.size() == Schema.Nodes.size());
+		const auto OtherSchema = MakeMaterialExpressionFixtureSchema();
+		PF_CHECK(Tests, DiscoverEditorGraphNodeActions(*Graph, OtherSchema).empty());
+		PF_CHECK(Tests, SearchEditorGraphNodeActions(BackgroundActions, "mIxEd").size() == 1 &&
+			SearchEditorGraphNodeActions(BackgroundActions, "mIxEd").front().NodeTypeKey == "test.mixed");
+		PF_CHECK(Tests, SearchEditorGraphNodeActions(NumberActions, "FIRST NUMBER").size() == 1);
+		PF_CHECK(Tests, SearchEditorGraphNodeActions(NumberActions, "not a result").empty());
+		PF_CHECK(Tests, SearchEditorGraphNodeActions(BackgroundActions, "").size() == BackgroundActions.size());
+
+		EditorGraphCommandHistory CreateOnly(*Graph);
+		PF_CHECK(Tests, AddEditorGraphNode(CreateOnly, Schema, "test.pair", 500.0, 60.0));
+		PF_CHECK(Tests, CreateOnly.Graph().Nodes.size() == Graph->Nodes.size() + 1 && CreateOnly.CanUndo());
+		const auto CreateOnlyGraph = CreateOnly.Graph();
+		PF_CHECK(Tests, CreateOnly.Undo() && CreateOnly.Graph() == *Graph);
+		PF_CHECK(Tests, CreateOnly.Redo() && CreateOnly.Graph() == CreateOnlyGraph);
+
+		EditorGraphCommandHistory FanoutHistory(*Graph);
+		const auto* ExistingFloatInput = FindPin(FanoutHistory.Graph().Nodes[1], "amount");
+		PF_CHECK(Tests, ExistingFloatInput &&
+			ConnectEditorGraphPins(FanoutHistory, Schema, NumberOut->ID, ExistingFloatInput->ID));
+		const auto ExistingFanout = FanoutHistory.Graph().Connections;
+		auto FanoutCreate = CreateEditorGraphNodeAndConnect(FanoutHistory, Schema,
+			"test.pair", "second", NumberOut->ID, 480.0, 100.0);
+		PF_CHECK(Tests, FanoutCreate && FanoutHistory.Graph().Nodes.size() == Graph->Nodes.size() + 1 &&
+			FanoutHistory.Graph().Connections.size() == ExistingFanout.size() + 1);
+		if (FanoutCreate)
+		{
+			const auto AfterCreate = FanoutHistory.Graph();
+			PF_CHECK(Tests, FanoutCreate->ConnectedPinID && FanoutCreate->ConnectionID &&
+				FanoutHistory.Graph().Connections.back().OutputPin == NumberOut->ID &&
+				FanoutHistory.Graph().Connections.back().InputPin == *FanoutCreate->ConnectedPinID);
+			PF_CHECK(Tests, FanoutHistory.Undo() && FanoutHistory.Graph().Connections == ExistingFanout &&
+				FanoutHistory.Graph().Nodes.size() == Graph->Nodes.size());
+			PF_CHECK(Tests, FanoutHistory.Redo() && FanoutHistory.Graph() == AfterCreate);
+			PF_CHECK(Tests, FanoutHistory.Graph().Nodes.back().ID == FanoutCreate->NodeID &&
+				FanoutHistory.Graph().Connections.back().ID == *FanoutCreate->ConnectionID);
+			const auto Serialized = SerializeEditorGraph(FanoutHistory.Graph(), Schema);
+			const auto Reloaded = Serialized ? DeserializeEditorGraph(*Serialized, Schema)
+				: std::expected<EditorGraph, std::string>(std::unexpected("Serialization failed"));
+			const auto ReloadedSource = Reloaded ? SerializeEditorGraph(*Reloaded, Schema)
+				: std::expected<std::string, std::string>(std::unexpected("Reload failed"));
+			PF_CHECK(Tests, ReloadedSource && Serialized && *ReloadedSource == *Serialized);
+		}
+
+		EditorGraphCommandHistory ReplacementHistory(*Graph);
+		const auto* OldOutput = FindPin(ReplacementHistory.Graph().Nodes[0], "numeric-out");
+		const auto* ExistingInput = FindPin(ReplacementHistory.Graph().Nodes[1], "amount");
+		const auto OldOutputID = OldOutput ? std::optional{ OldOutput->ID } : std::nullopt;
+		const auto ExistingInputID = ExistingInput ? std::optional{ ExistingInput->ID } : std::nullopt;
+		PF_CHECK(Tests, OldOutputID && ExistingInputID &&
+			ConnectEditorGraphPins(ReplacementHistory, Schema, *OldOutputID, *ExistingInputID));
+		const auto BeforeReplacement = ReplacementHistory.Graph();
+		const auto OriginalConnection = ReplacementHistory.Graph().Connections.back();
+		auto Replacement = CreateEditorGraphNodeAndConnect(ReplacementHistory, Schema,
+			"test.pair", "combined", ExistingInputID.value_or(PulseForge::UUID{}), 520.0, 120.0);
+		PF_CHECK(Tests, Replacement && ReplacementHistory.Graph().Connections.size() == 1 &&
+			ReplacementHistory.Graph().Connections.front().InputPin == ExistingInputID.value_or(PulseForge::UUID{}) &&
+			ReplacementHistory.Graph().Connections.front().ID != OriginalConnection.ID);
+		if (Replacement)
+		{
+			const auto AfterReplacement = ReplacementHistory.Graph();
+			PF_CHECK(Tests, ReplacementHistory.Undo() && ReplacementHistory.Graph() == BeforeReplacement);
+			PF_CHECK(Tests, ReplacementHistory.Redo() && ReplacementHistory.Graph() == AfterReplacement);
+		}
+
+		EditorGraphCommandHistory ExecutionHistory(*Graph);
+		auto ExecutionCreate = CreateEditorGraphNodeAndConnect(ExecutionHistory, Schema,
+			"test.flow-target", "flow-in", FlowOut->ID, 700.0, 100.0);
+		PF_CHECK(Tests, ExecutionCreate && ExecutionHistory.Graph().Connections.size() == 1 &&
+			ExecutionHistory.Graph().Connections.front().OutputPin == FlowOut->ID);
+
+		EditorGraphCommandHistory RejectionHistory(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(RejectionHistory, Schema, NumberOut->ID, MixedNumber->ID));
+		PF_CHECK(Tests, RejectionHistory.Undo() && RejectionHistory.CanRedo());
+		const auto BeforeRejectedCreate = RejectionHistory.Graph();
+		const auto RejectedCreate = CreateEditorGraphNodeAndConnect(RejectionHistory, Schema,
+			"test.mixed", "choice-first", NumberOut->ID, 900.0, 100.0);
+		PF_CHECK(Tests, !RejectedCreate && RejectionHistory.Graph() == BeforeRejectedCreate && RejectionHistory.CanRedo());
+
+		EditorGraphCommandHistory MissingSourceHistory(*Graph);
+		PF_CHECK(Tests, DeleteEditorGraphNodes(MissingSourceHistory, Schema, { Original.Nodes[0].ID }));
+		const auto AfterDelete = MissingSourceHistory.Graph();
+		const auto MissingSource = CreateEditorGraphNodeAndConnect(MissingSourceHistory, Schema,
+			"test.pair", "first", NumberOut->ID, 920.0, 140.0);
+		PF_CHECK(Tests, !MissingSource && MissingSourceHistory.Graph() == AfterDelete);
+	}
+
 	void TestMixedTypeCyclePolicies(TestRunner& Tests)
 	{
 		const auto Schema = MakeMixedTypeCycleSchema();
@@ -661,5 +829,6 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 	TestGameplaySchemaAndTransactions(Tests);
 	TestPropertyEditCoordinator(Tests);
 	TestReusableGraphLayoutAndPinCommands(Tests);
+	TestNodeActionDiscoverySearchAndAtomicAutowire(Tests);
 	TestMixedTypeCyclePolicies(Tests);
 }

@@ -3,6 +3,8 @@
 #include "Editor/EditorDocumentEditorRegistry.h"
 #include "Editor/EditorGraphModel.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -28,6 +30,16 @@ namespace PulseForgeEditor
 		bool SawRequest = false;
 		bool Accepted = false;
 		EditorGraphConnectionDecision Decision;
+	};
+
+	struct EditorGraphCanvasCreateRequestResult
+	{
+		bool SawLinkRequest = false;
+		bool AcceptedLink = false;
+		EditorGraphConnectionDecision LinkDecision;
+		bool SawNodeRequest = false;
+		bool AcceptedNode = false;
+		uintptr_t SourcePin = 0;
 	};
 
 	struct EditorGraphCanvasPinInput
@@ -56,6 +68,24 @@ namespace PulseForgeEditor
 		bool PropertyWidgetHovered = false;
 	};
 
+	struct EditorGraphNodeSearchNavigationInput
+	{
+		size_t ResultCount = 0;
+		int SelectedResult = 0;
+		bool SearchChanged = false;
+		bool MoveUp = false;
+		bool MoveDown = false;
+		bool Activate = false;
+		bool Cancel = false;
+	};
+
+	struct EditorGraphNodeSearchNavigationResult
+	{
+		int SelectedResult = 0;
+		std::optional<size_t> ActivateResult;
+		bool Cancelled = false;
+	};
+
 	namespace GraphCanvasDetail
 	{
 		[[nodiscard]] inline std::optional<PulseForge::UUID> ResolveAltPinUnlink(
@@ -72,6 +102,24 @@ namespace PulseForgeEditor
 				!Input.OtherInputOwned && !Input.PopupOpen && !Input.MouseButtonDown &&
 				!Input.NodeMoveTransaction && !Input.GraphTransaction && !Input.PropertyEditActive &&
 				!Input.PropertyWidgetHovered;
+		}
+
+		[[nodiscard]] inline EditorGraphNodeSearchNavigationResult ResolveNodeSearchNavigation(
+			const EditorGraphNodeSearchNavigationInput& Input)
+		{
+			EditorGraphNodeSearchNavigationResult Result;
+			if (Input.ResultCount == 0)
+			{
+				Result.Cancelled = Input.Cancel;
+				return Result;
+			}
+			const int Count = static_cast<int>(Input.ResultCount);
+			Result.SelectedResult = Input.SearchChanged ? 0 : std::clamp(Input.SelectedResult, 0, Count - 1);
+			if (Input.MoveDown) Result.SelectedResult = (Result.SelectedResult + 1) % Count;
+			if (Input.MoveUp) Result.SelectedResult = (Result.SelectedResult + Count - 1) % Count;
+			Result.Cancelled = Input.Cancel;
+			if (!Input.Cancel && Input.Activate) Result.ActivateResult = static_cast<size_t>(Result.SelectedResult);
+			return Result;
 		}
 
 		template <typename EndCreate>
@@ -100,6 +148,41 @@ namespace PulseForgeEditor
 			if (Result.Decision.Allowed)
 				Result.Accepted = AcceptRequest();
 			else RejectRequest();
+			return Result;
+		}
+
+		template <typename BeginCreate, typename EndCreate, typename QueryLink, typename ResolveLink,
+			typename AcceptLink, typename RejectLink, typename QueryNode, typename ResolveNode,
+			typename AcceptNode, typename RejectNode>
+		[[nodiscard]] EditorGraphCanvasCreateRequestResult ProcessEditorGraphCanvasCreateRequestFrame(
+			BeginCreate&& Begin, EndCreate&& End, QueryLink&& QueryLinkRequest,
+			ResolveLink&& ResolveLinkRequest, AcceptLink&& AcceptLinkRequest,
+			RejectLink&& RejectLinkRequest, QueryNode&& QueryNodeRequest,
+			ResolveNode&& ResolveNodeRequest, AcceptNode&& AcceptNodeRequest,
+			RejectNode&& RejectNodeRequest)
+		{
+			const bool Active = Begin();
+			EditorGraphCreateEnd<std::remove_reference_t<EndCreate>> EndGuard{ End };
+			if (!Active) return {};
+
+			EditorGraphCanvasCreateRequestResult Result;
+			if (const auto Link = QueryLinkRequest())
+			{
+				Result.SawLinkRequest = true;
+				Result.LinkDecision = ResolveLinkRequest(*Link);
+				if (Result.LinkDecision.Allowed)
+					Result.AcceptedLink = AcceptLinkRequest();
+				else RejectLinkRequest();
+				return Result;
+			}
+
+			if (const auto NodePin = QueryNodeRequest())
+			{
+				Result.SawNodeRequest = true;
+				Result.SourcePin = *NodePin;
+				if (ResolveNodeRequest(*NodePin)) Result.AcceptedNode = AcceptNodeRequest();
+				else RejectNodeRequest();
+			}
 			return Result;
 		}
 	}

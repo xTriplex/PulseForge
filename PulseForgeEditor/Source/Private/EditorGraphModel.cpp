@@ -766,6 +766,127 @@ namespace PulseForgeEditor
 		return { true, "Connection is valid", OutputID, InputID };
 	}
 
+	std::vector<EditorGraphNodeCreationAction> DiscoverEditorGraphNodeActions(const EditorGraph& Graph,
+		const EditorGraphSchema& Schema, std::optional<PulseForge::UUID> SourcePinID)
+	{
+		std::vector<EditorGraphNodeCreationAction> Actions;
+		if (Graph.SchemaKey != Schema.Key || Graph.SchemaVersion != Schema.Version) return Actions;
+		const EditorGraphPin* SourcePin = nullptr;
+		if (SourcePinID && !FindNodeForPin(Graph, *SourcePinID, &SourcePin)) return Actions;
+
+		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> UsedIDs;
+		UsedIDs.insert(Graph.ID);
+		for (const auto& Node : Graph.Nodes)
+		{
+			UsedIDs.insert(Node.ID);
+			for (const auto& Pin : Node.Pins) UsedIDs.insert(Pin.ID);
+		}
+		for (const auto& Connection : Graph.Connections) UsedIDs.insert(Connection.ID);
+		uint64_t TemporaryID = 1;
+		const auto AllocateTemporaryID = [&]() -> PulseForge::UUID
+		{
+			while (TemporaryID != std::numeric_limits<uint64_t>::max())
+			{
+				const PulseForge::UUID Candidate{ 0x50464E4F44454143ull, TemporaryID++ };
+				if (UsedIDs.insert(Candidate).second) return Candidate;
+			}
+			return {};
+		};
+
+		for (const auto& Definition : Schema.Nodes)
+		{
+			if (!SourcePinID)
+			{
+				Actions.push_back({ Definition.TypeKey, Definition.Label, std::nullopt, {} });
+				continue;
+			}
+
+			EditorGraph CandidateGraph = Graph;
+			EditorGraphNode CandidateNode{ AllocateTemporaryID(), Definition.TypeKey, 0.0, 0.0, {} };
+			if (CandidateNode.ID.IsNil()) return {};
+			for (const auto& Pin : Definition.Pins)
+			{
+				const auto PinID = AllocateTemporaryID();
+				if (PinID.IsNil()) return {};
+				CandidateNode.Pins.push_back({ PinID, Pin.Key, Pin.Direction, Pin.Type, Pin.Cardinality, Pin.DefaultValue });
+			}
+			CandidateGraph.Nodes.push_back(std::move(CandidateNode));
+			const auto& NewNode = CandidateGraph.Nodes.back();
+			for (const auto& Pin : NewNode.Pins)
+			{
+				if (Pin.Direction == SourcePin->Direction) continue;
+				const auto Decision = CanConnectEditorGraphPins(CandidateGraph, Schema, *SourcePinID, Pin.ID);
+				if (Decision.Allowed)
+				{
+					const auto* PinDefinition = FindPinDefinition(Definition, Pin.Key);
+					Actions.push_back({ Definition.TypeKey, Definition.Label, Pin.Key,
+						PinDefinition ? PinDefinition->Label : Pin.Key });
+				}
+			}
+		}
+
+		std::sort(Actions.begin(), Actions.end(), [](const auto& Left, const auto& Right)
+		{
+			if (Left.NodeTypeKey != Right.NodeTypeKey) return Left.NodeTypeKey < Right.NodeTypeKey;
+			return Left.ConnectPinKey.value_or(std::string{}) < Right.ConnectPinKey.value_or(std::string{});
+		});
+		return Actions;
+	}
+
+	std::vector<EditorGraphNodeCreationAction> SearchEditorGraphNodeActions(
+		const std::vector<EditorGraphNodeCreationAction>& Actions, std::string_view Query)
+	{
+		const auto Fold = [](std::string_view Value)
+		{
+			std::string Result(Value);
+			for (char& Character : Result)
+				if (Character >= 'A' && Character <= 'Z') Character = static_cast<char>(Character - 'A' + 'a');
+			return Result;
+		};
+		const std::string Needle = Fold(Query);
+		const auto MatchScore = [&Needle, &Fold](const EditorGraphNodeCreationAction& Action) -> int
+		{
+			if (Needle.empty()) return 0;
+			const std::string Label = Fold(Action.NodeLabel);
+			const std::string Type = Fold(Action.NodeTypeKey);
+			const std::string PinLabel = Fold(Action.ConnectPinLabel);
+			const std::string PinKey = Action.ConnectPinKey ? Fold(*Action.ConnectPinKey) : std::string{};
+			if (Label == Needle) return 0;
+			if (Type == Needle) return 1;
+			if (Label.starts_with(Needle)) return 2;
+			if (Type.starts_with(Needle)) return 3;
+			if (Label.find(Needle) != std::string::npos) return 4;
+			if (Type.find(Needle) != std::string::npos) return 5;
+			if (!PinLabel.empty() && PinLabel.find(Needle) != std::string::npos) return 6;
+			if (!PinKey.empty() && PinKey.find(Needle) != std::string::npos) return 7;
+			return std::numeric_limits<int>::max();
+		};
+		std::vector<std::pair<int, EditorGraphNodeCreationAction>> Ranked;
+		for (const auto& Action : Actions)
+		{
+			const int Score = MatchScore(Action);
+			if (Score != std::numeric_limits<int>::max()) Ranked.emplace_back(Score, Action);
+		}
+		std::sort(Ranked.begin(), Ranked.end(), [&Fold](const auto& Left, const auto& Right)
+		{
+			if (Left.first != Right.first) return Left.first < Right.first;
+			const std::string LeftLabel = Fold(Left.second.NodeLabel);
+			const std::string RightLabel = Fold(Right.second.NodeLabel);
+			if (LeftLabel != RightLabel) return LeftLabel < RightLabel;
+			if (Left.second.NodeTypeKey != Right.second.NodeTypeKey)
+				return Left.second.NodeTypeKey < Right.second.NodeTypeKey;
+			return Left.second.ConnectPinKey.value_or(std::string{}) < Right.second.ConnectPinKey.value_or(std::string{});
+		});
+		std::vector<EditorGraphNodeCreationAction> Results;
+		Results.reserve(Ranked.size());
+		for (auto& [Score, Action] : Ranked)
+		{
+			(void)Score;
+			Results.push_back(std::move(Action));
+		}
+		return Results;
+	}
+
 	std::expected<std::string, std::string> SerializeEditorGraph(const EditorGraph& Graph, const EditorGraphSchema& Schema)
 	{
 		const auto Diagnostics = ValidateEditorGraph(Graph, Schema);
@@ -957,6 +1078,40 @@ namespace PulseForgeEditor
 		if (!History.Execute(Schema, [Node = std::move(*Node)](EditorGraph& Graph) mutable -> std::expected<void, std::string>
 			{ Graph.Nodes.push_back(std::move(Node)); return {}; }, Error)) return std::unexpected(Error);
 		return {};
+	}
+
+	std::expected<EditorGraphNodeCreationResult, std::string> CreateEditorGraphNodeAndConnect(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		std::string_view TypeKey, std::string_view NewNodePinKey,
+		PulseForge::UUID SourcePinID, double X, double Y)
+	{
+		if (SourcePinID.IsNil()) return std::unexpected("A source pin is required for automatic connection");
+		auto Node = CreateEditorGraphNode(Schema, TypeKey, X, Y);
+		if (!Node) return std::unexpected(Node.error());
+		const auto NewPin = std::find_if(Node->Pins.begin(), Node->Pins.end(), [NewNodePinKey](const auto& Pin)
+			{ return Pin.Key == NewNodePinKey; });
+		if (NewPin == Node->Pins.end()) return std::unexpected("The selected node pin no longer exists in the active schema");
+		auto ConnectionID = NewID();
+		if (!ConnectionID) return std::unexpected(ConnectionID.error());
+		const EditorGraphNodeCreationResult Result{ Node->ID, NewPin->ID, *ConnectionID };
+		std::string Error;
+		if (!History.Execute(Schema,
+			[Node = std::move(*Node), SourcePinID, NewPinID = Result.ConnectedPinID.value(),
+				ConnectionID = Result.ConnectionID.value(), &Schema](EditorGraph& Graph) mutable -> std::expected<void, std::string>
+			{
+				Graph.Nodes.push_back(std::move(Node));
+				const auto Decision = CanConnectEditorGraphPins(Graph, Schema, SourcePinID, NewPinID);
+				if (!Decision.Allowed) return std::unexpected(Decision.Reason);
+				const EditorGraphPin* InputPin = nullptr;
+				(void)FindNodeForPin(Graph, Decision.InputPin, &InputPin);
+				if (InputPin && InputPin->Cardinality == EditorGraphPinCardinality::Single && Schema.ReplaceOccupiedInput)
+					Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(),
+						[&Decision](const auto& Existing) { return Existing.InputPin == Decision.InputPin; }), Graph.Connections.end());
+				Graph.Connections.push_back({ ConnectionID, Decision.OutputPin, Decision.InputPin });
+				return {};
+			}, Error))
+			return std::unexpected(Error);
+		return Result;
 	}
 
 	std::expected<void, std::string> DeleteEditorGraphNodes(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,

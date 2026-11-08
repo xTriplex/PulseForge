@@ -40,6 +40,21 @@ namespace
 		PulseForge::UUID PinID;
 		double CanvasY = 0.0;
 	};
+	struct PendingNodeSearch
+	{
+		bool Active = false;
+		bool OpenRequested = false;
+		bool PopupOpen = false;
+		bool FocusSearch = false;
+		EditorDocumentIdentity Document;
+		uint64_t SessionGeneration = 0;
+		std::string HostID;
+		PulseForge::UUID GraphID;
+		std::optional<PulseForge::UUID> SourcePin;
+		EditorGraphVector3 Placement;
+		std::array<char, 256> Search{};
+		int SelectedResult = 0;
+	};
 	bool SaveCanvasSettings(const char* Data, size_t Size, NodeEditor::SaveReasonFlags, void* UserPointer);
 	size_t LoadCanvasSettings(char* Data, void* UserPointer);
 
@@ -83,8 +98,33 @@ namespace
 		bool NodeMoveTransaction = false;
 		PulseForge::UUID LastHoveredPin;
 		bool LastPinWidgetHovered = false;
+		PendingNodeSearch NodeSearch;
 		EditorGraphPropertyEditCoordinator PropertyEdits;
 	};
+
+	void QueueNodeSearch(GraphDocumentState& State, const EditorDocumentSession& Session,
+		std::optional<PulseForge::UUID> SourcePin, EditorGraphVector3 Placement)
+	{
+		State.NodeSearch = {};
+		State.NodeSearch.Active = true;
+		State.NodeSearch.OpenRequested = true;
+		State.NodeSearch.FocusSearch = true;
+		State.NodeSearch.Document = Session.Identity;
+		State.NodeSearch.SessionGeneration = Session.SessionGeneration;
+		State.NodeSearch.HostID = Session.HostID;
+		State.NodeSearch.GraphID = State.History.Graph().ID;
+		State.NodeSearch.SourcePin = SourcePin;
+		State.NodeSearch.Placement = Placement;
+	}
+
+	bool IsNodeSearchSourceAvailable(const GraphDocumentState& State)
+	{
+		if (!State.NodeSearch.SourcePin) return true;
+		for (const auto& Node : State.History.Graph().Nodes)
+			if (std::any_of(Node.Pins.begin(), Node.Pins.end(), [&State](const auto& Pin)
+				{ return Pin.ID == *State.NodeSearch.SourcePin; })) return true;
+		return false;
+	}
 
 	bool SaveCanvasSettings(const char* Data, size_t Size, NodeEditor::SaveReasonFlags, void* UserPointer)
 	{
@@ -570,7 +610,14 @@ namespace PulseForgeEditor
 		State->WasFocused = Focused;
 		const ImGuiIO& Input = ImGui::GetIO();
 		const bool OtherInputOwner = ImGui::IsAnyItemActive();
-		const bool CapturedAltPinClick = Focused && !Input.WantTextInput && !OtherInputOwner &&
+		const bool SearchContextValid = State->NodeSearch.Active &&
+			State->NodeSearch.Document == Session.Identity &&
+			State->NodeSearch.SessionGeneration == Session.SessionGeneration &&
+			State->NodeSearch.HostID == Session.HostID &&
+			State->NodeSearch.GraphID == State->History.Graph().ID && IsNodeSearchSourceAvailable(*State);
+		bool SearchPopupActive = State->NodeSearch.Active &&
+			(State->NodeSearch.OpenRequested || State->NodeSearch.PopupOpen || ImGui::IsPopupOpen("GraphNodeSearch"));
+		const bool CapturedAltPinClick = Focused && !Input.WantTextInput && !OtherInputOwner && !SearchPopupActive &&
 			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && Input.KeyAlt &&
 			ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
 		if (Focused && !Input.WantTextInput && !State->LastHoveredPin.IsNil() &&
@@ -580,19 +627,8 @@ namespace PulseForgeEditor
 			// gesture through ImGui's input-owner API before the canvas processes it.
 			ImGui::SetKeyOwner(ImGuiKey_MouseLeft, ImGuiKeyOwner_Any, ImGuiInputFlags_LockUntilRelease);
 
-		if (ImGui::Button("Add Node")) ImGui::OpenPopup("GraphNodeTypes");
-		if (ImGui::BeginPopup("GraphNodeTypes"))
-		{
-			for (const auto& Definition : State->Schema.Nodes)
-				if (ImGui::MenuItem(Definition.Label.c_str()))
-				{
-					const double Offset = static_cast<double>(State->History.Graph().Nodes.size() % 12) * 28.0;
-					auto Added = AddEditorGraphNode(State->History, State->Schema, Definition.TypeKey, 100.0 + Offset, 90.0 + Offset);
-					if (!Added) State->Error = Added.error();
-					else { State->Error.clear(); (void)m_Documents.MarkEdited(Session.Identity); State->NeedsCanvasSync = true; }
-				}
-			ImGui::EndPopup();
-		}
+		const bool RequestSearchFromToolbar = ImGui::Button("Add Node") && Focused &&
+			!Input.WantTextInput && !OtherInputOwner && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
 		ImGui::SameLine();
 		if (ImGui::Button("Undo"))
 		{
@@ -679,6 +715,16 @@ namespace PulseForgeEditor
 			else ++It;
 
 		NodeEditor::Begin("##PulseForgeGraphCanvas", ImVec2(0.0f, 0.0f));
+		if (RequestSearchFromToolbar)
+		{
+			const ImVec2 CanvasOrigin = NodeEditor::CanvasToScreen(ImVec2(0.0f, 0.0f));
+			const ImVec2 CanvasSize = NodeEditor::GetScreenSize();
+			const ImVec2 CanvasCenterScreen(CanvasOrigin.x + CanvasSize.x * 0.5f,
+				CanvasOrigin.y + CanvasSize.y * 0.5f);
+			const ImVec2 CanvasCenter = NodeEditor::ScreenToCanvas(CanvasCenterScreen);
+			QueueNodeSearch(*State, Session, std::nullopt,
+				{ CanvasCenter.x, CanvasCenter.y, 0.0 });
+		}
 		for (const auto& Node : State->History.Graph().Nodes)
 		{
 			const uintptr_t NodeHandle = RegisterHandle(Node.ID);
@@ -757,8 +803,7 @@ namespace PulseForgeEditor
 		}
 
 		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> CreatedLink;
-		bool SawNewLinkRequest = false;
-		const auto CreateRequest = GraphCanvasDetail::ProcessEditorGraphCanvasLinkRequestFrame(
+		const auto CreateRequest = GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
 			[] { return NodeEditor::BeginCreate(); },
 			[] { NodeEditor::EndCreate(); },
 			[]() -> std::optional<EditorGraphCanvasLinkRequest>
@@ -777,11 +822,46 @@ namespace PulseForgeEditor
 				return CanConnectEditorGraphPins(State->History.Graph(), State->Schema, Start->second, End->second);
 			},
 			[] { return NodeEditor::AcceptNewItem(); },
+			[] { NodeEditor::RejectNewItem(); },
+			[]() -> std::optional<uintptr_t>
+			{
+				NodeEditor::PinId SourcePin;
+				if (!NodeEditor::QueryNewNode(&SourcePin)) return std::nullopt;
+				return SourcePin.Get();
+			},
+			[State](uintptr_t SourceHandle)
+			{
+				const auto Identity = State->Identities.find(SourceHandle);
+				if (Identity == State->Identities.end()) return false;
+				for (const auto& Node : State->History.Graph().Nodes)
+					if (std::any_of(Node.Pins.begin(), Node.Pins.end(), [&Identity](const auto& Pin)
+						{ return Pin.ID == Identity->second; })) return true;
+				return false;
+			},
+			[] { return NodeEditor::AcceptNewItem(); },
 			[] { NodeEditor::RejectNewItem(); });
-		SawNewLinkRequest = CreateRequest.SawRequest;
-		if (SawNewLinkRequest) State->Error = CreateRequest.Decision.Reason;
-		if (CreateRequest.Accepted)
-			CreatedLink = std::pair{ CreateRequest.Decision.OutputPin, CreateRequest.Decision.InputPin };
+		if (CreateRequest.SawLinkRequest) State->Error = CreateRequest.LinkDecision.Reason;
+		if (CreateRequest.AcceptedLink)
+			CreatedLink = std::pair{ CreateRequest.LinkDecision.OutputPin, CreateRequest.LinkDecision.InputPin };
+		if (CreateRequest.SawNodeRequest && !CreateRequest.AcceptedNode && CreateRequest.SourcePin != 0 &&
+			!State->Identities.contains(CreateRequest.SourcePin))
+			State->Error = "The source pin for node creation is no longer available";
+		std::optional<PulseForge::UUID> AcceptedNodeSource;
+		std::optional<EditorGraphVector3> AcceptedNodePlacement;
+		if (CreateRequest.AcceptedNode)
+		{
+			if (const auto Identity = State->Identities.find(CreateRequest.SourcePin); Identity != State->Identities.end())
+			{
+				const ImVec2 Placement = NodeEditor::ScreenToCanvas(ImGui::GetIO().MousePos);
+				if (std::isfinite(Placement.x) && std::isfinite(Placement.y))
+				{
+					AcceptedNodeSource = Identity->second;
+					AcceptedNodePlacement = EditorGraphVector3{ Placement.x, Placement.y, 0.0 };
+				}
+				else State->Error = "The node placement point could not be resolved";
+			}
+			else State->Error = "The source pin for node creation is no longer available";
+		}
 
 		std::vector<PulseForge::UUID> DeletedLinks;
 		std::vector<PulseForge::UUID> DeletedNodes;
@@ -819,7 +899,7 @@ namespace PulseForgeEditor
 			if (!Result) State->Error = Result.error();
 			else GraphChanged = true;
 		}
-		if (!DeletedNodes.empty() || (!DeletedLinks.empty() && !CreatedLink && !SawNewLinkRequest))
+		if (!DeletedNodes.empty() || (!DeletedLinks.empty() && !CreatedLink && !CreateRequest.SawLinkRequest))
 		{
 			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Nodes(DeletedNodes.begin(), DeletedNodes.end());
 			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Links(DeletedLinks.begin(), DeletedLinks.end());
@@ -875,16 +955,19 @@ namespace PulseForgeEditor
 		}
 
 		const ImGuiIO& IO = ImGui::GetIO();
-		if (Focused && NodeEditor::IsActive() && !IO.WantTextInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+		if (Focused && NodeEditor::IsActive() && !IO.WantTextInput && !SearchPopupActive &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
 		{
 			const auto CopySelection = [&]
 			{
-			const int Count = NodeEditor::GetSelectedObjectCount();
-			std::vector<NodeEditor::NodeId> Handles(static_cast<size_t>(std::max(Count, 0)));
-			const int Selected = Count > 0 ? NodeEditor::GetSelectedNodes(Handles.data(), Count) : 0;
+				const int Count = NodeEditor::GetSelectedObjectCount();
+				std::vector<NodeEditor::NodeId> Handles(static_cast<size_t>(std::max(Count, 0)));
+				const int Selected = Count > 0 ? NodeEditor::GetSelectedNodes(Handles.data(), Count) : 0;
 				std::vector<PulseForge::UUID> IDs;
-			for (int Index = 0; Index < Selected; ++Index)
-				if (const auto It = State->Identities.find(Handles[static_cast<size_t>(Index)].Get()); It != State->Identities.end()) IDs.push_back(It->second);
+				for (int Index = 0; Index < Selected; ++Index)
+					if (const auto It = State->Identities.find(Handles[static_cast<size_t>(Index)].Get());
+						It != State->Identities.end())
+						IDs.push_back(It->second);
 				auto Payload = SerializeEditorGraphClipboard(CopyEditorGraphSubgraph(State->History.Graph(), IDs));
 				if (Payload) ImGui::SetClipboardText(Payload->c_str());
 			};
@@ -897,9 +980,150 @@ namespace PulseForgeEditor
 					else { State->Error.clear(); (void)m_Documents.MarkEdited(Session.Identity); State->NeedsCanvasSync = true; }
 				}
 		}
-		NodeEditor::EnableShortcuts(!IO.WantTextInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup));
+		if (AcceptedNodeSource && AcceptedNodePlacement)
+		{
+			QueueNodeSearch(*State, Session, AcceptedNodeSource, *AcceptedNodePlacement);
+			SearchPopupActive = true;
+		}
+
+		bool BackgroundSearchRequested = false;
+		NodeEditor::Suspend();
+		if (Focused && !Input.WantTextInput && !SearchPopupActive && !OtherInputOwner &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+			BackgroundSearchRequested = NodeEditor::ShowBackgroundContextMenu();
+		NodeEditor::Resume();
+		if (BackgroundSearchRequested)
+		{
+			const ImVec2 Placement = NodeEditor::ScreenToCanvas(
+				ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Right]);
+			if (std::isfinite(Placement.x) && std::isfinite(Placement.y))
+			{
+				QueueNodeSearch(*State, Session, std::nullopt, { Placement.x, Placement.y, 0.0 });
+				SearchPopupActive = true;
+			}
+			else State->Error = "The node placement point could not be resolved";
+		}
+
+		struct PendingCreation
+		{
+			EditorGraphNodeCreationAction Action;
+			std::optional<PulseForge::UUID> SourcePin;
+			EditorGraphVector3 Placement;
+		};
+		std::optional<PendingCreation> PendingNodeCreation;
+		if (State->NodeSearch.Active)
+		{
+			const bool ContextValid = State->NodeSearch.Document == Session.Identity &&
+				State->NodeSearch.SessionGeneration == Session.SessionGeneration &&
+				State->NodeSearch.HostID == Session.HostID &&
+				State->NodeSearch.GraphID == State->History.Graph().ID && IsNodeSearchSourceAvailable(*State);
+			NodeEditor::Suspend();
+			if (ContextValid && State->NodeSearch.OpenRequested)
+			{
+				ImGui::OpenPopup("GraphNodeSearch");
+				State->NodeSearch.OpenRequested = false;
+				State->NodeSearch.PopupOpen = true;
+			}
+			const bool PopupVisible = ImGui::BeginPopup("GraphNodeSearch");
+			if (PopupVisible)
+			{
+				if (!ContextValid)
+				{
+					ImGui::TextUnformatted("This graph context is no longer available.");
+					ImGui::CloseCurrentPopup();
+					State->NodeSearch = {};
+				}
+				else
+				{
+					if (State->NodeSearch.FocusSearch) ImGui::SetKeyboardFocusHere();
+					ImGui::SetNextItemWidth(340.0f);
+					const bool SearchChanged = ImGui::InputText("##GraphNodeSearchInput",
+						State->NodeSearch.Search.data(), State->NodeSearch.Search.size());
+					if (SearchChanged) State->NodeSearch.SelectedResult = 0;
+					State->NodeSearch.FocusSearch = false;
+
+					const auto Actions = DiscoverEditorGraphNodeActions(State->History.Graph(), State->Schema,
+						State->NodeSearch.SourcePin);
+					const auto Matches = SearchEditorGraphNodeActions(Actions, State->NodeSearch.Search.data());
+					const auto Navigation = GraphCanvasDetail::ResolveNodeSearchNavigation({ Matches.size(),
+						State->NodeSearch.SelectedResult, SearchChanged,
+						ImGui::IsKeyPressed(ImGuiKey_UpArrow, false),
+						ImGui::IsKeyPressed(ImGuiKey_DownArrow, false),
+						ImGui::IsKeyPressed(ImGuiKey_Enter, false),
+						ImGui::IsKeyPressed(ImGuiKey_Escape, false) });
+					State->NodeSearch.SelectedResult = Navigation.SelectedResult;
+
+					std::optional<EditorGraphNodeCreationAction> ChosenAction;
+					if (Navigation.ActivateResult) ChosenAction = Matches[*Navigation.ActivateResult];
+					if (Actions.empty() && State->NodeSearch.SourcePin)
+						ImGui::TextDisabled("No compatible nodes");
+					else if (Matches.empty())
+						ImGui::TextDisabled("No matching nodes");
+					else
+					{
+						for (size_t Index = 0; Index < Matches.size(); ++Index)
+						{
+							const auto& Action = Matches[Index];
+							std::string Label = Action.NodeLabel;
+							if (Action.ConnectPinKey)
+								Label += "  →  " + Action.ConnectPinLabel + "  [" + Action.NodeTypeKey + " · " +
+									*Action.ConnectPinKey + "]";
+							else Label += "  [" + Action.NodeTypeKey + "]";
+							const bool Selected = static_cast<int>(Index) == State->NodeSearch.SelectedResult;
+							if (ImGui::Selectable(Label.c_str(), Selected))
+							{
+								State->NodeSearch.SelectedResult = static_cast<int>(Index);
+								ChosenAction = Action;
+							}
+							if (ImGui::IsItemHovered()) State->NodeSearch.SelectedResult = static_cast<int>(Index);
+						}
+					}
+					if (Navigation.Cancelled)
+					{
+						ImGui::CloseCurrentPopup();
+						State->NodeSearch = {};
+					}
+					else if (ChosenAction)
+					{
+						PendingNodeCreation = PendingCreation{ *ChosenAction, State->NodeSearch.SourcePin,
+							State->NodeSearch.Placement };
+						ImGui::CloseCurrentPopup();
+						State->NodeSearch = {};
+					}
+				}
+				ImGui::EndPopup();
+			}
+			NodeEditor::Resume();
+			if (State->NodeSearch.Active && !State->NodeSearch.OpenRequested && !ImGui::IsPopupOpen("GraphNodeSearch"))
+				State->NodeSearch = {};
+		}
+		SearchPopupActive = SearchPopupActive || State->NodeSearch.Active || ImGui::IsPopupOpen("GraphNodeSearch");
+		NodeEditor::EnableShortcuts(!Input.WantTextInput && !SearchPopupActive &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup));
 		NodeEditor::End();
 		NodeEditor::EnableShortcuts(true);
+
+		if (PendingNodeCreation)
+		{
+			std::expected<void, std::string> Added;
+			if (PendingNodeCreation->Action.ConnectPinKey && PendingNodeCreation->SourcePin)
+			{
+				auto Created = CreateEditorGraphNodeAndConnect(State->History, State->Schema,
+					PendingNodeCreation->Action.NodeTypeKey, *PendingNodeCreation->Action.ConnectPinKey,
+					*PendingNodeCreation->SourcePin, PendingNodeCreation->Placement.X, PendingNodeCreation->Placement.Y);
+				if (!Created) Added = std::unexpected(Created.error());
+				else Added = {};
+			}
+			else Added = AddEditorGraphNode(State->History, State->Schema, PendingNodeCreation->Action.NodeTypeKey,
+				PendingNodeCreation->Placement.X, PendingNodeCreation->Placement.Y);
+			if (!Added) State->Error = Added.error();
+			else
+			{
+				State->Error.clear();
+				(void)m_Documents.MarkEdited(Session.Identity);
+				State->NeedsCanvasSync = true;
+			}
+		}
 		const auto HoveredCanvasPin = NodeEditor::GetHoveredPin();
 		PulseForge::UUID HoveredPinID;
 		if (HoveredCanvasPin.Get() != 0)
@@ -924,7 +1148,7 @@ namespace PulseForgeEditor
 
 		if (GraphCanvasDetail::ShouldStraightenSelection({ Focused, NodeEditor::IsActive(),
 			ImGui::IsKeyPressed(ImGuiKey_Q, false), IO.WantTextInput, OtherInputOwner,
-			ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup), ImGui::IsMouseDown(ImGuiMouseButton_Left),
+			SearchPopupActive || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup), ImGui::IsMouseDown(ImGuiMouseButton_Left),
 			State->NodeMoveTransaction, State->History.HasOpenTransaction(),
 			State->PropertyEdits.HasActiveEdit(), PropertyWidgetHovered }))
 		{

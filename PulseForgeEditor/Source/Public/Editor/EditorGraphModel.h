@@ -133,6 +133,22 @@ namespace PulseForgeEditor
 		PulseForge::UUID InputPin;
 	};
 
+	struct EditorGraphNodeCreationAction
+	{
+		std::string NodeTypeKey;
+		std::string NodeLabel;
+		std::optional<std::string> ConnectPinKey;
+		std::string ConnectPinLabel;
+		friend bool operator==(const EditorGraphNodeCreationAction&, const EditorGraphNodeCreationAction&) = default;
+	};
+
+	struct EditorGraphNodeCreationResult
+	{
+		PulseForge::UUID NodeID;
+		std::optional<PulseForge::UUID> ConnectedPinID;
+		std::optional<PulseForge::UUID> ConnectionID;
+	};
+
 	struct EditorGraphClipboard
 	{
 		std::string SchemaKey;
@@ -222,6 +238,11 @@ namespace PulseForgeEditor
 		const EditorGraph& Graph, const EditorGraphSchema& Schema,
 		PulseForge::UUID FirstPin, PulseForge::UUID SecondPin,
 		std::optional<PulseForge::UUID> ReplacingConnection = std::nullopt);
+	[[nodiscard]] std::vector<EditorGraphNodeCreationAction> DiscoverEditorGraphNodeActions(
+		const EditorGraph& Graph, const EditorGraphSchema& Schema,
+		std::optional<PulseForge::UUID> SourcePin = std::nullopt);
+	[[nodiscard]] std::vector<EditorGraphNodeCreationAction> SearchEditorGraphNodeActions(
+		const std::vector<EditorGraphNodeCreationAction>& Actions, std::string_view Query);
 	[[nodiscard]] std::expected<std::string, std::string> SerializeEditorGraph(const EditorGraph& Graph,
 		const EditorGraphSchema& Schema);
 	[[nodiscard]] std::expected<EditorGraph, std::string> DeserializeEditorGraph(
@@ -236,6 +257,10 @@ namespace PulseForgeEditor
 	[[nodiscard]] std::expected<void, std::string> AddEditorGraphNode(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		std::string_view TypeKey, double X, double Y);
+	[[nodiscard]] std::expected<EditorGraphNodeCreationResult, std::string> CreateEditorGraphNodeAndConnect(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		std::string_view TypeKey, std::string_view NewNodePinKey,
+		PulseForge::UUID SourcePinID, double X, double Y);
 	[[nodiscard]] std::expected<void, std::string> DeleteEditorGraphNodes(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		const std::vector<PulseForge::UUID>& NodeIDs);
