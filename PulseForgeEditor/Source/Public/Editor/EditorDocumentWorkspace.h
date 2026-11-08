@@ -12,12 +12,21 @@ namespace PulseForgeEditor
 {
 	struct EditorDocumentWorkspaceState
 	{
-		uint32_t Version = 4;
+		uint32_t Version = 5;
 		bool LegacyMaterialDetailsMigration = false;
 		PulseForge::UUID Project;
 		std::optional<PulseForge::UUID> MaterialDetailsAsset;
 		std::vector<EditorDocumentHost> Hosts;
 		std::vector<std::pair<EditorDocumentKind, EditorDocumentPlacement>> RememberedPlacements;
+		struct GraphPinVisibility final
+		{
+			EditorDocumentIdentity Document;
+			PulseForge::UUID GraphID;
+			PulseForge::UUID NodeID;
+			PulseForge::UUID PinID;
+			friend bool operator==(const GraphPinVisibility&, const GraphPinVisibility&) = default;
+		};
+		std::vector<GraphPinVisibility> HiddenGraphPins;
 		std::string FocusedHostID = std::string(EditorDocumentManager::MainHostID);
 	};
 

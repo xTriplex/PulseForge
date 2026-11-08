@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Editor/EditorDocumentEditorRegistry.h"
+#include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorGraphModel.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -55,7 +57,11 @@ namespace PulseForgeEditor
 	struct EditorGraphCanvasPinPresentation
 	{
 		PulseForge::UUID PinID;
+		EditorGraphPinDirection Direction = EditorGraphPinDirection::Input;
+		bool Connected = false;
+		bool Visible = true;
 		EditorGraphCanvasPinMarkerGeometry Marker;
+		std::optional<EditorGraphCanvasRect> Label;
 		std::optional<EditorGraphCanvasRect> PropertyControl;
 	};
 
@@ -65,6 +71,8 @@ namespace PulseForgeEditor
 		EditorGraphCanvasPoint Position;
 		EditorGraphCanvasPoint Size;
 		double Zoom = 1.0;
+		double InputColumnWidth = 0.0;
+		double OutputColumnWidth = 0.0;
 		std::vector<EditorGraphCanvasPinPresentation> Pins;
 	};
 
@@ -319,7 +327,8 @@ namespace PulseForgeEditor
 	class EditorGraphDocumentEditor final
 	{
 	public:
-		EditorGraphDocumentEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors);
+		EditorGraphDocumentEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
+			std::function<void()> PresentationChanged = {});
 
 		[[nodiscard]] std::expected<void, std::string> Register();
 		[[nodiscard]] std::expected<EditorGraphFixtureLocation, std::string> CreateFixture(
@@ -327,6 +336,13 @@ namespace PulseForgeEditor
 		[[nodiscard]] static std::filesystem::path GetFixturePath(const PulseForge::UUID& GraphID);
 		[[nodiscard]] bool Open(EditorDocumentSession& Session, const EditorDocumentEditorContext& Context) const;
 		[[nodiscard]] bool Save(EditorDocumentSession& Session) const;
+		[[nodiscard]] std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> CapturePinVisibility(
+			const EditorDocumentSession& Session) const;
+		[[nodiscard]] std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> CaptureWorkspacePinVisibility() const;
+		void SetWorkspacePinVisibility(
+			std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> Settings);
+		void RestorePinVisibility(EditorDocumentSession& Session,
+			const std::vector<EditorDocumentWorkspaceState::GraphPinVisibility>& Settings);
 
 	private:
 		friend struct EditorGraphDocumentEditorTestAccess;
@@ -349,9 +365,12 @@ namespace PulseForgeEditor
 		void CapturePresentationForTesting(EditorDocumentSession& Session, bool Capture);
 		[[nodiscard]] std::vector<EditorGraphCanvasNodePresentation> GetPresentationForTesting(
 			EditorDocumentSession& Session);
+		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
 
 		EditorDocumentManager& m_Documents;
 		EditorDocumentEditorRegistry& m_Editors;
+		std::function<void()> m_PresentationChanged;
+		std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> m_PinVisibilitySettings;
 		bool m_Registered = false;
 	};
 }

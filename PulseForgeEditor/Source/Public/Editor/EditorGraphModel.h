@@ -46,6 +46,13 @@ namespace PulseForgeEditor
 		Multiple
 	};
 
+	enum class EditorGraphPinDefaultControl : uint8_t
+	{
+		Never,
+		WhenDisconnected,
+		Always
+	};
+
 	enum class EditorGraphCyclePolicy : uint8_t
 	{
 		Reject,
@@ -60,6 +67,9 @@ namespace PulseForgeEditor
 		EditorGraphPinType Type = EditorGraphPinType::Float;
 		EditorGraphPinCardinality Cardinality = EditorGraphPinCardinality::Single;
 		EditorGraphValue DefaultValue;
+		EditorGraphPinDefaultControl DefaultControl = EditorGraphPinDefaultControl::WhenDisconnected;
+		bool Hideable = true;
+		bool Required = false;
 	};
 
 	struct EditorGraphNodeDefinition
@@ -89,6 +99,12 @@ namespace PulseForgeEditor
 		EditorGraphValue DefaultValue;
 		friend bool operator==(const EditorGraphPin&, const EditorGraphPin&) = default;
 	};
+
+	[[nodiscard]] bool ShouldShowEditorGraphPinDefault(const EditorGraphPin& Pin,
+		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept;
+	[[nodiscard]] bool CanHideEditorGraphPin(const EditorGraphPinDefinition& Definition) noexcept;
+	[[nodiscard]] bool CanAutoHideEditorGraphPin(const EditorGraphPin& Pin,
+		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept;
 
 	struct EditorGraphNode
 	{
@@ -218,6 +234,7 @@ namespace PulseForgeEditor
 			const EditorGraphSchema& Schema);
 		[[nodiscard]] EditorGraphPropertyEditResult Cancel(EditorGraphCommandHistory& History);
 		[[nodiscard]] bool HasActiveEdit() const noexcept { return m_ActivePin.has_value(); }
+		[[nodiscard]] std::optional<PulseForge::UUID> ActivePin() const noexcept { return m_ActivePin; }
 		void Reset() noexcept { m_ActivePin.reset(); }
 
 	private:

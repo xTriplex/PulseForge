@@ -859,4 +859,21 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 	TestReusableGraphLayoutAndPinCommands(Tests);
 	TestNodeActionDiscoverySearchAndAtomicAutowire(Tests);
 	TestMixedTypeCyclePolicies(Tests);
+	{
+		using namespace PulseForgeEditor;
+		EditorGraphPinDefinition Definition{ "socket", "Socket", EditorGraphPinDirection::Input,
+			EditorGraphPinType::Float, EditorGraphPinCardinality::Single, 2.5 };
+		EditorGraphPin Pin{ PulseForge::UUID{}, Definition.Key, Definition.Direction, Definition.Type,
+			Definition.Cardinality, Definition.DefaultValue };
+		PF_CHECK(Tests, ShouldShowEditorGraphPinDefault(Pin, Definition, 0));
+		PF_CHECK(Tests, !ShouldShowEditorGraphPinDefault(Pin, Definition, 1));
+		PF_CHECK(Tests, CanHideEditorGraphPin(Definition));
+		PF_CHECK(Tests, CanAutoHideEditorGraphPin(Pin, Definition, 0));
+		Pin.DefaultValue = 3.0;
+		PF_CHECK(Tests, !CanAutoHideEditorGraphPin(Pin, Definition, 0));
+		Definition.DefaultControl = EditorGraphPinDefaultControl::Always;
+		PF_CHECK(Tests, ShouldShowEditorGraphPinDefault(Pin, Definition, 1));
+		Definition.Required = true;
+		PF_CHECK(Tests, !CanHideEditorGraphPin(Definition));
+	}
 }

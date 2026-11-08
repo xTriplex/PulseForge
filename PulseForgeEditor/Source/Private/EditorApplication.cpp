@@ -888,7 +888,8 @@ namespace
 			m_MaterialDocumentEditor->SetPreviewService(&m_MaterialPreviews);
 			if (auto Result = m_MaterialDocumentEditor->Register(); !Result)
 				PF_ERROR("Could not register the fixed-PBR material document editor: {}", Result.error());
-			m_GraphDocumentEditor = std::make_unique<PulseForgeEditor::EditorGraphDocumentEditor>(m_Documents, m_DocumentEditors);
+			m_GraphDocumentEditor = std::make_unique<PulseForgeEditor::EditorGraphDocumentEditor>(m_Documents,
+				m_DocumentEditors, [this] { MarkDocumentWorkspaceDirty(false); });
 			if (auto Result = m_GraphDocumentEditor->Register(); !Result)
 				PF_ERROR("Could not register the graph authoring fixture editor: {}", Result.error());
 			m_PrefabInstanceController = std::make_unique<PulseForgeEditor::EditorPrefabInstanceController>(*this);
@@ -4238,6 +4239,7 @@ namespace
 		void RestoreDocumentWorkspace()
 		{
 			if (!m_Project) return;
+			if (m_GraphDocumentEditor) m_GraphDocumentEditor->SetWorkspacePinVisibility({});
 			m_DocumentWorkspaceStore.Configure(m_Layout.GetDocumentWorkspacePath(m_Project->GetDescription().ID.ToString()));
 			auto Loaded = m_DocumentWorkspaceStore.Load(m_Project->GetDescription().ID);
 			if (!Loaded)
@@ -4261,6 +4263,7 @@ namespace
 				PF_WARN("Document workspace load completed without state; rebuilding from registered documents.");
 				return;
 			}
+			if (m_GraphDocumentEditor) m_GraphDocumentEditor->SetWorkspacePinVisibility(Workspace->HiddenGraphPins);
 			bool SkippedDocument = false;
 			if (Workspace->MaterialDetailsAsset)
 			{
@@ -4368,6 +4371,8 @@ namespace
 						PF_WARN("Could not load registered document session {}", DisplayName);
 						continue;
 					}
+					if (Identity.Kind == PulseForgeEditor::EditorDocumentKind::Graph && m_GraphDocumentEditor)
+						m_GraphDocumentEditor->RestorePinVisibility(*Session, Workspace->HiddenGraphPins);
 					const auto SavedDocument = std::find(SavedHost.Documents.begin(), SavedHost.Documents.end(), Identity);
 					const size_t DestinationIndex = static_cast<size_t>(std::distance(SavedHost.Documents.begin(), SavedDocument));
 					if (!m_Documents.Transfer(
@@ -4420,7 +4425,10 @@ namespace
 			Workspace.MaterialDetailsAsset = m_MaterialDetailsAsset;
 			if (const auto* FocusedHost = m_Documents.GetFocusedHost()) Workspace.FocusedHostID = FocusedHost->ID;
 			for (const auto& Host : m_Documents.GetHosts())
+			{
 				if (Host.Role == PulseForgeEditor::EditorDocumentHostRole::Main || !Host.Documents.empty()) Workspace.Hosts.push_back(Host);
+			}
+			if (m_GraphDocumentEditor) Workspace.HiddenGraphPins = m_GraphDocumentEditor->CaptureWorkspacePinVisibility();
 			Workspace.RememberedPlacements = m_Documents.GetRememberedPlacements(Workspace.Project);
 			std::sort(Workspace.RememberedPlacements.begin(), Workspace.RememberedPlacements.end(),
 				[](const auto& Left, const auto& Right) { return static_cast<uint8_t>(Left.first) < static_cast<uint8_t>(Right.first); });

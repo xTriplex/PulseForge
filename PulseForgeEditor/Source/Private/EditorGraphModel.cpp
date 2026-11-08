@@ -359,6 +359,27 @@ namespace
 
 namespace PulseForgeEditor
 {
+	bool ShouldShowEditorGraphPinDefault(const EditorGraphPin& Pin,
+		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept
+	{
+		return Definition.DefaultControl == EditorGraphPinDefaultControl::Always ||
+			(Definition.DefaultControl == EditorGraphPinDefaultControl::WhenDisconnected && IncidentConnectionCount == 0);
+	}
+
+	bool CanHideEditorGraphPin(const EditorGraphPinDefinition& Definition) noexcept
+	{
+		return Definition.Hideable && !Definition.Required;
+	}
+
+	bool CanAutoHideEditorGraphPin(const EditorGraphPin& Pin,
+		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount) noexcept
+	{
+		if (!CanHideEditorGraphPin(Definition) || IncidentConnectionCount != 0) return false;
+		if (Pin.Direction == EditorGraphPinDirection::Input && Pin.DefaultValue != Definition.DefaultValue)
+			return false;
+		return true;
+	}
+
 	EditorGraphCommandHistory::EditorGraphCommandHistory(EditorGraph InitialGraph)
 		: m_Graph(std::move(InitialGraph)), m_SavedGraph(m_Graph)
 	{

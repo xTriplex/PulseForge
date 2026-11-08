@@ -48,6 +48,34 @@ namespace PulseForgeEditor
 			return Editor.GetPresentationForTesting(Session);
 		}
 
+		static void SetPinHidden(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			PulseForge::UUID PinID, bool Hidden)
+		{
+			Editor.SetPinHiddenForTesting(Session, PinID, Hidden);
+		}
+
+		static auto CapturePinVisibility(EditorGraphDocumentEditor& Editor, const EditorDocumentSession& Session)
+		{
+			return Editor.CapturePinVisibility(Session);
+		}
+
+		static void RestorePinVisibility(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			const std::vector<EditorDocumentWorkspaceState::GraphPinVisibility>& Settings)
+		{
+			Editor.RestorePinVisibility(Session, Settings);
+		}
+
+		static auto CaptureWorkspacePinVisibility(EditorGraphDocumentEditor& Editor)
+		{
+			return Editor.CaptureWorkspacePinVisibility();
+		}
+
+		static void SetWorkspacePinVisibility(EditorGraphDocumentEditor& Editor,
+			std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> Settings)
+		{
+			Editor.SetWorkspacePinVisibility(std::move(Settings));
+		}
+
 		static EditorGraphPropertyEditResult Process(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			const std::vector<EditorGraphPropertyEditEvent>& Events)
 		{
@@ -285,7 +313,8 @@ namespace
 				{ return Node.NodeID == NodeID; });
 			return It == Metrics.end() ? nullptr : &*It;
 		};
-		const auto ValidateMetrics = [&](const auto& Metrics, const EditorGraph& Graph, double MaximumWidth)
+		const auto ValidateMetrics = [&](const auto& Metrics, const EditorGraph& Graph,
+			const EditorGraphSchema& Schema, double MaximumWidth)
 		{
 			PF_CHECK(Tests, Metrics.size() == Graph.Nodes.size());
 			for (const auto& Node : Metrics)
@@ -305,6 +334,7 @@ namespace
 					PF_CHECK(Tests, Pin != ModelNode->Pins.end());
 					if (Pin == ModelNode->Pins.end()) continue;
 					const auto& Marker = PinMetric.Marker;
+					PF_CHECK(Tests, PinMetric.Visible);
 					PF_CHECK(Tests, Marker.Minimum.X >= Node.Position.X - 2.0 &&
 						Marker.Maximum.X <= Node.Position.X + Node.Size.X + 2.0 &&
 						Marker.Minimum.Y >= Node.Position.Y - 2.0 &&
@@ -319,7 +349,26 @@ namespace
 						HasOutput = true;
 						PF_CHECK(Tests, Marker.Anchor.X > Node.Position.X + Node.Size.X * 0.6);
 					}
-					if (Pin->Direction == EditorGraphPinDirection::Input && Pin->Type != EditorGraphPinType::Execution)
+					const size_t Incident = static_cast<size_t>(std::count_if(Graph.Connections.begin(), Graph.Connections.end(),
+						[&Pin](const auto& Connection)
+							{ return Connection.InputPin == Pin->ID || Connection.OutputPin == Pin->ID; }));
+					PF_CHECK(Tests, PinMetric.Connected == (Incident > 0));
+					PF_CHECK(Tests, PinMetric.Label.has_value());
+					if (PinMetric.Label && Pin->Direction == EditorGraphPinDirection::Input)
+						PF_CHECK(Tests, PinMetric.Label->Minimum.X > Marker.Maximum.X);
+					if (PinMetric.Label && Pin->Direction == EditorGraphPinDirection::Output)
+						PF_CHECK(Tests, PinMetric.Label->Maximum.X < Marker.Minimum.X);
+					const auto NodeDefinition = std::find_if(Schema.Nodes.begin(), Schema.Nodes.end(), [&ModelNode](const auto& Definition)
+						{ return Definition.TypeKey == ModelNode->TypeKey; });
+					const auto PinDefinition = NodeDefinition == Schema.Nodes.end()
+						? std::vector<EditorGraphPinDefinition>::const_iterator{}
+						: std::find_if(NodeDefinition->Pins.begin(), NodeDefinition->Pins.end(), [&Pin](const auto& Definition)
+							{ return Definition.Key == Pin->Key; });
+					const bool ShowDefault = Pin->Direction == EditorGraphPinDirection::Input &&
+						Pin->Type != EditorGraphPinType::Execution && NodeDefinition != Schema.Nodes.end() &&
+						PinDefinition != NodeDefinition->Pins.end() &&
+						ShouldShowEditorGraphPinDefault(*Pin, *PinDefinition, Incident);
+					if (ShowDefault)
 					{
 						PF_CHECK(Tests, PinMetric.PropertyControl.has_value());
 						if (PinMetric.PropertyControl)
@@ -335,6 +384,8 @@ namespace
 							PF_CHECK(Tests, !OverlapsMarker);
 						}
 					}
+					else if (Pin->Direction == EditorGraphPinDirection::Input && Pin->Type != EditorGraphPinType::Execution)
+						PF_CHECK(Tests, !PinMetric.PropertyControl.has_value());
 				}
 				if (HasInput && HasOutput)
 				{
@@ -357,16 +408,16 @@ namespace
 		};
 
 		const auto CheckViewportStability = [&](EditorDocumentSession& Session, const EditorGraph& Graph,
-			std::string_view Host, double MaximumWidth)
+			const EditorGraphSchema& Schema, std::string_view Host, double MaximumWidth)
 		{
 			EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, Session,
 				"{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.65}}");
 			const auto Narrow = DrawFrame(Session, Host, 1280.0f);
-			ValidateMetrics(Narrow, Graph, MaximumWidth);
+			ValidateMetrics(Narrow, Graph, Schema, MaximumWidth);
 			const auto NarrowAgain = DrawFrame(Session, Host, 1280.0f);
-			ValidateMetrics(NarrowAgain, Graph, MaximumWidth);
+			ValidateMetrics(NarrowAgain, Graph, Schema, MaximumWidth);
 			const auto Wide = DrawFrame(Session, Host, 1920.0f);
-			ValidateMetrics(Wide, Graph, MaximumWidth);
+			ValidateMetrics(Wide, Graph, Schema, MaximumWidth);
 			for (const auto& Node : Narrow)
 			{
 				const auto* First = FindPresentation(NarrowAgain, Node.NodeID);
@@ -380,7 +431,7 @@ namespace
 			EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, Session,
 				"{\"view\":{\"scroll\":{\"x\":-83.0,\"y\":46.0},\"zoom\":1.45}}");
 			const auto Zoomed = DrawFrame(Session, Host, 1280.0f);
-			ValidateMetrics(Zoomed, Graph, MaximumWidth);
+			ValidateMetrics(Zoomed, Graph, Schema, MaximumWidth);
 			for (const auto& Node : Narrow)
 				if (const auto* ChangedView = FindPresentation(Zoomed, Node.NodeID))
 					PF_CHECK(Tests, std::abs(Node.Size.X - ChangedView->Size.X) < 1.0);
@@ -392,7 +443,57 @@ namespace
 		PF_CHECK(Tests, MaterialGraphForTest.has_value());
 		if (MaterialGraphForTest)
 		{
-			CheckViewportStability(*MaterialSession, MaterialGraphForLayout, "MaterialLayoutHost", 700.0);
+			CheckViewportStability(*MaterialSession, MaterialGraphForLayout, MaterialSchema, "MaterialLayoutHost", 700.0);
+			const auto* UnusedB = FindPin(MaterialGraphForLayout, "material.multiply", "b");
+			const auto* ConnectedA = FindPin(MaterialGraphForLayout, "material.multiply", "a");
+			PF_CHECK(Tests, UnusedB && ConnectedA);
+			if (UnusedB && ConnectedA)
+			{
+				const auto MultiplyNode = std::find_if(MaterialGraphForLayout.Nodes.begin(), MaterialGraphForLayout.Nodes.end(),
+					[UnusedB](const auto& Node)
+						{ return std::any_of(Node.Pins.begin(), Node.Pins.end(), [UnusedB](const auto& Pin) { return Pin.ID == UnusedB->ID; }); });
+				PF_CHECK(Tests, MultiplyNode != MaterialGraphForLayout.Nodes.end());
+				const auto VisibleMetrics = DrawFrame(*MaterialSession, "MaterialVisiblePins", 1280.0f);
+				PF_CHECK(Tests, !MaterialSession->IsDirty());
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, UnusedB->ID, true);
+				const auto HiddenMetrics = DrawFrame(*MaterialSession, "MaterialHiddenPins", 1280.0f);
+				if (MultiplyNode != MaterialGraphForLayout.Nodes.end())
+				{
+					const auto* VisibleNodeMetrics = FindPresentation(VisibleMetrics, MultiplyNode->ID);
+					if (const auto* NodeMetrics = FindPresentation(HiddenMetrics, MultiplyNode->ID))
+					{
+						PF_CHECK(Tests, VisibleNodeMetrics && VisibleNodeMetrics->Size.Y > NodeMetrics->Size.Y);
+						if (VisibleNodeMetrics)
+							PF_CHECK(Tests, std::abs(VisibleNodeMetrics->Position.X - NodeMetrics->Position.X) < 0.1 &&
+								std::abs(VisibleNodeMetrics->Position.Y - NodeMetrics->Position.Y) < 0.1);
+						PF_CHECK(Tests, std::none_of(NodeMetrics->Pins.begin(), NodeMetrics->Pins.end(),
+							[UnusedB](const auto& Pin) { return Pin.PinID == UnusedB->ID; }));
+						PF_CHECK(Tests, std::any_of(NodeMetrics->Pins.begin(), NodeMetrics->Pins.end(),
+							[ConnectedA](const auto& Pin) { return Pin.PinID == ConnectedA->ID && Pin.Connected; }));
+					}
+					else PF_CHECK(Tests, false);
+				}
+				const auto HiddenSettings = EditorGraphDocumentEditorTestAccess::CaptureWorkspacePinVisibility(GraphEditor);
+				PF_CHECK(Tests, HiddenSettings.size() == 1 && HiddenSettings.front().PinID == UnusedB->ID);
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, UnusedB->ID, false);
+				EditorGraphDocumentEditorTestAccess::SetWorkspacePinVisibility(GraphEditor, {});
+				EditorGraphDocumentEditorTestAccess::SetWorkspacePinVisibility(GraphEditor, HiddenSettings);
+				EditorGraphDocumentEditorTestAccess::RestorePinVisibility(GraphEditor, *MaterialSession, HiddenSettings);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *MaterialSession) == HiddenSettings);
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, UnusedB->ID, false);
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, ConnectedA->ID, true);
+				const auto ConnectedHiddenMetrics = DrawFrame(*MaterialSession, "ConnectedPinCannotDisappear", 1280.0f);
+				if (MultiplyNode != MaterialGraphForLayout.Nodes.end())
+				{
+					if (const auto* NodeMetrics = FindPresentation(ConnectedHiddenMetrics, MultiplyNode->ID))
+						PF_CHECK(Tests, std::any_of(NodeMetrics->Pins.begin(), NodeMetrics->Pins.end(),
+							[ConnectedA](const auto& Pin) { return Pin.PinID == ConnectedA->ID && Pin.Connected; }));
+					else PF_CHECK(Tests, false);
+				}
+				else PF_CHECK(Tests, false);
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, ConnectedA->ID, false);
+				PF_CHECK(Tests, !MaterialSession->IsDirty());
+			}
 			const auto BeforeTransfer = DrawFrame(*MaterialSession, "MaterialBeforeTransfer", 1280.0f);
 			const auto NativeHost = Documents.CreateNativeHost(EditorDocumentKind::Graph);
 			PF_CHECK(Tests, NativeHost.has_value());
@@ -404,7 +505,7 @@ namespace
 				if (TransferredSession)
 				{
 					const auto AfterTransfer = DrawFrame(*TransferredSession, "MaterialAfterTransfer", 1920.0f);
-					ValidateMetrics(AfterTransfer, MaterialGraphForLayout, 700.0);
+					ValidateMetrics(AfterTransfer, MaterialGraphForLayout, MaterialSchema, 700.0);
 					for (const auto& Node : BeforeTransfer)
 					{
 						const auto* Transferred = FindPresentation(AfterTransfer, Node.NodeID);
@@ -419,14 +520,18 @@ namespace
 			if (auto Deserialized = DeserializeEditorGraph(*GameplayBytes, MakeGameplayEventFixtureSchema()); Deserialized)
 				GameplayGraphForTest = std::move(*Deserialized);
 		PF_CHECK(Tests, GameplayGraphForTest.has_value());
-		if (GameplayGraphForTest) CheckViewportStability(*GameplaySession, *GameplayGraphForTest, "GameplayLayoutHost", 700.0);
+		const auto GameplaySchema = MakeGameplayEventFixtureSchema();
+		if (GameplayGraphForTest) CheckViewportStability(*GameplaySession, *GameplayGraphForTest, GameplaySchema,
+			"GameplayLayoutHost", 700.0);
 
 		EditorGraphSchema TestOnlySchema{ "test.layout-content", 1, EditorGraphCyclePolicy::Reject,
 			EditorGraphCyclePolicy::Allow, true,
 			{
 				{ "test.layout.source", "Long Source Node Label for Content-Fit Verification",
 					{ { "source_output_with_a_long_stable_pin_key", "Source Output", EditorGraphPinDirection::Output,
-						EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 } } },
+						EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 },
+						{ "source_boolean_signal", "Boolean Signal", EditorGraphPinDirection::Output,
+						EditorGraphPinType::Boolean, EditorGraphPinCardinality::Multiple, false } } },
 				{ "test.layout.consumer", "Independent Consumer Node",
 					{ { "input_with_a_deliberately_long_stable_key", "Long Input", EditorGraphPinDirection::Input,
 						EditorGraphPinType::Float, EditorGraphPinCardinality::Single, 0.0 },
@@ -435,6 +540,9 @@ namespace
 						{ "consumer_result", "Consumer Result", EditorGraphPinDirection::Output,
 						EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 } } }
 			} };
+		TestOnlySchema.Nodes[1].Pins[0].Hideable = false;
+		TestOnlySchema.Nodes[1].Pins[0].Required = true;
+		TestOnlySchema.Nodes[1].Pins[1].DefaultControl = EditorGraphPinDefaultControl::Always;
 		auto TestOnlyGraph = CreateEditorGraph(TestOnlySchema, GameplaySession->Identity.Asset);
 		PF_CHECK(Tests, TestOnlyGraph.has_value());
 		if (!TestOnlyGraph) return;
@@ -444,10 +552,32 @@ namespace
 		if (!TestSource || !TestConsumer) return;
 		TestOnlyGraph->Nodes.push_back(std::move(*TestSource));
 		TestOnlyGraph->Nodes.push_back(std::move(*TestConsumer));
-		const EditorGraph TestOnlyGraphForTest = *TestOnlyGraph;
+		EditorGraphCommandHistory TestOnlyHistory(*TestOnlyGraph);
+		const auto* TestBooleanOutput = FindPin(TestOnlyHistory.Graph(), "test.layout.source", "source_boolean_signal");
+		const auto* TestCondition = FindPin(TestOnlyHistory.Graph(), "test.layout.consumer", "condition_value");
+		PF_CHECK(Tests, TestBooleanOutput && TestCondition);
+		if (TestBooleanOutput && TestCondition)
+			PF_CHECK(Tests, ConnectEditorGraphPins(TestOnlyHistory, TestOnlySchema,
+				TestBooleanOutput->ID, TestCondition->ID).has_value());
+		const EditorGraph TestOnlyGraphForTest = TestOnlyHistory.Graph();
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *GameplaySession,
-			std::move(*TestOnlyGraph), TestOnlySchema);
-		CheckViewportStability(*GameplaySession, TestOnlyGraphForTest,
+			TestOnlyHistory.Graph(), TestOnlySchema);
+		const auto* RequiredPin = FindPin(TestOnlyGraphForTest, "test.layout.consumer", "input_with_a_deliberately_long_stable_key");
+		PF_CHECK(Tests, RequiredPin != nullptr);
+		if (RequiredPin)
+		{
+			EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *GameplaySession, RequiredPin->ID, true);
+			const auto RequiredVisibleMetrics = DrawFrame(*GameplaySession, "RequiredPinVisible", 1280.0f);
+			const auto ConsumerNode = std::find_if(TestOnlyGraphForTest.Nodes.begin(), TestOnlyGraphForTest.Nodes.end(),
+				[](const auto& Node) { return Node.TypeKey == "test.layout.consumer"; });
+			PF_CHECK(Tests, ConsumerNode != TestOnlyGraphForTest.Nodes.end());
+			const auto* ConsumerMetrics = ConsumerNode == TestOnlyGraphForTest.Nodes.end()
+				? nullptr : FindPresentation(RequiredVisibleMetrics, ConsumerNode->ID);
+			PF_CHECK(Tests, ConsumerMetrics && std::any_of(ConsumerMetrics->Pins.begin(), ConsumerMetrics->Pins.end(),
+				[RequiredPin](const auto& Pin) { return Pin.PinID == RequiredPin->ID; }));
+			EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *GameplaySession, RequiredPin->ID, false);
+		}
+		CheckViewportStability(*GameplaySession, TestOnlyGraphForTest, TestOnlySchema,
 			"LongLabelLayoutHost", 700.0);
 	}
 
