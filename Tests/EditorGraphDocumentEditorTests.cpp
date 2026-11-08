@@ -48,6 +48,12 @@ namespace PulseForgeEditor
 			return Editor.GetPresentationForTesting(Session);
 		}
 
+		static EditorGraphPinVisibilityPopupPresentation GetPinVisibilityPopup(
+			EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetPinVisibilityPopupForTesting(Session);
+		}
+
 		static void SetPinHidden(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			PulseForge::UUID PinID, bool Hidden)
 		{
@@ -307,6 +313,26 @@ namespace
 				? EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *MaterialSession)
 				: EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *GameplaySession);
 		};
+		const auto DrawInputFrame = [&](EditorDocumentSession& Session, std::string_view Host, float Width,
+			ImVec2 HostOrigin, ImVec2 MousePosition, bool LeftDown, bool Escape = false)
+		{
+			IO.DisplaySize = ImVec2(Width, 900.0f);
+			IO.AddMousePosEvent(MousePosition.x, MousePosition.y);
+			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
+			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(HostOrigin);
+			ImGui::SetNextWindowSize(ImVec2(Width - HostOrigin.x, 900.0f - HostOrigin.y));
+			const std::string Name(Host);
+			ImGui::Begin(Name.c_str(), nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			EditorGraphDocumentEditorTestAccess::Draw(GraphEditor, Session);
+			ImGui::End();
+			ImGui::Render();
+			return Session.Identity == MaterialSession->Identity
+				? EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *MaterialSession)
+				: EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *GameplaySession);
+		};
 		const auto FindPresentation = [](const auto& Metrics, UUID NodeID) -> const EditorGraphCanvasNodePresentation*
 		{
 			const auto It = std::find_if(Metrics.begin(), Metrics.end(), [NodeID](const auto& Node)
@@ -444,7 +470,180 @@ namespace
 		if (MaterialGraphForTest)
 		{
 			CheckViewportStability(*MaterialSession, MaterialGraphForLayout, MaterialSchema, "MaterialLayoutHost", 700.0);
+			const auto MultiplyNode = std::find_if(MaterialGraphForLayout.Nodes.begin(), MaterialGraphForLayout.Nodes.end(),
+				[](const auto& Node) { return Node.TypeKey == "material.multiply"; });
+			const auto ScalarNode = std::find_if(MaterialGraphForLayout.Nodes.begin(), MaterialGraphForLayout.Nodes.end(),
+				[](const auto& Node) { return Node.TypeKey == "material.scalar"; });
 			const auto* UnusedB = FindPin(MaterialGraphForLayout, "material.multiply", "b");
+			PF_CHECK(Tests, MultiplyNode != MaterialGraphForLayout.Nodes.end() && ScalarNode != MaterialGraphForLayout.Nodes.end());
+			PF_CHECK(Tests, UnusedB != nullptr);
+			if (MultiplyNode != MaterialGraphForLayout.Nodes.end() && ScalarNode != MaterialGraphForLayout.Nodes.end() && UnusedB)
+			{
+				const ImVec2 HostOrigin(37.0f, 29.0f);
+				const auto OtherDocumentVisibilityBefore = EditorGraphDocumentEditorTestAccess::CapturePinVisibility(
+					GraphEditor, *GameplaySession);
+				const bool OtherDocumentDirtyBefore = GameplaySession->IsDirty();
+				const auto Center = [](const EditorGraphCanvasRect& Rect)
+				{
+					return ImVec2(static_cast<float>((Rect.Minimum.X + Rect.Maximum.X) * 0.5),
+						static_cast<float>((Rect.Minimum.Y + Rect.Maximum.Y) * 0.5));
+				};
+				const auto ClickAt = [&](const EditorGraphCanvasRect& Rect)
+				{
+					const ImVec2 Point = Center(Rect);
+					(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, Point, true);
+					return DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, Point, false);
+				};
+				const auto ReadNodeMetrics = [&](UUID NodeID)
+				{
+					const auto Metrics = DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+						ImVec2(-1000.0f, -1000.0f), false);
+					const auto* NodeMetrics = FindPresentation(Metrics, NodeID);
+					return NodeMetrics ? *NodeMetrics : EditorGraphCanvasNodePresentation{};
+				};
+				const auto HoverAt = [&](const EditorGraphCanvasRect& Rect)
+				{
+					const ImVec2 Point = Center(Rect);
+					for (int Frame = 0; Frame < 16; ++Frame)
+						(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, Point, false);
+					return EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+				};
+				const auto OpenPopupFor = [&](UUID NodeID)
+				{
+					const auto NodeMetrics = ReadNodeMetrics(NodeID);
+					if (!NodeMetrics.PinsButtonScreenBounds) return EditorGraphPinVisibilityPopupPresentation{};
+					ClickAt(*NodeMetrics.PinsButtonScreenBounds);
+					return EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+				};
+				auto PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				PF_CHECK(Tests, PopupMetrics.NodeID == MultiplyNode->ID);
+				PF_CHECK(Tests, PopupMetrics.ContextValid && PopupMetrics.OpenSubmitted && PopupMetrics.PopupVisible &&
+					PopupMetrics.PopupOpenAfterSubmit && PopupMetrics.PopupScreenBounds.has_value() && PopupMetrics.NoMove);
+				PF_CHECK(Tests, PopupMetrics.HideUnusedScreenBounds.has_value() &&
+					PopupMetrics.ResetVisibilityScreenBounds.has_value() && PopupMetrics.ShowAllScreenBounds.has_value());
+				if (PopupMetrics.PopupScreenBounds && PopupMetrics.TriggerScreenBounds)
+				{
+					const auto& Popup = *PopupMetrics.PopupScreenBounds;
+					const auto& Trigger = *PopupMetrics.TriggerScreenBounds;
+					const double GapX = (std::max)({ Trigger.Minimum.X - Popup.Maximum.X,
+						Popup.Minimum.X - Trigger.Maximum.X, 0.0 });
+					const double GapY = (std::max)({ Trigger.Minimum.Y - Popup.Maximum.Y,
+						Popup.Minimum.Y - Trigger.Maximum.Y, 0.0 });
+					PF_CHECK(Tests, std::hypot(GapX, GapY) < 260.0);
+				}
+
+				if (PopupMetrics.HideUnusedScreenBounds)
+				{
+					PopupMetrics = HoverAt(*PopupMetrics.HideUnusedScreenBounds);
+					PF_CHECK(Tests, PopupMetrics.HideUnusedHovered && PopupMetrics.PopupWindowHovered);
+					const auto HideUnusedBounds = PopupMetrics.HideUnusedScreenBounds;
+					if (HideUnusedBounds) ClickAt(*HideUnusedBounds);
+					PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+					PF_CHECK(Tests, PopupMetrics.HideUnusedActivated);
+					const auto Visibility = EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *MaterialSession);
+					PF_CHECK(Tests, std::any_of(Visibility.begin(), Visibility.end(), [MultiplyNode, UnusedB](const auto& Setting)
+						{ return Setting.NodeID == MultiplyNode->ID && Setting.PinID == UnusedB->ID; }));
+					PF_CHECK(Tests, !MaterialSession->IsDirty());
+				}
+
+				// The submenu changes the same stable pin identity; a later Show All restores it.
+				PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				PF_CHECK(Tests, PopupMetrics.NodeID == MultiplyNode->ID && PopupMetrics.PopupVisible);
+				if (PopupMetrics.PinsSubmenuScreenBounds)
+				{
+					PopupMetrics = HoverAt(*PopupMetrics.PinsSubmenuScreenBounds);
+					PF_CHECK(Tests, PopupMetrics.PinsSubmenuHovered);
+					const auto BItem = std::find_if(PopupMetrics.PinItems.begin(), PopupMetrics.PinItems.end(),
+						[UnusedB](const auto& Item) { return Item.PinID == UnusedB->ID; });
+					PF_CHECK(Tests, BItem != PopupMetrics.PinItems.end());
+					if (BItem != PopupMetrics.PinItems.end())
+					{
+						const auto BBounds = BItem->Bounds;
+						HoverAt(BBounds);
+						ClickAt(BBounds);
+						const auto Visibility = EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *MaterialSession);
+						PF_CHECK(Tests, std::none_of(Visibility.begin(), Visibility.end(), [UnusedB](const auto& Setting)
+							{ return Setting.PinID == UnusedB->ID; }));
+					}
+				}
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, UnusedB->ID, true);
+				PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				if (PopupMetrics.ResetVisibilityScreenBounds)
+				{
+					PopupMetrics = HoverAt(*PopupMetrics.ResetVisibilityScreenBounds);
+					const auto ResetBounds = PopupMetrics.ResetVisibilityScreenBounds;
+					PF_CHECK(Tests, PopupMetrics.ResetVisibilityHovered);
+					if (ResetBounds) ClickAt(*ResetBounds);
+					PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+					PF_CHECK(Tests, PopupMetrics.ResetVisibilityActivated);
+					PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *MaterialSession).empty());
+				}
+				EditorGraphDocumentEditorTestAccess::SetPinHidden(GraphEditor, *MaterialSession, UnusedB->ID, true);
+				PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				if (PopupMetrics.ShowAllScreenBounds)
+				{
+					PopupMetrics = HoverAt(*PopupMetrics.ShowAllScreenBounds);
+					const auto ShowAllBounds = PopupMetrics.ShowAllScreenBounds;
+					PF_CHECK(Tests, PopupMetrics.ShowAllHovered);
+					if (ShowAllBounds) ClickAt(*ShowAllBounds);
+					PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+					PF_CHECK(Tests, PopupMetrics.ShowAllActivated);
+					PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *MaterialSession).empty());
+				}
+
+				// A drag starting within popup padding cannot move the popup or underlying node.
+				const auto NodeBeforeDrag = ReadNodeMetrics(MultiplyNode->ID).Position;
+				PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				const auto PopupBeforeDrag = PopupMetrics.PopupScreenBounds;
+				if (PopupBeforeDrag)
+				{
+					const ImVec2 PaddingPoint(static_cast<float>(PopupBeforeDrag->Maximum.X - 4.0),
+						static_cast<float>(PopupBeforeDrag->Maximum.Y - 4.0));
+					const ImVec2 DragPoint(PaddingPoint.x - 40.0f, PaddingPoint.y - 30.0f);
+					(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, PaddingPoint, false);
+					(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, PaddingPoint, true);
+					(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, DragPoint, true);
+					(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, DragPoint, false);
+					PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+					PF_CHECK(Tests, PopupMetrics.PopupScreenBounds.has_value());
+					if (PopupMetrics.PopupScreenBounds)
+						PF_CHECK(Tests, std::abs(PopupMetrics.PopupScreenBounds->Minimum.X - PopupBeforeDrag->Minimum.X) < 0.1 &&
+							std::abs(PopupMetrics.PopupScreenBounds->Minimum.Y - PopupBeforeDrag->Minimum.Y) < 0.1);
+					const auto AfterDrag = ReadNodeMetrics(MultiplyNode->ID);
+					PF_CHECK(Tests, std::abs(AfterDrag.Position.X - NodeBeforeDrag.X) < 0.1 &&
+						std::abs(AfterDrag.Position.Y - NodeBeforeDrag.Y) < 0.1);
+				}
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+					ImVec2(-1000.0f, -1000.0f), false, true);
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+					ImVec2(-1000.0f, -1000.0f), false, false);
+				PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+				PF_CHECK(Tests, !PopupMetrics.PopupScreenBounds.has_value());
+
+				// Outside dismissal does not reuse its click for an operation on the next node.
+				const auto NodeBeforeOutsideClick = ReadNodeMetrics(MultiplyNode->ID).Position;
+				PopupMetrics = OpenPopupFor(MultiplyNode->ID);
+				const ImVec2 OutsidePoint(120.0f, 180.0f);
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, OutsidePoint, true);
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, OutsidePoint, false);
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin, OutsidePoint, false);
+				PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+				PF_CHECK(Tests, !PopupMetrics.PopupScreenBounds.has_value());
+				const auto NodeAfterOutsideClick = ReadNodeMetrics(MultiplyNode->ID).Position;
+				PF_CHECK(Tests, std::abs(NodeAfterOutsideClick.X - NodeBeforeOutsideClick.X) < 0.1 &&
+					std::abs(NodeAfterOutsideClick.Y - NodeBeforeOutsideClick.Y) < 0.1);
+				PopupMetrics = OpenPopupFor(ScalarNode->ID);
+				PF_CHECK(Tests, PopupMetrics.NodeID == ScalarNode->ID && PopupMetrics.PopupVisible);
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+					ImVec2(-1000.0f, -1000.0f), false, true);
+				(void)DrawInputFrame(*MaterialSession, "PinsPopupHost", 1440.0f, HostOrigin,
+					ImVec2(-1000.0f, -1000.0f), false, false);
+				PopupMetrics = EditorGraphDocumentEditorTestAccess::GetPinVisibilityPopup(GraphEditor, *MaterialSession);
+				PF_CHECK(Tests, !PopupMetrics.PopupScreenBounds.has_value());
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::CapturePinVisibility(GraphEditor, *GameplaySession) ==
+					OtherDocumentVisibilityBefore);
+				PF_CHECK(Tests, GameplaySession->IsDirty() == OtherDocumentDirtyBefore);
+			}
 			const auto* ConnectedA = FindPin(MaterialGraphForLayout, "material.multiply", "a");
 			PF_CHECK(Tests, UnusedB && ConnectedA);
 			if (UnusedB && ConnectedA)

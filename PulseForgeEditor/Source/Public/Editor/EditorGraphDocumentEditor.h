@@ -73,7 +73,41 @@ namespace PulseForgeEditor
 		double Zoom = 1.0;
 		double InputColumnWidth = 0.0;
 		double OutputColumnWidth = 0.0;
+		std::optional<EditorGraphCanvasRect> PinsButtonScreenBounds;
+		bool PinsButtonHovered = false;
+		bool PinsButtonActivated = false;
 		std::vector<EditorGraphCanvasPinPresentation> Pins;
+	};
+
+	struct EditorGraphPinVisibilityPopupItemPresentation
+	{
+		PulseForge::UUID PinID;
+		EditorGraphCanvasRect Bounds;
+	};
+
+	struct EditorGraphPinVisibilityPopupPresentation
+	{
+		PulseForge::UUID NodeID;
+		std::optional<EditorGraphCanvasRect> TriggerScreenBounds;
+		std::optional<EditorGraphCanvasRect> PopupScreenBounds;
+		std::optional<EditorGraphCanvasRect> ShowAllScreenBounds;
+		std::optional<EditorGraphCanvasRect> HideUnusedScreenBounds;
+		std::optional<EditorGraphCanvasRect> ResetVisibilityScreenBounds;
+		std::optional<EditorGraphCanvasRect> PinsSubmenuScreenBounds;
+		std::vector<EditorGraphPinVisibilityPopupItemPresentation> PinItems;
+		bool ContextValid = false;
+		bool OpenSubmitted = false;
+		bool PopupVisible = false;
+		bool PopupOpenAfterSubmit = false;
+		bool NoMove = false;
+		bool PopupWindowHovered = false;
+		bool ShowAllHovered = false;
+		bool HideUnusedHovered = false;
+		bool ResetVisibilityHovered = false;
+		bool PinsSubmenuHovered = false;
+		bool ShowAllActivated = false;
+		bool HideUnusedActivated = false;
+		bool ResetVisibilityActivated = false;
 	};
 
 	struct EditorGraphCanvasDocumentContext
@@ -364,6 +398,8 @@ namespace PulseForgeEditor
 		void SetCanvasSettingsForTesting(EditorDocumentSession& Session, std::string Settings);
 		void CapturePresentationForTesting(EditorDocumentSession& Session, bool Capture);
 		[[nodiscard]] std::vector<EditorGraphCanvasNodePresentation> GetPresentationForTesting(
+			EditorDocumentSession& Session);
+		[[nodiscard]] EditorGraphPinVisibilityPopupPresentation GetPinVisibilityPopupForTesting(
 			EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
 

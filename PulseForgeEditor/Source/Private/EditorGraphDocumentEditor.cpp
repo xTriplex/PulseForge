@@ -46,6 +46,36 @@ namespace
 		EditorGraphCanvasDocumentContext Context;
 		EditorGraphScreenPoint Position;
 	};
+	struct PendingPinVisibilityPopup
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID NodeID;
+		std::string PopupID;
+		EditorGraphCanvasRect TriggerScreenBounds;
+		bool OpenRequested = true;
+	};
+
+	std::string MakePinVisibilityPopupID(const EditorGraphCanvasDocumentContext& Context, PulseForge::UUID NodeID)
+	{
+		return "PulseForgeGraphPins_" + Context.Document.Project.ToString() + "_" +
+			Context.Document.Asset.ToString() + "_" + std::to_string(static_cast<unsigned>(Context.Document.Kind)) +
+			"_" + std::to_string(Context.SessionGeneration) + "_" + Context.HostID + "_" +
+			Context.GraphID.ToString() + "_" + NodeID.ToString();
+	}
+
+	EditorGraphCanvasRect ToScreenRect(const ImVec2& Minimum, const ImVec2& Maximum)
+	{
+		const ImVec2 ScreenMinimum = NodeEditor::CanvasToScreen(Minimum);
+		const ImVec2 ScreenMaximum = NodeEditor::CanvasToScreen(Maximum);
+		return { { ScreenMinimum.x, ScreenMinimum.y }, { ScreenMaximum.x, ScreenMaximum.y } };
+	}
+
+	EditorGraphCanvasRect CurrentImGuiScreenRect()
+	{
+		const ImVec2 Minimum = ImGui::GetItemRectMin();
+		const ImVec2 Maximum = ImGui::GetItemRectMax();
+		return { { Minimum.x, Minimum.y }, { Maximum.x, Maximum.y } };
+	}
 	struct PendingNodeSearch
 	{
 		bool Active = false;
@@ -109,6 +139,8 @@ namespace
 		PendingScreenPinRelease ScreenPinRelease;
 		EditorGraphPendingPinRelease PinRelease;
 		EditorGraphPropertyEditCoordinator PropertyEdits;
+		std::optional<PendingPinVisibilityPopup> PinVisibilityPopup;
+		EditorGraphPinVisibilityPopupPresentation PinVisibilityPopupPresentation;
 		bool CapturePresentation = false;
 		std::vector<EditorGraphCanvasNodePresentation> Presentation;
 	};
@@ -679,6 +711,7 @@ namespace PulseForgeEditor
 		State->Handles.clear();
 		State->Identities.clear();
 		State->NodeSearch = {};
+		State->PinVisibilityPopup.reset();
 		State->ScreenPinRelease = {};
 		State->PinRelease = {};
 		State->NeedsCanvasSync = true;
@@ -707,6 +740,13 @@ namespace PulseForgeEditor
 	{
 		const auto* State = GetState(Session);
 		return State ? State->Presentation : std::vector<EditorGraphCanvasNodePresentation>{};
+	}
+
+	EditorGraphPinVisibilityPopupPresentation EditorGraphDocumentEditor::GetPinVisibilityPopupForTesting(
+		EditorDocumentSession& Session)
+	{
+		const auto* State = GetState(Session);
+		return State ? State->PinVisibilityPopupPresentation : EditorGraphPinVisibilityPopupPresentation{};
 	}
 
 	void EditorGraphDocumentEditor::SetPinHiddenForTesting(EditorDocumentSession& Session,
@@ -795,6 +835,7 @@ namespace PulseForgeEditor
 			return;
 		}
 		if (State->CapturePresentation) State->Presentation.clear();
+		State->PinVisibilityPopupPresentation = {};
 		if (!State->Canvas)
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", State->Error.c_str());
@@ -827,6 +868,12 @@ namespace PulseForgeEditor
 				Captured.SessionGeneration == CanvasContext.SessionGeneration &&
 				Captured.HostID == CanvasContext.HostID && Captured.GraphID == CanvasContext.GraphID;
 		};
+		const bool PinVisibilityContextValid = State->PinVisibilityPopup &&
+			ContextMatches(State->PinVisibilityPopup->Context) &&
+			std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+				[State](const auto& Node) { return Node.ID == State->PinVisibilityPopup->NodeID; });
+		const bool PinVisibilityPopupOwnsInput = State->PinVisibilityPopup &&
+			(PinVisibilityContextValid || State->PinVisibilityPopup->OpenRequested);
 		if (!Focused || (State->PinRelease.Valid && !ContextMatches(State->PinRelease.Context)) ||
 			(State->ScreenPinRelease.Valid && !ContextMatches(State->ScreenPinRelease.Context)))
 		{
@@ -838,7 +885,8 @@ namespace PulseForgeEditor
 			State->ScreenPinRelease = {};
 			State->PinRelease = {};
 		}
-		if (Focused && !CancelGesture && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+		if (Focused && !CancelGesture && !PinVisibilityPopupOwnsInput &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 		{
 			State->ScreenPinRelease = { true, CanvasContext,
 				{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y } };
@@ -851,6 +899,7 @@ namespace PulseForgeEditor
 		bool SearchPopupActive = State->NodeSearch.Active &&
 			(State->NodeSearch.OpenRequested || State->NodeSearch.PopupOpen || ImGui::IsPopupOpen("GraphNodeSearch"));
 		const bool CapturedAltPinClick = Focused && !Input.WantTextInput && !OtherInputOwner && !SearchPopupActive &&
+			!PinVisibilityPopupOwnsInput &&
 			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && Input.KeyAlt &&
 			ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
 		if (Focused && !Input.WantTextInput && !State->LastHoveredPin.IsNil() &&
@@ -913,6 +962,8 @@ namespace PulseForgeEditor
 		if (!State->Error.empty()) ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", State->Error.c_str());
 
 		NodeEditor::SetCurrentEditor(State->Canvas);
+		NodeEditor::EnableShortcuts(!PinVisibilityPopupOwnsInput &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup));
 		auto& CanvasStyle = NodeEditor::GetStyle();
 		CanvasStyle.Colors[NodeEditor::StyleColor_NodeBg] = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
 		CanvasStyle.Colors[NodeEditor::StyleColor_NodeBorder] = ImGui::GetStyleColorVec4(ImGuiCol_Border);
@@ -932,7 +983,7 @@ namespace PulseForgeEditor
 		};
 		std::vector<EditorGraphPropertyEditEvent> PropertyEvents;
 		std::vector<PinAnchorMeasurement> PinAnchorCanvasPositions;
-		struct PinVisibilityChange { PulseForge::UUID PinID; bool Hidden = false; };
+		struct PinVisibilityChange { PulseForge::UUID NodeID; PulseForge::UUID PinID; bool Hidden = false; };
 		std::vector<PinVisibilityChange> PendingVisibilityChanges;
 		bool PropertyWidgetHovered = false;
 		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> IncidentConnections;
@@ -1030,7 +1081,6 @@ namespace PulseForgeEditor
 			EditorGraphCanvasNodePresentation Presentation;
 			Presentation.NodeID = Node.ID;
 			const std::string NodeLabel = ReadableNodeLabel(State->Schema, Node.TypeKey);
-			const std::string PopupID = "GraphPinVisibility##" + Node.ID.ToString();
 			const std::string HeaderDisplay = FitGraphPresentationText(NodeLabel, 420.0f);
 			ImGui::TextUnformatted(HeaderDisplay.c_str());
 			if (HeaderDisplay != NodeLabel && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", NodeLabel.c_str());
@@ -1040,42 +1090,30 @@ namespace PulseForgeEditor
 				if (State->HiddenPins.contains(Pin.ID) && ConnectionCount(Pin.ID) == 0)
 					++HiddenCount;
 			const std::string VisibilityLabel = HiddenCount ? "Pins +" + std::to_string(HiddenCount) : "Pins";
-			if (ImGui::SmallButton((VisibilityLabel + "##" + Node.ID.ToString()).c_str()))
-				ImGui::OpenPopup(PopupID.c_str());
-			if (ImGui::BeginPopup(PopupID.c_str()))
-			{
-				if (ImGui::MenuItem("Show All Pins"))
-					for (const auto& Pin : Node.Pins)
-						PendingVisibilityChanges.push_back({ Pin.ID, false });
-				if (ImGui::MenuItem("Hide Unused Pins"))
-					for (const auto& Pin : Node.Pins)
-						if (const auto* Definition = FindPinDefinition(State->Schema, Node.TypeKey, Pin.Key);
-							Definition && CanAutoHideEditorGraphPin(Pin, *Definition, ConnectionCount(Pin.ID)))
-							PendingVisibilityChanges.push_back({ Pin.ID, true });
-				if (ImGui::MenuItem("Reset Pin Visibility"))
-					for (const auto& Pin : Node.Pins)
-						PendingVisibilityChanges.push_back({ Pin.ID, false });
-				if (ImGui::BeginMenu("Pins"))
-				{
-					for (const auto& Pin : Node.Pins)
-					{
-						const auto* Definition = FindPinDefinition(State->Schema, Node.TypeKey, Pin.Key);
-						if (!Definition) continue;
-						const bool Connected = ConnectionCount(Pin.ID) != 0;
-						const bool Visible = Connected || Definition->Required || !Definition->Hideable ||
-							!State->HiddenPins.contains(Pin.ID);
-						const bool CanToggle = CanHideEditorGraphPin(*Definition) && !Connected;
-						const std::string StateLabel = Connected ? " — connected; always visible" :
-							Definition->Required ? " — required" : Definition->Hideable ? "" : " — fixed visible";
-						const std::string Label = (Definition->Label.empty() ? Pin.Key : Definition->Label) +
-							"  [" + PinTypeLabel(Pin.Type) + "]" + StateLabel + "##" + Pin.ID.ToString();
-						if (ImGui::MenuItem(Label.c_str(), nullptr, Visible, CanToggle))
-							PendingVisibilityChanges.push_back({ Pin.ID, Visible });
-					}
-					ImGui::EndMenu();
-				}
-				ImGui::EndPopup();
-			}
+		const std::string PinsButtonLabel = VisibilityLabel + "##" + Node.ID.ToString();
+		const ImGuiID PinsButtonID = ImGui::GetID(PinsButtonLabel.c_str());
+		const bool PinsButtonWasActive = ImGui::GetActiveID() == PinsButtonID;
+		const bool PinsButtonActivated = ImGui::SmallButton(PinsButtonLabel.c_str());
+		const ImVec2 PinsButtonMinimum = ImGui::GetItemRectMin();
+		const ImVec2 PinsButtonMaximum = ImGui::GetItemRectMax();
+		if (State->CapturePresentation)
+		{
+			Presentation.PinsButtonScreenBounds = ToScreenRect(PinsButtonMinimum, PinsButtonMaximum);
+			Presentation.PinsButtonHovered = ImGui::IsItemHovered();
+			Presentation.PinsButtonActivated = PinsButtonActivated;
+		}
+		if (PinsButtonActivated && Focused && !Input.WantTextInput && (!OtherInputOwner || PinsButtonWasActive) &&
+			!PinVisibilityPopupOwnsInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+		{
+			const auto Trigger = ToScreenRect(PinsButtonMinimum, PinsButtonMaximum);
+			State->PinVisibilityPopup = PendingPinVisibilityPopup{ CanvasContext, Node.ID,
+				MakePinVisibilityPopupID(CanvasContext, Node.ID), Trigger, true };
+			State->PinVisibilityPopupPresentation.NodeID = Node.ID;
+			State->PinVisibilityPopupPresentation.TriggerScreenBounds = Trigger;
+			State->ScreenPinRelease = {};
+			State->PinRelease = {};
+			NodeEditor::EnableShortcuts(false);
+		}
 			const ImVec2 PinRowsOrigin = ImGui::GetCursorPos();
 			struct PinRow final
 			{
@@ -1285,11 +1323,14 @@ namespace PulseForgeEditor
 		}
 
 		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> CreatedLink;
+		const bool BlockCanvasRequests = PinVisibilityPopupOwnsInput || State->PinVisibilityPopup.has_value() ||
+			ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
 		const auto CreateRequest = GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
 			[] { return NodeEditor::BeginCreate(); },
 			[] { NodeEditor::EndCreate(); },
-			[]() -> std::optional<EditorGraphCanvasLinkRequest>
+			[BlockCanvasRequests]() -> std::optional<EditorGraphCanvasLinkRequest>
 			{
+				if (BlockCanvasRequests) return std::nullopt;
 				NodeEditor::PinId StartPin;
 				NodeEditor::PinId EndPin;
 				if (!NodeEditor::QueryNewLink(&StartPin, &EndPin)) return std::nullopt;
@@ -1305,8 +1346,9 @@ namespace PulseForgeEditor
 			},
 			[] { return NodeEditor::AcceptNewItem(); },
 			[] { NodeEditor::RejectNewItem(); },
-			[]() -> std::optional<uintptr_t>
+			[BlockCanvasRequests]() -> std::optional<uintptr_t>
 			{
+				if (BlockCanvasRequests) return std::nullopt;
 				NodeEditor::PinId SourcePin;
 				if (!NodeEditor::QueryNewNode(&SourcePin)) return std::nullopt;
 				return SourcePin.Get();
@@ -1371,28 +1413,31 @@ namespace PulseForgeEditor
 
 		std::vector<PulseForge::UUID> DeletedLinks;
 		std::vector<PulseForge::UUID> DeletedNodes;
-		NodeEditor::BeginDelete();
-		NodeEditor::LinkId DeletedLink;
-		while (NodeEditor::QueryDeletedLink(&DeletedLink))
+		if (!BlockCanvasRequests)
 		{
-			if (auto It = State->Identities.find(DeletedLink.Get()); It != State->Identities.end())
+			NodeEditor::BeginDelete();
+			NodeEditor::LinkId DeletedLink;
+			while (NodeEditor::QueryDeletedLink(&DeletedLink))
 			{
-				DeletedLinks.push_back(It->second);
-				NodeEditor::AcceptDeletedItem();
+				if (auto It = State->Identities.find(DeletedLink.Get()); It != State->Identities.end())
+				{
+					DeletedLinks.push_back(It->second);
+					NodeEditor::AcceptDeletedItem();
+				}
+				else NodeEditor::RejectDeletedItem();
 			}
-			else NodeEditor::RejectDeletedItem();
-		}
-		NodeEditor::NodeId DeletedNode;
-		while (NodeEditor::QueryDeletedNode(&DeletedNode))
-		{
-			if (auto It = State->Identities.find(DeletedNode.Get()); It != State->Identities.end())
+			NodeEditor::NodeId DeletedNode;
+			while (NodeEditor::QueryDeletedNode(&DeletedNode))
 			{
-				DeletedNodes.push_back(It->second);
-				NodeEditor::AcceptDeletedItem();
+				if (auto It = State->Identities.find(DeletedNode.Get()); It != State->Identities.end())
+				{
+					DeletedNodes.push_back(It->second);
+					NodeEditor::AcceptDeletedItem();
+				}
+				else NodeEditor::RejectDeletedItem();
 			}
-			else NodeEditor::RejectDeletedItem();
+			NodeEditor::EndDelete();
 		}
-		NodeEditor::EndDelete();
 
 		bool GraphChanged = false;
 		if (CreatedLink)
@@ -1498,8 +1543,119 @@ namespace PulseForgeEditor
 		bool BackgroundSearchRequested = false;
 		NodeEditor::Suspend();
 		if (Focused && !Input.WantTextInput && !SearchPopupActive && !OtherInputOwner &&
-			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+			!State->PinVisibilityPopup && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
 			BackgroundSearchRequested = NodeEditor::ShowBackgroundContextMenu();
+		if (State->PinVisibilityPopup)
+		{
+			auto& Request = *State->PinVisibilityPopup;
+			const bool ContextValid = ContextMatches(Request.Context) &&
+				std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+					[&Request](const auto& Node) { return Node.ID == Request.NodeID; });
+			State->PinVisibilityPopupPresentation.NodeID = Request.NodeID;
+			State->PinVisibilityPopupPresentation.TriggerScreenBounds = Request.TriggerScreenBounds;
+			State->PinVisibilityPopupPresentation.ContextValid = ContextValid;
+			if (Request.OpenRequested)
+			{
+				if (ContextValid)
+				{
+					// Suspend restored screen-space mouse input. Open once here, after node traversal,
+					// so ImGui anchors and hit-tests this popup in the owning host's screen space.
+					ImGui::OpenPopup(Request.PopupID.c_str());
+					State->PinVisibilityPopupPresentation.OpenSubmitted = true;
+				}
+				Request.OpenRequested = false;
+			}
+			constexpr ImGuiWindowFlags PinPopupFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+			const bool PopupVisible = ImGui::BeginPopup(Request.PopupID.c_str(), PinPopupFlags);
+			State->PinVisibilityPopupPresentation.PopupVisible = PopupVisible;
+			if (PopupVisible)
+			{
+				if (!ContextValid)
+				{
+					ImGui::TextDisabled("This graph node is no longer available.");
+					ImGui::CloseCurrentPopup();
+				}
+				else
+				{
+					const auto TargetNode = std::find_if(State->History.Graph().Nodes.begin(),
+						State->History.Graph().Nodes.end(), [&Request](const auto& Node)
+						{ return Node.ID == Request.NodeID; });
+					const auto CaptureMenuItem = [&State](std::optional<EditorGraphCanvasRect>& Destination)
+					{
+						if (State->CapturePresentation) Destination = CurrentImGuiScreenRect();
+					};
+					if (State->CapturePresentation)
+					{
+						const ImVec2 PopupMinimum = ImGui::GetWindowPos();
+						const ImVec2 PopupSize = ImGui::GetWindowSize();
+						State->PinVisibilityPopupPresentation.PopupScreenBounds = EditorGraphCanvasRect{
+							{ PopupMinimum.x, PopupMinimum.y },
+							{ PopupMinimum.x + PopupSize.x, PopupMinimum.y + PopupSize.y } };
+						State->PinVisibilityPopupPresentation.NoMove =
+							(ImGui::GetCurrentWindow()->Flags & ImGuiWindowFlags_NoMove) != 0;
+						State->PinVisibilityPopupPresentation.PopupWindowHovered =
+							ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+					}
+					if (TargetNode != State->History.Graph().Nodes.end())
+					{
+						const bool ShowAllActivated = ImGui::MenuItem("Show All Pins");
+						State->PinVisibilityPopupPresentation.ShowAllActivated = ShowAllActivated;
+						State->PinVisibilityPopupPresentation.ShowAllHovered = ImGui::IsItemHovered();
+						if (ShowAllActivated)
+							for (const auto& Pin : TargetNode->Pins)
+								PendingVisibilityChanges.push_back({ TargetNode->ID, Pin.ID, false });
+						CaptureMenuItem(State->PinVisibilityPopupPresentation.ShowAllScreenBounds);
+
+						const bool HideUnusedActivated = ImGui::MenuItem("Hide Unused Pins");
+						State->PinVisibilityPopupPresentation.HideUnusedActivated = HideUnusedActivated;
+						State->PinVisibilityPopupPresentation.HideUnusedHovered = ImGui::IsItemHovered();
+						if (HideUnusedActivated)
+							for (const auto& Pin : TargetNode->Pins)
+								if (const auto* Definition = FindPinDefinition(State->Schema, TargetNode->TypeKey, Pin.Key);
+									Definition && CanAutoHideEditorGraphPin(Pin, *Definition, ConnectionCount(Pin.ID)))
+									PendingVisibilityChanges.push_back({ TargetNode->ID, Pin.ID, true });
+						CaptureMenuItem(State->PinVisibilityPopupPresentation.HideUnusedScreenBounds);
+
+						const bool ResetVisibilityActivated = ImGui::MenuItem("Reset Pin Visibility");
+						State->PinVisibilityPopupPresentation.ResetVisibilityActivated = ResetVisibilityActivated;
+						State->PinVisibilityPopupPresentation.ResetVisibilityHovered = ImGui::IsItemHovered();
+						if (ResetVisibilityActivated)
+							for (const auto& Pin : TargetNode->Pins)
+								PendingVisibilityChanges.push_back({ TargetNode->ID, Pin.ID, false });
+						CaptureMenuItem(State->PinVisibilityPopupPresentation.ResetVisibilityScreenBounds);
+
+						const bool PinsMenuOpen = ImGui::BeginMenu("Pins");
+						State->PinVisibilityPopupPresentation.PinsSubmenuHovered = ImGui::IsItemHovered();
+						CaptureMenuItem(State->PinVisibilityPopupPresentation.PinsSubmenuScreenBounds);
+						if (PinsMenuOpen)
+						{
+							for (const auto& Pin : TargetNode->Pins)
+							{
+								const auto* Definition = FindPinDefinition(State->Schema, TargetNode->TypeKey, Pin.Key);
+								if (!Definition) continue;
+								const bool Connected = ConnectionCount(Pin.ID) != 0;
+								const bool Visible = Connected || Definition->Required || !Definition->Hideable ||
+									!State->HiddenPins.contains(Pin.ID);
+								const bool CanToggle = CanHideEditorGraphPin(*Definition) && !Connected;
+								const std::string StateLabel = Connected ? " — connected; always visible" :
+									Definition->Required ? " — required" : Definition->Hideable ? "" : " — fixed visible";
+								const std::string Label = (Definition->Label.empty() ? Pin.Key : Definition->Label) +
+									"  [" + PinTypeLabel(Pin.Type) + "]" + StateLabel + "##" + Pin.ID.ToString();
+								const bool Activated = ImGui::MenuItem(Label.c_str(), nullptr, Visible, CanToggle);
+								if (State->CapturePresentation)
+									State->PinVisibilityPopupPresentation.PinItems.push_back({ Pin.ID, CurrentImGuiScreenRect() });
+								if (Activated) PendingVisibilityChanges.push_back({ TargetNode->ID, Pin.ID, Visible });
+							}
+							ImGui::EndMenu();
+						}
+					}
+					if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+				}
+				ImGui::EndPopup();
+			}
+			State->PinVisibilityPopupPresentation.PopupOpenAfterSubmit = ImGui::IsPopupOpen(Request.PopupID.c_str());
+			if (!State->PinVisibilityPopupPresentation.PopupOpenAfterSubmit) State->PinVisibilityPopup.reset();
+		}
 		NodeEditor::Resume();
 		if (BackgroundSearchRequested)
 		{
@@ -1717,11 +1873,7 @@ namespace PulseForgeEditor
 		for (const auto& Change : PendingVisibilityChanges)
 		{
 			const auto Node = std::find_if(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
-				[&Change](const auto& Candidate)
-				{
-					return std::any_of(Candidate.Pins.begin(), Candidate.Pins.end(), [&Change](const auto& Pin)
-						{ return Pin.ID == Change.PinID; });
-				});
+				[&Change](const auto& Candidate) { return Candidate.ID == Change.NodeID; });
 			if (Node == State->History.Graph().Nodes.end()) continue;
 			const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(), [&Change](const auto& Candidate)
 				{ return Candidate.ID == Change.PinID; });
