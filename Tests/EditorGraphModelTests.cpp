@@ -961,6 +961,36 @@ namespace
 			LongGraph->Nodes.front().Pins[1].ID, &DiscoveryWork);
 		PF_CHECK(Tests, !Actions.empty() && DiscoveryWork.NodeVisits == NodeCount &&
 			DiscoveryWork.PinVisits == NodeCount * 2 && DiscoveryWork.ConnectionVisits == NodeCount - 1);
+
+		// Action discovery is graph-context-sensitive. The popup cache keys this result
+		// by the history graph revision, which must change when a committed edge changes
+		// a schema policy decision.
+		EditorGraphSchema ContextActionSchema = ChainSchema;
+		ContextActionSchema.Key = "test.context-actions";
+		ContextActionSchema.ConnectionPolicy = [](const EditorGraph& Graph, const EditorGraphPin& Output,
+			const EditorGraphPin& Input)
+			-> std::optional<std::string>
+			{
+				if (std::any_of(Graph.Connections.begin(), Graph.Connections.end(), [&Output, &Input](const auto& Connection)
+					{ return Connection.OutputPin == Output.ID && Connection.InputPin == Input.ID; })) return std::nullopt;
+				return Graph.Connections.empty() ? std::nullopt
+					: std::optional<std::string>("No additional links in this context");
+			};
+		auto ContextGraph = CreateEditorGraph(ContextActionSchema, ID(0xabd));
+		PF_CHECK(Tests, ContextGraph && AppendNode(*ContextGraph, ContextActionSchema, "test.step", 0.0) &&
+			AppendNode(*ContextGraph, ContextActionSchema, "test.step", 200.0));
+		if (ContextGraph)
+		{
+			EditorGraphCommandHistory ContextHistory(*ContextGraph);
+			const auto ContextSource = ContextHistory.Graph().Nodes.front().Pins[1].ID;
+			PF_CHECK(Tests, !DiscoverEditorGraphNodeActions(ContextHistory.Graph(), ContextActionSchema, ContextSource).empty());
+			const auto InitialRevision = ContextHistory.GraphRevision();
+			PF_CHECK(Tests, ConnectEditorGraphPins(ContextHistory, ContextActionSchema, ContextSource,
+				ContextHistory.Graph().Nodes.back().Pins[0].ID).has_value());
+			PF_CHECK(Tests, ContextHistory.GraphRevision() != InitialRevision);
+			PF_CHECK(Tests, DiscoverEditorGraphNodeActions(ContextHistory.Graph(), ContextActionSchema, ContextSource).empty());
+		}
+
 		for (const size_t Count : { size_t{ 100 }, size_t{ 500 }, size_t{ 1000 } })
 		{
 			EditorGraph Sample = *LongGraph;

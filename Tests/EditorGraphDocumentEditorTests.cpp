@@ -504,7 +504,7 @@ namespace
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
 			IO.AddKeyEvent(ImGuiMod_Ctrl, Control);
-			for (const ImGuiKey Key : { ImGuiKey_C, ImGuiKey_V, ImGuiKey_X, ImGuiKey_D })
+			for (const ImGuiKey Key : { ImGuiKey_C, ImGuiKey_V, ImGuiKey_X, ImGuiKey_D, ImGuiKey_Delete })
 				IO.AddKeyEvent(Key, Key == PressedKey);
 			ImGui::NewFrame();
 			if (Host == "GraphShortcutHost") ImGui::SetNextWindowFocus();
@@ -1280,6 +1280,29 @@ namespace
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
 			EditorDocumentCommand::Redo));
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutCut);
+
+		// Add through the registered adapter, then delete through the production canvas
+		// request path. Returning to the saved graph must clear the session dirty state.
+		const auto DeleteBaseline = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *GameplaySession, DeleteBaseline, TestOnlySchema);
+		(void)Documents.MarkSaved(GameplaySession->Identity, GameplaySession->Revision);
+		PF_CHECK(Tests, !GameplaySession->IsDirty());
+		const auto AddedForDelete = GraphEditor.AddNode(*GameplaySession, "test.layout.consumer", 760.0, 420.0);
+		PF_CHECK(Tests, AddedForDelete.has_value() && GameplaySession->IsDirty());
+		if (AddedForDelete)
+		{
+			(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+				ImVec2(900.0f, 650.0f), false);
+			EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession, { *AddedForDelete });
+			(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+				ImVec2(900.0f, 650.0f), false, false, ImGuiKey_Delete, true);
+			(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+				ImVec2(900.0f, 650.0f), false, false, ImGuiKey_Delete, true);
+			(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+				ImVec2(900.0f, 650.0f), false);
+			PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == DeleteBaseline);
+			PF_CHECK(Tests, !GameplaySession->IsDirty());
+		}
 	}
 
 	void TestGraphDocumentSaveRevisionAccounting(TestRunner& Tests)
