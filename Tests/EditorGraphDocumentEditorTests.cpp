@@ -19,6 +19,35 @@ namespace PulseForgeEditor
 {
 	struct EditorGraphDocumentEditorTestAccess final
 	{
+		static void Draw(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			Editor.DrawWorkspace(Session);
+		}
+
+
+		static void SetGraph(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			EditorGraph Graph, EditorGraphSchema Schema)
+		{
+			Editor.SetGraphForTesting(Session, std::move(Graph), std::move(Schema));
+		}
+
+		static void SetCanvasSettings(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			std::string Settings)
+		{
+			Editor.SetCanvasSettingsForTesting(Session, std::move(Settings));
+		}
+
+		static void CapturePresentation(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session, bool Capture)
+		{
+			Editor.CapturePresentationForTesting(Session, Capture);
+		}
+
+		static std::vector<EditorGraphCanvasNodePresentation> GetPresentation(
+			EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetPresentationForTesting(Session);
+		}
+
 		static EditorGraphPropertyEditResult Process(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			const std::vector<EditorGraphPropertyEditEvent>& Events)
 		{
@@ -154,6 +183,272 @@ namespace
 		}
 		PF_CHECK(Tests, GraphEditor.Save(*GameplaySession) && !GameplaySession->IsDirty());
 		PF_CHECK(Tests, ReadBytes(Project->GetRootPath() / Gameplay->ProjectRelativePath).has_value());
+	}
+
+	void TestGraphNodeSizingInProductionAdapter(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		ImGuiContextScope ImGuiScope;
+		PF_CHECK(Tests, ImGuiScope.Context != nullptr);
+		if (!ImGuiScope.Context) return;
+		ImGuiIO& IO = ImGui::GetIO();
+		IO.IniFilename = nullptr;
+		IO.LogFilename = nullptr;
+		IO.DeltaTime = 1.0f / 60.0f;
+		IO.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+
+		TemporaryGraphProject Temporary;
+		const auto ProjectID = UUID::Generate();
+		PF_CHECK(Tests, ProjectID.has_value());
+		if (!ProjectID) return;
+		Temporary.Path = std::filesystem::temp_directory_path() / ProjectID->ToString();
+		std::error_code Error;
+		std::filesystem::create_directories(Temporary.Path, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto Project = PulseForge::Project::Create(Temporary.Path / "GraphLayoutProject.pfproj", "Graph layout test");
+		PF_CHECK(Tests, Project.has_value());
+		if (!Project) return;
+
+		EditorDocumentManager Documents;
+		EditorDocumentEditorRegistry Editors;
+		EditorGraphDocumentEditor GraphEditor(Documents, Editors);
+		PF_CHECK(Tests, GraphEditor.Register().has_value());
+		const auto MaterialFixture = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::MaterialExpression);
+		const auto GameplayFixture = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::GameplayEvent);
+		PF_CHECK(Tests, MaterialFixture && GameplayFixture);
+		if (!MaterialFixture || !GameplayFixture) return;
+
+		const auto OpenFixture = [&](const EditorGraphFixtureLocation& Fixture)
+		{
+			const EditorDocumentIdentity Identity{ Project->GetDescription().ID, Fixture.GraphID, EditorDocumentKind::Graph };
+			PF_CHECK(Tests, Documents.Open(Identity, Fixture.ProjectRelativePath, Fixture.DisplayName,
+				EditorDocumentOpenPreference::MainDocumentStrip).has_value());
+			auto* Session = Documents.Find(Identity);
+			const EditorDocumentEditorContext Context{ Identity, Project->GetRootPath(), Fixture.ProjectRelativePath,
+				Fixture.DisplayName, nullptr };
+			const bool Loaded = Session && Editors.Load(*Session, Context);
+			PF_CHECK(Tests, Loaded && Session->EditorState);
+			return Session;
+		};
+		auto* MaterialSession = OpenFixture(*MaterialFixture);
+		auto* GameplaySession = OpenFixture(*GameplayFixture);
+		PF_CHECK(Tests, MaterialSession && GameplaySession);
+		if (!MaterialSession || !GameplaySession) return;
+
+		const auto MaterialSource = ReadBytes(Project->GetRootPath() / MaterialFixture->ProjectRelativePath);
+		auto MaterialGraph = MaterialSource ? ReadMaterialFixtureGraph(*MaterialSource) : std::nullopt;
+		PF_CHECK(Tests, MaterialGraph.has_value());
+		if (!MaterialGraph) return;
+		auto MaterialSchema = MakeMaterialExpressionFixtureSchema();
+		auto Scalar = CreateEditorGraphNode(MaterialSchema, "material.scalar", 760.0, 300.0);
+		auto Multiply = CreateEditorGraphNode(MaterialSchema, "material.multiply", 1040.0, 300.0);
+		PF_CHECK(Tests, Scalar && Multiply);
+		if (!Scalar || !Multiply) return;
+		MaterialGraph->Nodes.push_back(std::move(*Scalar));
+		MaterialGraph->Nodes.push_back(std::move(*Multiply));
+		const auto* ScalarValue = FindPin(*MaterialGraph, "material.scalar", "value");
+		const auto* MultiplyA = FindPin(*MaterialGraph, "material.multiply", "a");
+		PF_CHECK(Tests, ScalarValue && MultiplyA);
+		if (!ScalarValue || !MultiplyA) return;
+		EditorGraphCommandHistory MaterialHistory(*MaterialGraph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(MaterialHistory, MaterialSchema, ScalarValue->ID, MultiplyA->ID));
+		MaterialGraph = MaterialHistory.Graph();
+		const EditorGraph MaterialGraphForLayout = *MaterialGraph;
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *MaterialSession,
+			std::move(*MaterialGraph), MaterialSchema);
+
+		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *MaterialSession, true);
+		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *GameplaySession, true);
+		const auto DrawFrame = [&](EditorDocumentSession& Session, std::string_view Host, float Width)
+		{
+			IO.DisplaySize = ImVec2(Width, 900.0f);
+			IO.AddMousePosEvent(-1000.0f, -1000.0f);
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+			ImGui::SetNextWindowSize(IO.DisplaySize);
+			const std::string Name(Host);
+			ImGui::Begin(Name.c_str(), nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			EditorGraphDocumentEditorTestAccess::Draw(GraphEditor, Session);
+			ImGui::End();
+			ImGui::Render();
+			return Session.Identity == MaterialSession->Identity
+				? EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *MaterialSession)
+				: EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *GameplaySession);
+		};
+		const auto FindPresentation = [](const auto& Metrics, UUID NodeID) -> const EditorGraphCanvasNodePresentation*
+		{
+			const auto It = std::find_if(Metrics.begin(), Metrics.end(), [NodeID](const auto& Node)
+				{ return Node.NodeID == NodeID; });
+			return It == Metrics.end() ? nullptr : &*It;
+		};
+		const auto ValidateMetrics = [&](const auto& Metrics, const EditorGraph& Graph, double MaximumWidth)
+		{
+			PF_CHECK(Tests, Metrics.size() == Graph.Nodes.size());
+			for (const auto& Node : Metrics)
+			{
+				PF_CHECK(Tests, Node.Size.X > 0.0 && Node.Size.X < MaximumWidth && Node.Size.Y > 0.0);
+				PF_CHECK(Tests, Node.Zoom > 0.0);
+				bool HasInput = false;
+				bool HasOutput = false;
+				const auto ModelNode = std::find_if(Graph.Nodes.begin(), Graph.Nodes.end(), [&Node](const auto& Candidate)
+					{ return Candidate.ID == Node.NodeID; });
+				PF_CHECK(Tests, ModelNode != Graph.Nodes.end());
+				if (ModelNode == Graph.Nodes.end()) continue;
+				for (const auto& PinMetric : Node.Pins)
+				{
+					const auto Pin = std::find_if(ModelNode->Pins.begin(), ModelNode->Pins.end(), [&PinMetric](const auto& Candidate)
+						{ return Candidate.ID == PinMetric.PinID; });
+					PF_CHECK(Tests, Pin != ModelNode->Pins.end());
+					if (Pin == ModelNode->Pins.end()) continue;
+					const auto& Marker = PinMetric.Marker;
+					PF_CHECK(Tests, Marker.Minimum.X >= Node.Position.X - 2.0 &&
+						Marker.Maximum.X <= Node.Position.X + Node.Size.X + 2.0 &&
+						Marker.Minimum.Y >= Node.Position.Y - 2.0 &&
+						Marker.Maximum.Y <= Node.Position.Y + Node.Size.Y + 2.0);
+					if (Pin->Direction == EditorGraphPinDirection::Input)
+					{
+						HasInput = true;
+						PF_CHECK(Tests, Marker.Anchor.X < Node.Position.X + Node.Size.X * 0.4);
+					}
+					else
+					{
+						HasOutput = true;
+						PF_CHECK(Tests, Marker.Anchor.X > Node.Position.X + Node.Size.X * 0.6);
+					}
+					if (Pin->Direction == EditorGraphPinDirection::Input && Pin->Type != EditorGraphPinType::Execution)
+					{
+						PF_CHECK(Tests, PinMetric.PropertyControl.has_value());
+						if (PinMetric.PropertyControl)
+						{
+							const auto& Control = *PinMetric.PropertyControl;
+							PF_CHECK(Tests, Control.Minimum.X >= Node.Position.X - 2.0 &&
+								Control.Maximum.X <= Node.Position.X + Node.Size.X + 2.0 &&
+								Control.Minimum.Y >= Node.Position.Y - 2.0 &&
+								Control.Maximum.Y <= Node.Position.Y + Node.Size.Y + 2.0);
+							const bool OverlapsMarker = Control.Minimum.X < Marker.Maximum.X &&
+								Control.Maximum.X > Marker.Minimum.X && Control.Minimum.Y < Marker.Maximum.Y &&
+								Control.Maximum.Y > Marker.Minimum.Y;
+							PF_CHECK(Tests, !OverlapsMarker);
+						}
+					}
+				}
+				if (HasInput && HasOutput)
+				{
+					const auto Input = std::find_if(Node.Pins.begin(), Node.Pins.end(), [&](const auto& Metric)
+					{
+						const auto Pin = std::find_if(ModelNode->Pins.begin(), ModelNode->Pins.end(), [&Metric](const auto& Candidate)
+							{ return Candidate.ID == Metric.PinID; });
+						return Pin != ModelNode->Pins.end() && Pin->Direction == EditorGraphPinDirection::Input;
+					});
+					const auto Output = std::find_if(Node.Pins.begin(), Node.Pins.end(), [&](const auto& Metric)
+					{
+						const auto Pin = std::find_if(ModelNode->Pins.begin(), ModelNode->Pins.end(), [&Metric](const auto& Candidate)
+							{ return Candidate.ID == Metric.PinID; });
+						return Pin != ModelNode->Pins.end() && Pin->Direction == EditorGraphPinDirection::Output;
+					});
+					PF_CHECK(Tests, Input != Node.Pins.end() && Output != Node.Pins.end() &&
+						Input->Marker.Anchor.X < Output->Marker.Anchor.X);
+				}
+			}
+		};
+
+		const auto CheckViewportStability = [&](EditorDocumentSession& Session, const EditorGraph& Graph,
+			std::string_view Host, double MaximumWidth)
+		{
+			EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, Session,
+				"{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.65}}");
+			const auto Narrow = DrawFrame(Session, Host, 1280.0f);
+			ValidateMetrics(Narrow, Graph, MaximumWidth);
+			const auto NarrowAgain = DrawFrame(Session, Host, 1280.0f);
+			ValidateMetrics(NarrowAgain, Graph, MaximumWidth);
+			const auto Wide = DrawFrame(Session, Host, 1920.0f);
+			ValidateMetrics(Wide, Graph, MaximumWidth);
+			for (const auto& Node : Narrow)
+			{
+				const auto* First = FindPresentation(NarrowAgain, Node.NodeID);
+				const auto* Resized = FindPresentation(Wide, Node.NodeID);
+				PF_CHECK(Tests, First && Resized);
+				if (!First || !Resized) continue;
+				PF_CHECK(Tests, std::abs(Node.Size.X - First->Size.X) < 1.0 &&
+					std::abs(Node.Size.X - Resized->Size.X) < 1.0);
+			}
+
+			EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, Session,
+				"{\"view\":{\"scroll\":{\"x\":-83.0,\"y\":46.0},\"zoom\":1.45}}");
+			const auto Zoomed = DrawFrame(Session, Host, 1280.0f);
+			ValidateMetrics(Zoomed, Graph, MaximumWidth);
+			for (const auto& Node : Narrow)
+				if (const auto* ChangedView = FindPresentation(Zoomed, Node.NodeID))
+					PF_CHECK(Tests, std::abs(Node.Size.X - ChangedView->Size.X) < 1.0);
+				else PF_CHECK(Tests, false);
+		};
+
+		const auto MaterialBytes = ReadBytes(Project->GetRootPath() / MaterialFixture->ProjectRelativePath);
+		const auto MaterialGraphForTest = MaterialBytes ? ReadMaterialFixtureGraph(*MaterialBytes) : std::nullopt;
+		PF_CHECK(Tests, MaterialGraphForTest.has_value());
+		if (MaterialGraphForTest)
+		{
+			CheckViewportStability(*MaterialSession, MaterialGraphForLayout, "MaterialLayoutHost", 700.0);
+			const auto BeforeTransfer = DrawFrame(*MaterialSession, "MaterialBeforeTransfer", 1280.0f);
+			const auto NativeHost = Documents.CreateNativeHost(EditorDocumentKind::Graph);
+			PF_CHECK(Tests, NativeHost.has_value());
+			if (NativeHost)
+			{
+				PF_CHECK(Tests, Documents.Transfer(MaterialSession->Identity, *NativeHost, 0).has_value());
+				auto* TransferredSession = Documents.Find(MaterialSession->Identity);
+				PF_CHECK(Tests, TransferredSession != nullptr);
+				if (TransferredSession)
+				{
+					const auto AfterTransfer = DrawFrame(*TransferredSession, "MaterialAfterTransfer", 1920.0f);
+					ValidateMetrics(AfterTransfer, MaterialGraphForLayout, 700.0);
+					for (const auto& Node : BeforeTransfer)
+					{
+						const auto* Transferred = FindPresentation(AfterTransfer, Node.NodeID);
+						PF_CHECK(Tests, Transferred && std::abs(Node.Size.X - Transferred->Size.X) < 1.0);
+					}
+				}
+			}
+		}
+		const auto GameplayBytes = ReadBytes(Project->GetRootPath() / GameplayFixture->ProjectRelativePath);
+		std::optional<EditorGraph> GameplayGraphForTest;
+		if (GameplayBytes)
+			if (auto Deserialized = DeserializeEditorGraph(*GameplayBytes, MakeGameplayEventFixtureSchema()); Deserialized)
+				GameplayGraphForTest = std::move(*Deserialized);
+		PF_CHECK(Tests, GameplayGraphForTest.has_value());
+		if (GameplayGraphForTest) CheckViewportStability(*GameplaySession, *GameplayGraphForTest, "GameplayLayoutHost", 700.0);
+
+		EditorGraphSchema TestOnlySchema{ "test.layout-content", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true,
+			{
+				{ "test.layout.source", "Long Source Node Label for Content-Fit Verification",
+					{ { "source_output_with_a_long_stable_pin_key", "Source Output", EditorGraphPinDirection::Output,
+						EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 } } },
+				{ "test.layout.consumer", "Independent Consumer Node",
+					{ { "input_with_a_deliberately_long_stable_key", "Long Input", EditorGraphPinDirection::Input,
+						EditorGraphPinType::Float, EditorGraphPinCardinality::Single, 0.0 },
+						{ "condition_value", "Condition", EditorGraphPinDirection::Input,
+						EditorGraphPinType::Boolean, EditorGraphPinCardinality::Single, false },
+						{ "consumer_result", "Consumer Result", EditorGraphPinDirection::Output,
+						EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 } } }
+			} };
+		auto TestOnlyGraph = CreateEditorGraph(TestOnlySchema, GameplaySession->Identity.Asset);
+		PF_CHECK(Tests, TestOnlyGraph.has_value());
+		if (!TestOnlyGraph) return;
+		auto TestSource = CreateEditorGraphNode(TestOnlySchema, "test.layout.source", 120.0, 120.0);
+		auto TestConsumer = CreateEditorGraphNode(TestOnlySchema, "test.layout.consumer", 420.0, 120.0);
+		PF_CHECK(Tests, TestSource && TestConsumer);
+		if (!TestSource || !TestConsumer) return;
+		TestOnlyGraph->Nodes.push_back(std::move(*TestSource));
+		TestOnlyGraph->Nodes.push_back(std::move(*TestConsumer));
+		const EditorGraph TestOnlyGraphForTest = *TestOnlyGraph;
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *GameplaySession,
+			std::move(*TestOnlyGraph), TestOnlySchema);
+		CheckViewportStability(*GameplaySession, TestOnlyGraphForTest,
+			"LongLabelLayoutHost", 700.0);
 	}
 
 	void TestGraphDocumentSaveRevisionAccounting(TestRunner& Tests)
@@ -1187,6 +1482,7 @@ namespace
 void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 {
 	TestGraphDocumentLifecycle(Tests);
+	TestGraphNodeSizingInProductionAdapter(Tests);
 	TestGraphDocumentSaveRevisionAccounting(Tests);
 	TestGraphCanvasCreateRequestPolling(Tests);
 	TestGraphCanvasNodeCreationRequestPolling(Tests);

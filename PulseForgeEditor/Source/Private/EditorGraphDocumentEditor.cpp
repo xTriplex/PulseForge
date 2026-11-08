@@ -108,6 +108,8 @@ namespace
 		PendingScreenPinRelease ScreenPinRelease;
 		EditorGraphPendingPinRelease PinRelease;
 		EditorGraphPropertyEditCoordinator PropertyEdits;
+		bool CapturePresentation = false;
+		std::vector<EditorGraphCanvasNodePresentation> Presentation;
 	};
 
 	EditorGraphCanvasDocumentContext MakeCanvasDocumentContext(const EditorDocumentSession& Session,
@@ -116,7 +118,7 @@ namespace
 		return { Session.Identity, Session.SessionGeneration, Session.HostID, GraphID };
 	}
 
-	ImVec2 DrawGraphPinMarker(const EditorGraphPin& Pin)
+	EditorGraphCanvasPinMarkerGeometry DrawGraphPinMarker(const EditorGraphPin& Pin)
 	{
 		constexpr float MarkerSize = 14.0f;
 		const float VerticalInset = std::max((ImGui::GetFrameHeight() - MarkerSize) * 0.5f, 0.0f);
@@ -155,7 +157,7 @@ namespace
 				const ImVec2 Position(static_cast<float>(Anchor.X), static_cast<float>(Anchor.Y));
 				NodeEditor::PinPivotRect(Position, Position);
 			});
-		return Center;
+		return Geometry;
 	}
 
 	void QueueNodeSearch(GraphDocumentState& State, const EditorDocumentSession& Session,
@@ -584,6 +586,46 @@ namespace PulseForgeEditor
 		return true;
 	}
 
+	void EditorGraphDocumentEditor::SetGraphForTesting(EditorDocumentSession& Session,
+		EditorGraph Graph, EditorGraphSchema Schema)
+	{
+		auto* State = GetState(Session);
+		if (!State || Graph.ID != Session.Identity.Asset) return;
+		State->History.Reset(std::move(Graph));
+		State->Schema = std::move(Schema);
+		State->Handles.clear();
+		State->Identities.clear();
+		State->NodeSearch = {};
+		State->ScreenPinRelease = {};
+		State->PinRelease = {};
+		State->NeedsCanvasSync = true;
+	}
+
+	void EditorGraphDocumentEditor::CapturePresentationForTesting(EditorDocumentSession& Session, bool Capture)
+	{
+		if (auto* State = GetState(Session))
+		{
+			State->CapturePresentation = Capture;
+			State->Presentation.clear();
+		}
+	}
+
+	void EditorGraphDocumentEditor::SetCanvasSettingsForTesting(EditorDocumentSession& Session, std::string Settings)
+	{
+		if (auto* State = GetState(Session))
+		{
+			State->CanvasSettings = std::move(Settings);
+			CancelCanvasInteraction(*State);
+		}
+	}
+
+	std::vector<EditorGraphCanvasNodePresentation> EditorGraphDocumentEditor::GetPresentationForTesting(
+		EditorDocumentSession& Session)
+	{
+		const auto* State = GetState(Session);
+		return State ? State->Presentation : std::vector<EditorGraphCanvasNodePresentation>{};
+	}
+
 	bool EditorGraphDocumentEditor::DiscardSession(EditorDocumentSession& Session) const
 	{
 		return ReloadState(Session);
@@ -646,6 +688,7 @@ namespace PulseForgeEditor
 			ImGui::TextUnformatted("Graph document state is unavailable.");
 			return;
 		}
+		if (State->CapturePresentation) State->Presentation.clear();
 		if (!State->Canvas)
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", State->Error.c_str());
@@ -849,72 +892,109 @@ namespace PulseForgeEditor
 			const NodeEditor::NodeId CanvasNode(NodeHandle);
 			if (State->NeedsCanvasSync) NodeEditor::SetNodePosition(CanvasNode, ImVec2(static_cast<float>(Node.X), static_cast<float>(Node.Y)));
 			NodeEditor::BeginNode(CanvasNode);
-			ImGui::TextUnformatted(ReadableNodeLabel(State->Schema, Node.TypeKey).c_str());
-			if (ImGui::BeginTable("##GraphPins", 4, ImGuiTableFlags_SizingStretchProp))
+			EditorGraphCanvasNodePresentation Presentation;
+			Presentation.NodeID = Node.ID;
+			const std::string NodeLabel = ReadableNodeLabel(State->Schema, Node.TypeKey);
+			ImGui::TextUnformatted(NodeLabel.c_str());
+			float PinContentWidth = ImGui::CalcTextSize(NodeLabel.c_str()).x;
+			for (const auto& Pin : Node.Pins)
 			{
-				ImGui::TableSetupColumn("##InputMarker", ImGuiTableColumnFlags_WidthFixed, 18.0f);
-				ImGui::TableSetupColumn("##PinLabel", ImGuiTableColumnFlags_WidthStretch);
-				ImGui::TableSetupColumn("##PinValue", ImGuiTableColumnFlags_WidthFixed, 128.0f);
-				ImGui::TableSetupColumn("##OutputMarker", ImGuiTableColumnFlags_WidthFixed, 18.0f);
-				for (const auto& Pin : Node.Pins)
-				{
-					const uintptr_t PinHandle = RegisterHandle(Pin.ID);
-					if (!PinHandle) continue;
-					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(Pin.Direction == EditorGraphPinDirection::Input ? 0 : 3);
-					NodeEditor::BeginPin(NodeEditor::PinId(PinHandle), Pin.Direction == EditorGraphPinDirection::Input
-						? NodeEditor::PinKind::Input : NodeEditor::PinKind::Output);
-					const ImVec2 PinAnchor = DrawGraphPinMarker(Pin);
-					NodeEditor::EndPin();
-					if (std::isfinite(PinAnchor.x) && std::isfinite(PinAnchor.y))
-						PinAnchorCanvasPositions.push_back({ Node.ID, Pin.ID,
-							GraphCanvasDetail::MakeEditorGraphCanvasPoint(PinAnchor.x, PinAnchor.y) });
-
-					ImGui::TableSetColumnIndex(1);
-					ImGui::Text("%s  [%s]", Pin.Key.c_str(), PinTypeLabel(Pin.Type));
-					if (Pin.Direction == EditorGraphPinDirection::Input && Pin.Type != EditorGraphPinType::Execution)
-					{
-						ImGui::TableSetColumnIndex(2);
-						EditorGraphValue Value = ReadPinValue(Pin);
-						bool Changed = false;
-						const std::string Widget = "##" + Pin.ID.ToString();
-						if (Pin.Type == EditorGraphPinType::Float)
-						{
-							double Number = std::get<double>(Value);
-							Changed = ImGui::InputDouble(Widget.c_str(), &Number, 0.1, 1.0, "%.3f");
-							if (Changed) Value = Number;
-						}
-						else if (Pin.Type == EditorGraphPinType::Vector3)
-						{
-							auto Vector = std::get<EditorGraphVector3>(Value);
-							std::array<double, 3> Components{ Vector.X, Vector.Y, Vector.Z };
-							Changed = ImGui::InputScalarN(Widget.c_str(), ImGuiDataType_Double, Components.data(),
-								static_cast<int>(Components.size()), nullptr, nullptr, "%.3f");
-							if (Changed) Value = EditorGraphVector3{ Components[0], Components[1], Components[2] };
-						}
-						else if (Pin.Type == EditorGraphPinType::Boolean)
-						{
-							bool Boolean = std::get<bool>(Value);
-							Changed = ImGui::Checkbox(Widget.c_str(), &Boolean);
-							if (Changed) Value = Boolean;
-						}
-						else if (Pin.Type == EditorGraphPinType::String)
-						{
-							std::array<char, 4097> Buffer{};
-							const std::string& Text = std::get<std::string>(Value);
-							std::copy_n(Text.data(), std::min(Text.size(), Buffer.size() - 1), Buffer.data());
-							Changed = ImGui::InputText(Widget.c_str(), Buffer.data(), Buffer.size());
-							if (Changed) Value = std::string(Buffer.data());
-						}
-						const bool Activated = ImGui::IsItemActivated();
-						const bool Deactivated = ImGui::IsItemDeactivated();
-						PropertyWidgetHovered |= ImGui::IsItemHovered();
-						PropertyEvents.push_back({ Pin.ID, std::move(Value), Activated, Changed, Deactivated });
-					}
-				}
-				ImGui::EndTable();
+				const std::string PinLabel = Pin.Key + "  [" + PinTypeLabel(Pin.Type) + "]";
+				float RowWidth = ImGui::CalcTextSize(PinLabel.c_str()).x;
+				if (Pin.Direction == EditorGraphPinDirection::Input && Pin.Type != EditorGraphPinType::Execution)
+					RowWidth += ImGui::GetStyle().ItemSpacing.x + 128.0f;
+				PinContentWidth = std::max(PinContentWidth, RowWidth);
 			}
+			PinContentWidth = std::max(PinContentWidth, 48.0f);
+			constexpr float PinMarkerColumnWidth = 18.0f;
+			constexpr float PinContentGap = 8.0f;
+			const float NodeContentWidth = PinMarkerColumnWidth * 2.0f + PinContentGap * 2.0f + PinContentWidth;
+			const ImVec2 PinRowsOrigin = ImGui::GetCursorPos();
+			const float RowHeight = ImGui::GetFrameHeight();
+			const float RowSpacing = ImGui::GetStyle().ItemSpacing.y;
+			float RowY = PinRowsOrigin.y;
+			for (const auto& Pin : Node.Pins)
+			{
+				const uintptr_t PinHandle = RegisterHandle(Pin.ID);
+				if (!PinHandle) continue;
+				const bool IsInput = Pin.Direction == EditorGraphPinDirection::Input;
+				const float MarkerX = IsInput ? PinRowsOrigin.x :
+					PinRowsOrigin.x + NodeContentWidth - PinMarkerColumnWidth;
+				ImGui::SetCursorPos(ImVec2(MarkerX, RowY));
+				NodeEditor::BeginPin(NodeEditor::PinId(PinHandle), IsInput
+					? NodeEditor::PinKind::Input : NodeEditor::PinKind::Output);
+				const auto Marker = DrawGraphPinMarker(Pin);
+				NodeEditor::EndPin();
+				if (std::isfinite(Marker.Anchor.X) && std::isfinite(Marker.Anchor.Y))
+					PinAnchorCanvasPositions.push_back({ Node.ID, Pin.ID, Marker.Anchor });
+				EditorGraphCanvasPinPresentation PinPresentation{ Pin.ID, Marker, std::nullopt };
+
+				ImGui::SetCursorPos(ImVec2(PinRowsOrigin.x + PinMarkerColumnWidth + PinContentGap, RowY));
+				ImGui::Text("%s  [%s]", Pin.Key.c_str(), PinTypeLabel(Pin.Type));
+				if (IsInput && Pin.Type != EditorGraphPinType::Execution)
+				{
+					ImGui::SameLine(0.0f, 8.0f);
+					ImGui::SetNextItemWidth(128.0f);
+					EditorGraphValue Value = ReadPinValue(Pin);
+					bool Changed = false;
+					const std::string Widget = "##" + Pin.ID.ToString();
+					if (Pin.Type == EditorGraphPinType::Float)
+					{
+						double Number = std::get<double>(Value);
+						Changed = ImGui::InputDouble(Widget.c_str(), &Number, 0.1, 1.0, "%.3f");
+						if (Changed) Value = Number;
+					}
+					else if (Pin.Type == EditorGraphPinType::Vector3)
+					{
+						auto Vector = std::get<EditorGraphVector3>(Value);
+						std::array<double, 3> Components{ Vector.X, Vector.Y, Vector.Z };
+						Changed = ImGui::InputScalarN(Widget.c_str(), ImGuiDataType_Double, Components.data(),
+							static_cast<int>(Components.size()), nullptr, nullptr, "%.3f");
+						if (Changed) Value = EditorGraphVector3{ Components[0], Components[1], Components[2] };
+					}
+					else if (Pin.Type == EditorGraphPinType::Boolean)
+					{
+						bool Boolean = std::get<bool>(Value);
+						Changed = ImGui::Checkbox(Widget.c_str(), &Boolean);
+						if (Changed) Value = Boolean;
+					}
+					else if (Pin.Type == EditorGraphPinType::String)
+					{
+						std::array<char, 4097> Buffer{};
+						const std::string& Text = std::get<std::string>(Value);
+						std::copy_n(Text.data(), std::min(Text.size(), Buffer.size() - 1), Buffer.data());
+						Changed = ImGui::InputText(Widget.c_str(), Buffer.data(), Buffer.size());
+						if (Changed) Value = std::string(Buffer.data());
+					}
+					const bool Activated = ImGui::IsItemActivated();
+					const bool Deactivated = ImGui::IsItemDeactivated();
+					PropertyWidgetHovered |= ImGui::IsItemHovered();
+					if (State->CapturePresentation)
+					{
+						const ImVec2 Minimum = ImGui::GetItemRectMin();
+						const ImVec2 Maximum = ImGui::GetItemRectMax();
+						PinPresentation.PropertyControl = EditorGraphCanvasRect{
+							{ Minimum.x, Minimum.y }, { Maximum.x, Maximum.y } };
+					}
+					PropertyEvents.push_back({ Pin.ID, std::move(Value), Activated, Changed, Deactivated });
+				}
+				if (State->CapturePresentation) Presentation.Pins.push_back(std::move(PinPresentation));
+				RowY += RowHeight + RowSpacing;
+			}
+			ImGui::SetCursorPos(PinRowsOrigin);
+			const float PinRowsHeight = Node.Pins.empty() ? 0.0f : RowY - PinRowsOrigin.y - RowSpacing;
+			ImGui::Dummy(ImVec2(NodeContentWidth, PinRowsHeight));
 			NodeEditor::EndNode();
+			if (State->CapturePresentation)
+			{
+				const ImVec2 Position = NodeEditor::GetNodePosition(CanvasNode);
+				const ImVec2 ScreenSize = NodeEditor::GetNodeSize(CanvasNode);
+				const float Zoom = NodeEditor::GetCurrentZoom();
+				Presentation.Position = { Position.x, Position.y };
+				Presentation.Size = { ScreenSize.x, ScreenSize.y };
+				Presentation.Zoom = Zoom;
+				State->Presentation.push_back(std::move(Presentation));
+			}
 		}
 		for (const auto& Connection : State->History.Graph().Connections)
 		{

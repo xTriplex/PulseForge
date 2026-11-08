@@ -46,6 +46,28 @@ namespace PulseForgeEditor
 		EditorGraphCanvasPoint Anchor;
 	};
 
+	struct EditorGraphCanvasRect
+	{
+		EditorGraphCanvasPoint Minimum;
+		EditorGraphCanvasPoint Maximum;
+	};
+
+	struct EditorGraphCanvasPinPresentation
+	{
+		PulseForge::UUID PinID;
+		EditorGraphCanvasPinMarkerGeometry Marker;
+		std::optional<EditorGraphCanvasRect> PropertyControl;
+	};
+
+	struct EditorGraphCanvasNodePresentation
+	{
+		PulseForge::UUID NodeID;
+		EditorGraphCanvasPoint Position;
+		EditorGraphCanvasPoint Size;
+		double Zoom = 1.0;
+		std::vector<EditorGraphCanvasPinPresentation> Pins;
+	};
+
 	struct EditorGraphCanvasDocumentContext
 	{
 		EditorDocumentIdentity Document;
@@ -322,6 +344,11 @@ namespace PulseForgeEditor
 			const std::filesystem::path& Path, std::string_view DisplayName) const;
 		[[nodiscard]] std::expected<void, std::string> PrepareClose(const EditorDocumentCloseContext& Context) const;
 		[[nodiscard]] bool ReloadState(EditorDocumentSession& Session) const;
+		void SetGraphForTesting(EditorDocumentSession& Session, EditorGraph Graph, EditorGraphSchema Schema);
+		void SetCanvasSettingsForTesting(EditorDocumentSession& Session, std::string Settings);
+		void CapturePresentationForTesting(EditorDocumentSession& Session, bool Capture);
+		[[nodiscard]] std::vector<EditorGraphCanvasNodePresentation> GetPresentationForTesting(
+			EditorDocumentSession& Session);
 
 		EditorDocumentManager& m_Documents;
 		EditorDocumentEditorRegistry& m_Editors;
