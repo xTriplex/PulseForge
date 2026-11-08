@@ -1836,6 +1836,22 @@ namespace PulseForgeEditor
 		NodeEditor::End();
 		NodeEditor::EnableShortcuts(true);
 		(void)ProcessPropertyEditEvents(Session, PropertyEvents, CancelGesture);
+		const auto CapturedPointerCanvasPosition = [&]() -> std::expected<EditorGraphCanvasPoint, std::string>
+		{
+			const ImVec2 Screen = ScreenMousePositionAtFrameStart;
+			const bool PointerInsideCanvas = Screen.x >= CanvasScreenOrigin.x &&
+				Screen.x <= CanvasScreenOrigin.x + CanvasScreenSize.x &&
+				Screen.y >= CanvasScreenOrigin.y &&
+				Screen.y <= CanvasScreenOrigin.y + CanvasScreenSize.y;
+			if (!PointerInsideCanvas)
+				return std::unexpected("Move the pointer over this graph canvas to place nodes");
+			// The command-frame pointer was captured before the canvas changed ImGui input to local space.
+			// Convert that screen-space value once while this document's canvas context is current.
+			const ImVec2 Canvas = NodeEditor::ScreenToCanvas(Screen);
+			if (!std::isfinite(Canvas.x) || !std::isfinite(Canvas.y))
+				return std::unexpected("The graph pointer position is invalid");
+			return EditorGraphCanvasPoint{ Canvas.x, Canvas.y };
+		};
 
 		bool ShortcutCut = false;
 		bool ShortcutCopy = false;
@@ -1889,7 +1905,10 @@ namespace PulseForgeEditor
 					std::expected<std::vector<PulseForge::UUID>, std::string> Pasted = std::unexpected("No graph paste was requested");
 					if (ShortcutDuplicate)
 					{
-						Pasted = DuplicateEditorGraphSubgraph(State->History, State->Schema, SelectedNodeIDs);
+						if (auto Placement = CapturedPointerCanvasPosition())
+							Pasted = DuplicateEditorGraphSubgraph(State->History, State->Schema, SelectedNodeIDs,
+								Placement->X, Placement->Y);
+						else Pasted = std::unexpected(Placement.error());
 					}
 					else if (RequestPasteFromToolbar)
 					{
@@ -1903,21 +1922,14 @@ namespace PulseForgeEditor
 					}
 					else
 					{
-						const auto& Screen = ScreenMousePositionAtFrameStart;
-						const bool PointerInsideCanvas = Screen.x >= CanvasScreenOrigin.x &&
-							Screen.x <= CanvasScreenOrigin.x + CanvasScreenSize.x &&
-							Screen.y >= CanvasScreenOrigin.y &&
-							Screen.y <= CanvasScreenOrigin.y + CanvasScreenSize.y;
-						if (!PointerInsideCanvas)
-							Pasted = std::unexpected("Move the pointer over this graph canvas to paste nodes");
-						else if (const char* Clipboard = ImGui::GetClipboardText())
+						if (auto Placement = CapturedPointerCanvasPosition())
 						{
-							// This is the captured pre-canvas screen point; convert it exactly once.
-							const ImVec2 CanvasPoint = NodeEditor::ScreenToCanvas(Screen);
-							Pasted = PasteEditorGraphClipboard(State->History, State->Schema, Clipboard,
-								CanvasPoint.x, CanvasPoint.y);
+							if (const char* Clipboard = ImGui::GetClipboardText())
+								Pasted = PasteEditorGraphClipboard(State->History, State->Schema, Clipboard,
+									Placement->X, Placement->Y);
+							else Pasted = std::unexpected("The graph clipboard is empty or unavailable");
 						}
-						else Pasted = std::unexpected("The graph clipboard is empty or unavailable");
+						else Pasted = std::unexpected(Placement.error());
 					}
 					if (!Pasted) State->Error = Pasted.error();
 					else if (!Pasted->empty())

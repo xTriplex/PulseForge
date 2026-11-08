@@ -345,7 +345,7 @@ namespace
 		PF_CHECK(Tests, History.Graph().Nodes.size() == PastedGraph.Nodes.size() + 2);
 		PF_CHECK(Tests, !PasteEditorGraphClipboard(History, MakeMaterialExpressionFixtureSchema(), *ClipboardText, 0.0, 0.0));
 		const auto BeforeDuplicate = History.Graph();
-		auto Duplicated = DuplicateEditorGraphSubgraph(History, Schema, { BranchAID, BranchBID });
+		auto Duplicated = DuplicateEditorGraphSubgraph(History, Schema, { BranchAID, BranchBID }, 900.0, 720.0);
 		PF_CHECK(Tests, Duplicated.has_value() && Duplicated->size() == 2);
 		if (Duplicated && Duplicated->size() == 2)
 		{
@@ -366,9 +366,11 @@ namespace
 				const double SourceMaximumX = std::max(SourceA->X, SourceB->X);
 				const double DuplicateMinimumX = std::min(DuplicateA->X, DuplicateB->X);
 				const double DuplicateMaximumX = std::max(DuplicateA->X, DuplicateB->X);
+				const double DuplicateMinimumY = std::min(DuplicateA->Y, DuplicateB->Y);
 				PF_CHECK(Tests, std::abs((DuplicateMaximumX - DuplicateMinimumX) -
 					(SourceMaximumX - SourceMinimumX)) < 0.001 &&
-					std::abs(DuplicateMinimumX - std::floor(SourceMinimumX + 32.0)) < 0.001);
+					std::abs(DuplicateMinimumX - 900.0) < 0.001 && std::abs(DuplicateMinimumY - 720.0) < 0.001 &&
+					std::abs(DuplicateMinimumX - std::floor(SourceMinimumX + 32.0)) > 100.0);
 			}
 		}
 		const auto DuplicatedGraph = History.Graph();

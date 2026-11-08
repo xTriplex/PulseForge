@@ -275,7 +275,7 @@ namespace PulseForgeEditor
 		std::string_view Source, double TargetGroupOriginX, double TargetGroupOriginY);
 	[[nodiscard]] std::expected<std::vector<PulseForge::UUID>, std::string> DuplicateEditorGraphSubgraph(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
-		const std::vector<PulseForge::UUID>& NodeIDs, double OffsetX = 32.0, double OffsetY = 32.0);
+		const std::vector<PulseForge::UUID>& NodeIDs, double TargetGroupOriginX, double TargetGroupOriginY);
 	[[nodiscard]] std::expected<void, std::string> AddEditorGraphNode(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		std::string_view TypeKey, double X, double Y);

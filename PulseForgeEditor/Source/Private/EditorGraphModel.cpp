@@ -1118,23 +1118,16 @@ namespace PulseForgeEditor
 
 	std::expected<std::vector<PulseForge::UUID>, std::string> DuplicateEditorGraphSubgraph(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
-		const std::vector<PulseForge::UUID>& NodeIDs, double OffsetX, double OffsetY)
+		const std::vector<PulseForge::UUID>& NodeIDs, double TargetGroupOriginX, double TargetGroupOriginY)
 	{
 		if (NodeIDs.empty()) return std::vector<PulseForge::UUID>{};
-		if (!IsFiniteCoordinate(OffsetX) || !IsFiniteCoordinate(OffsetY))
-			return std::unexpected("Graph duplicate offset is invalid");
+		if (!IsFiniteCoordinate(TargetGroupOriginX) || !IsFiniteCoordinate(TargetGroupOriginY))
+			return std::unexpected("Graph duplicate placement target is invalid");
 		const auto Clipboard = CopyEditorGraphSubgraph(History.Graph(), NodeIDs);
 		if (Clipboard.Nodes.empty()) return std::vector<PulseForge::UUID>{};
 		const auto Payload = SerializeEditorGraphClipboard(Clipboard);
 		if (!Payload) return std::unexpected(Payload.error());
-		double MinimumX = Clipboard.Nodes.front().X;
-		double MinimumY = Clipboard.Nodes.front().Y;
-		for (const auto& Node : Clipboard.Nodes)
-		{
-			MinimumX = std::min(MinimumX, Node.X);
-			MinimumY = std::min(MinimumY, Node.Y);
-		}
-		return PasteEditorGraphClipboard(History, Schema, *Payload, MinimumX + OffsetX, MinimumY + OffsetY);
+		return PasteEditorGraphClipboard(History, Schema, *Payload, TargetGroupOriginX, TargetGroupOriginY);
 	}
 
 	std::expected<void, std::string> AddEditorGraphNode(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,

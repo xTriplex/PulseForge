@@ -982,17 +982,126 @@ namespace
 		const auto ClipboardBeforeDuplicate = GraphTestClipboard;
 		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession,
 			{ SourceNodeID, ConsumerNodeID });
+		const EditorGraph OtherDocumentBeforeDuplicate = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *MaterialSession);
+		const EditorGraph BeforeShortcutDuplicate = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		const ImVec2 DuplicateScreenPoint(1080.0f, 690.0f);
+		const auto ExpectedDuplicatePoint = EditorGraphDocumentEditorTestAccess::ScreenToCanvas(GraphEditor,
+			*GameplaySession, EditorGraphScreenPoint{ DuplicateScreenPoint.x, DuplicateScreenPoint.y });
 		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
-			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_D, true);
+			DuplicateScreenPoint, false, false, ImGuiKey_D, true);
 		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
-			ImVec2(900.0f, 700.0f), false, false, ImGuiKey_D, true);
+			DuplicateScreenPoint, false, false, ImGuiKey_D, true);
 		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
-			ImVec2(900.0f, 700.0f), false);
+			ImVec2(1280.0f, 800.0f), false);
 		auto AfterShortcutDuplicate = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
 		PF_CHECK(Tests, AfterShortcutDuplicate.Nodes.size() == AfterShortcutPaste.Nodes.size() + 2 &&
 			AfterShortcutDuplicate.Connections.size() == AfterShortcutPaste.Connections.size() + 1 &&
 			GraphTestClipboard == ClipboardBeforeDuplicate);
+		std::unordered_set<UUID, UUIDHash> IDsBeforeDuplicate;
+		for (const auto& Node : AfterShortcutPaste.Nodes) IDsBeforeDuplicate.insert(Node.ID);
+		std::vector<const EditorGraphNode*> DuplicatedShortcutNodes;
+		for (const auto& Node : AfterShortcutDuplicate.Nodes)
+			if (!IDsBeforeDuplicate.contains(Node.ID)) DuplicatedShortcutNodes.push_back(&Node);
+		PF_CHECK(Tests, DuplicatedShortcutNodes.size() == 2);
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetSelectedNodes(GraphEditor, *GameplaySession).size() == 2);
+		if (DuplicatedShortcutNodes.size() == 2)
+		{
+			const double DuplicatedMinimumX = std::min(DuplicatedShortcutNodes[0]->X, DuplicatedShortcutNodes[1]->X);
+			const double DuplicatedMinimumY = std::min(DuplicatedShortcutNodes[0]->Y, DuplicatedShortcutNodes[1]->Y);
+			PF_CHECK(Tests, std::abs(DuplicatedMinimumX - std::floor(ExpectedDuplicatePoint.X)) < 0.01 &&
+				std::abs(DuplicatedMinimumY - std::floor(ExpectedDuplicatePoint.Y)) < 0.01);
+			const auto OriginalSource = std::find_if(BeforeShortcutDuplicate.Nodes.begin(), BeforeShortcutDuplicate.Nodes.end(),
+				[SourceNodeID](const auto& Node) { return Node.ID == SourceNodeID; });
+			const auto OriginalConsumer = std::find_if(BeforeShortcutDuplicate.Nodes.begin(), BeforeShortcutDuplicate.Nodes.end(),
+				[ConsumerNodeID](const auto& Node) { return Node.ID == ConsumerNodeID; });
+			const auto DuplicatedSource = std::find_if(DuplicatedShortcutNodes.begin(), DuplicatedShortcutNodes.end(),
+				[](const auto* Node) { return Node->TypeKey == "test.layout.source"; });
+			const auto DuplicatedConsumer = std::find_if(DuplicatedShortcutNodes.begin(), DuplicatedShortcutNodes.end(),
+				[](const auto* Node) { return Node->TypeKey == "test.layout.consumer"; });
+			PF_CHECK(Tests, OriginalSource != BeforeShortcutDuplicate.Nodes.end() &&
+				OriginalConsumer != BeforeShortcutDuplicate.Nodes.end() &&
+				DuplicatedSource != DuplicatedShortcutNodes.end() && DuplicatedConsumer != DuplicatedShortcutNodes.end());
+			if (OriginalSource != BeforeShortcutDuplicate.Nodes.end() && OriginalConsumer != BeforeShortcutDuplicate.Nodes.end() &&
+				DuplicatedSource != DuplicatedShortcutNodes.end() && DuplicatedConsumer != DuplicatedShortcutNodes.end())
+			{
+				PF_CHECK(Tests, std::abs(DuplicatedMinimumX - std::floor(std::min(OriginalSource->X,
+					OriginalConsumer->X) + 32.0)) > 100.0);
+				PF_CHECK(Tests, std::abs(((*DuplicatedSource)->X - (*DuplicatedConsumer)->X) -
+					(OriginalSource->X - OriginalConsumer->X)) < 0.01 &&
+					std::abs(((*DuplicatedSource)->Y - (*DuplicatedConsumer)->Y) -
+					(OriginalSource->Y - OriginalConsumer->Y)) < 0.01);
+				const auto StillOriginalSource = std::find_if(AfterShortcutDuplicate.Nodes.begin(), AfterShortcutDuplicate.Nodes.end(),
+					[SourceNodeID](const auto& Node) { return Node.ID == SourceNodeID; });
+				const auto StillOriginalConsumer = std::find_if(AfterShortcutDuplicate.Nodes.begin(), AfterShortcutDuplicate.Nodes.end(),
+					[ConsumerNodeID](const auto& Node) { return Node.ID == ConsumerNodeID; });
+				PF_CHECK(Tests, StillOriginalSource != AfterShortcutDuplicate.Nodes.end() &&
+					StillOriginalConsumer != AfterShortcutDuplicate.Nodes.end());
+				if (StillOriginalSource != AfterShortcutDuplicate.Nodes.end() &&
+					StillOriginalConsumer != AfterShortcutDuplicate.Nodes.end())
+					PF_CHECK(Tests, *StillOriginalSource == *OriginalSource && *StillOriginalConsumer == *OriginalConsumer);
+			}
+		}
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *MaterialSession) ==
+			OtherDocumentBeforeDuplicate);
+		PF_CHECK(Tests, ValidateEditorGraph(AfterShortcutDuplicate, TestOnlySchema).empty());
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutPaste);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutDuplicate);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1280.0f, 800.0f), false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutDuplicate);
+
+		// Single-node duplicate exercises the same placement path above 1:1 zoom.
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *GameplaySession,
+			"{\"view\":{\"scroll\":{\"x\":-80.0,\"y\":55.0},\"zoom\":1.4}}");
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1120.0f, 740.0f), false);
+		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession, { SourceNodeID });
+		const ImVec2 SingleDuplicateScreenPoint(1120.0f, 740.0f);
+		const auto ExpectedSingleDuplicatePoint = EditorGraphDocumentEditorTestAccess::ScreenToCanvas(GraphEditor,
+			*GameplaySession, EditorGraphScreenPoint{ SingleDuplicateScreenPoint.x, SingleDuplicateScreenPoint.y });
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			SingleDuplicateScreenPoint, false, false, ImGuiKey_D, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			SingleDuplicateScreenPoint, false, false, ImGuiKey_D, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1300.0f, 810.0f), false);
+		const EditorGraph AfterSingleDuplicate = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession);
+		PF_CHECK(Tests, AfterSingleDuplicate.Nodes.size() == AfterShortcutDuplicate.Nodes.size() + 1 &&
+			AfterSingleDuplicate.Connections == AfterShortcutDuplicate.Connections &&
+			GraphTestClipboard == ClipboardBeforeDuplicate);
+		const auto SingleDuplicateNode = std::find_if(AfterSingleDuplicate.Nodes.begin(), AfterSingleDuplicate.Nodes.end(),
+			[&](const auto& Node) { return std::none_of(AfterShortcutDuplicate.Nodes.begin(), AfterShortcutDuplicate.Nodes.end(),
+				[&](const auto& Existing) { return Existing.ID == Node.ID; }); });
+		PF_CHECK(Tests, SingleDuplicateNode != AfterSingleDuplicate.Nodes.end());
+		if (SingleDuplicateNode != AfterSingleDuplicate.Nodes.end())
+			PF_CHECK(Tests, std::abs(SingleDuplicateNode->X - std::floor(ExpectedSingleDuplicatePoint.X)) < 0.01 &&
+				std::abs(SingleDuplicateNode->Y - std::floor(ExpectedSingleDuplicatePoint.Y)) < 0.01);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetSelectedNodes(GraphEditor, *GameplaySession).size() == 1);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutDuplicate);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterSingleDuplicate);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::HandleCommand(GraphEditor, *GameplaySession,
+			EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutDuplicate);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1300.0f, 810.0f), false);
+
+		// A key chord outside the focused graph's canvas is ignored.
+		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession, { SourceNodeID });
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(10.0f, 10.0f), false, false, ImGuiKey_D, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(10.0f, 10.0f), false, false, ImGuiKey_D, true);
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(10.0f, 10.0f), false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *GameplaySession) == AfterShortcutDuplicate);
 
 		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession,
 			{ SourceNodeID, ConsumerNodeID });
