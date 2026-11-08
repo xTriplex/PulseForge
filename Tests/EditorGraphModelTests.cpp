@@ -105,6 +105,34 @@ namespace
 		const auto* ResultB = FindPin(*MultiplyB, "result");
 		PF_CHECK(Tests, InputA && InputB && ResultA && ResultB);
 		if (!InputA || !InputB || !ResultA || !ResultB) return;
+		const auto InputActions = DiscoverEditorGraphNodeActions(*Graph, Schema, InputA->ID);
+		const auto MultiplyResultAction = std::find_if(InputActions.begin(), InputActions.end(), [](const auto& Action)
+			{ return Action.NodeTypeKey == "material.multiply" && Action.ConnectPinKey == "result"; });
+		PF_CHECK(Tests, MultiplyResultAction != InputActions.end());
+		if (MultiplyResultAction != InputActions.end())
+		{
+			EditorGraphCommandHistory InputOriginHistory(*Graph);
+			auto InputOriginCreate = CreateEditorGraphNodeAndConnect(InputOriginHistory, Schema,
+				MultiplyResultAction->NodeTypeKey, *MultiplyResultAction->ConnectPinKey, InputA->ID, 760.0, 180.0);
+			PF_CHECK(Tests, InputOriginCreate && InputOriginCreate->ConnectedPinID && InputOriginCreate->ConnectionID);
+			if (InputOriginCreate && InputOriginCreate->ConnectedPinID && InputOriginCreate->ConnectionID)
+			{
+				const auto NewNode = std::find_if(InputOriginHistory.Graph().Nodes.begin(), InputOriginHistory.Graph().Nodes.end(),
+					[&InputOriginCreate](const auto& Node) { return Node.ID == InputOriginCreate->NodeID; });
+				const auto* NewResult = NewNode == InputOriginHistory.Graph().Nodes.end() ? nullptr : FindPin(*NewNode, "result");
+				const auto NewLink = std::find_if(InputOriginHistory.Graph().Connections.begin(),
+					InputOriginHistory.Graph().Connections.end(), [&InputOriginCreate](const auto& Link)
+					{ return Link.ID == *InputOriginCreate->ConnectionID; });
+				PF_CHECK(Tests, NewResult && NewResult->Direction == EditorGraphPinDirection::Output &&
+					NewResult->Type == EditorGraphPinType::Float);
+				PF_CHECK(Tests, NewLink != InputOriginHistory.Graph().Connections.end() && NewResult &&
+					NewLink->OutputPin == NewResult->ID && NewLink->InputPin == InputA->ID);
+				PF_CHECK(Tests, ValidateEditorGraph(InputOriginHistory.Graph(), Schema).empty());
+				const auto AfterInputOriginCreate = InputOriginHistory.Graph();
+				PF_CHECK(Tests, InputOriginHistory.Undo() && InputOriginHistory.Graph() == *Graph);
+				PF_CHECK(Tests, InputOriginHistory.Redo() && InputOriginHistory.Graph() == AfterInputOriginCreate);
+			}
+		}
 		const auto Decision = CanConnectEditorGraphPins(*Graph, Schema, Scalar->ID, InputA->ID);
 		PF_CHECK(Tests, Decision.Allowed && Decision.OutputPin == Scalar->ID && Decision.InputPin == InputA->ID);
 		EditorGraphCommandHistory History(*Graph);

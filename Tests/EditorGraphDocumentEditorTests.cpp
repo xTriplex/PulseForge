@@ -8,6 +8,7 @@
 #include "../PulseForge/Vendor/imgui-node-editor/imgui_node_editor.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <iterator>
@@ -520,6 +521,200 @@ namespace
 		PF_CHECK(Tests, FreshResults.ActivateResult == 0 && !FreshResults.Cancelled);
 	}
 
+	void TestGraphCanvasCoordinateOwnership(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		namespace NodeEditor = ax::NodeEditor;
+
+		ImGuiContextScope ImGuiScope;
+		PF_CHECK(Tests, ImGuiScope.Context != nullptr);
+		if (!ImGuiScope.Context) return;
+		ImGuiIO& IO = ImGui::GetIO();
+		IO.IniFilename = nullptr;
+		IO.LogFilename = nullptr;
+		IO.DisplaySize = ImVec2(1280.0f, 720.0f);
+		IO.DeltaTime = 1.0f / 60.0f;
+		IO.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+		std::string CanvasSettings = "{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.65}}";
+		NodeEditor::Config Config;
+		Config.SettingsFile = nullptr;
+		Config.UserPointer = &CanvasSettings;
+		Config.LoadSettings = [](char* Data, void* UserPointer) -> size_t
+		{
+			const auto& Settings = *static_cast<const std::string*>(UserPointer);
+			if (!Data) return Settings.size();
+			std::copy(Settings.begin(), Settings.end(), Data);
+			return Settings.size();
+		};
+		auto* Canvas = NodeEditor::CreateEditor(&Config);
+		PF_CHECK(Tests, Canvas != nullptr);
+		if (!Canvas) return;
+		struct CanvasCleanup final
+		{
+			NodeEditor::EditorContext*& Canvas;
+			~CanvasCleanup()
+			{
+				if (!Canvas) return;
+				NodeEditor::SetCurrentEditor(Canvas);
+				NodeEditor::DestroyEditor(Canvas);
+				Canvas = nullptr;
+				NodeEditor::SetCurrentEditor(nullptr);
+			}
+		} Cleanup{ Canvas };
+		const auto RecreateCanvas = [&](std::string Settings)
+		{
+			CanvasSettings = std::move(Settings);
+			NodeEditor::SetCurrentEditor(Canvas);
+			NodeEditor::DestroyEditor(Canvas);
+			NodeEditor::SetCurrentEditor(nullptr);
+			Canvas = NodeEditor::CreateEditor(&Config);
+			PF_CHECK(Tests, Canvas != nullptr);
+		};
+
+		const auto GraphID = UUID::Generate();
+		PF_CHECK(Tests, GraphID.has_value());
+		if (!GraphID) return;
+		const EditorGraphCanvasDocumentContext Context{ {}, 9, "coordinate-test-host", *GraphID };
+		const ImVec2 RawScreenPoint(412.0f, 438.0f);
+		std::optional<EditorGraphPendingPinRelease> Pending;
+		for (size_t Index = 0; Index < 2; ++Index)
+		{
+			IO.AddMousePosEvent(RawScreenPoint.x, RawScreenPoint.y);
+			if (Index == 0) IO.AddMouseButtonEvent(ImGuiMouseButton_Right, true);
+			else IO.AddMouseButtonEvent(ImGuiMouseButton_Right, false);
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(96.0f, 64.0f));
+			ImGui::SetNextWindowSize(IO.DisplaySize);
+			ImGui::Begin("GraphCanvasCoordinateHost", nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			NodeEditor::SetCurrentEditor(Canvas);
+			const EditorGraphScreenPoint ScreenPoint{ IO.MousePos.x, IO.MousePos.y };
+			const EditorGraphScreenPoint ScreenClickPoint{ IO.MouseClickedPos[ImGuiMouseButton_Right].x,
+				IO.MouseClickedPos[ImGuiMouseButton_Right].y };
+			NodeEditor::Begin("##CoordinateCanvas", ImVec2(0.0f, 0.0f));
+			const float ExpectedScale = Index == 0 ? 0.65f : 1.45f;
+			PF_CHECK(Tests, std::abs(1.0f / NodeEditor::GetCurrentZoom() - ExpectedScale) < 0.01f);
+
+			const ImVec2 LocalMouse = IO.MousePos;
+			const auto ConvertedMouse = GraphCanvasDetail::ConvertEditorGraphScreenPoint(ScreenPoint,
+				[](EditorGraphScreenPoint Point)
+				{
+					const ImVec2 CanvasPoint = NodeEditor::ScreenToCanvas(
+						ImVec2(static_cast<float>(Point.X), static_cast<float>(Point.Y)));
+					return GraphCanvasDetail::MakeEditorGraphCanvasPoint(CanvasPoint.x, CanvasPoint.y);
+				});
+			PF_CHECK(Tests, std::abs(ConvertedMouse.X - LocalMouse.x) < 0.01 &&
+				std::abs(ConvertedMouse.Y - LocalMouse.y) < 0.01);
+
+			const ImVec2 LocalClick = IO.MouseClickedPos[ImGuiMouseButton_Right];
+			const auto ClickedCanvasPoint = GraphCanvasDetail::MakeEditorGraphCanvasPoint(LocalClick.x, LocalClick.y);
+			const auto ConvertedClick = GraphCanvasDetail::ConvertEditorGraphScreenPoint(ScreenClickPoint,
+				[](EditorGraphScreenPoint Point)
+				{
+					const ImVec2 CanvasPoint = NodeEditor::ScreenToCanvas(
+						ImVec2(static_cast<float>(Point.X), static_cast<float>(Point.Y)));
+					return GraphCanvasDetail::MakeEditorGraphCanvasPoint(CanvasPoint.x, CanvasPoint.y);
+				});
+			PF_CHECK(Tests, std::abs(ClickedCanvasPoint.X - ConvertedClick.X) < 0.01 &&
+				std::abs(ClickedCanvasPoint.Y - ConvertedClick.Y) < 0.01);
+
+			const auto OldDoubleConverted = GraphCanvasDetail::ConvertEditorGraphScreenPoint(
+				{ LocalMouse.x, LocalMouse.y }, [](EditorGraphScreenPoint Point)
+				{
+					const ImVec2 CanvasPoint = NodeEditor::ScreenToCanvas(
+						ImVec2(static_cast<float>(Point.X), static_cast<float>(Point.Y)));
+					return GraphCanvasDetail::MakeEditorGraphCanvasPoint(CanvasPoint.x, CanvasPoint.y);
+				});
+			PF_CHECK(Tests, std::abs(OldDoubleConverted.X - ConvertedMouse.X) > 1.0 ||
+				std::abs(OldDoubleConverted.Y - ConvertedMouse.Y) > 1.0);
+
+			NodeEditor::BeginNode(NodeEditor::NodeId(static_cast<uintptr_t>(800 + Index)));
+			ImGui::TextUnformatted("Pin geometry");
+			const auto SubmitMarker = [](uintptr_t PinID, NodeEditor::PinKind Kind, ImVec2 Cursor)
+			{
+				ImGui::SetCursorPos(Cursor);
+				NodeEditor::BeginPin(NodeEditor::PinId(PinID), Kind);
+				ImGui::Dummy(ImVec2(14.0f, 14.0f));
+				const ImVec2 Minimum = ImGui::GetItemRectMin();
+				const ImVec2 Maximum = ImGui::GetItemRectMax();
+				const ImVec2 Center((Minimum.x + Maximum.x) * 0.5f, (Minimum.y + Maximum.y) * 0.5f);
+				const auto Geometry = GraphCanvasDetail::MakePinMarkerGeometry(
+					GraphCanvasDetail::MakeEditorGraphCanvasPoint(Center.x, Center.y), 14.0, 14.0);
+				GraphCanvasDetail::ApplyPinMarkerGeometry(Geometry,
+					[](EditorGraphCanvasPoint Min, EditorGraphCanvasPoint Max)
+					{
+						NodeEditor::PinRect(ImVec2(static_cast<float>(Min.X), static_cast<float>(Min.Y)),
+							ImVec2(static_cast<float>(Max.X), static_cast<float>(Max.Y)));
+					}, [](EditorGraphCanvasPoint Anchor)
+					{
+						const ImVec2 Point(static_cast<float>(Anchor.X), static_cast<float>(Anchor.Y));
+						NodeEditor::PinPivotRect(Point, Point);
+					});
+				NodeEditor::EndPin();
+				return Geometry;
+			};
+			const auto InputGeometry = SubmitMarker(901 + Index, NodeEditor::PinKind::Input, ImVec2(20.0f, 54.0f));
+			const auto OutputGeometry = SubmitMarker(902 + Index, NodeEditor::PinKind::Output, ImVec2(132.0f, 54.0f));
+			ImGui::SetCursorPos(ImVec2(40.0f, 80.0f));
+			ImGui::SetNextItemWidth(100.0f);
+		double PropertyValue = 1.0;
+		ImGui::InputDouble("##PinGeometryProperty", &PropertyValue);
+		const ImVec2 PropertyMinimum = ImGui::GetItemRectMin();
+		const ImVec2 PropertyMaximum = ImGui::GetItemRectMax();
+		const ImVec2 InputScreen = NodeEditor::CanvasToScreen(ImVec2(
+			static_cast<float>(InputGeometry.Anchor.X), static_cast<float>(InputGeometry.Anchor.Y)));
+		const ImVec2 OutputScreen = NodeEditor::CanvasToScreen(ImVec2(
+			static_cast<float>(OutputGeometry.Anchor.X), static_cast<float>(OutputGeometry.Anchor.Y)));
+		NodeEditor::EndNode();
+		PF_CHECK(Tests, std::abs(InputGeometry.Maximum.X - InputGeometry.Minimum.X - 14.0) < 0.01 &&
+			std::abs(InputGeometry.Maximum.Y - InputGeometry.Minimum.Y - 14.0) < 0.01);
+		PF_CHECK(Tests, InputGeometry.Maximum.X < OutputGeometry.Minimum.X && OutputScreen.x > InputScreen.x);
+		PF_CHECK(Tests, PropertyMaximum.y <= InputGeometry.Minimum.Y ||
+			PropertyMinimum.y >= InputGeometry.Maximum.Y);
+
+			const UUID SourcePin{ 0x43414E5641530000ull, Index + 1 };
+			Pending = EditorGraphPendingPinRelease{ true, Context, SourcePin, ConvertedMouse };
+			NodeEditor::End();
+			NodeEditor::SetCurrentEditor(nullptr);
+			ImGui::End();
+			ImGui::Render();
+			if (Index == 0)
+			{
+				// The acceptance frame changes both pointer and view. The captured graph point remains fixed.
+				RecreateCanvas("{\"view\":{\"scroll\":{\"x\":-80.0,\"y\":56.0},\"zoom\":1.8}}");
+				IO.AddMousePosEvent(900.0f, 650.0f);
+				ImGui::NewFrame();
+				ImGui::SetNextWindowPos(ImVec2(96.0f, 64.0f));
+				ImGui::SetNextWindowSize(IO.DisplaySize);
+				ImGui::Begin("GraphCanvasCoordinateAcceptHost", nullptr,
+					ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+				NodeEditor::SetCurrentEditor(Canvas);
+				NodeEditor::Begin("##CoordinateCanvas", ImVec2(0.0f, 0.0f));
+				PF_CHECK(Tests, std::abs(1.0f / NodeEditor::GetCurrentZoom() - 1.8f) < 0.01f);
+				const auto Accepted = GraphCanvasDetail::ConsumePinRelease(*Pending, Context, SourcePin);
+				PF_CHECK(Tests, Accepted && Accepted->SourcePin == SourcePin &&
+					std::abs(Accepted->Position.X - ConvertedMouse.X) < 0.01 &&
+					std::abs(Accepted->Position.Y - ConvertedMouse.Y) < 0.01);
+				PF_CHECK(Tests, !Pending->Valid && !GraphCanvasDetail::ConsumePinRelease(*Pending, Context, SourcePin));
+				EditorGraphPendingPinRelease WrongContext{ true, Context, SourcePin, ConvertedMouse };
+				auto ReplacedContext = Context;
+				++ReplacedContext.SessionGeneration;
+				PF_CHECK(Tests, !GraphCanvasDetail::ConsumePinRelease(WrongContext, ReplacedContext, SourcePin) &&
+					!WrongContext.Valid);
+				EditorGraphPendingPinRelease WrongSource{ true, Context,
+					UUID{ 0x43414E5641530000ull, 99 }, ConvertedMouse };
+				PF_CHECK(Tests, !GraphCanvasDetail::ConsumePinRelease(WrongSource, Context, SourcePin) &&
+					!WrongSource.Valid);
+				NodeEditor::End();
+				NodeEditor::SetCurrentEditor(nullptr);
+				ImGui::End();
+				ImGui::Render();
+				RecreateCanvas("{\"view\":{\"scroll\":{\"x\":-24.0,\"y\":83.0},\"zoom\":1.45}}");
+			}
+		}
+	}
+
 	void TestAltPinUnlinkInputOwnership(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
@@ -641,6 +836,14 @@ namespace
 		int UnlinkRequests = 0;
 		uintptr_t LastHoveredPin = 0;
 		std::optional<EditorGraphVector3> AcceptedNodeDrop;
+		std::optional<EditorGraphVector3> CreatedCanvasNodePosition;
+		std::optional<EditorGraphVector3> CreatedCanvasNodeReadback;
+		const EditorGraphCanvasDocumentContext CanvasContext{ {}, 17, "graph-link-protocol-host", *GraphID };
+		EditorGraphPendingPinRelease PendingPinRelease;
+		std::optional<EditorGraphScreenPoint> ReleaseScreenPosition;
+		std::optional<EditorGraphCanvasPoint> BackgroundCanvasPosition;
+		std::optional<EditorGraphCanvasPoint> ExpectedBackgroundCanvasPosition;
+		std::optional<EditorGraphCanvasPoint> CapturedReleasePosition;
 		const auto Frame = [&](std::optional<ImVec2> MousePosition = std::nullopt,
 			std::optional<bool> LeftDown = std::nullopt, bool PressEscape = false,
 			std::optional<bool> AltDown = std::nullopt, std::optional<bool> RightDown = std::nullopt)
@@ -664,10 +867,11 @@ namespace
 			IO.DeltaTime = 1.0f / 60.0f;
 			ImGui::NewFrame();
 			if (AltDown) IO.KeyAlt = *AltDown;
-			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+			ImGui::SetNextWindowPos(ImVec2(96.0f, 64.0f));
 			ImGui::SetNextWindowSize(IO.DisplaySize);
 			ImGui::Begin("GraphLinkProtocolHost", nullptr,
 				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			const ImVec2 RightClickScreenAtFrameStart = IO.MouseClickedPos[ImGuiMouseButton_Right];
 			const bool CapturedAltClick = AltDown.value_or(false) && LeftDown.value_or(false) &&
 				LastHoveredPin != 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
 			if (IO.KeyAlt && IO.MouseDown[ImGuiMouseButton_Left] && LastHoveredPin != 0)
@@ -680,8 +884,29 @@ namespace
 				Canvas = NodeEditor::CreateEditor(&Config);
 				NeedsNodePositions = true;
 			}
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left, false))
+			{
+				PendingPinRelease = {};
+				ReleaseScreenPosition.reset();
+			}
+			if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+				ReleaseScreenPosition = EditorGraphScreenPoint{ IO.MousePos.x, IO.MousePos.y };
 			NodeEditor::SetCurrentEditor(Canvas);
 			NodeEditor::Begin("##GraphLinkProtocolCanvas", ImVec2(0.0f, 0.0f));
+			if (ReleaseScreenPosition)
+			{
+				const auto ScreenRelease = *ReleaseScreenPosition;
+				const auto CapturedPoint = GraphCanvasDetail::ConvertEditorGraphScreenPoint(ScreenRelease,
+					[](EditorGraphScreenPoint Point)
+					{
+						const ImVec2 Local = NodeEditor::ScreenToCanvas(
+							ImVec2(static_cast<float>(Point.X), static_cast<float>(Point.Y)));
+						return GraphCanvasDetail::MakeEditorGraphCanvasPoint(Local.x, Local.y);
+					});
+				PendingPinRelease = { true, CanvasContext, {}, CapturedPoint };
+				CapturedReleasePosition = CapturedPoint;
+				ReleaseScreenPosition.reset();
+			}
 			const auto DrawPinNode = [&](uintptr_t NodeID, uintptr_t PinID, NodeEditor::PinKind Kind,
 				const char* Label, float X)
 			{
@@ -701,6 +926,16 @@ namespace
 			DrawPinNode(1, 11, NodeEditor::PinKind::Output, "Scalar", 80.0f);
 			DrawPinNode(2, 22, NodeEditor::PinKind::Input, "Multiply", 360.0f);
 			DrawPinNode(3, 33, NodeEditor::PinKind::Input, "Output", 640.0f);
+			if (CreatedCanvasNodePosition)
+			{
+				if (NeedsNodePositions)
+					NodeEditor::SetNodePosition(NodeEditor::NodeId(44), ImVec2(
+						static_cast<float>(CreatedCanvasNodePosition->X),
+						static_cast<float>(CreatedCanvasNodePosition->Y)));
+				NodeEditor::BeginNode(NodeEditor::NodeId(44));
+				ImGui::TextUnformatted("Created node");
+				NodeEditor::EndNode();
+			}
 
 			const auto Result = PulseForgeEditor::GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
 				[] { return NodeEditor::BeginCreate(); },
@@ -737,6 +972,9 @@ namespace
 				[] { NodeEditor::RejectNewItem(); });
 			PF_CHECK(Tests, QueriesThisFrame <= 1);
 			PF_CHECK(Tests, NodeQueriesThisFrame <= 1);
+			if (Result.SawNodeRequest && PendingPinRelease.Valid && PendingPinRelease.SourcePin.IsNil())
+				if (const auto Source = Identities.find(Result.SourcePin); Source != Identities.end())
+					PendingPinRelease.SourcePin = Source->second;
 			if (Result.SawLinkRequest && Result.LinkDecision.Allowed && !Result.AcceptedLink) ++PreviewFrames;
 			if (Result.SawLinkRequest && !Result.LinkDecision.Allowed) ++RejectedFrames;
 			if (Result.AcceptedLink)
@@ -752,15 +990,35 @@ namespace
 				PF_CHECK(Tests, Source != Identities.end());
 				if (Source != Identities.end())
 				{
-					const ImVec2 Drop = NodeEditor::ScreenToCanvas(IO.MousePos);
-					PF_CHECK(Tests, std::isfinite(Drop.x) && std::isfinite(Drop.y));
-					AcceptedNodeDrop = EditorGraphVector3{ Drop.x, Drop.y, 0.0 };
+					const auto Captured = GraphCanvasDetail::ConsumePinRelease(
+						PendingPinRelease, CanvasContext, Source->second);
+					PF_CHECK(Tests, Captured.has_value());
+					if (Captured)
+					{
+						AcceptedNodeDrop = GraphCanvasDetail::ToEditorGraphPosition(Captured->Position);
+						PF_CHECK(Tests, std::isfinite(AcceptedNodeDrop->X) && std::isfinite(AcceptedNodeDrop->Y));
+						PF_CHECK(Tests, CapturedReleasePosition &&
+							AcceptedNodeDrop->X == std::floor(CapturedReleasePosition->X) &&
+							AcceptedNodeDrop->Y == std::floor(CapturedReleasePosition->Y));
+					}
 				}
 			}
 			NodeEditor::Suspend();
 			const bool BackgroundMenuRequested = NodeEditor::ShowBackgroundContextMenu();
 			NodeEditor::Resume();
+			if (BackgroundMenuRequested)
+			{
+				const ImVec2 LocalClick = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Right];
+				BackgroundCanvasPosition = GraphCanvasDetail::MakeEditorGraphCanvasPoint(LocalClick.x, LocalClick.y);
+				const ImVec2 Expected = NodeEditor::ScreenToCanvas(RightClickScreenAtFrameStart);
+				ExpectedBackgroundCanvasPosition = GraphCanvasDetail::MakeEditorGraphCanvasPoint(Expected.x, Expected.y);
+			}
 			NodeEditor::End();
+			if (CreatedCanvasNodePosition)
+			{
+				const ImVec2 Readback = NodeEditor::GetNodePosition(NodeEditor::NodeId(44));
+				CreatedCanvasNodeReadback = EditorGraphVector3{ Readback.x, Readback.y, 0.0 };
+			}
 			const auto HoveredPin = NodeEditor::GetHoveredPin();
 			LastHoveredPin = HoveredPin.Get();
 			const auto HoveredIdentity = Identities.find(LastHoveredPin);
@@ -857,7 +1115,9 @@ namespace
 		const int PriorNodeAccepts = AcceptedNodeRequests;
 		const ImVec2 EmptyCanvasPosition(1030.0f, 630.0f);
 		BeginDrag(ScalarPosition, EmptyCanvasPosition);
-		ReleaseDrag(EmptyCanvasPosition);
+		Frame(EmptyCanvasPosition, false);
+		Frame(ImVec2(1120.0f, 500.0f));
+		Frame();
 		PF_CHECK(Tests, AcceptedNodeRequests == PriorNodeAccepts + 1 && AcceptedNodeDrop.has_value());
 		const auto* SourceValue = FindPin(History.Graph(), "material.scalar", "value");
 		PF_CHECK(Tests, SourceValue != nullptr);
@@ -877,8 +1137,23 @@ namespace
 				if (Created)
 				{
 					const auto AfterAutoCreate = History.Graph();
+					const auto CreatedNode = std::find_if(AfterAutoCreate.Nodes.begin(), AfterAutoCreate.Nodes.end(),
+						[&Created](const auto& Node) { return Node.ID == Created->NodeID; });
+					PF_CHECK(Tests, CreatedNode != AfterAutoCreate.Nodes.end() &&
+						CreatedNode->X == std::floor(AcceptedNodeDrop->X) &&
+						CreatedNode->Y == std::floor(AcceptedNodeDrop->Y));
 					PF_CHECK(Tests, History.Undo() && History.Graph() == BeforeAutoCreate);
 					PF_CHECK(Tests, History.Redo() && History.Graph() == AfterAutoCreate);
+					CreatedCanvasNodePosition = *AcceptedNodeDrop;
+					NeedsNodePositions = true;
+					Frame();
+					PF_CHECK(Tests, CreatedCanvasNodeReadback &&
+						CreatedCanvasNodeReadback->X == AcceptedNodeDrop->X &&
+						CreatedCanvasNodeReadback->Y == AcceptedNodeDrop->Y);
+					Frame();
+					PF_CHECK(Tests, CreatedCanvasNodeReadback &&
+						CreatedCanvasNodeReadback->X == AcceptedNodeDrop->X &&
+						CreatedCanvasNodeReadback->Y == AcceptedNodeDrop->Y);
 				}
 			}
 		}
@@ -894,6 +1169,12 @@ namespace
 		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, false);
 		Frame();
 		PF_CHECK(Tests, BackgroundMenuRequests == PreviousBackgroundRequests + 1);
+		PF_CHECK(Tests, BackgroundCanvasPosition.has_value() && ExpectedBackgroundCanvasPosition.has_value());
+		if (BackgroundCanvasPosition && ExpectedBackgroundCanvasPosition)
+		{
+			PF_CHECK(Tests, std::abs(BackgroundCanvasPosition->X - ExpectedBackgroundCanvasPosition->X) < 0.01 &&
+				std::abs(BackgroundCanvasPosition->Y - ExpectedBackgroundCanvasPosition->Y) < 0.01);
+		}
 		for (int Index = 0; Index < 3; ++Index) Frame();
 		PF_CHECK(Tests, BackgroundMenuRequests == PreviousBackgroundRequests + 1);
 		Frame(BackgroundPosition, std::nullopt, false, std::nullopt, true);
@@ -910,6 +1191,7 @@ void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 	TestGraphCanvasCreateRequestPolling(Tests);
 	TestGraphCanvasNodeCreationRequestPolling(Tests);
 	TestGraphNodeSearchNavigation(Tests);
+	TestGraphCanvasCoordinateOwnership(Tests);
 	TestAltPinUnlinkInputOwnership(Tests);
 	TestGraphStraightenShortcutOwnership(Tests);
 	TestPinnedCanvasLinkGesture(Tests);

@@ -4,6 +4,7 @@
 #include "Editor/EditorGraphModel.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace PulseForgeEditor
@@ -23,6 +25,47 @@ namespace PulseForgeEditor
 	{
 		uintptr_t StartPin = 0;
 		uintptr_t EndPin = 0;
+	};
+
+	struct EditorGraphScreenPoint
+	{
+		double X = 0.0;
+		double Y = 0.0;
+	};
+
+	struct EditorGraphCanvasPoint
+	{
+		double X = 0.0;
+		double Y = 0.0;
+	};
+
+	struct EditorGraphCanvasPinMarkerGeometry
+	{
+		EditorGraphCanvasPoint Minimum;
+		EditorGraphCanvasPoint Maximum;
+		EditorGraphCanvasPoint Anchor;
+	};
+
+	struct EditorGraphCanvasDocumentContext
+	{
+		EditorDocumentIdentity Document;
+		uint64_t SessionGeneration = 0;
+		std::string HostID;
+		PulseForge::UUID GraphID;
+	};
+
+	struct EditorGraphPendingPinRelease
+	{
+		bool Valid = false;
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID SourcePin;
+		EditorGraphCanvasPoint Position;
+	};
+
+	struct EditorGraphAcceptedPinRelease
+	{
+		PulseForge::UUID SourcePin;
+		EditorGraphCanvasPoint Position;
 	};
 
 	struct EditorGraphCanvasLinkRequestResult
@@ -88,6 +131,57 @@ namespace PulseForgeEditor
 
 	namespace GraphCanvasDetail
 	{
+		[[nodiscard]] inline EditorGraphCanvasPoint MakeEditorGraphCanvasPoint(double X, double Y)
+		{
+			return { X, Y };
+		}
+
+		[[nodiscard]] inline EditorGraphCanvasPinMarkerGeometry MakePinMarkerGeometry(
+			EditorGraphCanvasPoint Center, double Width, double Height)
+		{
+			const double HalfWidth = Width * 0.5;
+			const double HalfHeight = Height * 0.5;
+			return { { Center.X - HalfWidth, Center.Y - HalfHeight },
+				{ Center.X + HalfWidth, Center.Y + HalfHeight }, Center };
+		}
+
+		template <typename SetBounds, typename SetPivot>
+		inline void ApplyPinMarkerGeometry(const EditorGraphCanvasPinMarkerGeometry& Geometry,
+			SetBounds&& SetBoundsCallback, SetPivot&& SetPivotCallback)
+		{
+			std::forward<SetBounds>(SetBoundsCallback)(Geometry.Minimum, Geometry.Maximum);
+			std::forward<SetPivot>(SetPivotCallback)(Geometry.Anchor);
+		}
+
+		[[nodiscard]] inline EditorGraphVector3 ToEditorGraphPosition(EditorGraphCanvasPoint Point)
+		{
+			// The pinned canvas floors SetNodePosition bounds. Match that placement anchor
+			// before model publication so the first canvas sync is not a second edit.
+			return { std::floor(Point.X), std::floor(Point.Y), 0.0 };
+		}
+
+		template <typename ScreenToCanvas>
+		[[nodiscard]] inline EditorGraphCanvasPoint ConvertEditorGraphScreenPoint(
+			EditorGraphScreenPoint Screen, ScreenToCanvas&& Convert)
+		{
+			return std::forward<ScreenToCanvas>(Convert)(Screen);
+		}
+
+		[[nodiscard]] inline std::optional<EditorGraphAcceptedPinRelease> ConsumePinRelease(
+			EditorGraphPendingPinRelease& Pending,
+			const EditorGraphCanvasDocumentContext& Current,
+			PulseForge::UUID SourcePin)
+		{
+			if (!Pending.Valid) return std::nullopt;
+			const auto Captured = Pending;
+			Pending = {};
+			if (SourcePin.IsNil() || Captured.SourcePin != SourcePin || Captured.Context.Document != Current.Document ||
+				Captured.Context.SessionGeneration != Current.SessionGeneration ||
+				Captured.Context.HostID != Current.HostID || Captured.Context.GraphID != Current.GraphID)
+				return std::nullopt;
+			return EditorGraphAcceptedPinRelease{ SourcePin, Captured.Position };
+		}
+
 		[[nodiscard]] inline std::optional<PulseForge::UUID> ResolveAltPinUnlink(
 			const EditorGraphCanvasPinInput& Input)
 		{
