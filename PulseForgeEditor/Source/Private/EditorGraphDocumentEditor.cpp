@@ -219,7 +219,6 @@ namespace
 		std::unordered_map<PulseForge::UUID, uintptr_t, PulseForge::UUIDHash> Handles;
 		std::unordered_map<uintptr_t, PulseForge::UUID> Identities;
 		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> HiddenPins;
-		std::unordered_map<PulseForge::UUID, EditorGraphCanvasRect, PulseForge::UUIDHash> PinMarkerScreenBounds;
 		uint64_t NextHandle = 1;
 		bool NeedsCanvasSync = true;
 		bool WasFocused = false;
@@ -227,6 +226,16 @@ namespace
 		bool SuppressCanvasInputUntilRelease = false;
 		PulseForge::UUID LastHoveredPin;
 		bool LastPinWidgetHovered = false;
+		bool LastCanvasPinHitValid = false;
+		EditorGraphCanvasDocumentContext LastCanvasPinHitContext;
+		uint64_t LastCanvasPinHitGraphRevision = 0;
+		PulseForge::UUID LastCanvasPinHitID;
+		EditorGraphScreenPoint LastCanvasPinHitScreenPoint;
+		EditorGraphCanvasPoint LastCanvasPinHitCanvasPoint;
+		EditorGraphScreenPoint LastCanvasPinHitCanvasOriginScreen;
+		double LastCanvasPinHitZoom = 1.0;
+		EditorGraphCanvasRect LastCanvasPinHitCanvasBounds;
+		EditorGraphCanvasRect LastCanvasPinHitHostClip;
 		PendingNodeSearch NodeSearch;
 		PendingScreenPinRelease ScreenPinRelease;
 		EditorGraphPendingPinRelease PinRelease;
@@ -1128,42 +1137,11 @@ namespace PulseForgeEditor
 			return std::find_if(State->History.Graph().Connections.begin(), State->History.Graph().Connections.end(),
 				[ConnectionID](const auto& Connection) { return Connection.ID == ConnectionID; });
 		};
-		const auto FindPinAtCapturedScreenPoint = [&State](EditorGraphScreenPoint ScreenPoint)
-		{
-			for (const auto& [PinID, Bounds] : State->PinMarkerScreenBounds)
-				if (ScreenPoint.X >= Bounds.Minimum.X && ScreenPoint.X <= Bounds.Maximum.X &&
-					ScreenPoint.Y >= Bounds.Minimum.Y && ScreenPoint.Y <= Bounds.Maximum.Y)
-					return PinID;
-			return PulseForge::UUID{};
-		};
 		if (State->PinMove && (!Focused || !ContextMatches(State->PinMove->Context) ||
 			State->PinMove->CapturedGraphRevision != State->History.GraphRevision()))
 		{
 			if (LeftDownAtFrameStart) State->SuppressCanvasInputUntilRelease = true;
 			State->PinMove.reset();
-		}
-		if (!State->PinMove && Focused && !Input.WantTextInput && !OtherInputOwner && !Input.KeyAlt && Input.KeyCtrl &&
-			LeftClickedAtFrameStart && !State->NodeSearch.Active && !State->PinVisibilityPopup && !State->ReconnectPopup &&
-			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !State->NodeMoveTransaction)
-		{
-			const auto SourcePinID = FindPinAtCapturedScreenPoint(
-				{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y });
-			if (!SourcePinID.IsNil())
-			{
-				const EditorGraphPin* SourcePin = nullptr;
-				for (const auto& Node : State->History.Graph().Nodes)
-					if (const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
-						[SourcePinID](const auto& Candidate) { return Candidate.ID == SourcePinID; }); Pin != Node.Pins.end())
-					{ SourcePin = &*Pin; break; }
-				std::vector<EditorGraphConnection> Captured;
-				for (const auto& Connection : State->History.Graph().Connections)
-					if (Connection.OutputPin == SourcePinID || Connection.InputPin == SourcePinID)
-						Captured.push_back(Connection);
-				if (SourcePin && !Captured.empty())
-					State->PinMove = PendingPinMove{ CanvasContext, SourcePinID, SourcePin->Direction,
-						std::move(Captured), State->History.GraphRevision(),
-						{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y }, true };
-			}
 		}
 		const bool TargetClickAtFrameStart = State->PinMove && State->PinMove->AwaitingTargetClick &&
 			LeftClickedAtFrameStart;
@@ -1316,7 +1294,6 @@ namespace PulseForgeEditor
 		};
 		std::vector<EditorGraphPropertyEditEvent> PropertyEvents;
 		std::vector<PinAnchorMeasurement> PinAnchorCanvasPositions;
-		std::unordered_map<PulseForge::UUID, EditorGraphCanvasRect, PulseForge::UUIDHash> CurrentPinMarkerScreenBounds;
 		struct PinVisibilityChange { PulseForge::UUID NodeID; PulseForge::UUID PinID; bool Hidden = false; };
 		std::vector<PinVisibilityChange> PendingVisibilityChanges;
 		bool PropertyWidgetHovered = false;
@@ -1363,6 +1340,77 @@ namespace PulseForgeEditor
 
 		const ImVec2 CanvasScreenOrigin = ImGui::GetCursorScreenPos();
 		const ImVec2 CanvasScreenSize = ImGui::GetContentRegionAvail();
+		const ImVec2 HostClipMinimum = ImGui::GetWindowDrawList()->GetClipRectMin();
+		const ImVec2 HostClipMaximum = ImGui::GetWindowDrawList()->GetClipRectMax();
+		const ImVec2 CurrentCanvasPoint = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+		const ImVec2 CurrentCanvasOriginScreen = NodeEditor::CanvasToScreen(ImVec2(0.0f, 0.0f));
+		const float CurrentCanvasZoom = NodeEditor::GetCurrentZoom();
+		const auto SamePoint = [](double Left, double Right)
+		{
+			return std::isfinite(Left) && std::isfinite(Right) && std::abs(Left - Right) <= 1e-4;
+		};
+		const auto SameRect = [&SamePoint](const EditorGraphCanvasRect& Left, const EditorGraphCanvasRect& Right)
+		{
+			return SamePoint(Left.Minimum.X, Right.Minimum.X) && SamePoint(Left.Minimum.Y, Right.Minimum.Y) &&
+				SamePoint(Left.Maximum.X, Right.Maximum.X) && SamePoint(Left.Maximum.Y, Right.Maximum.Y);
+		};
+		const EditorGraphCanvasRect CurrentCanvasBounds{
+			{ CanvasScreenOrigin.x, CanvasScreenOrigin.y },
+			{ CanvasScreenOrigin.x + CanvasScreenSize.x, CanvasScreenOrigin.y + CanvasScreenSize.y } };
+		const EditorGraphCanvasRect CurrentHostClip{
+			{ HostClipMinimum.x, HostClipMinimum.y }, { HostClipMaximum.x, HostClipMaximum.y } };
+		const auto CapturedScreenPoint = EditorGraphScreenPoint{
+			ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y };
+		const auto PointerInsideInteractiveClip = [&]()
+		{
+			const double MinimumX = std::max(CurrentCanvasBounds.Minimum.X, CurrentHostClip.Minimum.X);
+			const double MinimumY = std::max(CurrentCanvasBounds.Minimum.Y, CurrentHostClip.Minimum.Y);
+			const double MaximumX = std::min(CurrentCanvasBounds.Maximum.X, CurrentHostClip.Maximum.X);
+			const double MaximumY = std::min(CurrentCanvasBounds.Maximum.Y, CurrentHostClip.Maximum.Y);
+			return MaximumX > MinimumX && MaximumY > MinimumY &&
+				CapturedScreenPoint.X >= MinimumX && CapturedScreenPoint.X < MaximumX &&
+				CapturedScreenPoint.Y >= MinimumY && CapturedScreenPoint.Y < MaximumY;
+		};
+		// Source capture must mask the press before Begin(). Reuse only the previous End() hit at
+		// this exact pointer and unchanged host, clip, graph, and canvas transform. That hit already
+		// carries the pinned canvas's clipping and front-to-back ordering decisions.
+		const bool FreshCanvasPinHit = State->LastCanvasPinHitValid && !State->NeedsCanvasSync &&
+			State->LastCanvasPinHitID == State->LastHoveredPin && !State->LastCanvasPinHitID.IsNil() &&
+			State->LastCanvasPinHitContext.Document == CanvasContext.Document &&
+			State->LastCanvasPinHitContext.SessionGeneration == CanvasContext.SessionGeneration &&
+			State->LastCanvasPinHitContext.HostID == CanvasContext.HostID &&
+			State->LastCanvasPinHitContext.GraphID == CanvasContext.GraphID &&
+			State->LastCanvasPinHitGraphRevision == State->History.GraphRevision() &&
+			SamePoint(State->LastCanvasPinHitScreenPoint.X, CapturedScreenPoint.X) &&
+			SamePoint(State->LastCanvasPinHitScreenPoint.Y, CapturedScreenPoint.Y) &&
+			SamePoint(State->LastCanvasPinHitCanvasPoint.X, CurrentCanvasPoint.x) &&
+			SamePoint(State->LastCanvasPinHitCanvasPoint.Y, CurrentCanvasPoint.y) &&
+			SamePoint(State->LastCanvasPinHitCanvasOriginScreen.X, CurrentCanvasOriginScreen.x) &&
+			SamePoint(State->LastCanvasPinHitCanvasOriginScreen.Y, CurrentCanvasOriginScreen.y) &&
+			SamePoint(State->LastCanvasPinHitZoom, CurrentCanvasZoom) &&
+			SameRect(State->LastCanvasPinHitCanvasBounds, CurrentCanvasBounds) &&
+			SameRect(State->LastCanvasPinHitHostClip, CurrentHostClip) && PointerInsideInteractiveClip() &&
+			ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+		if (!State->PinMove && FreshCanvasPinHit && Focused && !Input.WantTextInput && !OtherInputOwner &&
+			!Input.KeyAlt && Input.KeyCtrl && LeftClickedAtFrameStart && !State->NodeSearch.Active &&
+			!State->PinVisibilityPopup && !State->ReconnectPopup &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !State->NodeMoveTransaction &&
+			!State->SuppressCanvasInputUntilRelease)
+		{
+			const PulseForge::UUID SourcePinID = State->LastCanvasPinHitID;
+			const EditorGraphPin* SourcePin = nullptr;
+			for (const auto& Node : State->History.Graph().Nodes)
+				if (const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+					[SourcePinID](const auto& Candidate) { return Candidate.ID == SourcePinID; }); Pin != Node.Pins.end())
+				{ SourcePin = &*Pin; break; }
+			std::vector<EditorGraphConnection> Captured;
+			for (const auto& Connection : State->History.Graph().Connections)
+				if (Connection.OutputPin == SourcePinID || Connection.InputPin == SourcePinID)
+					Captured.push_back(Connection);
+			if (SourcePin && !Captured.empty())
+				State->PinMove = PendingPinMove{ CanvasContext, SourcePinID, SourcePin->Direction,
+					std::move(Captured), State->History.GraphRevision(), CapturedScreenPoint, true };
+		}
 		std::optional<CanvasMouseInputMask> CanvasInputMask;
 		if (State->PinMove || State->SuppressCanvasInputUntilRelease) CanvasInputMask.emplace();
 		NodeEditor::Begin("##PulseForgeGraphCanvas", ImVec2(0.0f, 0.0f));
@@ -1568,12 +1616,6 @@ namespace PulseForgeEditor
 					? NodeEditor::PinKind::Input : NodeEditor::PinKind::Output);
 				const auto Marker = DrawGraphPinMarker(Pin, Row.Connected, Tooltip);
 				NodeEditor::EndPin();
-				const ImVec2 MarkerScreenMinimum = NodeEditor::CanvasToScreen(
-					ImVec2(static_cast<float>(Marker.Minimum.X), static_cast<float>(Marker.Minimum.Y)));
-				const ImVec2 MarkerScreenMaximum = NodeEditor::CanvasToScreen(
-					ImVec2(static_cast<float>(Marker.Maximum.X), static_cast<float>(Marker.Maximum.Y)));
-				CurrentPinMarkerScreenBounds.emplace(Pin.ID, EditorGraphCanvasRect{
-					{ MarkerScreenMinimum.x, MarkerScreenMinimum.y }, { MarkerScreenMaximum.x, MarkerScreenMaximum.y } });
 				if (std::isfinite(Marker.Anchor.X) && std::isfinite(Marker.Anchor.Y))
 					PinAnchorCanvasPositions.push_back({ Node.ID, Pin.ID, Marker.Anchor });
 				EditorGraphCanvasPinPresentation PinPresentation;
@@ -1662,7 +1704,6 @@ namespace PulseForgeEditor
 				State->Presentation.push_back(std::move(Presentation));
 			}
 		}
-		State->PinMarkerScreenBounds = std::move(CurrentPinMarkerScreenBounds);
 		for (const auto& Connection : State->History.Graph().Connections)
 		{
 			const uintptr_t LinkHandle = RegisterHandle(Connection.ID);
@@ -2290,6 +2331,16 @@ namespace PulseForgeEditor
 			State->PinMove = std::move(BeginPinMoveSelection);
 			State->Error.clear();
 		}
+		const auto ResolveInteractiveCanvasPin = [&State]()
+		{
+			// End() publishes BuildControl's current clipped, z-ordered pin result. This is the sole
+			// destination resolver for preview and release; no raw-marker fallback is valid here.
+			const auto CanvasPin = NodeEditor::GetHoveredPin();
+			if (CanvasPin.Get() == 0) return PulseForge::UUID{};
+			const auto Identity = State->Identities.find(CanvasPin.Get());
+			return Identity == State->Identities.end() ? PulseForge::UUID{} : Identity->second;
+		};
+		const PulseForge::UUID HoveredPinID = ResolveInteractiveCanvasPin();
 		if (State->PinMove && Focused && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
 		{
 			if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -2297,14 +2348,6 @@ namespace PulseForgeEditor
 			State->PinMove.reset();
 			State->PinMovePresentation = {};
 		}
-		PulseForge::UUID HoveredPinID;
-		const auto HoveredCanvasPin = NodeEditor::GetHoveredPin();
-		if (HoveredCanvasPin.Get() != 0)
-			if (const auto It = State->Identities.find(HoveredCanvasPin.Get()); It != State->Identities.end())
-				HoveredPinID = It->second;
-		if (State->PinMove && HoveredPinID.IsNil())
-			HoveredPinID = FindPinAtCapturedScreenPoint(
-				{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y });
 		std::optional<PendingPinMove> PendingPinMoveCommit;
 		const auto ResolvePinMovePreview = [&](PulseForge::UUID TargetPin)
 		{
@@ -2355,7 +2398,6 @@ namespace PulseForgeEditor
 			State->PinMovePresentation.TargetAllowed = Move.Preview.Allowed;
 			State->PinMovePresentation.TargetNoOp = Move.Preview.NoOp;
 			State->PinMovePresentation.PreviewDecisionEvaluations = Move.PreviewDecisionEvaluations;
-			State->PinMovePresentation.CandidatePinEnumerations = 0;
 			State->PinMovePresentation.Feedback = Move.PreviewTarget == HoveredPinID && !HoveredPinID.IsNil()
 				? "Moving " + std::to_string(Move.CapturedConnections.size()) + " connection(s): " + Move.Preview.Reason
 				: (Move.AwaitingTargetClick ? "Click a destination pin; Escape cancels" :
@@ -2586,6 +2628,28 @@ namespace PulseForgeEditor
 		}
 		State->LastHoveredPin = HoveredPinID;
 		State->LastPinWidgetHovered = PropertyWidgetHovered;
+		State->LastCanvasPinHitValid = false;
+		if (!State->NeedsCanvasSync && !HoveredPinID.IsNil() &&
+			std::isfinite(ScreenMousePositionAtFrameStart.x) && std::isfinite(ScreenMousePositionAtFrameStart.y))
+		{
+			const ImVec2 CanvasPoint = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+			const ImVec2 CanvasOriginScreen = NodeEditor::CanvasToScreen(ImVec2(0.0f, 0.0f));
+			const float CanvasZoom = NodeEditor::GetCurrentZoom();
+			if (std::isfinite(CanvasPoint.x) && std::isfinite(CanvasPoint.y) &&
+				std::isfinite(CanvasOriginScreen.x) && std::isfinite(CanvasOriginScreen.y) && std::isfinite(CanvasZoom))
+			{
+				State->LastCanvasPinHitValid = true;
+				State->LastCanvasPinHitContext = CanvasContext;
+				State->LastCanvasPinHitGraphRevision = State->History.GraphRevision();
+				State->LastCanvasPinHitID = HoveredPinID;
+				State->LastCanvasPinHitScreenPoint = CapturedScreenPoint;
+				State->LastCanvasPinHitCanvasPoint = { CanvasPoint.x, CanvasPoint.y };
+				State->LastCanvasPinHitCanvasOriginScreen = { CanvasOriginScreen.x, CanvasOriginScreen.y };
+				State->LastCanvasPinHitZoom = CanvasZoom;
+				State->LastCanvasPinHitCanvasBounds = CurrentCanvasBounds;
+				State->LastCanvasPinHitHostClip = CurrentHostClip;
+			}
+		}
 
 		if (GraphCanvasDetail::ShouldStraightenSelection({ Focused, NodeEditor::IsActive(),
 			ImGui::IsKeyPressed(ImGuiKey_Q, false), Input.WantTextInput, OtherInputOwner,
@@ -2664,6 +2728,11 @@ namespace PulseForgeEditor
 			else if (!Change.Hidden && ExistingSetting != m_PinVisibilitySettings.end())
 				m_PinVisibilitySettings.erase(ExistingSetting);
 		}
-		if (PresentationChanged && m_PresentationChanged) m_PresentationChanged();
+		if (PresentationChanged)
+		{
+			State->LastCanvasPinHitValid = false;
+			State->LastHoveredPin = {};
+			if (m_PresentationChanged) m_PresentationChanged();
+		}
 	}
 }

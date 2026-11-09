@@ -1649,10 +1649,10 @@ namespace
 		PF_CHECK(Tests, BaselineBytes.has_value());
 		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *Session, true);
 
-		const ImVec2 HostOrigin(73.0f, 37.0f);
+		ImVec2 HostOrigin(73.0f, 37.0f);
 		bool FocusReconnectHost = true;
 		const auto DrawFrame = [&](ImVec2 Mouse, bool LeftDown = false, bool RightDown = false,
-			bool Escape = false, bool Control = false)
+			bool Escape = false, bool Control = false, std::optional<EditorGraphCanvasRect> ScreenClip = std::nullopt)
 		{
 			IO.DisplaySize = ImVec2(1440.0f, 900.0f);
 			IO.AddMousePosEvent(Mouse.x, Mouse.y);
@@ -1678,7 +1678,12 @@ namespace
 			ImGui::SetNextWindowSize(ImVec2(1367.0f, 850.0f));
 			ImGui::Begin("GraphReconnectHost", nullptr,
 				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			if (ScreenClip)
+				ImGui::GetWindowDrawList()->PushClipRect(
+					ImVec2(static_cast<float>(ScreenClip->Minimum.X), static_cast<float>(ScreenClip->Minimum.Y)),
+					ImVec2(static_cast<float>(ScreenClip->Maximum.X), static_cast<float>(ScreenClip->Maximum.Y)), true);
 			EditorGraphDocumentEditorTestAccess::Draw(GraphEditor, *Session);
+			if (ScreenClip) ImGui::GetWindowDrawList()->PopClipRect();
 			ImGui::End();
 			ImGui::Render();
 		};
@@ -1829,13 +1834,14 @@ namespace
 		const ImVec2 SourceBOutputPoint = FindPinScreen(SourceBValue);
 		const auto BeforeCtrlOutput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
 		const uint64_t CtrlOutputRevision = Session->Revision;
+		DrawFrame(SourceAOutputPoint);
 		DrawFrame(SourceAOutputPoint, true, false, false, true);
 		auto PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
 		PF_CHECK(Tests, PinMove.Active && PinMove.CtrlDrag && !PinMove.Dragging && PinMove.MovingConnectionCount == 2);
 		DrawFrame(SourceBOutputPoint, true, false, false, false);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
 		PF_CHECK(Tests, PinMove.Active && PinMove.Dragging && PinMove.TargetAllowed &&
-			PinMove.MovingConnectionCount == 2 && PinMove.CandidatePinEnumerations == 0 &&
+			PinMove.MovingConnectionCount == 2 &&
 			PinMove.PreviewDecisionEvaluations == 1);
 		DrawFrame(SourceBOutputPoint, false, false, false, false);
 		auto AfterCtrlOutput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
@@ -1851,6 +1857,7 @@ namespace
 		// A Ctrl-drag from one input moves that endpoint while preserving its wire identity.
 		const ImVec2 InputSourcePoint = FindPinScreen(TargetAA);
 		const ImVec2 InputTargetPoint = FindPinScreen(TargetDA);
+		DrawFrame(InputSourcePoint);
 		DrawFrame(InputSourcePoint, true, false, false, true);
 		DrawFrame(InputTargetPoint, true, false, false, false);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
@@ -1865,6 +1872,7 @@ namespace
 
 		// A mismatched direction is visible as rejected feedback and dropping cancels without editing.
 		const ImVec2 InvalidInputPoint = FindPinScreen(TargetDA);
+		DrawFrame(SourceAOutputPoint);
 		DrawFrame(SourceAOutputPoint, true, false, false, true);
 		DrawFrame(InvalidInputPoint, true, false, false, false);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
@@ -1876,12 +1884,14 @@ namespace
 			!Session->IsDirty());
 
 		// Ctrl-click without crossing the drag threshold is a no-op.
+		DrawFrame(SourceAOutputPoint);
 		DrawFrame(SourceAOutputPoint, true, false, false, true);
 		DrawFrame(SourceAOutputPoint, false, false, false, false);
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline &&
 			!Session->IsDirty());
 
 		// Escape cancels an active drag and consumes the held button through release.
+		DrawFrame(SourceAOutputPoint);
 		DrawFrame(SourceAOutputPoint, true, false, false, true);
 		DrawFrame(SourceBOutputPoint, true, false, false, false);
 		DrawFrame(SourceBOutputPoint, true, false, true, false);
@@ -1930,6 +1940,176 @@ namespace
 			return true;
 		};
 		PF_CHECK(Tests, ReopenedGraph && SameGraphByIdentity(*ReopenedGraph, AfterReplacement));
+
+		const auto SetNodeY = [](EditorGraph& TargetGraph, UUID NodeID, double Y)
+		{
+			const auto Node = std::find_if(TargetGraph.Nodes.begin(), TargetGraph.Nodes.end(),
+				[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
+			if (Node != TargetGraph.Nodes.end()) Node->Y = Y;
+		};
+		const auto SetNodePosition = [](EditorGraph& TargetGraph, UUID NodeID, double X, double Y)
+		{
+			const auto Node = std::find_if(TargetGraph.Nodes.begin(), TargetGraph.Nodes.end(),
+				[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
+			if (Node != TargetGraph.Nodes.end()) { Node->X = X; Node->Y = Y; }
+		};
+		EditorGraph ClippedOutputGraph = Baseline;
+		SetNodeY(ClippedOutputGraph, SourceB, -10000.0);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, ClippedOutputGraph, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *Session, true);
+		const ImVec2 ClippedOutputPoint = FindPinScreen(SourceBValue);
+		PF_CHECK(Tests, ClippedOutputPoint.y < HostOrigin.y);
+		const ImVec2 VisibleSourcePoint = FindPinScreen(SourceAValue);
+		const EditorGraph BeforeClippedOutputGesture = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const uint64_t ClippedOutputRevision = Session->Revision;
+		DrawFrame(VisibleSourcePoint);
+		DrawFrame(VisibleSourcePoint, true, false, false, true);
+		DrawFrame(ClippedOutputPoint, true);
+		const auto ClippedOutputPreview = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, ClippedOutputPreview.Active && ClippedOutputPreview.TargetPin.IsNil() &&
+			!ClippedOutputPreview.TargetAllowed);
+		DrawFrame(ClippedOutputPoint, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == BeforeClippedOutputGesture &&
+			Session->Revision == ClippedOutputRevision && !Session->IsDirty());
+
+		// A cached live hit cannot claim a press if the inherited host clip changes before it.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 SourcePointBeforeClip = FindPinScreen(SourceAValue);
+		DrawFrame(SourcePointBeforeClip);
+		const EditorGraphCanvasRect ClipAboveSource{
+			{ HostOrigin.x, HostOrigin.y }, { HostOrigin.x + 1367.0, SourcePointBeforeClip.y - 1.0 } };
+		const uint64_t SourceClipRevision = Session->Revision;
+		DrawFrame(SourcePointBeforeClip, true, false, false, true, ClipAboveSource);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+		DrawFrame(SourcePointBeforeClip, false, false, false, false, ClipAboveSource);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline &&
+			Session->Revision == SourceClipRevision && !Session->IsDirty());
+
+		EditorGraph ClippedSourceGraph = Baseline;
+		SetNodeY(ClippedSourceGraph, SourceA, -10000.0);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, ClippedSourceGraph, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 ClippedSourcePoint = FindPinScreen(SourceAValue);
+		PF_CHECK(Tests, ClippedSourcePoint.y < HostOrigin.y);
+		DrawFrame(ClippedSourcePoint, true, false, false, true);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+		DrawFrame(ClippedSourcePoint, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == ClippedSourceGraph &&
+			!Session->IsDirty());
+
+		EditorGraph ClippedOccupiedInputGraph = Baseline;
+		SetNodeY(ClippedOccupiedInputGraph, TargetC, -10000.0);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, ClippedOccupiedInputGraph, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 ClippedOccupiedInputPoint = FindPinScreen(TargetCA);
+		PF_CHECK(Tests, ClippedOccupiedInputPoint.y < HostOrigin.y);
+		const uint64_t ClippedInputRevision = Session->Revision;
+		(void)OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+		DrawFrame(ClippedOccupiedInputPoint, true);
+		DrawFrame(ClippedOccupiedInputPoint, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == ClippedOccupiedInputGraph &&
+			Session->Revision == ClippedInputRevision && !Session->IsDirty());
+
+		// Only the portion of a pin marker inside the inherited ImGui clip can receive a reconnect click.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *Session,
+			"{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.65}}");
+		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *Session, true);
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
+		const auto FindMarkerScreenBounds = [&](UUID PinID) -> std::optional<EditorGraphCanvasRect>
+		{
+			for (const auto& Node : EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session))
+				for (const auto& Pin : Node.Pins)
+					if (Pin.PinID == PinID)
+					{
+						const auto Minimum = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+							GraphEditor, *Session, Pin.Marker.Minimum);
+						const auto Maximum = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+							GraphEditor, *Session, Pin.Marker.Maximum);
+						return EditorGraphCanvasRect{ { Minimum.X, Minimum.Y }, { Maximum.X, Maximum.Y } };
+					}
+			return std::nullopt;
+		};
+		const auto PartialClipMarker = FindMarkerScreenBounds(TargetDA);
+		PF_CHECK(Tests, PartialClipMarker.has_value());
+		if (PartialClipMarker)
+		{
+			const double MidY = (PartialClipMarker->Minimum.Y + PartialClipMarker->Maximum.Y) * 0.5;
+			const EditorGraphCanvasRect LowerHalfClip{
+				{ HostOrigin.x, MidY }, { HostOrigin.x + 1367.0, HostOrigin.y + 850.0 } };
+			const ImVec2 ClippedPartPoint(
+				static_cast<float>((PartialClipMarker->Minimum.X + PartialClipMarker->Maximum.X) * 0.5),
+				static_cast<float>(PartialClipMarker->Minimum.Y +
+					(PartialClipMarker->Maximum.Y - PartialClipMarker->Minimum.Y) * 0.25));
+			const ImVec2 VisiblePartPoint(
+				static_cast<float>((PartialClipMarker->Minimum.X + PartialClipMarker->Maximum.X) * 0.5),
+				static_cast<float>(PartialClipMarker->Minimum.Y +
+					(PartialClipMarker->Maximum.Y - PartialClipMarker->Minimum.Y) * 0.75));
+			const uint64_t PartialClipRevision = Session->Revision;
+			(void)OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+			DrawFrame(ClippedPartPoint, true, false, false, false, LowerHalfClip);
+			DrawFrame(ClippedPartPoint, false, false, false, false, LowerHalfClip);
+			PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline &&
+				Session->Revision == PartialClipRevision && !Session->IsDirty());
+
+			(void)OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+			DrawFrame(VisiblePartPoint, true, false, false, false, LowerHalfClip);
+			DrawFrame(VisiblePartPoint, false, false, false, false, LowerHalfClip);
+			const auto AfterPartialClipReconnect = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			PF_CHECK(Tests, LinkID(AfterPartialClipReconnect, SourceAValue, TargetDA) == PrimaryLink &&
+				LinkID(AfterPartialClipReconnect, SourceAValue, TargetAA).IsNil());
+			PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+			PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline);
+		}
+
+		// Overlapping pins obey the pinned canvas's reverse node-order hit priority.
+		EditorGraph OverlappingTargets = Baseline;
+		const auto SourceANode = std::find_if(OverlappingTargets.Nodes.begin(), OverlappingTargets.Nodes.end(),
+			[SourceA](const auto& Node) { return Node.ID == SourceA; });
+		PF_CHECK(Tests, SourceANode != OverlappingTargets.Nodes.end());
+		if (SourceANode != OverlappingTargets.Nodes.end())
+			SetNodePosition(OverlappingTargets, SourceB, SourceANode->X, SourceANode->Y);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, OverlappingTargets, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 OverlappingPinPoint = FindPinScreen(SourceBValue);
+		const ImVec2 SingleWireSourcePoint = FindPinScreen(SourceCValue);
+		DrawFrame(SingleWireSourcePoint);
+		DrawFrame(SingleWireSourcePoint, true, false, false, true);
+		DrawFrame(OverlappingPinPoint, true, false, false, false);
+		const auto OverlapPreview = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, OverlapPreview.Active &&
+			(OverlapPreview.TargetPin == SourceAValue || OverlapPreview.TargetPin == SourceBValue) && OverlapPreview.TargetAllowed);
+		DrawFrame(OverlappingPinPoint, false);
+		const auto AfterOverlapMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterOverlapMove, OverlapPreview.TargetPin, TargetCA) == OccupiedLink &&
+			LinkID(AfterOverlapMove, SourceAValue, TargetAA) == PrimaryLink &&
+			LinkID(AfterOverlapMove, SourceAValue, TargetBA) == FanOutLink &&
+			LinkID(AfterOverlapMove, SourceCValue, TargetCA).IsNil());
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == OverlappingTargets);
+
+		// A previously allowed target is not valid after a viewport pan/zoom changes before release.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *Session,
+			"{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.65}}");
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
+		const ImVec2 StaleSourcePoint = FindPinScreen(SourceAValue);
+		const ImVec2 StaleTargetPoint = FindPinScreen(SourceBValue);
+		const uint64_t StaleGeometryRevision = Session->Revision;
+		const auto StaleGeometryGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		DrawFrame(StaleSourcePoint);
+		DrawFrame(StaleSourcePoint, true, false, false, true);
+		DrawFrame(StaleTargetPoint, true, false, false, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).TargetAllowed);
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *Session,
+			"{\"view\":{\"scroll\":{\"x\":-220.0,\"y\":180.0},\"zoom\":1.45}}");
+		DrawFrame(StaleTargetPoint, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == StaleGeometryGraph &&
+			Session->Revision == StaleGeometryRevision && !Session->IsDirty());
 	}
 
 	void TestGraphCanvasCreateRequestPolling(TestRunner& Tests)

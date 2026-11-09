@@ -146,7 +146,6 @@ namespace PulseForgeEditor
 		bool TargetNoOp = false;
 		std::string Feedback;
 		size_t PreviewDecisionEvaluations = 0;
-		size_t CandidatePinEnumerations = 0;
 		size_t CommitCount = 0;
 	};
 
