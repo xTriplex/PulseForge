@@ -102,8 +102,8 @@ namespace PulseForgeEditor
 		bool OpenSubmitted = false;
 		bool PopupVisible = false;
 		bool PopupOpenAfterSubmit = false;
-		bool NoMove = false;
 		bool PopupWindowHovered = false;
+		bool NoMove = false;
 		bool ShowAllHovered = false;
 		bool HideUnusedHovered = false;
 		bool HideUnusedEnabled = true;
@@ -112,6 +112,34 @@ namespace PulseForgeEditor
 		bool ShowAllActivated = false;
 		bool HideUnusedActivated = false;
 		bool ResetVisibilityActivated = false;
+	};
+
+	struct EditorGraphReconnectPopupItemPresentation
+	{
+		PulseForge::UUID PinID;
+		EditorGraphCanvasRect Bounds;
+		bool Enabled = false;
+		bool Hovered = false;
+		std::string RejectionReason;
+	};
+
+	struct EditorGraphReconnectPopupPresentation
+	{
+		PulseForge::UUID ConnectionID;
+		std::optional<EditorGraphCanvasRect> PopupScreenBounds;
+		std::optional<EditorGraphCanvasRect> ReconnectInputBounds;
+		std::optional<EditorGraphCanvasRect> ReconnectOutputBounds;
+		bool ReconnectInputHovered = false;
+		bool ReconnectOutputHovered = false;
+		std::vector<EditorGraphReconnectPopupItemPresentation> InputTargets;
+		std::vector<EditorGraphReconnectPopupItemPresentation> OutputTargets;
+		PulseForge::UUID HoveredConnectionAtRightRelease;
+		bool ContextValid = false;
+		bool LinkContextRequestSeen = false;
+		bool PopupVisible = false;
+		bool PopupOpenAfterSubmit = false;
+		bool NoMove = false;
+		bool NoResize = false;
 	};
 
 	struct EditorGraphCanvasDocumentContext
@@ -410,12 +438,17 @@ namespace PulseForgeEditor
 			EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphPinVisibilityPopupPresentation GetPinVisibilityPopupForTesting(
 			EditorDocumentSession& Session);
+		[[nodiscard]] EditorGraphReconnectPopupPresentation GetReconnectPopupForTesting(
+			EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
 		[[nodiscard]] EditorGraph GetGraphForTesting(EditorDocumentSession& Session);
 		void SetSelectedNodesForTesting(EditorDocumentSession& Session, const std::vector<PulseForge::UUID>& NodeIDs);
 		[[nodiscard]] std::vector<PulseForge::UUID> GetSelectedNodesForTesting(EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphCanvasPoint ScreenToCanvasForTesting(
 			EditorDocumentSession& Session, EditorGraphScreenPoint ScreenPoint);
+		[[nodiscard]] EditorGraphScreenPoint CanvasToScreenForTesting(
+			EditorDocumentSession& Session, EditorGraphCanvasPoint CanvasPoint);
+		[[nodiscard]] PulseForge::UUID GetHoveredConnectionForTesting(EditorDocumentSession& Session);
 
 		EditorDocumentManager& m_Documents;
 		EditorDocumentEditorRegistry& m_Editors;

@@ -54,6 +54,26 @@ namespace
 		EditorGraphCanvasRect TriggerScreenBounds;
 		bool OpenRequested = true;
 	};
+	struct PendingReconnectPopup
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID ConnectionID;
+		PulseForge::UUID OriginalOutputPin;
+		PulseForge::UUID OriginalInputPin;
+		std::string PopupID;
+		EditorGraphScreenPoint ScreenAnchor;
+		bool OpenRequested = true;
+	};
+	struct PendingReconnectCommit
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID ConnectionID;
+		PulseForge::UUID OriginalOutputPin;
+		PulseForge::UUID OriginalInputPin;
+		EditorGraphPinDirection EndpointToMove = EditorGraphPinDirection::Input;
+		PulseForge::UUID OutputPin;
+		PulseForge::UUID InputPin;
+	};
 
 	std::string MakePinVisibilityPopupID(const EditorGraphCanvasDocumentContext& Context, PulseForge::UUID NodeID)
 	{
@@ -61,6 +81,15 @@ namespace
 			Context.Document.Asset.ToString() + "_" + std::to_string(static_cast<unsigned>(Context.Document.Kind)) +
 			"_" + std::to_string(Context.SessionGeneration) + "_" + Context.HostID + "_" +
 			Context.GraphID.ToString() + "_" + NodeID.ToString();
+	}
+
+	std::string MakeReconnectPopupID(const EditorGraphCanvasDocumentContext& Context,
+		PulseForge::UUID ConnectionID)
+	{
+		return "PulseForgeGraphReconnect_" + Context.Document.Project.ToString() + "_" +
+			Context.Document.Asset.ToString() + "_" + std::to_string(static_cast<unsigned>(Context.Document.Kind)) +
+			"_" + std::to_string(Context.SessionGeneration) + "_" + Context.HostID + "_" +
+			Context.GraphID.ToString() + "_" + ConnectionID.ToString();
 	}
 
 	EditorGraphCanvasRect ToScreenRect(const ImVec2& Minimum, const ImVec2& Maximum)
@@ -147,6 +176,8 @@ namespace
 		EditorGraphPropertyEditCoordinator PropertyEdits;
 		std::optional<PendingPinVisibilityPopup> PinVisibilityPopup;
 		EditorGraphPinVisibilityPopupPresentation PinVisibilityPopupPresentation;
+		std::optional<PendingReconnectPopup> ReconnectPopup;
+		EditorGraphReconnectPopupPresentation ReconnectPopupPresentation;
 		std::vector<PulseForge::UUID> PendingSelectionNodeIDs;
 		ImGuiKey GraphShortcutLatchedKey = ImGuiKey_None;
 		bool CapturePresentation = false;
@@ -274,6 +305,7 @@ namespace
 		State.NeedsCanvasSync = true;
 		State.ScreenPinRelease = {};
 		State.PinRelease = {};
+		State.ReconnectPopup.reset();
 		if (!State.Canvas) State.Error = "Could not restore the graph canvas after cancelling its interaction";
 	}
 
@@ -765,6 +797,7 @@ namespace PulseForgeEditor
 		State->Identities.clear();
 		State->NodeSearch = {};
 		State->PinVisibilityPopup.reset();
+		State->ReconnectPopup.reset();
 		State->ScreenPinRelease = {};
 		State->PinRelease = {};
 		State->NeedsCanvasSync = true;
@@ -800,6 +833,13 @@ namespace PulseForgeEditor
 	{
 		const auto* State = GetState(Session);
 		return State ? State->PinVisibilityPopupPresentation : EditorGraphPinVisibilityPopupPresentation{};
+	}
+
+	EditorGraphReconnectPopupPresentation EditorGraphDocumentEditor::GetReconnectPopupForTesting(
+		EditorDocumentSession& Session)
+	{
+		const auto* State = GetState(Session);
+		return State ? State->ReconnectPopupPresentation : EditorGraphReconnectPopupPresentation{};
 	}
 
 	void EditorGraphDocumentEditor::SetPinHiddenForTesting(EditorDocumentSession& Session,
@@ -872,6 +912,29 @@ namespace PulseForgeEditor
 		return { CanvasPoint.x, CanvasPoint.y };
 	}
 
+	EditorGraphScreenPoint EditorGraphDocumentEditor::CanvasToScreenForTesting(
+		EditorDocumentSession& Session, EditorGraphCanvasPoint CanvasPoint)
+	{
+		auto* State = GetState(Session);
+		if (!State || !State->Canvas) return {};
+		NodeEditor::SetCurrentEditor(State->Canvas);
+		const ImVec2 ScreenPoint = NodeEditor::CanvasToScreen(
+			ImVec2(static_cast<float>(CanvasPoint.X), static_cast<float>(CanvasPoint.Y)));
+		NodeEditor::SetCurrentEditor(nullptr);
+		return { ScreenPoint.x, ScreenPoint.y };
+	}
+
+	PulseForge::UUID EditorGraphDocumentEditor::GetHoveredConnectionForTesting(EditorDocumentSession& Session)
+	{
+		auto* State = GetState(Session);
+		if (!State || !State->Canvas) return {};
+		NodeEditor::SetCurrentEditor(State->Canvas);
+		const auto Link = NodeEditor::GetHoveredLink();
+		const auto Identity = State->Identities.find(Link.Get());
+		NodeEditor::SetCurrentEditor(nullptr);
+		return Identity == State->Identities.end() ? PulseForge::UUID{} : Identity->second;
+	}
+
 	bool EditorGraphDocumentEditor::DiscardSession(EditorDocumentSession& Session) const
 	{
 		return ReloadState(Session);
@@ -935,14 +998,31 @@ namespace PulseForgeEditor
 		}
 		if (State->CapturePresentation) State->Presentation.clear();
 		State->PinVisibilityPopupPresentation = {};
+		State->ReconnectPopupPresentation = {};
 		if (!State->Canvas)
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", State->Error.c_str());
 			if (ImGui::Button("Retry Graph Canvas")) CancelCanvasInteraction(*State);
 			return;
 		}
+		const auto CanvasContext = MakeCanvasDocumentContext(Session, State->History.Graph().ID);
+		const auto ContextMatches = [&CanvasContext](const EditorGraphCanvasDocumentContext& Captured)
+		{
+			return Captured.Document == CanvasContext.Document &&
+				Captured.SessionGeneration == CanvasContext.SessionGeneration &&
+				Captured.HostID == CanvasContext.HostID && Captured.GraphID == CanvasContext.GraphID;
+		};
 		const bool Focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-		const bool CancelGesture = (Focused && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) || (State->WasFocused && !Focused);
+		const bool ReconnectPopupOwnsFocus = State->ReconnectPopup &&
+			ContextMatches(State->ReconnectPopup->Context);
+		const bool ReconnectPopupEscape = State->ReconnectPopup && (Focused || ReconnectPopupOwnsFocus) &&
+			State->ReconnectPopup->Context.Document == Session.Identity &&
+			State->ReconnectPopup->Context.SessionGeneration == Session.SessionGeneration &&
+			State->ReconnectPopup->Context.HostID == Session.HostID &&
+			State->ReconnectPopup->Context.GraphID == State->History.Graph().ID &&
+			ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+		const bool CancelGesture = (Focused && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ReconnectPopupEscape) ||
+			(State->WasFocused && !Focused && !ReconnectPopupOwnsFocus);
 		if (CancelGesture)
 		{
 			State->ScreenPinRelease = {};
@@ -964,19 +1044,37 @@ namespace PulseForgeEditor
 			State->GraphShortcutLatchedKey = ImGuiKey_None;
 		const ImVec2 ScreenMousePositionAtFrameStart = Input.MousePos;
 		const bool OtherInputOwner = ImGui::IsAnyItemActive();
-		const auto CanvasContext = MakeCanvasDocumentContext(Session, State->History.Graph().ID);
-		const auto ContextMatches = [&CanvasContext](const EditorGraphCanvasDocumentContext& Captured)
-		{
-			return Captured.Document == CanvasContext.Document &&
-				Captured.SessionGeneration == CanvasContext.SessionGeneration &&
-				Captured.HostID == CanvasContext.HostID && Captured.GraphID == CanvasContext.GraphID;
-		};
 		const bool PinVisibilityContextValid = State->PinVisibilityPopup &&
 			ContextMatches(State->PinVisibilityPopup->Context) &&
 			std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
 				[State](const auto& Node) { return Node.ID == State->PinVisibilityPopup->NodeID; });
 		const bool PinVisibilityPopupOwnsInput = State->PinVisibilityPopup &&
 			(PinVisibilityContextValid || State->PinVisibilityPopup->OpenRequested);
+		const auto FindLiveConnection = [&State](PulseForge::UUID ConnectionID)
+		{
+			return std::find_if(State->History.Graph().Connections.begin(), State->History.Graph().Connections.end(),
+				[ConnectionID](const auto& Connection) { return Connection.ID == ConnectionID; });
+		};
+		const auto ReconnectConnection = State->ReconnectPopup
+			? FindLiveConnection(State->ReconnectPopup->ConnectionID) : State->History.Graph().Connections.end();
+		const bool ReconnectEndpointsExist = ReconnectConnection != State->History.Graph().Connections.end() &&
+			ReconnectConnection->OutputPin == State->ReconnectPopup->OriginalOutputPin &&
+			ReconnectConnection->InputPin == State->ReconnectPopup->OriginalInputPin &&
+			std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+				[&ReconnectConnection](const auto& Node)
+				{
+					return std::any_of(Node.Pins.begin(), Node.Pins.end(), [&ReconnectConnection](const auto& Pin)
+						{ return Pin.ID == ReconnectConnection->OutputPin; });
+				}) &&
+			std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+				[&ReconnectConnection](const auto& Node)
+				{
+					return std::any_of(Node.Pins.begin(), Node.Pins.end(), [&ReconnectConnection](const auto& Pin)
+						{ return Pin.ID == ReconnectConnection->InputPin; });
+				});
+		const bool ReconnectContextValid = State->ReconnectPopup &&
+			ContextMatches(State->ReconnectPopup->Context) && ReconnectEndpointsExist;
+		const bool ReconnectPopupOwnsInput = State->ReconnectPopup.has_value() && ReconnectContextValid;
 		if (!Focused || (State->PinRelease.Valid && !ContextMatches(State->PinRelease.Context)) ||
 			(State->ScreenPinRelease.Valid && !ContextMatches(State->ScreenPinRelease.Context)))
 		{
@@ -988,7 +1086,7 @@ namespace PulseForgeEditor
 			State->ScreenPinRelease = {};
 			State->PinRelease = {};
 		}
-		if (Focused && !CancelGesture && !PinVisibilityPopupOwnsInput &&
+		if (Focused && !CancelGesture && !PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput &&
 			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 		{
 			State->ScreenPinRelease = { true, CanvasContext,
@@ -1002,7 +1100,7 @@ namespace PulseForgeEditor
 		bool SearchPopupActive = State->NodeSearch.Active &&
 			(State->NodeSearch.OpenRequested || State->NodeSearch.PopupOpen || ImGui::IsPopupOpen("GraphNodeSearch"));
 		const bool CapturedAltPinClick = Focused && !Input.WantTextInput && !OtherInputOwner && !SearchPopupActive &&
-			!PinVisibilityPopupOwnsInput &&
+			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput &&
 			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && Input.KeyAlt &&
 			ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
 		if (Focused && !Input.WantTextInput && !State->LastHoveredPin.IsNil() &&
@@ -1081,7 +1179,7 @@ namespace PulseForgeEditor
 
 		NodeEditor::SetCurrentEditor(State->Canvas);
 		NodeEditor::EnableShortcuts(Focused && !Input.WantTextInput && !OtherInputOwner &&
-			!PinVisibilityPopupOwnsInput && !SearchPopupActive && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput && !SearchPopupActive && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
 			!State->NodeMoveTransaction && State->GraphShortcutLatchedKey == ImGuiKey_None);
 		auto& CanvasStyle = NodeEditor::GetStyle();
 		CanvasStyle.Colors[NodeEditor::StyleColor_NodeBg] = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
@@ -1224,7 +1322,7 @@ namespace PulseForgeEditor
 			Presentation.PinsButtonActivated = PinsButtonActivated;
 		}
 		if (PinsButtonActivated && Focused && !Input.WantTextInput && (!OtherInputOwner || PinsButtonWasActive) &&
-			!PinVisibilityPopupOwnsInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
 		{
 			const auto Trigger = ToScreenRect(PinsButtonMinimum, PinsButtonMaximum);
 			State->PinVisibilityPopup = PendingPinVisibilityPopup{ CanvasContext, Node.ID,
@@ -1457,7 +1555,8 @@ namespace PulseForgeEditor
 		}
 
 		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> CreatedLink;
-		const bool BlockCanvasRequests = PinVisibilityPopupOwnsInput || State->PinVisibilityPopup.has_value() ||
+		const bool BlockCanvasRequests = PinVisibilityPopupOwnsInput || ReconnectPopupOwnsInput ||
+			State->PinVisibilityPopup.has_value() || State->ReconnectPopup.has_value() ||
 			ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
 		const auto CreateRequest = GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
 			[] { return NodeEditor::BeginCreate(); },
@@ -1576,15 +1675,12 @@ namespace PulseForgeEditor
 		bool GraphChanged = false;
 		if (CreatedLink)
 		{
-			std::expected<void, std::string> Result = std::unexpected("Unresolved graph link request");
-			if (!DeletedLinks.empty())
-				Result = ReconnectEditorGraphConnection(State->History, State->Schema, DeletedLinks.front(),
-					CreatedLink->first, CreatedLink->second);
-			else Result = ConnectEditorGraphPins(State->History, State->Schema, CreatedLink->first, CreatedLink->second);
+			auto Result = ConnectEditorGraphPins(State->History, State->Schema,
+				CreatedLink->first, CreatedLink->second);
 			if (!Result) State->Error = Result.error();
 			else GraphChanged = true;
 		}
-		if (!DeletedNodes.empty() || (!DeletedLinks.empty() && !CreatedLink && !CreateRequest.SawLinkRequest))
+		if (!DeletedNodes.empty() || !DeletedLinks.empty())
 		{
 			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Nodes(DeletedNodes.begin(), DeletedNodes.end());
 			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Links(DeletedLinks.begin(), DeletedLinks.end());
@@ -1650,9 +1746,44 @@ namespace PulseForgeEditor
 		}
 
 		bool BackgroundSearchRequested = false;
+		std::optional<PendingReconnectCommit> PendingReconnect;
+		NodeEditor::LinkId RequestedReconnectLink;
+		const bool LinkContextRequested = Focused && !Input.WantTextInput && !OtherInputOwner &&
+			!SearchPopupActive && !State->PinVisibilityPopup && !State->ReconnectPopup &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+			NodeEditor::ShowLinkContextMenu(&RequestedReconnectLink);
+		if (State->CapturePresentation)
+			State->ReconnectPopupPresentation.LinkContextRequestSeen = LinkContextRequested;
+		if (LinkContextRequested)
+		{
+			const auto LinkIdentity = State->Identities.find(RequestedReconnectLink.Get());
+			NodeEditor::PinId CanvasOutput;
+			NodeEditor::PinId CanvasInput;
+			if (LinkIdentity == State->Identities.end() ||
+				!NodeEditor::GetLinkPins(RequestedReconnectLink, &CanvasOutput, &CanvasInput))
+				State->Error = "The selected canvas connection is no longer available";
+			else
+			{
+				const auto Connection = FindLiveConnection(LinkIdentity->second);
+				const auto OutputIdentity = State->Identities.find(CanvasOutput.Get());
+				const auto InputIdentity = State->Identities.find(CanvasInput.Get());
+				if (Connection == State->History.Graph().Connections.end() ||
+					OutputIdentity == State->Identities.end() || InputIdentity == State->Identities.end() ||
+					Connection->OutputPin != OutputIdentity->second || Connection->InputPin != InputIdentity->second)
+					State->Error = "The selected canvas wire no longer matches the graph connection";
+				else
+				{
+					State->ReconnectPopup = PendingReconnectPopup{
+						CanvasContext, Connection->ID, Connection->OutputPin, Connection->InputPin,
+						MakeReconnectPopupID(CanvasContext, Connection->ID),
+						{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y } };
+					State->Error.clear();
+				}
+			}
+		}
 		NodeEditor::Suspend();
 		if (Focused && !Input.WantTextInput && !SearchPopupActive && !OtherInputOwner &&
-			!State->PinVisibilityPopup && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+			!State->PinVisibilityPopup && !State->ReconnectPopup && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
 			BackgroundSearchRequested = NodeEditor::ShowBackgroundContextMenu();
 		if (State->PinVisibilityPopup)
 		{
@@ -1775,6 +1906,134 @@ namespace PulseForgeEditor
 			State->PinVisibilityPopupPresentation.PopupOpenAfterSubmit = ImGui::IsPopupOpen(Request.PopupID.c_str());
 			if (!State->PinVisibilityPopupPresentation.PopupOpenAfterSubmit) State->PinVisibilityPopup.reset();
 		}
+		const auto DrawReconnectPopup = [&]()
+		{
+			if (!State->ReconnectPopup) return;
+			auto& Request = *State->ReconnectPopup;
+			const auto Connection = FindLiveConnection(Request.ConnectionID);
+			const bool ContextValid = ContextMatches(Request.Context) &&
+				Connection != State->History.Graph().Connections.end() &&
+				Connection->OutputPin == Request.OriginalOutputPin &&
+				Connection->InputPin == Request.OriginalInputPin &&
+				std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+					[&Connection](const auto& Node)
+					{
+						return std::any_of(Node.Pins.begin(), Node.Pins.end(), [&Connection](const auto& Pin)
+							{ return Pin.ID == Connection->OutputPin; });
+					}) &&
+				std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+					[&Connection](const auto& Node)
+					{
+						return std::any_of(Node.Pins.begin(), Node.Pins.end(), [&Connection](const auto& Pin)
+							{ return Pin.ID == Connection->InputPin; });
+					});
+			State->ReconnectPopupPresentation.ConnectionID = Request.ConnectionID;
+			State->ReconnectPopupPresentation.ContextValid = ContextValid;
+			if (Request.OpenRequested && ContextValid)
+			{
+				// NodeEditor::End restored host-screen input; anchor once at the wire invocation.
+				ImGui::SetNextWindowPos(ImVec2(static_cast<float>(Request.ScreenAnchor.X),
+					static_cast<float>(Request.ScreenAnchor.Y)), ImGuiCond_Appearing);
+				ImGui::OpenPopup(Request.PopupID.c_str());
+				Request.OpenRequested = false;
+			}
+			constexpr ImGuiWindowFlags ReconnectPopupFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+			const bool PopupVisible = ContextValid && ImGui::BeginPopup(Request.PopupID.c_str(), ReconnectPopupFlags);
+			State->ReconnectPopupPresentation.PopupVisible = PopupVisible;
+			if (PopupVisible)
+			{
+				const auto FindPin = [&State](PulseForge::UUID PinID)
+				{
+					for (const auto& Node : State->History.Graph().Nodes)
+						for (const auto& Pin : Node.Pins)
+							if (Pin.ID == PinID) return std::pair{ &Node, &Pin };
+					return std::pair<const EditorGraphNode*, const EditorGraphPin*>{ nullptr, nullptr };
+				};
+				const auto DescribePin = [&State](const EditorGraphNode& Node, const EditorGraphPin& Pin)
+				{
+					const auto* Definition = FindPinDefinition(State->Schema, Node.TypeKey, Pin.Key);
+					const std::string PinLabel = Definition && !Definition->Label.empty() ? Definition->Label : Pin.Key;
+					return ReadableNodeLabel(State->Schema, Node.TypeKey) + " / " + PinLabel +
+						" [" + PinTypeLabel(Pin.Type) + "]";
+				};
+				const auto DrawTargetMenu = [&](EditorGraphPinDirection TargetDirection, const char* MenuLabel,
+					std::optional<EditorGraphCanvasRect>& MenuBounds,
+					std::vector<EditorGraphReconnectPopupItemPresentation>& ItemMetrics)
+				{
+					const auto FixedEndpoint = FindPin(TargetDirection == EditorGraphPinDirection::Input
+						? Connection->OutputPin : Connection->InputPin);
+					if (!FixedEndpoint.first || !FixedEndpoint.second)
+					{
+						ImGui::TextDisabled("%s (fixed endpoint unavailable)", MenuLabel);
+						return;
+					}
+					const bool Open = ImGui::BeginMenu(MenuLabel);
+					const bool MenuHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+					if (State->CapturePresentation)
+					{
+						if (TargetDirection == EditorGraphPinDirection::Input)
+							State->ReconnectPopupPresentation.ReconnectInputHovered = MenuHovered;
+						else State->ReconnectPopupPresentation.ReconnectOutputHovered = MenuHovered;
+					}
+					if (State->CapturePresentation) MenuBounds = CurrentImGuiScreenRect();
+					if (!Open) return;
+					ImGui::TextDisabled("Fixed endpoint: %s", DescribePin(*FixedEndpoint.first, *FixedEndpoint.second).c_str());
+					ImGui::Separator();
+					ImGui::TextDisabled("Choose a new %s pin", TargetDirection == EditorGraphPinDirection::Input
+						? "input" : "output");
+					for (const auto& Node : State->History.Graph().Nodes)
+						for (const auto& Pin : Node.Pins)
+						{
+							if (Pin.Direction != TargetDirection) continue;
+							const bool IsCurrentEndpoint = Pin.ID == (TargetDirection == EditorGraphPinDirection::Input
+								? Connection->InputPin : Connection->OutputPin);
+							EditorGraphConnectionDecision Decision;
+							if (IsCurrentEndpoint)
+								Decision = { false, "This is already the current endpoint", Connection->OutputPin, Connection->InputPin };
+							else
+								Decision = CanConnectEditorGraphPins(State->History.Graph(), State->Schema,
+									TargetDirection == EditorGraphPinDirection::Input ? Connection->OutputPin : Pin.ID,
+									TargetDirection == EditorGraphPinDirection::Input ? Pin.ID : Connection->InputPin,
+									Request.ConnectionID);
+							const bool Activated = ImGui::MenuItem(DescribePin(Node, Pin).c_str(), nullptr,
+								false, Decision.Allowed);
+							const bool Hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+							if (State->CapturePresentation)
+								ItemMetrics.push_back({ Pin.ID, CurrentImGuiScreenRect(), Decision.Allowed, Hovered,
+									Decision.Allowed ? std::string{} : Decision.Reason });
+							if (!Decision.Allowed && Hovered && !Decision.Reason.empty())
+								ImGui::SetTooltip("%s", Decision.Reason.c_str());
+							if (Activated)
+								PendingReconnect = PendingReconnectCommit{ Request.Context, Request.ConnectionID,
+									Request.OriginalOutputPin, Request.OriginalInputPin, TargetDirection,
+									Decision.OutputPin, Decision.InputPin };
+						}
+					ImGui::EndMenu();
+				};
+
+				if (State->CapturePresentation)
+				{
+					const ImVec2 Minimum = ImGui::GetWindowPos();
+					const ImVec2 Size = ImGui::GetWindowSize();
+					State->ReconnectPopupPresentation.PopupScreenBounds = EditorGraphCanvasRect{
+						{ Minimum.x, Minimum.y }, { Minimum.x + Size.x, Minimum.y + Size.y } };
+					const ImGuiWindowFlags Flags = ImGui::GetCurrentWindow()->Flags;
+					State->ReconnectPopupPresentation.NoMove = (Flags & ImGuiWindowFlags_NoMove) != 0;
+					State->ReconnectPopupPresentation.NoResize = (Flags & ImGuiWindowFlags_NoResize) != 0;
+				}
+				DrawTargetMenu(EditorGraphPinDirection::Input, "Reconnect Input",
+					State->ReconnectPopupPresentation.ReconnectInputBounds,
+					State->ReconnectPopupPresentation.InputTargets);
+				DrawTargetMenu(EditorGraphPinDirection::Output, "Reconnect Output",
+					State->ReconnectPopupPresentation.ReconnectOutputBounds,
+					State->ReconnectPopupPresentation.OutputTargets);
+				if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+				ImGui::EndPopup();
+			}
+			State->ReconnectPopupPresentation.PopupOpenAfterSubmit = ImGui::IsPopupOpen(Request.PopupID.c_str());
+			if (!State->ReconnectPopupPresentation.PopupOpenAfterSubmit || !ContextValid)
+				State->ReconnectPopup.reset();
+		};
 		NodeEditor::Resume();
 		if (BackgroundSearchRequested)
 		{
@@ -1904,12 +2163,50 @@ namespace PulseForgeEditor
 		SearchPopupActive = SearchPopupActive || State->NodeSearch.Active || ImGui::IsPopupOpen("GraphNodeSearch");
 		const bool ShortcutOwnerEligible = Focused && !Input.WantTextInput && !OtherInputOwner &&
 			!ImGui::IsAnyItemActive() && !PropertyWidgetHovered && !SearchPopupActive &&
-			!PinVisibilityPopupOwnsInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
 			!State->NodeMoveTransaction && State->GraphShortcutLatchedKey == ImGuiKey_None;
 		NodeEditor::EnableShortcuts(ShortcutOwnerEligible);
 		NodeEditor::End();
 		NodeEditor::EnableShortcuts(true);
+		DrawReconnectPopup();
 		(void)ProcessPropertyEditEvents(Session, PropertyEvents, CancelGesture);
+		if (PendingReconnect)
+		{
+			const bool OnlyRequestedEndpointChanged =
+				PendingReconnect->EndpointToMove == EditorGraphPinDirection::Input
+					? PendingReconnect->OutputPin == PendingReconnect->OriginalOutputPin &&
+						PendingReconnect->InputPin != PendingReconnect->OriginalInputPin
+					: PendingReconnect->InputPin == PendingReconnect->OriginalInputPin &&
+						PendingReconnect->OutputPin != PendingReconnect->OriginalOutputPin;
+			const bool ContextStillValid = OnlyRequestedEndpointChanged && ContextMatches(PendingReconnect->Context) &&
+				std::any_of(State->History.Graph().Connections.begin(), State->History.Graph().Connections.end(),
+					[&PendingReconnect](const auto& Connection)
+						{ return Connection.ID == PendingReconnect->ConnectionID &&
+							Connection.OutputPin == PendingReconnect->OriginalOutputPin &&
+							Connection.InputPin == PendingReconnect->OriginalInputPin; });
+			if (!ContextStillValid)
+				State->Error = "The selected graph connection changed before reconnection";
+			else
+			{
+				const auto Finished = FinishPropertyEdit(*State, m_Documents, Session);
+				if (!Finished.Error.empty()) State->Error = Finished.Error;
+				else if (State->History.HasOpenTransaction())
+					State->Error = "Finish the active graph edit before reconnecting this wire";
+				else
+				{
+					const EditorGraph BeforeReconnect = State->History.Graph();
+					auto Reconnected = ReconnectEditorGraphConnection(State->History, State->Schema,
+						PendingReconnect->ConnectionID, PendingReconnect->OutputPin, PendingReconnect->InputPin);
+					if (!Reconnected) State->Error = Reconnected.error();
+					else if (State->History.Graph() != BeforeReconnect)
+					{
+						State->Error.clear();
+						ReconcileDirtyState(*State, m_Documents, Session);
+						State->NeedsCanvasSync = true;
+					}
+				}
+			}
+		}
 		const auto CapturedPointerCanvasPosition = [&]() -> std::expected<EditorGraphCanvasPoint, std::string>
 		{
 			const ImVec2 Screen = ScreenMousePositionAtFrameStart;

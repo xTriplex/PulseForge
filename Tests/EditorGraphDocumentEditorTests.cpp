@@ -55,6 +55,12 @@ namespace PulseForgeEditor
 			return Editor.GetPinVisibilityPopupForTesting(Session);
 		}
 
+		static EditorGraphReconnectPopupPresentation GetReconnectPopup(
+			EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetReconnectPopupForTesting(Session);
+		}
+
 		static void SetPinHidden(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			PulseForge::UUID PinID, bool Hidden)
 		{
@@ -88,6 +94,17 @@ namespace PulseForgeEditor
 			EditorDocumentSession& Session, EditorGraphScreenPoint ScreenPoint)
 		{
 			return Editor.ScreenToCanvasForTesting(Session, ScreenPoint);
+		}
+
+		static EditorGraphScreenPoint CanvasToScreen(EditorGraphDocumentEditor& Editor,
+			EditorDocumentSession& Session, EditorGraphCanvasPoint CanvasPoint)
+		{
+			return Editor.CanvasToScreenForTesting(Session, CanvasPoint);
+		}
+
+		static PulseForge::UUID GetHoveredConnection(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetHoveredConnectionForTesting(Session);
 		}
 
 		static auto CapturePinVisibility(EditorGraphDocumentEditor& Editor, const EditorDocumentSession& Session)
@@ -518,17 +535,18 @@ namespace
 		};
 		const auto DrawInputFrame = [&](EditorDocumentSession& Session, std::string_view Host, float Width,
 			ImVec2 HostOrigin, ImVec2 MousePosition, bool LeftDown, bool Escape = false,
-			ImGuiKey PressedKey = ImGuiKey_None, bool Control = false)
+			ImGuiKey PressedKey = ImGuiKey_None, bool Control = false, bool RightDown = false)
 		{
 			IO.DisplaySize = ImVec2(Width, 900.0f);
 			IO.AddMousePosEvent(MousePosition.x, MousePosition.y);
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
+			IO.AddMouseButtonEvent(ImGuiMouseButton_Right, RightDown);
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
 			IO.AddKeyEvent(ImGuiMod_Ctrl, Control);
 			for (const ImGuiKey Key : { ImGuiKey_C, ImGuiKey_V, ImGuiKey_X, ImGuiKey_D, ImGuiKey_Delete })
 				IO.AddKeyEvent(Key, Key == PressedKey);
 			ImGui::NewFrame();
-			if (Host == "GraphShortcutHost") ImGui::SetNextWindowFocus();
+			if (Host == "GraphShortcutHost" || Host == "GraphReconnectHost") ImGui::SetNextWindowFocus();
 			ImGui::SetNextWindowPos(HostOrigin);
 			ImGui::SetNextWindowSize(ImVec2(Width - HostOrigin.x, 900.0f - HostOrigin.y));
 			const std::string Name(Host);
@@ -1495,6 +1513,355 @@ namespace
 		PF_CHECK(Tests, Editors.Discard(*ConflictSession) && !ConflictSession->IsDirty());
 	}
 
+	void TestGraphCanvasReconnectContextMenu(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		ImGuiContextScope ImGuiScope;
+		PF_CHECK(Tests, ImGuiScope.Context != nullptr);
+		if (!ImGuiScope.Context) return;
+		ImGuiIO& IO = ImGui::GetIO();
+		IO.IniFilename = nullptr;
+		IO.LogFilename = nullptr;
+		IO.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+		IO.DeltaTime = 1.0f / 60.0f;
+
+		TemporaryGraphProject Temporary;
+		const auto ProjectID = UUID::Generate();
+		PF_CHECK(Tests, ProjectID.has_value());
+		if (!ProjectID) return;
+		Temporary.Path = std::filesystem::temp_directory_path() / ProjectID->ToString();
+		std::error_code FileError;
+		std::filesystem::create_directories(Temporary.Path, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		auto Project = PulseForge::Project::Create(Temporary.Path / "GraphReconnectProject.pfproj", "Graph reconnect test");
+		PF_CHECK(Tests, Project.has_value());
+		if (!Project) return;
+
+		EditorDocumentManager Documents;
+		EditorDocumentEditorRegistry Editors;
+		EditorGraphDocumentEditor GraphEditor(Documents, Editors);
+		PF_CHECK(Tests, GraphEditor.Register().has_value());
+		const auto Fixture = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::MaterialExpression);
+		PF_CHECK(Tests, Fixture.has_value());
+		if (!Fixture) return;
+		const EditorDocumentIdentity Identity{ Project->GetDescription().ID, Fixture->GraphID, EditorDocumentKind::Graph };
+		PF_CHECK(Tests, Documents.Open(Identity, Fixture->ProjectRelativePath, Fixture->DisplayName,
+			EditorDocumentOpenPreference::MainDocumentStrip).has_value());
+		auto* Session = Documents.Find(Identity);
+		const EditorDocumentEditorContext LoadContext{ Identity, Project->GetRootPath(), Fixture->ProjectRelativePath,
+			Fixture->DisplayName, nullptr };
+		PF_CHECK(Tests, Session && Editors.Load(*Session, LoadContext));
+		if (!Session) return;
+
+		const auto BaseSchema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = CreateEditorGraph(BaseSchema, Fixture->GraphID);
+		PF_CHECK(Tests, Graph.has_value());
+		if (!Graph) return;
+		const auto AddNode = [&](std::string_view Type, double X, double Y)
+		{
+			auto Node = CreateEditorGraphNode(BaseSchema, Type, X, Y);
+			PF_CHECK(Tests, Node.has_value());
+			if (!Node) return UUID{};
+			const UUID IDValue = Node->ID;
+			Graph->Nodes.push_back(std::move(*Node));
+			return IDValue;
+		};
+		const UUID SourceA = AddNode("material.scalar", 100.0, 80.0);
+		const UUID SourceB = AddNode("material.scalar", 100.0, 350.0);
+		const UUID SourceC = AddNode("material.scalar", 100.0, 620.0);
+		const UUID TargetA = AddNode("material.multiply", 480.0, 80.0);
+		const UUID TargetB = AddNode("material.multiply", 480.0, 350.0);
+		const UUID TargetC = AddNode("material.multiply", 820.0, 80.0);
+		const UUID TargetD = AddNode("material.multiply", 820.0, 350.0);
+		const UUID VectorTarget = AddNode("material.output", 1120.0, 80.0);
+		const auto PinID = [](const EditorGraph& Source, UUID NodeID, std::string_view Key)
+		{
+			const auto Node = std::find_if(Source.Nodes.begin(), Source.Nodes.end(), [NodeID](const auto& Item)
+				{ return Item.ID == NodeID; });
+			if (Node == Source.Nodes.end()) return UUID{};
+			const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(), [Key](const auto& Item)
+				{ return Item.Key == Key; });
+			return Pin == Node->Pins.end() ? UUID{} : Pin->ID;
+		};
+		const UUID SourceAValue = PinID(*Graph, SourceA, "value");
+		const UUID SourceBValue = PinID(*Graph, SourceB, "value");
+		const UUID SourceCValue = PinID(*Graph, SourceC, "value");
+		const UUID TargetAA = PinID(*Graph, TargetA, "a");
+		const UUID TargetAB = PinID(*Graph, TargetA, "b");
+		const UUID TargetBA = PinID(*Graph, TargetB, "a");
+		const UUID TargetCA = PinID(*Graph, TargetC, "a");
+		const UUID TargetDA = PinID(*Graph, TargetD, "a");
+		const UUID VectorSurface = PinID(*Graph, VectorTarget, "surface");
+		PF_CHECK(Tests, !SourceAValue.IsNil() && !SourceBValue.IsNil() && !SourceCValue.IsNil() &&
+			!TargetAA.IsNil() && !TargetAB.IsNil() && !TargetBA.IsNil() && !TargetCA.IsNil() &&
+			!TargetDA.IsNil() && !VectorSurface.IsNil());
+		if (SourceAValue.IsNil() || SourceBValue.IsNil() || SourceCValue.IsNil() || TargetAA.IsNil() ||
+			TargetAB.IsNil() || TargetBA.IsNil() || TargetCA.IsNil() || TargetDA.IsNil() || VectorSurface.IsNil()) return;
+
+		EditorGraphCommandHistory Setup(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(Setup, BaseSchema, SourceAValue, TargetAA).has_value());
+		PF_CHECK(Tests, ConnectEditorGraphPins(Setup, BaseSchema, SourceAValue, TargetBA).has_value());
+		PF_CHECK(Tests, ConnectEditorGraphPins(Setup, BaseSchema, SourceCValue, TargetCA).has_value());
+		Graph = Setup.Graph();
+		const auto LinkID = [&](const EditorGraph& Source, UUID Output, UUID Input)
+		{
+			const auto Link = std::find_if(Source.Connections.begin(), Source.Connections.end(),
+				[Output, Input](const auto& Item) { return Item.OutputPin == Output && Item.InputPin == Input; });
+			return Link == Source.Connections.end() ? UUID{} : Link->ID;
+		};
+		const auto PositionsMatch = [](const EditorGraph& Left, const EditorGraph& Right)
+		{
+			if (Left.Nodes.size() != Right.Nodes.size()) return false;
+			for (const auto& Node : Left.Nodes)
+			{
+				const auto Other = std::find_if(Right.Nodes.begin(), Right.Nodes.end(), [&Node](const auto& Candidate)
+					{ return Candidate.ID == Node.ID; });
+				if (Other == Right.Nodes.end() || Node.X != Other->X || Node.Y != Other->Y) return false;
+			}
+			return true;
+		};
+		const UUID PrimaryLink = LinkID(*Graph, SourceAValue, TargetAA);
+		const UUID FanOutLink = LinkID(*Graph, SourceAValue, TargetBA);
+		const UUID OccupiedLink = LinkID(*Graph, SourceCValue, TargetCA);
+		PF_CHECK(Tests, !PrimaryLink.IsNil() && !FanOutLink.IsNil() && !OccupiedLink.IsNil());
+		const EditorGraph Baseline = *Graph;
+		auto Schema = BaseSchema;
+		Schema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
+			-> std::optional<std::string>
+		{
+			if (Context.Purpose == EditorGraphConnectionPolicyPurpose::ProposedOperation &&
+				!Context.ProposedConnectionIsStored && Context.RemovedConnectionIDs.empty())
+				return "This test policy requires the original wire to be removed during preview";
+			if (Context.Input.PinKey == "b") return "This test schema forbids connections to input b";
+			return std::nullopt;
+		};
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const auto BaselineBytes = ReadBytes(Project->GetRootPath() / Fixture->ProjectRelativePath);
+		PF_CHECK(Tests, BaselineBytes.has_value());
+		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *Session, true);
+
+		const ImVec2 HostOrigin(73.0f, 37.0f);
+		bool FocusReconnectHost = true;
+		const auto DrawFrame = [&](ImVec2 Mouse, bool LeftDown = false, bool RightDown = false, bool Escape = false)
+		{
+			IO.DisplaySize = ImVec2(1440.0f, 900.0f);
+			IO.AddMousePosEvent(Mouse.x, Mouse.y);
+			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
+			IO.AddMouseButtonEvent(ImGuiMouseButton_Right, RightDown);
+			IO.MouseDown[ImGuiMouseButton_Right] = RightDown;
+			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
+			ImGui::NewFrame();
+			if (FocusReconnectHost)
+			{
+				ImGui::SetNextWindowFocus();
+				FocusReconnectHost = false;
+			}
+			ImGui::SetNextWindowPos(HostOrigin);
+			ImGui::SetNextWindowSize(ImVec2(1367.0f, 850.0f));
+			ImGui::Begin("GraphReconnectHost", nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			EditorGraphDocumentEditorTestAccess::Draw(GraphEditor, *Session);
+			ImGui::End();
+			ImGui::Render();
+		};
+		const auto FindPinScreen = [&](UUID Pin)
+		{
+			DrawFrame(ImVec2(-1000.0f, -1000.0f));
+			const auto Metrics = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+			for (const auto& Node : Metrics)
+				for (const auto& PinMetric : Node.Pins)
+					if (PinMetric.PinID == Pin)
+					{
+						const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(GraphEditor, *Session,
+							PinMetric.Marker.Anchor);
+						return ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+					}
+			return ImVec2(-1000.0f, -1000.0f);
+		};
+		const auto FindLinkPoint = [&](UUID Connection)
+		{
+			const auto CurrentGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			const auto Link = std::find_if(CurrentGraph.Connections.begin(), CurrentGraph.Connections.end(),
+				[Connection](const auto& Item) { return Item.ID == Connection; });
+			if (Link == CurrentGraph.Connections.end()) return std::optional<ImVec2>{};
+			const ImVec2 Start = FindPinScreen(Link->OutputPin);
+			const ImVec2 End = FindPinScreen(Link->InputPin);
+			const ImVec2 Center((Start.x + End.x) * 0.5f, (Start.y + End.y) * 0.5f);
+			for (int Y = -24; Y <= 24; Y += 4)
+				for (int X = -16; X <= 16; X += 4)
+				{
+					const ImVec2 Point(Center.x + static_cast<float>(X), Center.y + static_cast<float>(Y));
+					DrawFrame(Point);
+					if (EditorGraphDocumentEditorTestAccess::GetHoveredConnection(GraphEditor, *Session) == Connection)
+						return std::optional<ImVec2>{ Point };
+				}
+			return std::optional<ImVec2>{};
+		};
+		const auto OpenReconnectPopup = [&](UUID Connection)
+		{
+			const auto Point = FindLinkPoint(Connection);
+			PF_CHECK(Tests, Point.has_value());
+			if (!Point) return EditorGraphReconnectPopupPresentation{};
+			DrawFrame(*Point, false, true);
+			DrawFrame(*Point);
+			auto Popup = EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session);
+			bool SawContextRequest = Popup.LinkContextRequestSeen;
+			bool SawPopupOpen = Popup.PopupOpenAfterSubmit;
+			for (int Frame = 0; Frame < 4 && (!Popup.PopupVisible || !Popup.PopupScreenBounds ||
+				Popup.PopupScreenBounds->Maximum.X - Popup.PopupScreenBounds->Minimum.X < 70.0 ||
+				Popup.PopupScreenBounds->Maximum.Y - Popup.PopupScreenBounds->Minimum.Y < 40.0); ++Frame)
+			{
+				DrawFrame(*Point);
+				Popup = EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session);
+				SawContextRequest = SawContextRequest || Popup.LinkContextRequestSeen;
+				SawPopupOpen = SawPopupOpen || Popup.PopupOpenAfterSubmit;
+			}
+			PF_CHECK(Tests, SawContextRequest && SawPopupOpen);
+			return Popup;
+		};
+		const auto OpenTargetSubmenu = [&](UUID Connection, EditorGraphPinDirection Direction)
+		{
+			auto Popup = OpenReconnectPopup(Connection);
+			const auto Menu = Direction == EditorGraphPinDirection::Input
+				? Popup.ReconnectInputBounds : Popup.ReconnectOutputBounds;
+			PF_CHECK(Tests, Popup.ContextValid && Popup.PopupVisible && Menu.has_value());
+			if (!Menu) return Popup;
+			const ImVec2 MenuPoint(static_cast<float>((Menu->Minimum.X + Menu->Maximum.X) * 0.5),
+				static_cast<float>((Menu->Minimum.Y + Menu->Maximum.Y) * 0.5));
+			DrawFrame(MenuPoint, true);
+			DrawFrame(MenuPoint);
+			for (int Frame = 0; Frame < 40; ++Frame)
+			{
+				DrawFrame(MenuPoint);
+				Popup = EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session);
+				const auto& Targets = Direction == EditorGraphPinDirection::Input ? Popup.InputTargets : Popup.OutputTargets;
+				if (!Targets.empty()) break;
+			}
+			const auto& Targets = Direction == EditorGraphPinDirection::Input ? Popup.InputTargets : Popup.OutputTargets;
+			return Popup;
+		};
+		const auto FindTarget = [](const EditorGraphReconnectPopupPresentation& Popup,
+			EditorGraphPinDirection Direction, UUID Pin)
+		{
+			const auto& Items = Direction == EditorGraphPinDirection::Input ? Popup.InputTargets : Popup.OutputTargets;
+			const auto Item = std::find_if(Items.begin(), Items.end(), [Pin](const auto& Candidate)
+				{ return Candidate.PinID == Pin; });
+			return Item == Items.end() ? std::optional<EditorGraphReconnectPopupItemPresentation>{} : *Item;
+		};
+		const auto ClickTarget = [&](const EditorGraphReconnectPopupItemPresentation& Target)
+		{
+			const ImVec2 Point(static_cast<float>((Target.Bounds.Minimum.X + Target.Bounds.Maximum.X) * 0.5),
+				static_cast<float>((Target.Bounds.Minimum.Y + Target.Bounds.Maximum.Y) * 0.5));
+			DrawFrame(Point);
+			DrawFrame(Point, true);
+			DrawFrame(Point);
+		};
+
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
+		auto RejectedPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Input);
+		PF_CHECK(Tests, RejectedPopup.ContextValid && RejectedPopup.PopupVisible &&
+			RejectedPopup.PopupScreenBounds.has_value());
+		PF_CHECK(Tests, RejectedPopup.NoMove && RejectedPopup.NoResize);
+		const auto Incompatible = FindTarget(RejectedPopup, EditorGraphPinDirection::Input, VectorSurface);
+		const auto DomainForbidden = FindTarget(RejectedPopup, EditorGraphPinDirection::Input, TargetAB);
+		const auto ExistingInput = FindTarget(RejectedPopup, EditorGraphPinDirection::Input, TargetAA);
+		PF_CHECK(Tests, Incompatible && !Incompatible->Enabled && !Incompatible->RejectionReason.empty());
+		PF_CHECK(Tests, DomainForbidden && !DomainForbidden->Enabled &&
+			DomainForbidden->RejectionReason == "This test schema forbids connections to input b");
+		PF_CHECK(Tests, ExistingInput && !ExistingInput->Enabled &&
+			ExistingInput->RejectionReason == "This is already the current endpoint");
+		const EditorGraph BeforeRejectedSelection = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const uint64_t RevisionBeforeRejectedSelection = Session->Revision;
+		if (Incompatible) ClickTarget(*Incompatible);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == BeforeRejectedSelection);
+		PF_CHECK(Tests, Session->Revision == RevisionBeforeRejectedSelection && !Session->IsDirty());
+		DrawFrame(ImVec2(-1000.0f, -1000.0f), false, false, true);
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session).PopupVisible);
+
+		// Move one input endpoint while preserving the selected wire and its fan-out sibling.
+		auto InputPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Input);
+		const auto FreeInput = FindTarget(InputPopup, EditorGraphPinDirection::Input, TargetDA);
+		PF_CHECK(Tests, FreeInput && FreeInput->Enabled);
+		if (FreeInput) ClickTarget(*FreeInput);
+		auto AfterInputMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterInputMove, SourceAValue, TargetDA) == PrimaryLink);
+		PF_CHECK(Tests, LinkID(AfterInputMove, SourceAValue, TargetBA) == FanOutLink);
+		PF_CHECK(Tests, LinkID(AfterInputMove, SourceCValue, TargetCA) == OccupiedLink);
+		PF_CHECK(Tests, PositionsMatch(AfterInputMove, Baseline));
+		PF_CHECK(Tests, Session->IsDirty());
+		auto StalePopup = OpenReconnectPopup(PrimaryLink);
+		PF_CHECK(Tests, StalePopup.PopupVisible && StalePopup.ContextValid);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline && !Session->IsDirty());
+		DrawFrame(ImVec2(600.0f, 500.0f));
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session).PopupVisible);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo));
+		AfterInputMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterInputMove, SourceAValue, TargetDA) == PrimaryLink && Session->IsDirty());
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+
+		// Move the output of exactly one shared-output wire; its sibling remains untouched.
+		auto OutputPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Output);
+		const auto ReplacementOutput = FindTarget(OutputPopup, EditorGraphPinDirection::Output, SourceBValue);
+		PF_CHECK(Tests, ReplacementOutput && ReplacementOutput->Enabled);
+		if (ReplacementOutput) ClickTarget(*ReplacementOutput);
+		auto AfterOutputMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterOutputMove, SourceBValue, TargetAA) == PrimaryLink);
+		PF_CHECK(Tests, LinkID(AfterOutputMove, SourceAValue, TargetBA) == FanOutLink);
+		PF_CHECK(Tests, LinkID(AfterOutputMove, SourceCValue, TargetCA) == OccupiedLink);
+		PF_CHECK(Tests, PositionsMatch(AfterOutputMove, Baseline));
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == AfterOutputMove);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+
+		// Occupied-input replacement removes the displaced edge in the same command; Undo restores its UUID.
+		auto OccupiedPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Input);
+		const auto OccupiedInput = FindTarget(OccupiedPopup, EditorGraphPinDirection::Input, TargetCA);
+		PF_CHECK(Tests, OccupiedInput && OccupiedInput->Enabled);
+		if (OccupiedInput) ClickTarget(*OccupiedInput);
+		auto AfterReplacement = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterReplacement, SourceAValue, TargetCA) == PrimaryLink);
+		PF_CHECK(Tests, LinkID(AfterReplacement, SourceCValue, TargetCA).IsNil());
+		PF_CHECK(Tests, AfterReplacement.Connections.size() + 1 == Baseline.Connections.size());
+		PF_CHECK(Tests, PositionsMatch(AfterReplacement, Baseline));
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == AfterReplacement);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const auto SavedBytes = ReadBytes(Project->GetRootPath() / Fixture->ProjectRelativePath);
+		const auto ReopenedGraph = SavedBytes ? DeserializeEditorGraph(*SavedBytes, BaseSchema)
+			: std::expected<EditorGraph, std::string>(std::unexpected("saved graph bytes are unavailable"));
+		const auto SameGraphByIdentity = [](const EditorGraph& Left, const EditorGraph& Right)
+		{
+			if (Left.ID != Right.ID || Left.SchemaKey != Right.SchemaKey || Left.SchemaVersion != Right.SchemaVersion ||
+				Left.Nodes.size() != Right.Nodes.size() || Left.Connections.size() != Right.Connections.size()) return false;
+			for (const auto& Node : Left.Nodes)
+			{
+				const auto Other = std::find_if(Right.Nodes.begin(), Right.Nodes.end(), [&Node](const auto& Candidate)
+					{ return Candidate.ID == Node.ID; });
+				if (Other == Right.Nodes.end() || Node.TypeKey != Other->TypeKey || Node.X != Other->X || Node.Y != Other->Y ||
+					Node.Pins.size() != Other->Pins.size()) return false;
+				for (const auto& Pin : Node.Pins)
+				{
+					const auto OtherPin = std::find_if(Other->Pins.begin(), Other->Pins.end(), [&Pin](const auto& Candidate)
+						{ return Candidate.ID == Pin.ID; });
+					if (OtherPin == Other->Pins.end() || *OtherPin != Pin) return false;
+				}
+			}
+			for (const auto& Connection : Left.Connections)
+				if (std::find(Right.Connections.begin(), Right.Connections.end(), Connection) == Right.Connections.end()) return false;
+			return true;
+		};
+		PF_CHECK(Tests, ReopenedGraph && SameGraphByIdentity(*ReopenedGraph, AfterReplacement));
+	}
+
 	void TestGraphCanvasCreateRequestPolling(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -2367,6 +2734,7 @@ void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 	TestGraphDocumentLifecycle(Tests);
 	TestGraphNodeSizingInProductionAdapter(Tests);
 	TestGraphDocumentSaveRevisionAccounting(Tests);
+	TestGraphCanvasReconnectContextMenu(Tests);
 	TestGraphCanvasCreateRequestPolling(Tests);
 	TestGraphCanvasNodeCreationRequestPolling(Tests);
 	TestGraphNodeSearchNavigation(Tests);
