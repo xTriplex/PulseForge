@@ -114,15 +114,6 @@ namespace PulseForgeEditor
 		bool ResetVisibilityActivated = false;
 	};
 
-	struct EditorGraphReconnectPopupItemPresentation
-	{
-		PulseForge::UUID PinID;
-		EditorGraphCanvasRect Bounds;
-		bool Enabled = false;
-		bool Hovered = false;
-		std::string RejectionReason;
-	};
-
 	struct EditorGraphReconnectPopupPresentation
 	{
 		PulseForge::UUID ConnectionID;
@@ -131,8 +122,6 @@ namespace PulseForgeEditor
 		std::optional<EditorGraphCanvasRect> ReconnectOutputBounds;
 		bool ReconnectInputHovered = false;
 		bool ReconnectOutputHovered = false;
-		std::vector<EditorGraphReconnectPopupItemPresentation> InputTargets;
-		std::vector<EditorGraphReconnectPopupItemPresentation> OutputTargets;
 		PulseForge::UUID HoveredConnectionAtRightRelease;
 		bool ContextValid = false;
 		bool LinkContextRequestSeen = false;
@@ -140,6 +129,25 @@ namespace PulseForgeEditor
 		bool PopupOpenAfterSubmit = false;
 		bool NoMove = false;
 		bool NoResize = false;
+	};
+
+	struct EditorGraphPinMovePresentation
+	{
+		bool Active = false;
+		bool CtrlDrag = false;
+		bool Dragging = false;
+		bool AwaitingTargetClick = false;
+		PulseForge::UUID SourcePin;
+		PulseForge::UUID TargetPin;
+		EditorGraphPinDirection Direction = EditorGraphPinDirection::Input;
+		size_t MovingConnectionCount = 0;
+		size_t DisplacedConnectionCount = 0;
+		bool TargetAllowed = false;
+		bool TargetNoOp = false;
+		std::string Feedback;
+		size_t PreviewDecisionEvaluations = 0;
+		size_t CandidatePinEnumerations = 0;
+		size_t CommitCount = 0;
 	};
 
 	struct EditorGraphCanvasDocumentContext
@@ -440,6 +448,7 @@ namespace PulseForgeEditor
 			EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphReconnectPopupPresentation GetReconnectPopupForTesting(
 			EditorDocumentSession& Session);
+		[[nodiscard]] EditorGraphPinMovePresentation GetPinMoveForTesting(EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
 		[[nodiscard]] EditorGraph GetGraphForTesting(EditorDocumentSession& Session);
 		void SetSelectedNodesForTesting(EditorDocumentSession& Session, const std::vector<PulseForge::UUID>& NodeIDs);

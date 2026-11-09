@@ -1311,8 +1311,162 @@ namespace
 	}
 }
 
+namespace
+{
+	void TestBatchPinConnectionMove(TestRunner& Tests)
+	{
+		const auto Schema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "material.scalar", 0.0) &&
+			AppendNode(*Graph, Schema, "material.scalar", 160.0) &&
+			AppendNode(*Graph, Schema, "material.multiply", 320.0) &&
+			AppendNode(*Graph, Schema, "material.multiply", 480.0));
+		if (!Graph) return;
+		const auto SourceA = FindPin(Graph->Nodes[0], "value")->ID;
+		const auto SourceB = FindPin(Graph->Nodes[1], "value")->ID;
+		const auto InputA = FindPin(Graph->Nodes[2], "a")->ID;
+		const auto InputB = FindPin(Graph->Nodes[3], "a")->ID;
+		EditorGraphCommandHistory History(*Graph);
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, SourceA, InputA));
+		PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, SourceA, InputB));
+		const EditorGraph Before = History.Graph();
+		std::vector<EditorGraphConnection> Captured;
+		for (const auto& Connection : Before.Connections)
+			if (Connection.OutputPin == SourceA) Captured.push_back(Connection);
+		const auto Preview = CanMoveEditorGraphPinConnections(Before, Schema, SourceA, SourceB, Captured);
+		PF_CHECK(Tests, Preview.Allowed && !Preview.NoOp && Preview.MovedConnectionIDs.size() == 2);
+		EditorGraphCommandHistory OneWireHistory(Before);
+		const std::array OneWire{ Captured.front() };
+		const auto OneWirePreview = CanMoveEditorGraphPinConnections(Before, Schema, SourceA, SourceB,
+			OneWire, nullptr, false);
+		PF_CHECK(Tests, OneWirePreview.Allowed && OneWirePreview.MovedConnectionIDs.size() == 1);
+		PF_CHECK(Tests, MoveEditorGraphPinConnections(OneWireHistory, Schema, SourceA, SourceB, OneWire, false));
+		PF_CHECK(Tests, std::any_of(OneWireHistory.Graph().Connections.begin(), OneWireHistory.Graph().Connections.end(),
+			[&Captured](const auto& Link) { return Link.ID == Captured[0].ID && Link.OutputPin != Captured[0].OutputPin; }) &&
+			std::any_of(OneWireHistory.Graph().Connections.begin(), OneWireHistory.Graph().Connections.end(),
+			[&Captured](const auto& Link) { return Link.ID == Captured[1].ID && Link.OutputPin == Captured[1].OutputPin; }));
+		PF_CHECK(Tests, OneWireHistory.Undo() && OneWireHistory.Graph() == Before);
+		PF_CHECK(Tests, MoveEditorGraphPinConnections(History, Schema, SourceA, SourceB, Captured));
+		const EditorGraph Moved = History.Graph();
+		PF_CHECK(Tests, Moved.Connections.size() == Before.Connections.size());
+		for (const auto& Original : Captured)
+		{
+			const auto Link = std::find_if(Moved.Connections.begin(), Moved.Connections.end(),
+				[&Original](const auto& Candidate) { return Candidate.ID == Original.ID; });
+			PF_CHECK(Tests, Link != Moved.Connections.end() && Link->OutputPin == SourceB);
+		}
+		PF_CHECK(Tests, History.Undo() && History.Graph() == Before);
+		PF_CHECK(Tests, History.Redo() && History.Graph() == Moved);
+		PF_CHECK(Tests, History.Undo());
+
+		auto Restricted = Schema;
+		Restricted.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
+			-> std::optional<std::string>
+		{
+			if (Context.Purpose == EditorGraphConnectionPolicyPurpose::ProposedOperation &&
+				Context.ProposedConnections.size() == 2 && Context.Input.PinKey == "a" &&
+				Context.Input.OwnerNodeID == Context.ProposedConnections.back().Input.OwnerNodeID)
+				return "The complete moved group is forbidden";
+			return std::nullopt;
+		};
+		const auto Revision = History.GraphRevision();
+		const auto Rejected = CanMoveEditorGraphPinConnections(History.Graph(), Restricted, SourceA, SourceB, Captured);
+		PF_CHECK(Tests, !Rejected.Allowed && Rejected.Reason == "The complete moved group is forbidden");
+		PF_CHECK(Tests, !MoveEditorGraphPinConnections(History, Restricted, SourceA, SourceB, Captured));
+		PF_CHECK(Tests, History.Graph() == Before && History.GraphRevision() == Revision && History.CanRedo());
+
+		auto Stale = Captured;
+		Stale.front().InputPin = InputB;
+		const auto StaleDecision = CanMoveEditorGraphPinConnections(Before, Schema, SourceA, SourceB, Stale);
+		PF_CHECK(Tests, !StaleDecision.Allowed && StaleDecision.Reason.find("connection set changed") != std::string::npos);
+		auto ChangedSourceGraph = Before;
+		ChangedSourceGraph.Connections.push_back({ ID(0xc302), SourceA, InputB });
+		const auto ChangedSource = CanMoveEditorGraphPinConnections(ChangedSourceGraph, Schema,
+			SourceA, SourceB, Captured);
+		PF_CHECK(Tests, !ChangedSource.Allowed && ChangedSource.Reason.find("connection set changed") != std::string::npos);
+
+		EditorGraphCommandHistory InputHistory(Before);
+		const auto ExistingID = Before.Connections[0].ID;
+		const auto DisplacedID = Before.Connections[1].ID;
+		const auto InputCaptured = std::span<const EditorGraphConnection>(&Before.Connections[0], 1);
+		const auto InputDecision = CanMoveEditorGraphPinConnections(Before, Schema, InputA, InputB, InputCaptured);
+		PF_CHECK(Tests, InputDecision.Allowed && InputDecision.DisplacedConnectionIDs.size() == 1 &&
+			InputDecision.DisplacedConnectionIDs.front() == DisplacedID);
+		PF_CHECK(Tests, MoveEditorGraphPinConnections(InputHistory, Schema, InputA, InputB, InputCaptured));
+		PF_CHECK(Tests, InputHistory.Graph().Connections.size() == 1 &&
+			InputHistory.Graph().Connections.front().ID == ExistingID &&
+			InputHistory.Graph().Connections.front().InputPin == InputB);
+		const auto AfterInputMove = InputHistory.Graph();
+		PF_CHECK(Tests, InputHistory.Undo() && InputHistory.Graph() == Before);
+		PF_CHECK(Tests, InputHistory.Redo() && InputHistory.Graph() == AfterInputMove);
+		auto NoReplace = Schema;
+		NoReplace.ReplaceOccupiedInput = false;
+		PF_CHECK(Tests, !CanMoveEditorGraphPinConnections(Before, NoReplace, InputA, InputB, InputCaptured).Allowed);
+
+		EditorGraphSchema CapacitySchema{ "test.pin-move-output-capacity", 1, EditorGraphCyclePolicy::Reject,
+			EditorGraphCyclePolicy::Allow, true, {
+				{ "test.fanout", "Fan-out", { { "out", "Out", EditorGraphPinDirection::Output,
+					EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 } } },
+				{ "test.single-output", "Single output", { { "out", "Out", EditorGraphPinDirection::Output,
+					EditorGraphPinType::Float, EditorGraphPinCardinality::Single, 0.0 } } },
+				{ "test.multi-input", "Multi input", { { "in", "In", EditorGraphPinDirection::Input,
+					EditorGraphPinType::Float, EditorGraphPinCardinality::Multiple, 0.0 } } }
+			} };
+		auto CapacityGraph = FixtureGraph(CapacitySchema);
+		PF_CHECK(Tests, CapacityGraph && AppendNode(*CapacityGraph, CapacitySchema, "test.fanout", 0.0) &&
+			AppendNode(*CapacityGraph, CapacitySchema, "test.single-output", 100.0) &&
+			AppendNode(*CapacityGraph, CapacitySchema, "test.multi-input", 200.0) &&
+			AppendNode(*CapacityGraph, CapacitySchema, "test.multi-input", 300.0));
+		if (CapacityGraph)
+		{
+			const auto Fanout = CapacityGraph->Nodes[0].Pins[0].ID;
+			const auto Single = CapacityGraph->Nodes[1].Pins[0].ID;
+			const auto InputOne = CapacityGraph->Nodes[2].Pins[0].ID;
+			const auto InputTwo = CapacityGraph->Nodes[3].Pins[0].ID;
+			EditorGraphCommandHistory CapacityHistory(*CapacityGraph);
+			PF_CHECK(Tests, ConnectEditorGraphPins(CapacityHistory, CapacitySchema, Fanout, InputOne));
+			PF_CHECK(Tests, ConnectEditorGraphPins(CapacityHistory, CapacitySchema, Fanout, InputTwo));
+			std::vector<EditorGraphConnection> CapacityCaptured(CapacityHistory.Graph().Connections.begin(),
+				CapacityHistory.Graph().Connections.end());
+			const auto Capacity = CanMoveEditorGraphPinConnections(CapacityHistory.Graph(), CapacitySchema,
+				Fanout, Single, CapacityCaptured);
+			PF_CHECK(Tests, !Capacity.Allowed && Capacity.Reason.find("single-cardinality output") != std::string::npos);
+		}
+		if (CapacityGraph)
+		{
+			auto DuplicateSchema = CapacitySchema;
+			for (auto& Definition : DuplicateSchema.Nodes)
+				if (Definition.TypeKey == "test.multi-input")
+					Definition.Pins.front().Cardinality = EditorGraphPinCardinality::Multiple;
+			auto DuplicateGraph = CreateEditorGraph(DuplicateSchema, ID(0xc303));
+			PF_CHECK(Tests, DuplicateGraph && AppendNode(*DuplicateGraph, DuplicateSchema, "test.fanout", 0.0) &&
+				AppendNode(*DuplicateGraph, DuplicateSchema, "test.fanout", 100.0) &&
+				AppendNode(*DuplicateGraph, DuplicateSchema, "test.multi-input", 200.0) &&
+				AppendNode(*DuplicateGraph, DuplicateSchema, "test.multi-input", 300.0));
+			if (DuplicateGraph)
+			{
+				const auto OutputA = DuplicateGraph->Nodes[0].Pins[0].ID;
+				const auto OutputB = DuplicateGraph->Nodes[1].Pins[0].ID;
+				const auto TargetA = DuplicateGraph->Nodes[2].Pins[0].ID;
+				const auto TargetB = DuplicateGraph->Nodes[3].Pins[0].ID;
+				EditorGraphCommandHistory DuplicateHistory(*DuplicateGraph);
+				PF_CHECK(Tests, ConnectEditorGraphPins(DuplicateHistory, DuplicateSchema, OutputA, TargetA));
+				PF_CHECK(Tests, ConnectEditorGraphPins(DuplicateHistory, DuplicateSchema, OutputA, TargetB));
+				PF_CHECK(Tests, ConnectEditorGraphPins(DuplicateHistory, DuplicateSchema, OutputB, TargetA));
+				std::vector<EditorGraphConnection> DuplicateCaptured;
+				for (const auto& Connection : DuplicateHistory.Graph().Connections)
+					if (Connection.OutputPin == OutputA) DuplicateCaptured.push_back(Connection);
+				const auto Duplicate = CanMoveEditorGraphPinConnections(DuplicateHistory.Graph(), DuplicateSchema,
+					OutputA, OutputB, DuplicateCaptured);
+				PF_CHECK(Tests, !Duplicate.Allowed && Duplicate.Reason.find("Duplicate connections") != std::string::npos);
+			}
+		}
+	}
+}
+
 void RunEditorGraphModelTests(TestRunner& Tests)
 {
+	TestBatchPinConnectionMove(Tests);
 	TestMaterialSchemaAndSerialization(Tests);
 	TestGameplaySchemaAndTransactions(Tests);
 	TestPropertyEditCoordinator(Tests);

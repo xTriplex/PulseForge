@@ -197,6 +197,15 @@ namespace PulseForgeEditor
 		// as the proposed pair. StoredConnectionValidation removes the stored edge being checked before
 		// supplying that same pair, so domain rules evaluate the effective result without counting it twice.
 		std::span<const PulseForge::UUID> RemovedConnectionIDs;
+		// Batch proposals are evaluated against the original graph after RemovedConnectionIDs
+		// are removed and all of these stable-identity endpoint pairs are applied.
+		struct ProposedConnection
+		{
+			PulseForge::UUID ConnectionID;
+			EditorGraphPolicyEndpoint Output;
+			EditorGraphPolicyEndpoint Input;
+		};
+		std::span<const ProposedConnection> ProposedConnections;
 		std::optional<PulseForge::UUID> ProposedConnectionID;
 		bool ProposedConnectionIsStored = false;
 
@@ -220,6 +229,15 @@ namespace PulseForgeEditor
 		PulseForge::UUID OutputPin;
 		PulseForge::UUID InputPin;
 		std::vector<PulseForge::UUID> RemovedConnectionIDs;
+	};
+
+	struct EditorGraphPinMoveDecision
+	{
+		bool Allowed = false;
+		bool NoOp = false;
+		std::string Reason;
+		std::vector<PulseForge::UUID> MovedConnectionIDs;
+		std::vector<PulseForge::UUID> DisplacedConnectionIDs;
 	};
 
 	struct EditorGraphNodeCreationAction
@@ -372,6 +390,14 @@ namespace PulseForgeEditor
 	[[nodiscard]] std::expected<void, std::string> ReconnectEditorGraphConnection(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID ConnectionID, PulseForge::UUID FirstPin, PulseForge::UUID SecondPin);
+	[[nodiscard]] EditorGraphPinMoveDecision CanMoveEditorGraphPinConnections(
+		const EditorGraph& Graph, const EditorGraphSchema& Schema, PulseForge::UUID SourcePin,
+		PulseForge::UUID TargetPin, std::span<const EditorGraphConnection> CapturedConnections,
+		EditorGraphWorkStats* Stats = nullptr, bool RequireCompleteSourceSet = true);
+	[[nodiscard]] std::expected<void, std::string> MoveEditorGraphPinConnections(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema, PulseForge::UUID SourcePin,
+		PulseForge::UUID TargetPin, std::span<const EditorGraphConnection> CapturedConnections,
+		bool RequireCompleteSourceSet = true);
 	[[nodiscard]] std::expected<void, std::string> MoveEditorGraphNodes(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		const std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>>& Positions);

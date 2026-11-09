@@ -61,6 +61,12 @@ namespace PulseForgeEditor
 			return Editor.GetReconnectPopupForTesting(Session);
 		}
 
+		static EditorGraphPinMovePresentation GetPinMove(
+			EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetPinMoveForTesting(Session);
+		}
+
 		static void SetPinHidden(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			PulseForge::UUID PinID, bool Hidden)
 		{
@@ -136,7 +142,6 @@ namespace PulseForgeEditor
 		}
 	};
 }
-
 namespace
 {
 	std::string GraphTestClipboard;
@@ -1628,13 +1633,14 @@ namespace
 		PF_CHECK(Tests, !PrimaryLink.IsNil() && !FanOutLink.IsNil() && !OccupiedLink.IsNil());
 		const EditorGraph Baseline = *Graph;
 		auto Schema = BaseSchema;
-		Schema.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
+		Schema.ConnectionPolicy = [SourceAValue](const EditorGraph&, const EditorGraphConnectionPolicyContext& Context)
 			-> std::optional<std::string>
 		{
 			if (Context.Purpose == EditorGraphConnectionPolicyPurpose::ProposedOperation &&
-				!Context.ProposedConnectionIsStored && Context.RemovedConnectionIDs.empty())
+			Context.Output.PinID == SourceAValue && Context.RemovedConnectionIDs.empty())
 				return "This test policy requires the original wire to be removed during preview";
-			if (Context.Input.PinKey == "b") return "This test schema forbids connections to input b";
+			if (Context.Purpose == EditorGraphConnectionPolicyPurpose::ProposedOperation &&
+				Context.Input.PinKey == "b") return "This test schema forbids connections to input b";
 			return std::nullopt;
 		};
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
@@ -1645,7 +1651,8 @@ namespace
 
 		const ImVec2 HostOrigin(73.0f, 37.0f);
 		bool FocusReconnectHost = true;
-		const auto DrawFrame = [&](ImVec2 Mouse, bool LeftDown = false, bool RightDown = false, bool Escape = false)
+		const auto DrawFrame = [&](ImVec2 Mouse, bool LeftDown = false, bool RightDown = false,
+			bool Escape = false, bool Control = false)
 		{
 			IO.DisplaySize = ImVec2(1440.0f, 900.0f);
 			IO.AddMousePosEvent(Mouse.x, Mouse.y);
@@ -1653,7 +1660,15 @@ namespace
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Right, RightDown);
 			IO.MouseDown[ImGuiMouseButton_Right] = RightDown;
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
+			IO.AddKeyEvent(ImGuiKey_LeftCtrl, Control);
 			ImGui::NewFrame();
+			IO.MousePos = Mouse;
+			IO.MouseDown[ImGuiMouseButton_Left] = LeftDown;
+			IO.MouseDown[ImGuiMouseButton_Right] = RightDown;
+			IO.KeyCtrl = Control;
+			auto* EscapeKey = ImGui::GetKeyData(ImGuiKey_Escape);
+			EscapeKey->Down = Escape;
+			EscapeKey->DownDuration = Escape ? 0.0f : -1.0f;
 			if (FocusReconnectHost)
 			{
 				ImGui::SetNextWindowFocus();
@@ -1719,74 +1734,64 @@ namespace
 				SawContextRequest = SawContextRequest || Popup.LinkContextRequestSeen;
 				SawPopupOpen = SawPopupOpen || Popup.PopupOpenAfterSubmit;
 			}
-			PF_CHECK(Tests, SawContextRequest && SawPopupOpen);
+			PF_CHECK(Tests, SawPopupOpen && Popup.PopupVisible && Popup.ContextValid);
 			return Popup;
 		};
-		const auto OpenTargetSubmenu = [&](UUID Connection, EditorGraphPinDirection Direction)
+		const auto OpenTargetSelection = [&](UUID Connection, EditorGraphPinDirection Direction)
 		{
 			auto Popup = OpenReconnectPopup(Connection);
 			const auto Menu = Direction == EditorGraphPinDirection::Input
 				? Popup.ReconnectInputBounds : Popup.ReconnectOutputBounds;
 			PF_CHECK(Tests, Popup.ContextValid && Popup.PopupVisible && Menu.has_value());
-			if (!Menu) return Popup;
+			if (!Menu) return EditorGraphPinMovePresentation{};
 			const ImVec2 MenuPoint(static_cast<float>((Menu->Minimum.X + Menu->Maximum.X) * 0.5),
 				static_cast<float>((Menu->Minimum.Y + Menu->Maximum.Y) * 0.5));
 			DrawFrame(MenuPoint, true);
 			DrawFrame(MenuPoint);
-			for (int Frame = 0; Frame < 40; ++Frame)
-			{
-				DrawFrame(MenuPoint);
-				Popup = EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session);
-				const auto& Targets = Direction == EditorGraphPinDirection::Input ? Popup.InputTargets : Popup.OutputTargets;
-				if (!Targets.empty()) break;
-			}
-			const auto& Targets = Direction == EditorGraphPinDirection::Input ? Popup.InputTargets : Popup.OutputTargets;
-			return Popup;
+			const auto Move = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+			PF_CHECK(Tests, Move.Active && Move.AwaitingTargetClick && Move.Direction == Direction);
+			return Move;
 		};
-		const auto FindTarget = [](const EditorGraphReconnectPopupPresentation& Popup,
-			EditorGraphPinDirection Direction, UUID Pin)
+		const auto ClickCanvasPin = [&](UUID Pin)
 		{
-			const auto& Items = Direction == EditorGraphPinDirection::Input ? Popup.InputTargets : Popup.OutputTargets;
-			const auto Item = std::find_if(Items.begin(), Items.end(), [Pin](const auto& Candidate)
-				{ return Candidate.PinID == Pin; });
-			return Item == Items.end() ? std::optional<EditorGraphReconnectPopupItemPresentation>{} : *Item;
-		};
-		const auto ClickTarget = [&](const EditorGraphReconnectPopupItemPresentation& Target)
-		{
-			const ImVec2 Point(static_cast<float>((Target.Bounds.Minimum.X + Target.Bounds.Maximum.X) * 0.5),
-				static_cast<float>((Target.Bounds.Minimum.Y + Target.Bounds.Maximum.Y) * 0.5));
-			DrawFrame(Point);
+			const ImVec2 Point = FindPinScreen(Pin);
 			DrawFrame(Point, true);
 			DrawFrame(Point);
+			return Point;
 		};
 
 		DrawFrame(ImVec2(-1000.0f, -1000.0f));
-		auto RejectedPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Input);
+		auto RejectedPopup = OpenReconnectPopup(PrimaryLink);
 		PF_CHECK(Tests, RejectedPopup.ContextValid && RejectedPopup.PopupVisible &&
 			RejectedPopup.PopupScreenBounds.has_value());
 		PF_CHECK(Tests, RejectedPopup.NoMove && RejectedPopup.NoResize);
-		const auto Incompatible = FindTarget(RejectedPopup, EditorGraphPinDirection::Input, VectorSurface);
-		const auto DomainForbidden = FindTarget(RejectedPopup, EditorGraphPinDirection::Input, TargetAB);
-		const auto ExistingInput = FindTarget(RejectedPopup, EditorGraphPinDirection::Input, TargetAA);
-		PF_CHECK(Tests, Incompatible && !Incompatible->Enabled && !Incompatible->RejectionReason.empty());
-		PF_CHECK(Tests, DomainForbidden && !DomainForbidden->Enabled &&
-			DomainForbidden->RejectionReason == "This test schema forbids connections to input b");
-		PF_CHECK(Tests, ExistingInput && !ExistingInput->Enabled &&
-			ExistingInput->RejectionReason == "This is already the current endpoint");
 		const EditorGraph BeforeRejectedSelection = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
 		const uint64_t RevisionBeforeRejectedSelection = Session->Revision;
-		if (Incompatible) ClickTarget(*Incompatible);
+		auto RejectedMove = OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+		const ImVec2 IncompatiblePoint = FindPinScreen(VectorSurface);
+		DrawFrame(IncompatiblePoint);
+		RejectedMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, RejectedMove.Active && !RejectedMove.TargetAllowed &&
+			RejectedMove.Feedback.find("exactly") != std::string::npos);
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == BeforeRejectedSelection);
 		PF_CHECK(Tests, Session->Revision == RevisionBeforeRejectedSelection && !Session->IsDirty());
 		DrawFrame(ImVec2(-1000.0f, -1000.0f), false, false, true);
 		DrawFrame(ImVec2(-1000.0f, -1000.0f));
-		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetReconnectPopup(GraphEditor, *Session).PopupVisible);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+
+		auto DomainMove = OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+		const ImVec2 ForbiddenPoint = FindPinScreen(TargetAB);
+		DrawFrame(ForbiddenPoint);
+		DomainMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, DomainMove.Active && !DomainMove.TargetAllowed &&
+			DomainMove.Feedback.find("This test schema forbids connections to input b") != std::string::npos);
+		DrawFrame(ImVec2(-1000.0f, -1000.0f), false, false, true);
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
 
 		// Move one input endpoint while preserving the selected wire and its fan-out sibling.
-		auto InputPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Input);
-		const auto FreeInput = FindTarget(InputPopup, EditorGraphPinDirection::Input, TargetDA);
-		PF_CHECK(Tests, FreeInput && FreeInput->Enabled);
-		if (FreeInput) ClickTarget(*FreeInput);
+		(void)OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+		const ImVec2 FreeInputPoint = ClickCanvasPin(TargetDA);
+		DrawFrame(FreeInputPoint, false);
 		auto AfterInputMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
 		PF_CHECK(Tests, LinkID(AfterInputMove, SourceAValue, TargetDA) == PrimaryLink);
 		PF_CHECK(Tests, LinkID(AfterInputMove, SourceAValue, TargetBA) == FanOutLink);
@@ -1805,10 +1810,9 @@ namespace
 		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
 
 		// Move the output of exactly one shared-output wire; its sibling remains untouched.
-		auto OutputPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Output);
-		const auto ReplacementOutput = FindTarget(OutputPopup, EditorGraphPinDirection::Output, SourceBValue);
-		PF_CHECK(Tests, ReplacementOutput && ReplacementOutput->Enabled);
-		if (ReplacementOutput) ClickTarget(*ReplacementOutput);
+		(void)OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Output);
+		const ImVec2 ReplacementOutputPoint = ClickCanvasPin(SourceBValue);
+		DrawFrame(ReplacementOutputPoint, false);
 		auto AfterOutputMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
 		PF_CHECK(Tests, LinkID(AfterOutputMove, SourceBValue, TargetAA) == PrimaryLink);
 		PF_CHECK(Tests, LinkID(AfterOutputMove, SourceAValue, TargetBA) == FanOutLink);
@@ -1820,11 +1824,77 @@ namespace
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == AfterOutputMove);
 		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
 
+		// Ctrl-drag on a fan-out output moves every incident wire, even after Ctrl is released mid-drag.
+		const ImVec2 SourceAOutputPoint = FindPinScreen(SourceAValue);
+		const ImVec2 SourceBOutputPoint = FindPinScreen(SourceBValue);
+		const auto BeforeCtrlOutput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const uint64_t CtrlOutputRevision = Session->Revision;
+		DrawFrame(SourceAOutputPoint, true, false, false, true);
+		auto PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, PinMove.Active && PinMove.CtrlDrag && !PinMove.Dragging && PinMove.MovingConnectionCount == 2);
+		DrawFrame(SourceBOutputPoint, true, false, false, false);
+		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, PinMove.Active && PinMove.Dragging && PinMove.TargetAllowed &&
+			PinMove.MovingConnectionCount == 2 && PinMove.CandidatePinEnumerations == 0 &&
+			PinMove.PreviewDecisionEvaluations == 1);
+		DrawFrame(SourceBOutputPoint, false, false, false, false);
+		auto AfterCtrlOutput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterCtrlOutput, SourceBValue, TargetAA) == PrimaryLink &&
+			LinkID(AfterCtrlOutput, SourceBValue, TargetBA) == FanOutLink &&
+			Session->Revision == CtrlOutputRevision + 1);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == BeforeCtrlOutput);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == AfterCtrlOutput);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+
+		// A Ctrl-drag from one input moves that endpoint while preserving its wire identity.
+		const ImVec2 InputSourcePoint = FindPinScreen(TargetAA);
+		const ImVec2 InputTargetPoint = FindPinScreen(TargetDA);
+		DrawFrame(InputSourcePoint, true, false, false, true);
+		DrawFrame(InputTargetPoint, true, false, false, false);
+		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, PinMove.Active && PinMove.Dragging && PinMove.Direction == EditorGraphPinDirection::Input &&
+			PinMove.TargetAllowed && PinMove.MovingConnectionCount == 1);
+		DrawFrame(InputTargetPoint, false);
+		const auto AfterCtrlInput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, LinkID(AfterCtrlInput, SourceAValue, TargetDA) == PrimaryLink &&
+			LinkID(AfterCtrlInput, SourceAValue, TargetBA) == FanOutLink);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline);
+
+		// A mismatched direction is visible as rejected feedback and dropping cancels without editing.
+		const ImVec2 InvalidInputPoint = FindPinScreen(TargetDA);
+		DrawFrame(SourceAOutputPoint, true, false, false, true);
+		DrawFrame(InvalidInputPoint, true, false, false, false);
+		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, PinMove.Active && !PinMove.TargetAllowed &&
+			PinMove.Feedback.find("same direction") != std::string::npos);
+		DrawFrame(InvalidInputPoint, false);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline &&
+			!Session->IsDirty());
+
+		// Ctrl-click without crossing the drag threshold is a no-op.
+		DrawFrame(SourceAOutputPoint, true, false, false, true);
+		DrawFrame(SourceAOutputPoint, false, false, false, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline &&
+			!Session->IsDirty());
+
+		// Escape cancels an active drag and consumes the held button through release.
+		DrawFrame(SourceAOutputPoint, true, false, false, true);
+		DrawFrame(SourceBOutputPoint, true, false, false, false);
+		DrawFrame(SourceBOutputPoint, true, false, true, false);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+		DrawFrame(SourceBOutputPoint, false);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Baseline);
+		PF_CHECK(Tests, !Session->IsDirty());
+
 		// Occupied-input replacement removes the displaced edge in the same command; Undo restores its UUID.
-		auto OccupiedPopup = OpenTargetSubmenu(PrimaryLink, EditorGraphPinDirection::Input);
-		const auto OccupiedInput = FindTarget(OccupiedPopup, EditorGraphPinDirection::Input, TargetCA);
-		PF_CHECK(Tests, OccupiedInput && OccupiedInput->Enabled);
-		if (OccupiedInput) ClickTarget(*OccupiedInput);
+		(void)OpenTargetSelection(PrimaryLink, EditorGraphPinDirection::Input);
+		const ImVec2 OccupiedInputPoint = ClickCanvasPin(TargetCA);
+		DrawFrame(OccupiedInputPoint, false);
 		auto AfterReplacement = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
 		PF_CHECK(Tests, LinkID(AfterReplacement, SourceAValue, TargetCA) == PrimaryLink);
 		PF_CHECK(Tests, LinkID(AfterReplacement, SourceCValue, TargetCA).IsNil());

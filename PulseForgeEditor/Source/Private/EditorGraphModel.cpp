@@ -1446,6 +1446,153 @@ namespace PulseForgeEditor
 		return {};
 	}
 
+	EditorGraphPinMoveDecision CanMoveEditorGraphPinConnections(const EditorGraph& Graph,
+		const EditorGraphSchema& Schema, PulseForge::UUID SourcePin, PulseForge::UUID TargetPin,
+		std::span<const EditorGraphConnection> CapturedConnections, EditorGraphWorkStats* Stats,
+		bool RequireCompleteSourceSet)
+	{
+		if (Stats) *Stats = {};
+		if (Graph.SchemaKey != Schema.Key || Graph.SchemaVersion != Schema.Version)
+			return { false, false, "The active graph schema changed", {}, {} };
+		const GraphIndex Index = BuildGraphIndex(Graph, Stats);
+		const auto Source = Index.Pins.find(SourcePin);
+		const auto Target = Index.Pins.find(TargetPin);
+		if (Source == Index.Pins.end() || Target == Index.Pins.end())
+			return { false, false, "The source or destination pin no longer exists", {}, {} };
+		if (Source->second.Pin->Direction != Target->second.Pin->Direction)
+			return { false, false, "Move a pin to another pin with the same direction", {}, {} };
+		if (CapturedConnections.empty())
+			return { false, false, "The source pin has no connections to move", {}, {} };
+
+		std::unordered_map<PulseForge::UUID, EditorGraphConnection, PulseForge::UUIDHash> CapturedByID;
+		for (const auto& Connection : CapturedConnections)
+			if (Connection.ID.IsNil() || !CapturedByID.emplace(Connection.ID, Connection).second)
+				return { false, false, "The captured connection set is invalid", {}, {} };
+		std::vector<EditorGraphConnection> CurrentConnections;
+		for (const auto& Connection : Graph.Connections)
+			if (Connection.OutputPin == SourcePin || Connection.InputPin == SourcePin)
+				CurrentConnections.push_back(Connection);
+		if ((RequireCompleteSourceSet && CurrentConnections.size() != CapturedByID.size()) ||
+			std::any_of(CurrentConnections.begin(), CurrentConnections.end(), [&CapturedByID](const auto& Connection)
+			{
+				const auto Captured = CapturedByID.find(Connection.ID);
+				return Captured != CapturedByID.end() && Captured->second != Connection;
+			}))
+			return { false, false, "The source pin's connection set changed during this gesture", {}, {} };
+		for (const auto& [ConnectionID, Captured] : CapturedByID)
+			if (std::none_of(CurrentConnections.begin(), CurrentConnections.end(), [ConnectionID, &Captured](const auto& Connection)
+				{ return Connection.ID == ConnectionID && Connection == Captured; }))
+				return { false, false, "The selected connection changed during this gesture", {}, {} };
+
+		std::vector<PulseForge::UUID> MovedIDs;
+		MovedIDs.reserve(CapturedByID.size());
+		for (const auto& [ConnectionID, Connection] : CapturedByID)
+		{
+			(void)Connection;
+			MovedIDs.push_back(ConnectionID);
+		}
+		std::sort(MovedIDs.begin(), MovedIDs.end());
+		if (SourcePin == TargetPin)
+			return { true, true, "Release on a different pin to move these connections", std::move(MovedIDs), {} };
+
+		EditorGraph Candidate = Graph;
+		std::vector<PulseForge::UUID> RemovedIDs = MovedIDs;
+		std::vector<PulseForge::UUID> DisplacedIDs;
+		if (Target->second.Pin->Direction == EditorGraphPinDirection::Input &&
+			Target->second.Pin->Cardinality == EditorGraphPinCardinality::Single && Schema.ReplaceOccupiedInput)
+		{
+			for (const auto& Connection : Graph.Connections)
+				if (Connection.InputPin == TargetPin && !CapturedByID.contains(Connection.ID))
+				{
+					DisplacedIDs.push_back(Connection.ID);
+					RemovedIDs.push_back(Connection.ID);
+				}
+		}
+
+		std::vector<EditorGraphConnectionPolicyContext::ProposedConnection> Proposals;
+		Proposals.reserve(CapturedConnections.size());
+		for (const auto& Original : CapturedConnections)
+		{
+			auto Proposed = Original;
+			if (Source->second.Pin->Direction == EditorGraphPinDirection::Output)
+				Proposed.OutputPin = TargetPin;
+			else
+				Proposed.InputPin = TargetPin;
+			const auto Output = Index.Pins.find(Proposed.OutputPin);
+			const auto Input = Index.Pins.find(Proposed.InputPin);
+			if (Output == Index.Pins.end() || Input == Index.Pins.end())
+				return { false, false, "A connection endpoint no longer exists", {}, {} };
+			if (Output->second.Pin->Direction != EditorGraphPinDirection::Output ||
+				Input->second.Pin->Direction != EditorGraphPinDirection::Input)
+				return { false, false, "Move a pin to another pin with the same direction", {}, {} };
+			if (Output->second.Pin->Type != Input->second.Pin->Type)
+				return { false, false, "Pin types must match exactly; implicit conversions are not supported", {}, {} };
+			Proposals.push_back({ Proposed.ID, MakePolicyEndpoint(Index, Proposed.OutputPin),
+				MakePolicyEndpoint(Index, Proposed.InputPin) });
+			auto Live = std::find_if(Candidate.Connections.begin(), Candidate.Connections.end(), [&Original](const auto& Item)
+				{ return Item.ID == Original.ID; });
+			if (Live == Candidate.Connections.end())
+				return { false, false, "The captured connection disappeared before preview", {}, {} };
+			*Live = Proposed;
+		}
+		if (!DisplacedIDs.empty())
+			Candidate.Connections.erase(std::remove_if(Candidate.Connections.begin(), Candidate.Connections.end(),
+				[&DisplacedIDs](const auto& Connection) { return IsRemoved(DisplacedIDs, Connection.ID); }),
+				Candidate.Connections.end());
+
+		if (Schema.ConnectionPolicy)
+			for (const auto& Proposal : Proposals)
+			{
+				EditorGraphConnectionPolicyContext Context;
+				Context.Purpose = EditorGraphConnectionPolicyPurpose::ProposedOperation;
+				Context.Output = Proposal.Output;
+				Context.Input = Proposal.Input;
+				Context.RemovedConnectionIDs = RemovedIDs;
+				Context.ProposedConnections = Proposals;
+				Context.ProposedConnectionID = Proposal.ConnectionID;
+				if (auto Reason = Schema.ConnectionPolicy(Graph, Context))
+					return { false, false, std::move(*Reason), {}, {} };
+			}
+
+		const auto Diagnostics = ValidateEditorGraph(Candidate, Schema);
+		if (!Diagnostics.empty())
+			return { false, false, Diagnostics.front().Message, {}, {} };
+		return { true, false, "All attached connections can move to this pin", std::move(MovedIDs),
+			std::move(DisplacedIDs) };
+	}
+
+	std::expected<void, std::string> MoveEditorGraphPinConnections(EditorGraphCommandHistory& History,
+		const EditorGraphSchema& Schema, PulseForge::UUID SourcePin, PulseForge::UUID TargetPin,
+		std::span<const EditorGraphConnection> CapturedConnections, bool RequireCompleteSourceSet)
+	{
+		const std::vector<EditorGraphConnection> Captured(CapturedConnections.begin(), CapturedConnections.end());
+		std::string Error;
+		if (!History.Execute(Schema, [&Schema, SourcePin, TargetPin, Captured, RequireCompleteSourceSet](EditorGraph& Graph)
+			-> std::expected<void, std::string>
+		{
+			const auto Decision = CanMoveEditorGraphPinConnections(Graph, Schema, SourcePin, TargetPin,
+				Captured, nullptr, RequireCompleteSourceSet);
+			if (!Decision.Allowed) return std::unexpected(Decision.Reason);
+			if (Decision.NoOp) return {};
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Moved(Decision.MovedConnectionIDs.begin(),
+				Decision.MovedConnectionIDs.end());
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Displaced(
+				Decision.DisplacedConnectionIDs.begin(), Decision.DisplacedConnectionIDs.end());
+			for (auto& Connection : Graph.Connections)
+				if (Moved.contains(Connection.ID))
+				{
+					if (Connection.OutputPin == SourcePin) Connection.OutputPin = TargetPin;
+					else if (Connection.InputPin == SourcePin) Connection.InputPin = TargetPin;
+					else return std::unexpected("The captured source pin is no longer an endpoint of its connection");
+				}
+			Graph.Connections.erase(std::remove_if(Graph.Connections.begin(), Graph.Connections.end(),
+				[&Displaced](const auto& Connection) { return Displaced.contains(Connection.ID); }), Graph.Connections.end());
+			return {};
+		}, Error))
+			return std::unexpected(Error);
+		return {};
+	}
+
 	std::expected<void, std::string> MoveEditorGraphNodes(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		const std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>>& Positions)
 	{
