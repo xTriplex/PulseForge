@@ -133,6 +133,12 @@ namespace PulseForgeEditor
 
 	struct EditorGraphPinMovePresentation
 	{
+		struct Curve final
+		{
+			PulseForge::UUID ConnectionID;
+			EditorGraphCanvasPoint Start;
+			EditorGraphCanvasPoint End;
+		};
 		bool Active = false;
 		bool CtrlDrag = false;
 		bool Dragging = false;
@@ -147,6 +153,8 @@ namespace PulseForgeEditor
 		std::string Feedback;
 		size_t PreviewDecisionEvaluations = 0;
 		size_t CommitCount = 0;
+		bool PreviewSubmittedOnCanvasUnderlay = false;
+		std::vector<Curve> PreviewCurves;
 	};
 
 	struct EditorGraphCanvasDocumentContext

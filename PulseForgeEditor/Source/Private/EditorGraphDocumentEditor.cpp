@@ -236,6 +236,19 @@ namespace
 		std::optional<PendingPinMove> PinMove;
 		EditorGraphPinMovePresentation PinMovePresentation;
 		EditorGraphReconnectPopupPresentation ReconnectPopupPresentation;
+		std::vector<PinAnchorMeasurement> LastPinAnchors;
+		std::unordered_map<PulseForge::UUID, EditorGraphCanvasPoint, PulseForge::UUIDHash> LastAnchorNodePositions;
+		std::unordered_map<PulseForge::UUID, EditorGraphCanvasPoint, PulseForge::UUIDHash> LastAnchorNodeSizes;
+		EditorGraphCanvasDocumentContext LastAnchorContext;
+		NodeEditor::EditorContext* LastAnchorCanvas = nullptr;
+		uint64_t LastAnchorGraphRevision = 0;
+		uint64_t PinLayoutRevision = 0;
+		uint64_t LastAnchorLayoutRevision = 0;
+		PulseForge::UUID StagedPreviewTarget;
+		EditorGraphCanvasPoint StagedPreviewTargetAnchor;
+		EditorGraphScreenPoint StagedPreviewPointer;
+		EditorGraphCanvasDocumentContext StagedPreviewContext;
+		uint64_t StagedPreviewRevision = 0;
 		std::vector<PulseForge::UUID> PendingSelectionNodeIDs;
 		ImGuiKey GraphShortcutLatchedKey = ImGuiKey_None;
 		bool CapturePresentation = false;
@@ -396,9 +409,7 @@ namespace
 
 	const EditorGraphNodeDefinition* FindNodeDefinition(const EditorGraphSchema& Schema, std::string_view Key)
 	{
-		const auto It = std::find_if(Schema.Nodes.begin(), Schema.Nodes.end(), [Key](const auto& Node)
-			{ return Node.TypeKey == Key; });
-		return It == Schema.Nodes.end() ? nullptr : &*It;
+		return FindEditorGraphNodeDefinition(Schema, Key);
 	}
 
 	const EditorGraphPinDefinition* FindPinDefinition(const EditorGraphSchema& Schema,
@@ -783,6 +794,7 @@ namespace PulseForgeEditor
 	{
 		auto* State = GetState(Session);
 		if (!State) return;
+		const auto PreviousVisibility = State->HiddenPins;
 		State->HiddenPins.clear();
 		const auto& Graph = State->History.Graph();
 		for (const auto& Setting : Settings)
@@ -801,6 +813,7 @@ namespace PulseForgeEditor
 			{ return Setting.Document == Session.Identity && Setting.GraphID == Graph.ID; });
 		const auto Current = CapturePinVisibility(Session);
 		m_PinVisibilitySettings.insert(m_PinVisibilitySettings.end(), Current.begin(), Current.end());
+		if (PreviousVisibility != State->HiddenPins) ++State->PinLayoutRevision;
 	}
 
 	bool EditorGraphDocumentEditor::SaveSession(EditorDocumentSession& Session, uint64_t SavedRevision) const
@@ -928,8 +941,9 @@ namespace PulseForgeEditor
 				for (const auto& Pin : Node.Pins)
 					if (Pin.ID == PinID)
 					{
-						if (Hidden) State->HiddenPins.insert(PinID);
-						else State->HiddenPins.erase(PinID);
+						const bool Changed = Hidden ? State->HiddenPins.insert(PinID).second :
+							State->HiddenPins.erase(PinID) != 0;
+						if (Changed) ++State->PinLayoutRevision;
 						const auto Setting = std::find_if(m_PinVisibilitySettings.begin(), m_PinVisibilitySettings.end(),
 							[&Session, &State, PinID](const auto& Candidate)
 								{ return Candidate.Document == Session.Identity && Candidate.GraphID == State->History.Graph().ID &&
@@ -1311,6 +1325,8 @@ namespace PulseForgeEditor
 		};
 		std::vector<EditorGraphPropertyEditEvent> PropertyEvents;
 		std::vector<PinAnchorMeasurement> PinAnchorCanvasPositions;
+		std::unordered_map<PulseForge::UUID, EditorGraphCanvasPoint, PulseForge::UUIDHash> CurrentNodeCanvasPositions;
+		std::unordered_map<PulseForge::UUID, EditorGraphCanvasPoint, PulseForge::UUIDHash> CurrentNodeCanvasSizes;
 		struct PinVisibilityChange { PulseForge::UUID NodeID; PulseForge::UUID PinID; bool Hidden = false; };
 		std::vector<PinVisibilityChange> PendingVisibilityChanges;
 		bool PropertyWidgetHovered = false;
@@ -1362,6 +1378,111 @@ namespace PulseForgeEditor
 		std::optional<CanvasMouseInputMask> CanvasInputMask;
 		if (State->PinMove || State->SuppressCanvasInputUntilRelease) CanvasInputMask.emplace();
 		NodeEditor::Begin("##PulseForgeGraphCanvas", ImVec2(0.0f, 0.0f));
+		const ImVec2 WireDoubleClickCanvasPosition = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+		const bool PinMovePreviewFrame = State->PinMove && State->PinMove->CtrlDrag &&
+			(State->PinMove->Dragging ||
+				(std::pow(ScreenMousePositionAtFrameStart.x - State->PinMove->PressPosition.X, 2.0) +
+				 std::pow(ScreenMousePositionAtFrameStart.y - State->PinMove->PressPosition.Y, 2.0) >=
+				 std::pow(static_cast<double>(Input.MouseDragThreshold), 2.0)));
+		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> MovingConnectionIDs;
+		State->PinMovePresentation.PreviewSubmittedOnCanvasUnderlay = false;
+		if (PinMovePreviewFrame && ContextMatches(CanvasContext) &&
+			State->LastAnchorCanvas == State->Canvas &&
+			State->History.GraphRevision() == State->PinMove->CapturedGraphRevision &&
+			State->LastAnchorGraphRevision == State->PinMove->CapturedGraphRevision &&
+			State->LastAnchorLayoutRevision == State->PinLayoutRevision &&
+			State->LastAnchorContext.Document == CanvasContext.Document &&
+			State->LastAnchorContext.SessionGeneration == CanvasContext.SessionGeneration &&
+			State->LastAnchorContext.HostID == CanvasContext.HostID &&
+			State->LastAnchorContext.GraphID == CanvasContext.GraphID)
+		{
+			std::unordered_map<PulseForge::UUID, ImVec2, PulseForge::UUIDHash> AnchorByPin;
+			std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> AnchorNodeByPin;
+			AnchorByPin.reserve(State->LastPinAnchors.size());
+			AnchorNodeByPin.reserve(State->LastPinAnchors.size());
+			for (const auto& Anchor : State->LastPinAnchors)
+			{
+				AnchorByPin.emplace(Anchor.PinID, ImVec2(static_cast<float>(Anchor.Position.X),
+					static_cast<float>(Anchor.Position.Y)));
+				AnchorNodeByPin.emplace(Anchor.PinID, Anchor.NodeID);
+			}
+			std::unordered_map<PulseForge::UUID, const EditorGraphConnection*, PulseForge::UUIDHash> CurrentConnections;
+			CurrentConnections.reserve(State->History.Graph().Connections.size());
+			for (const auto& Connection : State->History.Graph().Connections)
+				CurrentConnections.emplace(Connection.ID, &Connection);
+			bool Ready = !State->PinMove->CapturedConnections.empty();
+			for (const auto& Connection : State->PinMove->CapturedConnections)
+			{
+				const auto Live = CurrentConnections.find(Connection.ID);
+				const auto FixedPin = State->PinMove->Direction == EditorGraphPinDirection::Output
+					? Connection.InputPin : Connection.OutputPin;
+				const auto AnchorNode = AnchorNodeByPin.find(FixedPin);
+				const auto OwnerPosition = AnchorNode == AnchorNodeByPin.end()
+					? State->LastAnchorNodePositions.end() : State->LastAnchorNodePositions.find(AnchorNode->second);
+				const auto OwnerSize = AnchorNode == AnchorNodeByPin.end()
+					? State->LastAnchorNodeSizes.end() : State->LastAnchorNodeSizes.find(AnchorNode->second);
+				const auto OwnerHandle = AnchorNode == AnchorNodeByPin.end()
+					? State->Handles.end() : State->Handles.find(AnchorNode->second);
+				const bool OwnerGeometryCurrent = OwnerPosition != State->LastAnchorNodePositions.end() &&
+					OwnerSize != State->LastAnchorNodeSizes.end() &&
+					OwnerHandle != State->Handles.end() &&
+					[&]()
+					{
+						const ImVec2 CurrentPosition = NodeEditor::GetNodePosition(NodeEditor::NodeId(OwnerHandle->second));
+						const ImVec2 CurrentSize = NodeEditor::GetNodeSize(NodeEditor::NodeId(OwnerHandle->second));
+						return std::abs(CurrentPosition.x - OwnerPosition->second.X) < 0.01 &&
+							std::abs(CurrentPosition.y - OwnerPosition->second.Y) < 0.01 &&
+							std::abs(CurrentSize.x - OwnerSize->second.X) < 0.01 &&
+							std::abs(CurrentSize.y - OwnerSize->second.Y) < 0.01;
+					}();
+				if (Live == CurrentConnections.end() || *Live->second != Connection || !AnchorByPin.contains(FixedPin) ||
+					!OwnerGeometryCurrent)
+				{
+					Ready = false;
+					break;
+				}
+				MovingConnectionIDs.insert(Connection.ID);
+			}
+			if (Ready)
+			{
+				const ImVec2 PointerCanvas = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+				ImVec2 LooseEnd = PointerCanvas;
+				if (State->StagedPreviewTarget == State->PinMove->PreviewTarget &&
+					State->StagedPreviewRevision == State->History.GraphRevision() &&
+					State->StagedPreviewContext.Document == CanvasContext.Document &&
+					State->StagedPreviewContext.SessionGeneration == CanvasContext.SessionGeneration &&
+					State->StagedPreviewContext.HostID == CanvasContext.HostID &&
+					State->StagedPreviewContext.GraphID == CanvasContext.GraphID &&
+					std::abs(ScreenMousePositionAtFrameStart.x - State->StagedPreviewPointer.X) < 0.5 &&
+					std::abs(ScreenMousePositionAtFrameStart.y - State->StagedPreviewPointer.Y) < 0.5 &&
+					State->PinMove->Preview.Allowed && !State->PinMove->Preview.NoOp)
+					if (const auto Snap = AnchorByPin.find(State->StagedPreviewTarget); Snap != AnchorByPin.end())
+						LooseEnd = Snap->second;
+
+				const ImU32 Color = State->PinMove->Preview.Allowed ? IM_COL32(120, 230, 150, 240) :
+					IM_COL32(255, 190, 90, 235);
+				auto* DrawList = ImGui::GetWindowDrawList();
+				State->PinMovePresentation.PreviewCurves.clear();
+				for (const auto& Connection : State->PinMove->CapturedConnections)
+				{
+					const PulseForge::UUID FixedPin = State->PinMove->Direction == EditorGraphPinDirection::Output
+						? Connection.InputPin : Connection.OutputPin;
+					const ImVec2 Fixed = AnchorByPin.at(FixedPin);
+					const ImVec2 Start = State->PinMove->Direction == EditorGraphPinDirection::Output ? LooseEnd : Fixed;
+					const ImVec2 End = State->PinMove->Direction == EditorGraphPinDirection::Output ? Fixed : LooseEnd;
+					const float Tangent = (std::max)(24.0f, std::abs(End.x - Start.x) * 0.5f);
+					DrawList->AddBezierCubic(Start, ImVec2(Start.x + Tangent, Start.y),
+						ImVec2(End.x - Tangent, End.y), End, Color, 2.5f);
+					State->PinMovePresentation.PreviewSubmittedOnCanvasUnderlay = true;
+					const ImVec2 ScreenStart = NodeEditor::CanvasToScreen(Start);
+					const ImVec2 ScreenEnd = NodeEditor::CanvasToScreen(End);
+					State->PinMovePresentation.PreviewCurves.push_back({ Connection.ID,
+						{ ScreenStart.x, ScreenStart.y }, { ScreenEnd.x, ScreenEnd.y } });
+				}
+			}
+			else MovingConnectionIDs.clear();
+		}
+		else State->PinMovePresentation.PreviewCurves.clear();
 		if (State->ScreenPinRelease.Valid)
 		{
 			const auto& ScreenRelease = State->ScreenPinRelease.Position;
@@ -1412,6 +1533,7 @@ namespace PulseForgeEditor
 			NodeEditor::BeginNode(CanvasNode);
 			EditorGraphCanvasNodePresentation Presentation;
 			Presentation.NodeID = Node.ID;
+			const bool IsRerouteNode = IsEditorGraphRerouteType(Node.TypeKey);
 			const std::string NodeLabel = ReadableNodeLabel(State->Schema, Node.TypeKey);
 			const std::string HeaderDisplay = FitGraphPresentationText(NodeLabel, 420.0f);
 			ImGui::TextUnformatted(HeaderDisplay.c_str());
@@ -1493,7 +1615,8 @@ namespace PulseForgeEditor
 					ShouldShowEditorGraphPinDefault(Pin, *Definition, Incidents);
 				const std::string_view Label = Definition->Label.empty() ? std::string_view(Pin.Key) :
 					std::string_view(Definition->Label);
-				Row.Label = std::string(Label) + "  [" + PinTypeLabel(Pin.Type) + "]";
+				Row.Label = IsRerouteNode ? std::string(Label) :
+					std::string(Label) + "  [" + PinTypeLabel(Pin.Type) + "]";
 				Row.LabelWidth = MeasureLabel(Row.Label, Pin.Direction == EditorGraphPinDirection::Input
 					? MaxInputLabelWidth : MaxOutputLabelWidth);
 				if (Row.ShowDefault)
@@ -1641,9 +1764,15 @@ namespace PulseForgeEditor
 			ImGui::SetCursorPos(PinRowsOrigin);
 			ImGui::Dummy(ImVec2(NodeContentWidth, RowsHeight));
 			NodeEditor::EndNode();
+			const ImVec2 NodeCanvasPosition = NodeEditor::GetNodePosition(CanvasNode);
+			const ImVec2 NodeCanvasSize = NodeEditor::GetNodeSize(CanvasNode);
+			CurrentNodeCanvasPositions.emplace(Node.ID,
+				EditorGraphCanvasPoint{ NodeCanvasPosition.x, NodeCanvasPosition.y });
+			CurrentNodeCanvasSizes.emplace(Node.ID,
+				EditorGraphCanvasPoint{ NodeCanvasSize.x, NodeCanvasSize.y });
 			if (State->CapturePresentation)
 			{
-				const ImVec2 Position = NodeEditor::GetNodePosition(CanvasNode);
+				const ImVec2 Position = NodeCanvasPosition;
 				const ImVec2 ScreenSize = NodeEditor::GetNodeSize(CanvasNode);
 				const float Zoom = NodeEditor::GetCurrentZoom();
 				Presentation.Position = { Position.x, Position.y };
@@ -1654,6 +1783,9 @@ namespace PulseForgeEditor
 		}
 		for (const auto& Connection : State->History.Graph().Connections)
 		{
+			// Do not submit captured links to the canvas while their loose ends are moving.
+			// This removes both their original curves and their native link hit targets.
+			if (MovingConnectionIDs.contains(Connection.ID)) continue;
 			const uintptr_t LinkHandle = RegisterHandle(Connection.ID);
 			const uintptr_t OutputHandle = RegisterHandle(Connection.OutputPin);
 			const uintptr_t InputHandle = RegisterHandle(Connection.InputPin);
@@ -2283,6 +2415,49 @@ namespace PulseForgeEditor
 			!State->NodeMoveTransaction && State->GraphShortcutLatchedKey == ImGuiKey_None;
 		NodeEditor::EnableShortcuts(ShortcutOwnerEligible);
 		NodeEditor::End();
+		State->LastPinAnchors = PinAnchorCanvasPositions;
+		State->LastAnchorNodePositions = std::move(CurrentNodeCanvasPositions);
+		State->LastAnchorNodeSizes = std::move(CurrentNodeCanvasSizes);
+		State->LastAnchorContext = CanvasContext;
+		State->LastAnchorCanvas = State->Canvas;
+		State->LastAnchorGraphRevision = State->History.GraphRevision();
+		State->LastAnchorLayoutRevision = State->PinLayoutRevision;
+		const auto DoubleClickedCanvasLink = NodeEditor::GetDoubleClickedLink();
+		if (!State->PinMove && !State->ReconnectPopup && !SearchPopupActive &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !State->PropertyEdits.HasActiveEdit() &&
+			!State->NodeMoveTransaction && Input.WantTextInput == false)
+		{
+			const auto ClickedLink = DoubleClickedCanvasLink;
+			if (ClickedLink.Get() != 0)
+			{
+				const auto LinkIdentity = State->Identities.find(ClickedLink.Get());
+				NodeEditor::PinId NativeOutput;
+				NodeEditor::PinId NativeInput;
+				if (LinkIdentity != State->Identities.end() &&
+					NodeEditor::GetLinkPins(ClickedLink, &NativeOutput, &NativeInput))
+				{
+					const auto OutputIdentity = State->Identities.find(NativeOutput.Get());
+					const auto InputIdentity = State->Identities.find(NativeInput.Get());
+					const auto Connection = std::find_if(State->History.Graph().Connections.begin(),
+						State->History.Graph().Connections.end(), [&LinkIdentity](const auto& Candidate)
+						{ return Candidate.ID == LinkIdentity->second; });
+					if (OutputIdentity != State->Identities.end() && InputIdentity != State->Identities.end() &&
+						Connection != State->History.Graph().Connections.end() &&
+						Connection->OutputPin == OutputIdentity->second && Connection->InputPin == InputIdentity->second)
+					{
+						auto Inserted = InsertEditorGraphReroute(State->History, State->Schema, Connection->ID,
+							WireDoubleClickCanvasPosition.x, WireDoubleClickCanvasPosition.y);
+						if (Inserted)
+						{
+							State->NeedsCanvasSync = true;
+							ReconcileDirtyState(*State, m_Documents, Session);
+							State->Error.clear();
+						}
+						else State->Error = Inserted.error();
+					}
+				}
+			}
+		}
 		if (CanvasInputMask) CanvasInputMask->Restore();
 		if (State->SuppressCanvasInputUntilRelease && LeftReleasedAtFrameStart)
 			State->SuppressCanvasInputUntilRelease = false;
@@ -2634,6 +2809,22 @@ namespace PulseForgeEditor
 				ReconcileDirtyState(*State, m_Documents, Session);
 			}
 		}
+		if (State->PinMove && State->PinMove->Dragging && State->PinMove->Preview.Allowed &&
+			!State->PinMove->Preview.NoOp && State->PinMove->PreviewTarget == HoveredPinID)
+		{
+			const auto TargetAnchor = std::find_if(PinAnchorCanvasPositions.begin(), PinAnchorCanvasPositions.end(),
+				[&](const auto& Candidate) { return Candidate.PinID == HoveredPinID; });
+			if (TargetAnchor != PinAnchorCanvasPositions.end())
+			{
+				State->StagedPreviewTarget = HoveredPinID;
+				State->StagedPreviewTargetAnchor = TargetAnchor->Position;
+				State->StagedPreviewPointer = CapturedScreenPoint;
+				State->StagedPreviewContext = CanvasContext;
+				State->StagedPreviewRevision = State->History.GraphRevision();
+			}
+			else State->StagedPreviewTarget = {};
+		}
+		else State->StagedPreviewTarget = {};
 		State->LastHoveredPin = HoveredPinID;
 		State->LastPinWidgetHovered = PropertyWidgetHovered;
 
@@ -2716,6 +2907,7 @@ namespace PulseForgeEditor
 		}
 		if (PresentationChanged)
 		{
+			++State->PinLayoutRevision;
 			State->LastHoveredPin = {};
 			if (m_PresentationChanged) m_PresentationChanged();
 		}

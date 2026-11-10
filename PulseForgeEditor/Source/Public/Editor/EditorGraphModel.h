@@ -103,6 +103,10 @@ namespace PulseForgeEditor
 		std::function<std::optional<std::string>(const EditorGraph&, const EditorGraphConnectionPolicyContext&)>
 			ConnectionPolicy;
 		std::function<std::optional<EditorGraphDiagnostic>(const EditorGraph&)> GraphValidationPolicy;
+		// Explicitly opted-in pin types that may be split by the authoring reroute command.
+		// Schemas with custom policies must leave this empty until their policy declares routing transparency.
+		std::vector<EditorGraphPinType> RerouteTypes;
+		bool ReroutePolicyAware = false;
 	};
 
 	struct EditorGraphPin
@@ -139,6 +143,11 @@ namespace PulseForgeEditor
 	[[nodiscard]] bool CanAutoHideEditorGraphPin(const EditorGraphPin& Pin,
 		const EditorGraphPinDefinition& Definition, size_t IncidentConnectionCount, bool NodeConnected) noexcept;
 	[[nodiscard]] bool IsEditorGraphNodeConnected(const EditorGraph& Graph, PulseForge::UUID NodeID);
+	// Reroutes are authoring topology only: consumers follow their input upstream and output downstream;
+	// node position and selection have no evaluation meaning.
+	[[nodiscard]] bool IsEditorGraphRerouteType(std::string_view TypeKey);
+	[[nodiscard]] const EditorGraphNodeDefinition* FindEditorGraphNodeDefinition(
+		const EditorGraphSchema& Schema, std::string_view TypeKey);
 
 	struct EditorGraphNode
 	{
@@ -398,6 +407,9 @@ namespace PulseForgeEditor
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema, PulseForge::UUID SourcePin,
 		PulseForge::UUID TargetPin, std::span<const EditorGraphConnection> CapturedConnections,
 		bool RequireCompleteSourceSet = true);
+	[[nodiscard]] std::expected<PulseForge::UUID, std::string> InsertEditorGraphReroute(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
+		PulseForge::UUID ConnectionID, double X, double Y);
 	[[nodiscard]] std::expected<void, std::string> MoveEditorGraphNodes(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		const std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>>& Positions);

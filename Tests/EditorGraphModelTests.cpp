@@ -1467,6 +1467,104 @@ namespace
 void RunEditorGraphModelTests(TestRunner& Tests)
 {
 	TestBatchPinConnectionMove(Tests);
+	{
+		using namespace PulseForgeEditor;
+		auto Schema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "material.scalar", 0.0) &&
+			AppendNode(*Graph, Schema, "material.multiply", 240.0) && AppendNode(*Graph, Schema, "material.multiply", 480.0));
+		if (Graph)
+		{
+			const auto Output = FindPin(Graph->Nodes[0], "value")->ID;
+			const auto InputA = FindPin(Graph->Nodes[1], "a")->ID;
+			const auto InputB = FindPin(Graph->Nodes[2], "a")->ID;
+			EditorGraphCommandHistory History(*Graph);
+			PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, Output, InputA));
+			PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, Output, InputB));
+			const auto Before = History.Graph();
+			const auto SelectedID = Before.Connections.front().ID;
+			const auto SiblingID = Before.Connections.back().ID;
+			const auto Inserted = InsertEditorGraphReroute(History, Schema, SelectedID, 360.0, 80.0);
+			PF_CHECK(Tests, Inserted.has_value() && History.Graph().Nodes.size() == Before.Nodes.size() + 1 &&
+				History.Graph().Connections.size() == Before.Connections.size() + 1);
+			if (Inserted)
+			{
+				const auto Node = std::find_if(History.Graph().Nodes.begin(), History.Graph().Nodes.end(),
+					[&Inserted](const auto& Candidate) { return Candidate.ID == *Inserted; });
+				PF_CHECK(Tests, Node != History.Graph().Nodes.end() && IsEditorGraphRerouteType(Node->TypeKey));
+				const auto OriginalSegment = std::find_if(History.Graph().Connections.begin(), History.Graph().Connections.end(),
+					[SelectedID](const auto& Candidate) { return Candidate.ID == SelectedID; });
+				const auto* RerouteInput = Node == History.Graph().Nodes.end() ? nullptr : FindPin(*Node, "in");
+				const auto UpstreamSegment = std::find_if(History.Graph().Connections.begin(), History.Graph().Connections.end(),
+				[RerouteInput](const auto& Candidate)
+					{ return RerouteInput && Candidate.InputPin == RerouteInput->ID; });
+				PF_CHECK(Tests, OriginalSegment != History.Graph().Connections.end() && UpstreamSegment != History.Graph().Connections.end() &&
+					OriginalSegment->InputPin == InputA && OriginalSegment->OutputPin != Output &&
+					UpstreamSegment->InputPin == RerouteInput->ID && UpstreamSegment->OutputPin == Output &&
+					UpstreamSegment->ID != SelectedID);
+				PF_CHECK(Tests, std::any_of(History.Graph().Connections.begin(), History.Graph().Connections.end(),
+					[SiblingID, Output, InputB](const auto& Link)
+					{ return Link.ID == SiblingID && Link.OutputPin == Output && Link.InputPin == InputB; }));
+				if (Node != History.Graph().Nodes.end())
+				{
+					const auto* RerouteOutput = FindPin(*Node, "out");
+					const auto* AdditionalInput = FindPin(History.Graph().Nodes[1], "b");
+					EditorGraphCommandHistory BranchHistory(History.Graph());
+					PF_CHECK(Tests, RerouteOutput && AdditionalInput && ConnectEditorGraphPins(
+						BranchHistory, Schema, RerouteOutput->ID, AdditionalInput->ID));
+					PF_CHECK(Tests, BranchHistory.Graph().Connections.size() == History.Graph().Connections.size() + 1 &&
+						ValidateEditorGraph(BranchHistory.Graph(), Schema).empty());
+				}
+				const auto After = History.Graph();
+				PF_CHECK(Tests, History.Undo() && History.Graph() == Before);
+				PF_CHECK(Tests, History.Redo() && History.Graph() == After);
+				PF_CHECK(Tests, ValidateEditorGraph(History.Graph(), Schema).empty());
+			}
+			auto Custom = Schema;
+			Custom.ConnectionPolicy = [](const EditorGraph&, const EditorGraphConnectionPolicyContext&)
+				-> std::optional<std::string> { return std::nullopt; };
+			PF_CHECK(Tests, !InsertEditorGraphReroute(History, Custom, SelectedID, 360.0, 80.0));
+		}
+		{
+			const auto Schema = MakeGameplayEventFixtureSchema();
+			auto Graph = FixtureGraph(Schema);
+			PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "gameplay.event.begin", 0.0) &&
+				AppendNode(*Graph, Schema, "gameplay.flow.branch", 240.0));
+			if (Graph)
+			{
+				const auto Output = FindPin(Graph->Nodes[0], "event")->ID;
+				const auto Input = FindPin(Graph->Nodes[1], "exec-in")->ID;
+				EditorGraphCommandHistory History(*Graph);
+				PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, Output, Input));
+				const auto Wire = History.Graph().Connections.front().ID;
+				const auto Reroute = InsertEditorGraphReroute(History, Schema, Wire, 120.0, 40.0);
+				PF_CHECK(Tests, Reroute && ValidateEditorGraph(History.Graph(), Schema).empty());
+				const auto Serialized = SerializeEditorGraph(History.Graph(), Schema);
+				const auto Reopened = Serialized ? DeserializeEditorGraph(*Serialized, Schema)
+					: std::expected<EditorGraph, std::string>(std::unexpected("reroute serialization failed"));
+				PF_CHECK(Tests, Reopened && Reopened->Nodes.size() == History.Graph().Nodes.size() &&
+					Reopened->Connections == History.Graph().Connections);
+			}
+		}
+		{
+			const auto Schema = MakeGameplayEventFixtureSchema();
+			auto Graph = FixtureGraph(Schema);
+			PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "pulseforge.reroute.execution", 0.0) &&
+				AppendNode(*Graph, Schema, "pulseforge.reroute.execution", 120.0));
+			if (Graph)
+			{
+				const auto FirstInput = FindPin(Graph->Nodes[0], "in")->ID;
+				const auto FirstOutput = FindPin(Graph->Nodes[0], "out")->ID;
+				const auto SecondInput = FindPin(Graph->Nodes[1], "in")->ID;
+				const auto SecondOutput = FindPin(Graph->Nodes[1], "out")->ID;
+				Graph->Connections = { { ID(0xf101), FirstOutput, SecondInput },
+					{ ID(0xf102), SecondOutput, FirstInput } };
+				const auto Diagnostics = ValidateEditorGraph(*Graph, Schema);
+				PF_CHECK(Tests, std::any_of(Diagnostics.begin(), Diagnostics.end(), [](const auto& Diagnostic)
+					{ return Diagnostic.Code == "connection.reroute_cycle"; }));
+			}
+		}
+	}
 	TestMaterialSchemaAndSerialization(Tests);
 	TestGameplaySchemaAndTransactions(Tests);
 	TestPropertyEditCoordinator(Tests);

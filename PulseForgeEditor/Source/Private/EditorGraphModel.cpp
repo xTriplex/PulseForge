@@ -54,11 +54,55 @@ namespace
 		return static_cast<uint32_t>(FullWidth);
 	}
 
+	std::string_view GraphRerouteTypeKey(EditorGraphPinType Type)
+	{
+		switch (Type)
+		{
+		case EditorGraphPinType::Float: return "pulseforge.reroute.float";
+		case EditorGraphPinType::Vector3: return "pulseforge.reroute.vector3";
+		case EditorGraphPinType::Boolean: return "pulseforge.reroute.boolean";
+		case EditorGraphPinType::String: return "pulseforge.reroute.string";
+		case EditorGraphPinType::Execution: return "pulseforge.reroute.execution";
+		}
+		return {};
+	}
+
+	EditorGraphPinDefinition Pin(std::string Key, std::string Label, EditorGraphPinDirection Direction,
+		EditorGraphPinType Type, EditorGraphValue Default = {});
+
+	const std::array<EditorGraphNodeDefinition, 5>& GraphRerouteDefinitions()
+	{
+		static const std::array<EditorGraphNodeDefinition, 5> Definitions = []
+		{
+			std::array<EditorGraphNodeDefinition, 5> Result;
+			const std::array Types = { EditorGraphPinType::Float, EditorGraphPinType::Vector3,
+				EditorGraphPinType::Boolean, EditorGraphPinType::String, EditorGraphPinType::Execution };
+			for (size_t Index = 0; Index < Types.size(); ++Index)
+			{
+				const auto Type = Types[Index];
+				auto Input = Pin("in", "In", EditorGraphPinDirection::Input, Type);
+				auto Output = Pin("out", "Out", EditorGraphPinDirection::Output, Type);
+				Input.DefaultControl = EditorGraphPinDefaultControl::Never;
+				Output.DefaultControl = EditorGraphPinDefaultControl::Never;
+				Input.Hideable = Output.Hideable = false;
+				Input.Required = Output.Required = true;
+				Result[Index] = { std::string(GraphRerouteTypeKey(Type)), "Reroute", { std::move(Input), std::move(Output) } };
+			}
+			return Result;
+		}();
+		return Definitions;
+	}
+
 	const EditorGraphNodeDefinition* FindDefinition(const EditorGraphSchema& Schema, std::string_view Key)
 	{
 		const auto It = std::find_if(Schema.Nodes.begin(), Schema.Nodes.end(), [Key](const auto& Item)
 			{ return Item.TypeKey == Key; });
-		return It == Schema.Nodes.end() ? nullptr : &*It;
+		if (It != Schema.Nodes.end()) return &*It;
+		if ((!Schema.ConnectionPolicy && !Schema.GraphValidationPolicy) || Schema.ReroutePolicyAware)
+			for (const auto& Definition : GraphRerouteDefinitions())
+				if (Definition.TypeKey == Key && std::find(Schema.RerouteTypes.begin(), Schema.RerouteTypes.end(),
+					Definition.Pins.front().Type) != Schema.RerouteTypes.end()) return &Definition;
+		return nullptr;
 	}
 
 	const EditorGraphPinDefinition* FindPinDefinition(const EditorGraphNodeDefinition& Definition, std::string_view Key)
@@ -387,8 +431,43 @@ namespace
 		return Visited != InDegree.size();
 	}
 
+	bool HasRerouteOnlyCycle(const EditorGraph& Graph)
+	{
+		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> RerouteNodes;
+		std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> PinOwners;
+		for (const auto& Node : Graph.Nodes)
+			if (IsEditorGraphRerouteType(Node.TypeKey))
+			{
+				RerouteNodes.emplace(Node.ID, 0);
+				for (const auto& PinValue : Node.Pins) PinOwners.emplace(PinValue.ID, Node.ID);
+			}
+		if (RerouteNodes.empty()) return false;
+		std::unordered_map<PulseForge::UUID, std::vector<PulseForge::UUID>, PulseForge::UUIDHash> Adjacency;
+		for (const auto& Connection : Graph.Connections)
+		{
+			const auto OutputOwner = PinOwners.find(Connection.OutputPin);
+			const auto InputOwner = PinOwners.find(Connection.InputPin);
+			if (OutputOwner == PinOwners.end() || InputOwner == PinOwners.end()) continue;
+			Adjacency[OutputOwner->second].push_back(InputOwner->second);
+			++RerouteNodes[InputOwner->second];
+		}
+		std::vector<PulseForge::UUID> Ready;
+		for (const auto& [NodeID, InDegree] : RerouteNodes)
+			if (InDegree == 0) Ready.push_back(NodeID);
+		size_t Visited = 0;
+		while (!Ready.empty())
+		{
+			const auto NodeID = Ready.back();
+			Ready.pop_back();
+			++Visited;
+			for (const auto Next : Adjacency[NodeID])
+				if (--RerouteNodes[Next] == 0) Ready.push_back(Next);
+		}
+		return Visited != RerouteNodes.size();
+	}
+
 	EditorGraphPinDefinition Pin(std::string Key, std::string Label, EditorGraphPinDirection Direction,
-		EditorGraphPinType Type, EditorGraphValue Default = {})
+		EditorGraphPinType Type, EditorGraphValue Default)
 	{
 		if (std::holds_alternative<std::monostate>(Default))
 		{
@@ -436,11 +515,23 @@ namespace PulseForgeEditor
 		if (Schema.Key.empty() || Schema.Version == 0)
 			return std::unexpected("A graph schema requires a stable key and nonzero version");
 		if (Schema.Nodes.empty()) return std::unexpected("A graph schema must provide a node catalog");
+		if ((!Schema.RerouteTypes.empty()) && (Schema.ConnectionPolicy || Schema.GraphValidationPolicy) &&
+			!Schema.ReroutePolicyAware)
+			return std::unexpected("A schema with custom policy callbacks must explicitly implement reroute transparency before opting in");
+		{
+			std::unordered_set<EditorGraphPinType> Types;
+			for (const auto Type : Schema.RerouteTypes)
+				if (!Types.insert(Type).second)
+					return std::unexpected("A graph schema lists the same reroute pin type more than once");
+		}
 		std::unordered_set<std::string> NodeKeys;
 		for (const auto& Node : Schema.Nodes)
 		{
 			if (Node.TypeKey.empty() || !NodeKeys.insert(Node.TypeKey).second)
 				return std::unexpected("A graph schema contains an empty or duplicate node type key");
+			if (std::any_of(GraphRerouteDefinitions().begin(), GraphRerouteDefinitions().end(), [&Node](const auto& Definition)
+				{ return Definition.TypeKey == Node.TypeKey; }))
+				return std::unexpected("Graph node keys cannot reuse reserved typed-reroute identities");
 			std::unordered_set<std::string> PinKeys;
 			for (const auto& Pin : Node.Pins)
 				if (Pin.Key.empty() || !PinKeys.insert(Pin.Key).second || !IsValueCompatible(Pin.Type, Pin.DefaultValue))
@@ -498,6 +589,17 @@ namespace PulseForgeEditor
 		for (const auto& Pin : Node->Pins) PinIDs.insert(Pin.ID);
 		return std::any_of(Graph.Connections.begin(), Graph.Connections.end(), [&PinIDs](const auto& Connection)
 			{ return PinIDs.contains(Connection.OutputPin) || PinIDs.contains(Connection.InputPin); });
+	}
+
+	bool IsEditorGraphRerouteType(std::string_view TypeKey)
+	{
+		return std::any_of(GraphRerouteDefinitions().begin(), GraphRerouteDefinitions().end(), [TypeKey](const auto& Definition)
+			{ return Definition.TypeKey == TypeKey; });
+	}
+
+	const EditorGraphNodeDefinition* FindEditorGraphNodeDefinition(const EditorGraphSchema& Schema, std::string_view TypeKey)
+	{
+		return FindDefinition(Schema, TypeKey);
 	}
 
 	EditorGraphCommandHistory::EditorGraphCommandHistory(EditorGraph InitialGraph)
@@ -742,7 +844,7 @@ namespace PulseForgeEditor
 
 	EditorGraphSchema MakeMaterialExpressionFixtureSchema()
 	{
-		return EditorGraphSchema{
+		auto Schema = EditorGraphSchema{
 			"pulseforge.material-expression-fixture", 1,
 			EditorGraphCyclePolicy::Reject, EditorGraphCyclePolicy::Reject, true,
 			{
@@ -756,11 +858,13 @@ namespace PulseForgeEditor
 				{ "material.output", "Material Output", { Pin("surface", "Surface", EditorGraphPinDirection::Input,
 					EditorGraphPinType::Vector3, EditorGraphVector3{ 0.5, 0.5, 0.5 }) } }
 			} };
+		Schema.RerouteTypes = { EditorGraphPinType::Float, EditorGraphPinType::Vector3 };
+		return Schema;
 	}
 
 	EditorGraphSchema MakeGameplayEventFixtureSchema()
 	{
-		return EditorGraphSchema{
+		auto Schema = EditorGraphSchema{
 			"pulseforge.gameplay-event-fixture", 1,
 			EditorGraphCyclePolicy::Reject, EditorGraphCyclePolicy::Allow, true,
 			{
@@ -774,6 +878,8 @@ namespace PulseForgeEditor
 					Pin("exec-in", "In", EditorGraphPinDirection::Input, EditorGraphPinType::Execution),
 					Pin("message", "Message", EditorGraphPinDirection::Input, EditorGraphPinType::String, std::string{}) } }
 			} };
+		Schema.RerouteTypes = { EditorGraphPinType::Execution };
+		return Schema;
 	}
 
 	std::expected<EditorGraph, std::string> CreateEditorGraph(const EditorGraphSchema& Schema, PulseForge::UUID GraphID)
@@ -898,6 +1004,8 @@ namespace PulseForgeEditor
 			Add("connection.cycle", "Material/data dependency cycle violates this schema policy", Graph.ID);
 		if (Schema.ExecutionCyclePolicy == EditorGraphCyclePolicy::Reject && HasCycle(Graph, Index, true, Stats))
 			Add("connection.cycle", "Gameplay execution cycle violates this schema policy", Graph.ID);
+		if (HasRerouteOnlyCycle(Graph))
+			Add("connection.reroute_cycle", "A reroute-only cycle has no real graph producer", Graph.ID);
 		if (Schema.GraphValidationPolicy)
 			if (auto Diagnostic = Schema.GraphValidationPolicy(Graph))
 				Diagnostics.push_back(std::move(*Diagnostic));
@@ -1591,6 +1699,67 @@ namespace PulseForgeEditor
 		}, Error))
 			return std::unexpected(Error);
 		return {};
+	}
+
+	std::expected<PulseForge::UUID, std::string> InsertEditorGraphReroute(EditorGraphCommandHistory& History,
+		const EditorGraphSchema& Schema, PulseForge::UUID ConnectionID, double X, double Y)
+	{
+		const auto& Before = History.Graph();
+		const auto Existing = std::find_if(Before.Connections.begin(), Before.Connections.end(),
+			[ConnectionID](const auto& Connection) { return Connection.ID == ConnectionID; });
+		if (Existing == Before.Connections.end()) return std::unexpected("The selected wire no longer exists");
+		if (!IsFiniteCoordinate(X) || !IsFiniteCoordinate(Y)) return std::unexpected("Reroute position is outside the supported range");
+		if ((Schema.ConnectionPolicy || Schema.GraphValidationPolicy) && !Schema.ReroutePolicyAware)
+			return std::unexpected("This schema has custom connection rules but has not declared transparent reroute semantics");
+		const EditorGraphPin* Output = nullptr;
+		const EditorGraphPin* Input = nullptr;
+		for (const auto& Node : Before.Nodes)
+			for (const auto& PinValue : Node.Pins)
+			{
+				if (PinValue.ID == Existing->OutputPin) Output = &PinValue;
+				if (PinValue.ID == Existing->InputPin) Input = &PinValue;
+			}
+		if (!Output || !Input || Output->Type != Input->Type || Output->Direction != EditorGraphPinDirection::Output ||
+			Input->Direction != EditorGraphPinDirection::Input)
+			return std::unexpected("The selected wire endpoints are invalid");
+		if (Output->Cardinality != EditorGraphPinCardinality::Multiple)
+			return std::unexpected("Reroutes cannot expand a single-cardinality source output");
+		if (std::find(Schema.RerouteTypes.begin(), Schema.RerouteTypes.end(), Output->Type) == Schema.RerouteTypes.end())
+			return std::unexpected("This graph schema does not support reroutes for the selected wire type");
+		const auto* RerouteDefinition = FindDefinition(Schema, GraphRerouteTypeKey(Output->Type));
+		if (!RerouteDefinition) return std::unexpected("The schema does not provide a compatible reroute definition");
+		auto RerouteResult = CreateEditorGraphNode(Schema, RerouteDefinition->TypeKey, X, Y);
+		if (!RerouteResult) return std::unexpected(RerouteResult.error());
+		EditorGraphNode Reroute = std::move(*RerouteResult);
+		const auto RerouteInput = std::find_if(Reroute.Pins.begin(), Reroute.Pins.end(),
+			[](const auto& PinValue) { return PinValue.Key == "in"; });
+		const auto RerouteOutput = std::find_if(Reroute.Pins.begin(), Reroute.Pins.end(),
+			[](const auto& PinValue) { return PinValue.Key == "out"; });
+		if (RerouteInput == Reroute.Pins.end() || RerouteOutput == Reroute.Pins.end())
+			return std::unexpected("The reroute schema definition is incomplete");
+		auto UpstreamID = PulseForge::UUID::Generate();
+		if (!UpstreamID) return std::unexpected(UpstreamID.error().Message);
+		const PulseForge::UUID RerouteID = Reroute.ID;
+		const PulseForge::UUID RerouteInputID = RerouteInput->ID;
+		const PulseForge::UUID RerouteOutputID = RerouteOutput->ID;
+		const PulseForge::UUID OriginalOutput = Existing->OutputPin;
+		const PulseForge::UUID OriginalInput = Existing->InputPin;
+		std::string Error;
+		if (!History.Execute(Schema, [=, Reroute = std::move(Reroute)](EditorGraph& Graph) mutable
+			-> std::expected<void, std::string>
+		{
+			auto Link = std::find_if(Graph.Connections.begin(), Graph.Connections.end(),
+				[ConnectionID](const auto& Candidate) { return Candidate.ID == ConnectionID; });
+			if (Link == Graph.Connections.end() || Link->OutputPin != OriginalOutput || Link->InputPin != OriginalInput)
+				return std::unexpected("The selected wire changed before reroute insertion");
+			if (Graph.Nodes.size() >= EditorGraphMaximumNodes || Graph.Connections.size() >= EditorGraphMaximumConnections)
+				return std::unexpected("The graph has no capacity for a reroute insertion");
+			Link->OutputPin = RerouteOutputID;
+			Graph.Nodes.push_back(std::move(Reroute));
+			Graph.Connections.push_back({ *UpstreamID, OriginalOutput, RerouteInputID });
+			return {};
+		}, Error)) return std::unexpected(Error);
+		return RerouteID;
 	}
 
 	std::expected<void, std::string> MoveEditorGraphNodes(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,

@@ -1644,6 +1644,7 @@ namespace
 		const EditorGraph Baseline = *Graph;
 		bool AllowUnconnectedSourceAConnection = false;
 		auto Schema = BaseSchema;
+		Schema.ReroutePolicyAware = true;
 		Schema.ConnectionPolicy = [SourceAValue, &AllowUnconnectedSourceAConnection](const EditorGraph&,
 			const EditorGraphConnectionPolicyContext& Context)
 			-> std::optional<std::string>
@@ -1909,10 +1910,47 @@ namespace
 		// Reset explicitly so a pre-fix ordinary link cannot contaminate later assertions.
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
 		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *Session,
+			"{\"view\":{\"scroll\":{\"x\":37.0,\"y\":-21.0},\"zoom\":0.85}}");
 		// SetGraphForTesting replaces model identities. Let the production adapter
 		// synchronize its canvas before reusing screen coordinates for another gesture.
 		DrawFrame(ImVec2(-1000.0f, -1000.0f));
 		const ImVec2 ResetSourceAOutputPoint = FindPinScreen(SourceAValue);
+		const ImVec2 ResetSourceBOutputPoint = FindPinScreen(SourceBValue);
+		const ImVec2 FixedInputA = FindPinScreen(TargetAA);
+		const ImVec2 FixedInputB = FindPinScreen(TargetBA);
+		const auto PreviewNodeMetrics = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+		const auto FindPinOwnerID = [&](UUID PinID)
+		{
+			for (const auto& Node : Baseline.Nodes)
+				if (std::any_of(Node.Pins.begin(), Node.Pins.end(), [PinID](const auto& Pin) { return Pin.ID == PinID; }))
+					return Node.ID;
+			return UUID{};
+		};
+		const auto IsInsideNodeBody = [&](EditorGraphScreenPoint Point, UUID NodeID)
+		{
+			const auto Metric = std::find_if(PreviewNodeMetrics.begin(), PreviewNodeMetrics.end(), [NodeID](const auto& Candidate)
+				{ return Candidate.NodeID == NodeID; });
+			if (Metric == PreviewNodeMetrics.end()) return false;
+			const auto Minimum = EditorGraphDocumentEditorTestAccess::CanvasToScreen(GraphEditor, *Session, Metric->Position);
+			const auto Maximum = EditorGraphDocumentEditorTestAccess::CanvasToScreen(GraphEditor, *Session,
+				{ Metric->Position.X + Metric->Size.X, Metric->Position.Y + Metric->Size.Y });
+			return Point.X > Minimum.X && Point.X < Maximum.X && Point.Y > Minimum.Y && Point.Y < Maximum.Y;
+		};
+		const auto FindNodeCenterByID = [&](UUID NodeID)
+		{
+			const auto Metric = std::find_if(PreviewNodeMetrics.begin(), PreviewNodeMetrics.end(), [NodeID](const auto& Candidate)
+				{ return Candidate.NodeID == NodeID; });
+			if (Metric == PreviewNodeMetrics.end()) return ImVec2(-1000.0f, -1000.0f);
+			const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(GraphEditor, *Session,
+				{ Metric->Position.X + Metric->Size.X * 0.5, Metric->Position.Y + Metric->Size.Y * 0.5 });
+			return ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+		};
+		const ImVec2 PreviewCursorA = FindNodeCenterByID(SourceB);
+		const UUID PreviewCursorNodeA = SourceB;
+		const auto PreviewCursorNodeB = std::find_if(Baseline.Nodes.begin(), Baseline.Nodes.end(),
+			[SourceC](const auto& Node) { return Node.ID == SourceC; });
+		const ImVec2 PreviewCursorB = FindNodeCenterByID(SourceC);
 		const ImVec2 ResetOnePixelPressPoint(ResetSourceAOutputPoint.x + 1.0f, ResetSourceAOutputPoint.y);
 
 		const auto BeforeCtrlOutput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
@@ -1925,12 +1963,46 @@ namespace
 		DrawFrame(ResetOnePixelPressPoint, true, false, false, false);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
 		PF_CHECK(Tests, PinMove.Active && PinMove.CtrlDrag && !PinMove.Dragging);
-		DrawFrame(SourceBOutputPoint, true, false, false, false);
+		DrawFrame(PreviewCursorA, true, false, false, false);
+		const auto OutputPreviewA = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		DrawFrame(PreviewCursorB, true, false, false, false);
+		const auto OutputPreviewB = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, OutputPreviewA.Dragging && OutputPreviewA.PreviewCurves.size() == 2 &&
+			OutputPreviewB.Dragging && OutputPreviewB.PreviewCurves.size() == 2);
+		PF_CHECK(Tests, OutputPreviewA.PreviewSubmittedOnCanvasUnderlay &&
+			OutputPreviewB.PreviewSubmittedOnCanvasUnderlay);
+		PF_CHECK(Tests, PreviewCursorA.x > HostOrigin.x && PreviewCursorA.y > HostOrigin.y &&
+			PreviewCursorB.x > HostOrigin.x && PreviewCursorB.y > HostOrigin.y);
+		if (OutputPreviewA.PreviewCurves.size() == 2 && OutputPreviewB.PreviewCurves.size() == 2)
+		{
+			PF_CHECK(Tests, PreviewCursorNodeB != Baseline.Nodes.end() &&
+				IsInsideNodeBody({ OutputPreviewA.PreviewCurves[0].End.X, OutputPreviewA.PreviewCurves[0].End.Y },
+					FindPinOwnerID(TargetAA)) &&
+				IsInsideNodeBody({ OutputPreviewA.PreviewCurves[1].End.X, OutputPreviewA.PreviewCurves[1].End.Y },
+					FindPinOwnerID(TargetBA)) &&
+				IsInsideNodeBody({ PreviewCursorA.x, PreviewCursorA.y }, PreviewCursorNodeA) &&
+				IsInsideNodeBody({ PreviewCursorB.x, PreviewCursorB.y }, PreviewCursorNodeB->ID));
+			PF_CHECK(Tests, std::abs(OutputPreviewA.PreviewCurves[0].Start.X - PreviewCursorA.x) < 1.0 &&
+				std::abs(OutputPreviewA.PreviewCurves[1].Start.X - PreviewCursorA.x) < 1.0);
+			PF_CHECK(Tests, std::abs(OutputPreviewB.PreviewCurves[0].Start.X - PreviewCursorB.x) < 1.0 &&
+				std::abs(OutputPreviewB.PreviewCurves[1].Start.X - PreviewCursorB.x) < 1.0);
+			PF_CHECK(Tests, std::abs(OutputPreviewA.PreviewCurves[0].End.X - FixedInputA.x) < 1.0 &&
+				std::abs(OutputPreviewB.PreviewCurves[0].End.X - FixedInputA.x) < 1.0 &&
+				std::abs(OutputPreviewA.PreviewCurves[0].End.Y - FixedInputA.y) < 1.0 &&
+				std::abs(OutputPreviewB.PreviewCurves[0].End.Y - FixedInputA.y) < 1.0);
+			PF_CHECK(Tests, std::abs(OutputPreviewA.PreviewCurves[1].End.X - FixedInputB.x) < 1.0 &&
+				std::abs(OutputPreviewB.PreviewCurves[1].End.X - FixedInputB.x) < 1.0 &&
+				std::abs(OutputPreviewA.PreviewCurves[1].End.Y - FixedInputB.y) < 1.0 &&
+				std::abs(OutputPreviewB.PreviewCurves[1].End.Y - FixedInputB.y) < 1.0);
+		}
+		DrawFrame(ResetSourceBOutputPoint, true, false, false, false);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
-		PF_CHECK(Tests, PinMove.Active && PinMove.Dragging && PinMove.TargetAllowed &&
-			PinMove.MovingConnectionCount == 2 &&
-			PinMove.PreviewDecisionEvaluations == 1);
-		DrawFrame(SourceBOutputPoint, false, false, false, false);
+		PF_CHECK(Tests, PinMove.Active);
+		PF_CHECK(Tests, PinMove.Dragging);
+		PF_CHECK(Tests, PinMove.TargetAllowed);
+		PF_CHECK(Tests, PinMove.MovingConnectionCount == 2);
+		PF_CHECK(Tests, PinMove.PreviewDecisionEvaluations == 1);
+		DrawFrame(ResetSourceBOutputPoint, false, false, false, false);
 		auto AfterCtrlOutput = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
 		PF_CHECK(Tests, LinkID(AfterCtrlOutput, SourceBValue, TargetAA) == PrimaryLink &&
 			LinkID(AfterCtrlOutput, SourceBValue, TargetBA) == FanOutLink &&
@@ -1944,12 +2016,26 @@ namespace
 		// A Ctrl-drag from one input moves that endpoint while preserving its wire identity.
 		const ImVec2 InputSourcePoint = FindPinScreen(TargetAA);
 		const ImVec2 InputTargetPoint = FindPinScreen(TargetDA);
+		const ImVec2 FixedOutputForInputMove = FindPinScreen(SourceAValue);
 		DrawFrame(ImVec2(-1000.0f, -1000.0f));
 		DrawFrame(ImVec2(InputSourcePoint.x + 1.0f, InputSourcePoint.y), true, false, false, true, std::nullopt, true);
 		PF_CHECK(Tests, LastQueuedCtrlLeftPress);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
 		PF_CHECK(Tests, PinMove.Active && PinMove.SourcePin == TargetAA &&
 			PinMove.MovingConnectionCount == 1);
+		DrawFrame(PreviewCursorA, true);
+		const auto InputPreviewA = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		DrawFrame(PreviewCursorB, true);
+		const auto InputPreviewB = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+		PF_CHECK(Tests, InputPreviewA.PreviewCurves.size() == 1 && InputPreviewB.PreviewCurves.size() == 1 &&
+			InputPreviewA.PreviewSubmittedOnCanvasUnderlay && InputPreviewB.PreviewSubmittedOnCanvasUnderlay);
+		if (InputPreviewA.PreviewCurves.size() == 1 && InputPreviewB.PreviewCurves.size() == 1)
+			PF_CHECK(Tests, std::abs(InputPreviewA.PreviewCurves[0].Start.X - FixedOutputForInputMove.x) < 1.0 &&
+				std::abs(InputPreviewB.PreviewCurves[0].Start.X - FixedOutputForInputMove.x) < 1.0 &&
+				std::abs(InputPreviewA.PreviewCurves[0].Start.Y - FixedOutputForInputMove.y) < 1.0 &&
+				std::abs(InputPreviewB.PreviewCurves[0].Start.Y - FixedOutputForInputMove.y) < 1.0 &&
+				std::abs(InputPreviewA.PreviewCurves[0].End.X - PreviewCursorA.x) < 1.0 &&
+				std::abs(InputPreviewB.PreviewCurves[0].End.X - PreviewCursorB.x) < 1.0);
 		DrawFrame(InputTargetPoint, true, false, false, false);
 		PinMove = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
 		PF_CHECK(Tests, PinMove.Active && PinMove.Dragging && PinMove.Direction == EditorGraphPinDirection::Input &&
@@ -2232,6 +2318,69 @@ namespace
 		DrawFrame(StaleTargetPoint, false);
 		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == StaleGeometryGraph &&
 			Session->Revision == StaleGeometryRevision && !Session->IsDirty());
+
+		// Double-clicking the canvas-resolved wire inserts a typed reroute through the
+		// production adapter and preserves the selected downstream connection identity.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
+		const auto WirePoint = FindLinkPoint(PrimaryLink);
+		PF_CHECK(Tests, WirePoint.has_value());
+		if (WirePoint)
+		{
+			const auto BeforeReroute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			const auto ExpectedReroutePosition = EditorGraphDocumentEditorTestAccess::ScreenToCanvas(GraphEditor, *Session,
+				{ WirePoint->x, WirePoint->y });
+			const uint64_t RerouteRevision = Session->Revision;
+			DrawFrame(*WirePoint);
+			DrawFrame(*WirePoint, true);
+			DrawFrame(*WirePoint, false);
+			DrawFrame(*WirePoint, true);
+			DrawFrame(*WirePoint, false);
+			const auto AfterReroute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			PF_CHECK(Tests, AfterReroute.Nodes.size() == BeforeReroute.Nodes.size() + 1 &&
+				AfterReroute.Connections.size() == BeforeReroute.Connections.size() + 1 &&
+				Session->Revision == RerouteRevision + 1 && Session->IsDirty());
+			DrawFrame(ImVec2(-1000.0f, -1000.0f));
+			const auto Downstream = std::find_if(AfterReroute.Connections.begin(), AfterReroute.Connections.end(),
+				[PrimaryLink](const auto& Link) { return Link.ID == PrimaryLink; });
+			PF_CHECK(Tests, Downstream != AfterReroute.Connections.end() && Downstream->InputPin == TargetAA &&
+				Downstream->OutputPin != SourceAValue);
+			if (Downstream != AfterReroute.Connections.end())
+			{
+				const auto RerouteNode = std::find_if(AfterReroute.Nodes.begin(), AfterReroute.Nodes.end(),
+					[&](const auto& Node) { return std::any_of(Node.Pins.begin(), Node.Pins.end(),
+						[&](const auto& Pin) { return Pin.ID == Downstream->OutputPin; }); });
+				PF_CHECK(Tests, RerouteNode != AfterReroute.Nodes.end() && IsEditorGraphRerouteType(RerouteNode->TypeKey));
+				if (RerouteNode != AfterReroute.Nodes.end())
+				{
+					const auto ReroutePresentations = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+					const auto ReroutePresentation = std::find_if(ReroutePresentations.begin(), ReroutePresentations.end(),
+						[&](const auto& Candidate) { return Candidate.NodeID == RerouteNode->ID; });
+					const auto RerouteInputIt = std::find_if(RerouteNode->Pins.begin(), RerouteNode->Pins.end(),
+						[](const auto& Pin) { return Pin.Key == "in"; });
+					const auto RerouteOutputIt = std::find_if(RerouteNode->Pins.begin(), RerouteNode->Pins.end(),
+						[](const auto& Pin) { return Pin.Key == "out"; });
+					const auto* RerouteInput = RerouteInputIt == RerouteNode->Pins.end() ? nullptr : &*RerouteInputIt;
+					const auto* RerouteOutput = RerouteOutputIt == RerouteNode->Pins.end() ? nullptr : &*RerouteOutputIt;
+					PF_CHECK(Tests, RerouteInput && RerouteOutput &&
+						std::abs(RerouteNode->X - ExpectedReroutePosition.X) < 1.0 &&
+						std::abs(RerouteNode->Y - ExpectedReroutePosition.Y) < 1.0 &&
+						RerouteInput->Type == EditorGraphPinType::Float && RerouteOutput->Type == EditorGraphPinType::Float);
+					if (ReroutePresentation != ReroutePresentations.end())
+						PF_CHECK(Tests, ReroutePresentation->Size.X < 200.0 && ReroutePresentation->Size.Y < 110.0);
+				}
+			}
+			PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+				EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == BeforeReroute);
+			PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+				EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == AfterReroute);
+			PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+			const auto RerouteBytes = ReadBytes(Project->GetRootPath() / Fixture->ProjectRelativePath);
+			const auto ReopenedReroute = RerouteBytes ? DeserializeEditorGraph(*RerouteBytes, Schema)
+				: std::expected<EditorGraph, std::string>(std::unexpected("saved reroute graph bytes are unavailable"));
+			PF_CHECK(Tests, ReopenedReroute && SameGraphByIdentity(*ReopenedReroute, AfterReroute));
+		}
 	}
 
 	void TestGraphCanvasCreateRequestPolling(TestRunner& Tests)
