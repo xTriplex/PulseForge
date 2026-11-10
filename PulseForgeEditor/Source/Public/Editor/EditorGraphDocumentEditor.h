@@ -448,6 +448,8 @@ namespace PulseForgeEditor
 		[[nodiscard]] EditorGraphReconnectPopupPresentation GetReconnectPopupForTesting(
 			EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphPinMovePresentation GetPinMoveForTesting(EditorDocumentSession& Session);
+		[[nodiscard]] bool IsCanvasInputSuppressedForTesting(EditorDocumentSession& Session);
+		[[nodiscard]] PulseForge::UUID GetLastHoveredPinForTesting(EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
 		[[nodiscard]] EditorGraph GetGraphForTesting(EditorDocumentSession& Session);
 		void SetSelectedNodesForTesting(EditorDocumentSession& Session, const std::vector<PulseForge::UUID>& NodeIDs);
