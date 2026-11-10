@@ -431,39 +431,109 @@ namespace
 		return Visited != InDegree.size();
 	}
 
-	bool HasRerouteOnlyCycle(const EditorGraph& Graph)
+	struct RerouteTopologyIssue final
 	{
-		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> RerouteNodes;
-		std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> PinOwners;
+		bool OnlyCycle = false;
+		PulseForge::UUID SingleOutputFanout;
+	};
+
+	RerouteTopologyIssue InspectRerouteTopology(const EditorGraph& Graph,
+		std::span<const PulseForge::UUID> RemovedConnectionIDs = {},
+		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> Proposed = std::nullopt)
+	{
+		std::unordered_map<PulseForge::UUID, const EditorGraphNode*, PulseForge::UUIDHash> PinOwners;
+		std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> RerouteOutputs;
+		std::unordered_map<PulseForge::UUID, EditorGraphPinCardinality, PulseForge::UUIDHash> OutputCardinality;
+		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> RerouteNodes;
 		for (const auto& Node : Graph.Nodes)
-			if (IsEditorGraphRerouteType(Node.TypeKey))
-			{
-				RerouteNodes.emplace(Node.ID, 0);
-				for (const auto& PinValue : Node.Pins) PinOwners.emplace(PinValue.ID, Node.ID);
-			}
-		if (RerouteNodes.empty()) return false;
-		std::unordered_map<PulseForge::UUID, std::vector<PulseForge::UUID>, PulseForge::UUIDHash> Adjacency;
-		for (const auto& Connection : Graph.Connections)
 		{
-			const auto OutputOwner = PinOwners.find(Connection.OutputPin);
-			const auto InputOwner = PinOwners.find(Connection.InputPin);
-			if (OutputOwner == PinOwners.end() || InputOwner == PinOwners.end()) continue;
-			Adjacency[OutputOwner->second].push_back(InputOwner->second);
-			++RerouteNodes[InputOwner->second];
+			const bool IsReroute = IsEditorGraphRerouteType(Node.TypeKey);
+			if (IsReroute) RerouteNodes.insert(Node.ID);
+			for (const auto& PinValue : Node.Pins)
+			{
+				PinOwners.emplace(PinValue.ID, &Node);
+				if (PinValue.Direction == EditorGraphPinDirection::Output)
+				{
+					OutputCardinality.emplace(PinValue.ID, PinValue.Cardinality);
+					if (IsReroute && PinValue.Key == "out") RerouteOutputs.emplace(Node.ID, PinValue.ID);
+				}
+			}
 		}
+		std::unordered_map<PulseForge::UUID, std::vector<PulseForge::UUID>, PulseForge::UUIDHash> Outgoing;
+		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> RerouteInDegree;
+		for (const auto NodeID : RerouteNodes) RerouteInDegree.emplace(NodeID, 0);
+		const auto AddEdge = [&](PulseForge::UUID OutputPin, PulseForge::UUID InputPin)
+		{
+			Outgoing[OutputPin].push_back(InputPin);
+			const auto OutputOwner = PinOwners.find(OutputPin);
+			const auto InputOwner = PinOwners.find(InputPin);
+			if (OutputOwner != PinOwners.end() && InputOwner != PinOwners.end() &&
+				RerouteNodes.contains(OutputOwner->second->ID) && RerouteNodes.contains(InputOwner->second->ID))
+				++RerouteInDegree[InputOwner->second->ID];
+		};
+		for (const auto& Connection : Graph.Connections)
+			if (std::find(RemovedConnectionIDs.begin(), RemovedConnectionIDs.end(), Connection.ID) == RemovedConnectionIDs.end())
+				AddEdge(Connection.OutputPin, Connection.InputPin);
+		if (Proposed) AddEdge(Proposed->first, Proposed->second);
+
 		std::vector<PulseForge::UUID> Ready;
-		for (const auto& [NodeID, InDegree] : RerouteNodes)
-			if (InDegree == 0) Ready.push_back(NodeID);
+		for (const auto& [NodeID, Degree] : RerouteInDegree)
+			if (Degree == 0) Ready.push_back(NodeID);
 		size_t Visited = 0;
 		while (!Ready.empty())
 		{
 			const auto NodeID = Ready.back();
 			Ready.pop_back();
 			++Visited;
-			for (const auto Next : Adjacency[NodeID])
-				if (--RerouteNodes[Next] == 0) Ready.push_back(Next);
+			const auto Output = RerouteOutputs.find(NodeID);
+			if (Output == RerouteOutputs.end()) continue;
+			const auto Edges = Outgoing.find(Output->second);
+			if (Edges == Outgoing.end()) continue;
+			for (const auto InputPin : Edges->second)
+			{
+				const auto Owner = PinOwners.find(InputPin);
+				if (Owner != PinOwners.end() && RerouteNodes.contains(Owner->second->ID) &&
+					--RerouteInDegree[Owner->second->ID] == 0)
+					Ready.push_back(Owner->second->ID);
+			}
 		}
-		return Visited != RerouteNodes.size();
+		RerouteTopologyIssue Result;
+		Result.OnlyCycle = Visited != RerouteNodes.size();
+
+		for (const auto& [OutputPin, Cardinality] : OutputCardinality)
+		{
+			if (Cardinality != EditorGraphPinCardinality::Single) continue;
+			const auto Owner = PinOwners.find(OutputPin);
+			if (Owner == PinOwners.end() || RerouteNodes.contains(Owner->second->ID)) continue;
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Consumers;
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> VisitedReroutes;
+			std::vector<PulseForge::UUID> PendingInputs;
+			if (const auto Edges = Outgoing.find(OutputPin); Edges != Outgoing.end())
+				PendingInputs.insert(PendingInputs.end(), Edges->second.begin(), Edges->second.end());
+			while (!PendingInputs.empty())
+			{
+				const auto InputPin = PendingInputs.back();
+				PendingInputs.pop_back();
+				const auto InputOwner = PinOwners.find(InputPin);
+				if (InputOwner == PinOwners.end()) continue;
+				if (!RerouteNodes.contains(InputOwner->second->ID))
+				{
+					Consumers.insert(InputPin);
+					continue;
+				}
+				if (!VisitedReroutes.insert(InputOwner->second->ID).second) continue;
+				const auto RerouteOutput = RerouteOutputs.find(InputOwner->second->ID);
+				if (RerouteOutput == RerouteOutputs.end()) continue;
+				if (const auto Edges = Outgoing.find(RerouteOutput->second); Edges != Outgoing.end())
+					PendingInputs.insert(PendingInputs.end(), Edges->second.begin(), Edges->second.end());
+			}
+			if (Consumers.size() > 1)
+			{
+				Result.SingleOutputFanout = OutputPin;
+				return Result;
+			}
+		}
+		return Result;
 	}
 
 	EditorGraphPinDefinition Pin(std::string Key, std::string Label, EditorGraphPinDirection Direction,
@@ -1004,8 +1074,12 @@ namespace PulseForgeEditor
 			Add("connection.cycle", "Material/data dependency cycle violates this schema policy", Graph.ID);
 		if (Schema.ExecutionCyclePolicy == EditorGraphCyclePolicy::Reject && HasCycle(Graph, Index, true, Stats))
 			Add("connection.cycle", "Gameplay execution cycle violates this schema policy", Graph.ID);
-		if (HasRerouteOnlyCycle(Graph))
+		const auto RerouteTopology = InspectRerouteTopology(Graph);
+		if (RerouteTopology.OnlyCycle)
 			Add("connection.reroute_cycle", "A reroute-only cycle has no real graph producer", Graph.ID);
+		if (!RerouteTopology.SingleOutputFanout.IsNil())
+			Add("connection.reroute_cardinality", "A single-cardinality output cannot fan out through reroutes",
+				RerouteTopology.SingleOutputFanout);
 		if (Schema.GraphValidationPolicy)
 			if (auto Diagnostic = Schema.GraphValidationPolicy(Graph))
 				Diagnostics.push_back(std::move(*Diagnostic));
@@ -1079,6 +1153,12 @@ namespace PulseForgeEditor
 			HasPath(Index, InputNode->ID, OutputNode->ID, Output->Type == EditorGraphPinType::Execution,
 				ReplacedInput, Stats))
 			return { false, "This connection would create a cycle rejected by the active schema", OutputID, InputID };
+		const auto RerouteTopology = InspectRerouteTopology(Graph, RemovedConnectionIDs,
+			std::pair{ OutputID, InputID });
+		if (RerouteTopology.OnlyCycle)
+			return { false, "This connection would create a reroute-only cycle with no real graph producer", OutputID, InputID };
+		if (!RerouteTopology.SingleOutputFanout.IsNil())
+			return { false, "This connection would exceed a single-cardinality output through a reroute", OutputID, InputID };
 		return { true, "Connection is valid", OutputID, InputID, std::move(RemovedConnectionIDs) };
 	}
 

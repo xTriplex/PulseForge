@@ -32,6 +32,8 @@ namespace
 	using Json = nlohmann::json;
 	constexpr size_t MaximumGraphFileBytes = 2 * 1024 * 1024;
 	constexpr size_t MaximumCanvasHandles = 32'768;
+	constexpr float GraphRerouteWidth = 40.0f;
+	constexpr float GraphRerouteHeight = 22.0f;
 
 	struct GraphDocumentState;
 	struct PinAnchorMeasurement
@@ -1341,6 +1343,85 @@ namespace PulseForgeEditor
 			const auto Found = IncidentConnections.find(PinID);
 			return Found == IncidentConnections.end() ? size_t{} : Found->second;
 		};
+		std::unordered_map<PulseForge::UUID, std::pair<const EditorGraphNode*, const EditorGraphPin*>, PulseForge::UUIDHash> GraphPinOwners;
+		for (const auto& Node : State->History.Graph().Nodes)
+			for (const auto& Pin : Node.Pins) GraphPinOwners.emplace(Pin.ID, std::pair{ &Node, &Pin });
+		const auto FindGraphPinOwner = [&GraphPinOwners](PulseForge::UUID PinID)
+			-> std::pair<const EditorGraphNode*, const EditorGraphPin*>
+		{
+			const auto Owner = GraphPinOwners.find(PinID);
+			return Owner == GraphPinOwners.end() ? std::pair<const EditorGraphNode*, const EditorGraphPin*>{} : Owner->second;
+		};
+		const auto EstimateGraphPinAnchor = [&](PulseForge::UUID PinID)
+		{
+			const auto [Owner, Pin] = FindGraphPinOwner(PinID);
+			if (!Owner || !Pin) return ImVec2{};
+			if (IsEditorGraphRerouteType(Owner->TypeKey))
+				return ImVec2(static_cast<float>(Owner->X), static_cast<float>(Owner->Y));
+			const auto Size = State->LastAnchorNodeSizes.find(Owner->ID);
+			const float Width = Size == State->LastAnchorNodeSizes.end() ? 176.0f :
+				static_cast<float>(Size->second.X);
+			const float Height = Size == State->LastAnchorNodeSizes.end() ? 56.0f :
+				static_cast<float>(Size->second.Y);
+			const float X = static_cast<float>(Owner->X) +
+				(Pin->Direction == EditorGraphPinDirection::Output ? Width : 0.0f);
+			return ImVec2(X, static_cast<float>(Owner->Y) + Height * 0.5f);
+		};
+		std::unordered_map<PulseForge::UUID, ImVec2, PulseForge::UUIDHash> RerouteDirections;
+		for (const auto& Node : State->History.Graph().Nodes)
+		{
+			if (!IsEditorGraphRerouteType(Node.TypeKey)) continue;
+			const auto Input = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+				[](const auto& Pin) { return Pin.Key == "in"; });
+			const auto Output = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+				[](const auto& Pin) { return Pin.Key == "out"; });
+			if (Input == Node.Pins.end() || Output == Node.Pins.end()) continue;
+			const auto Incoming = std::find_if(State->History.Graph().Connections.begin(),
+				State->History.Graph().Connections.end(), [&Input](const auto& Link) { return Link.InputPin == Input->ID; });
+			if (Incoming != State->History.Graph().Connections.end())
+			{
+				const ImVec2 Source = EstimateGraphPinAnchor(Incoming->OutputPin);
+				const float DeltaX = Source.x - static_cast<float>(Node.X);
+				const float DeltaY = Source.y - static_cast<float>(Node.Y);
+				const bool Vertical = std::abs(DeltaX) <= 28.0f && std::abs(DeltaY) > 24.0f;
+				RerouteDirections.emplace(Input->ID, Vertical
+					? ImVec2(0.0f, DeltaY < 0.0f ? -1.0f : 1.0f)
+					: ImVec2(DeltaX < 0.0f ? -1.0f : 1.0f, 0.0f));
+			}
+			else RerouteDirections.emplace(Input->ID, ImVec2(-1.0f, 0.0f));
+
+			std::vector<std::pair<PulseForge::UUID, ImVec2>> Targets;
+			for (const auto& Link : State->History.Graph().Connections)
+				if (Link.OutputPin == Output->ID) Targets.emplace_back(Link.InputPin, EstimateGraphPinAnchor(Link.InputPin));
+			if (Targets.empty())
+			{
+				RerouteDirections.emplace(Output->ID, ImVec2(1.0f, 0.0f));
+				continue;
+			}
+			std::sort(Targets.begin(), Targets.end(), [](const auto& Left, const auto& Right)
+				{ return Left.first < Right.first; });
+			bool AllVertical = true;
+			int VerticalSign = 0;
+			float HorizontalSum = 0.0f;
+			for (const auto& TargetEntry : Targets)
+			{
+				const auto& Target = TargetEntry.second;
+				const float DeltaX = Target.x - static_cast<float>(Node.X);
+				const float DeltaY = Target.y - static_cast<float>(Node.Y);
+				const bool Vertical = std::abs(DeltaX) <= 28.0f && std::abs(DeltaY) > 24.0f;
+				AllVertical &= Vertical;
+				if (Vertical)
+				{
+					const int Sign = DeltaY < 0.0f ? -1 : 1;
+					if (VerticalSign && VerticalSign != Sign) AllVertical = false;
+					VerticalSign = Sign;
+				}
+				HorizontalSum += DeltaX;
+			}
+			RerouteDirections.emplace(Output->ID, AllVertical
+				? ImVec2(0.0f, static_cast<float>(VerticalSign))
+				: ImVec2(HorizontalSum < 0.0f ? -1.0f : 1.0f, 0.0f));
+		}
 		if (const auto ActivePin = State->PropertyEdits.ActivePin(); ActivePin && State->PropertyEdits.HasActiveEdit())
 		{
 			for (const auto& Node : State->History.Graph().Nodes)
@@ -1529,12 +1610,120 @@ namespace PulseForgeEditor
 				continue;
 			}
 			const NodeEditor::NodeId CanvasNode(NodeHandle);
-			if (State->NeedsCanvasSync) NodeEditor::SetNodePosition(CanvasNode, ImVec2(static_cast<float>(Node.X), static_cast<float>(Node.Y)));
+			const bool IsRerouteNode = IsEditorGraphRerouteType(Node.TypeKey);
+			if (IsRerouteNode)
+			{
+				NodeEditor::PushStyleColor(NodeEditor::StyleColor_NodeBg, ImVec4(0, 0, 0, 0));
+				NodeEditor::PushStyleColor(NodeEditor::StyleColor_NodeBorder, ImVec4(0, 0, 0, 0));
+				NodeEditor::PushStyleColor(NodeEditor::StyleColor_HovNodeBorder, ImVec4(0, 0, 0, 0));
+				NodeEditor::PushStyleColor(NodeEditor::StyleColor_SelNodeBorder, ImVec4(0, 0, 0, 0));
+				NodeEditor::PushStyleVar(NodeEditor::StyleVar_NodePadding, ImVec4(0, 0, 0, 0));
+				NodeEditor::PushStyleVar(NodeEditor::StyleVar_NodeBorderWidth, 0.0f);
+			}
+			if (State->NeedsCanvasSync)
+			{
+				const float Offset = IsRerouteNode ? GraphRerouteWidth * 0.5f : 0.0f;
+				const float VerticalOffset = IsRerouteNode ? GraphRerouteHeight * 0.5f : 0.0f;
+				NodeEditor::SetNodePosition(CanvasNode,
+					ImVec2(static_cast<float>(Node.X) - Offset, static_cast<float>(Node.Y) - VerticalOffset));
+			}
 			NodeEditor::BeginNode(CanvasNode);
 			EditorGraphCanvasNodePresentation Presentation;
 			Presentation.NodeID = Node.ID;
-			const bool IsRerouteNode = IsEditorGraphRerouteType(Node.TypeKey);
+			Presentation.IsReroute = IsRerouteNode;
 			const std::string NodeLabel = ReadableNodeLabel(State->Schema, Node.TypeKey);
+			if (IsRerouteNode)
+			{
+				const ImVec2 KnotNodeCursor = ImGui::GetCursorPos();
+				const ImVec2 KnotNodeOrigin = ImGui::GetCursorScreenPos();
+				const ImVec2 KnotCenter(KnotNodeOrigin.x + GraphRerouteWidth * 0.5f,
+					KnotNodeOrigin.y + GraphRerouteHeight * 0.5f);
+				Presentation.HiddenPinCount = 0;
+				const auto InputPin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "in"; });
+				const auto OutputPin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "out"; });
+				if (InputPin != Node.Pins.end() && OutputPin != Node.Pins.end())
+				{
+					const auto DrawKnotPin = [&](const EditorGraphPin& Pin, float HitMinimumX,
+						std::string_view DirectionLabel)
+					{
+						const uintptr_t PinHandle = RegisterHandle(Pin.ID);
+						if (!PinHandle) return EditorGraphCanvasRect{};
+						const bool IsInput = Pin.Direction == EditorGraphPinDirection::Input;
+						const float HitWidth = (GraphRerouteWidth - 8.0f) * 0.5f;
+						const auto DirectionIt = RerouteDirections.find(Pin.ID);
+						const ImVec2 Direction = DirectionIt == RerouteDirections.end()
+							? (IsInput ? ImVec2(-1.0f, 0.0f) : ImVec2(1.0f, 0.0f)) : DirectionIt->second;
+						const EditorGraphCanvasPoint LinkDirection{ Direction.x, Direction.y };
+						NodeEditor::PushStyleVar(IsInput ? NodeEditor::StyleVar_TargetDirection : NodeEditor::StyleVar_SourceDirection,
+							Direction);
+						NodeEditor::BeginPin(NodeEditor::PinId(PinHandle), IsInput
+							? NodeEditor::PinKind::Input : NodeEditor::PinKind::Output);
+						ImGui::SetCursorPos(ImVec2(KnotNodeCursor.x + HitMinimumX, KnotNodeCursor.y));
+						ImGui::Dummy(ImVec2(HitWidth, GraphRerouteHeight));
+						const ImVec2 HitMinimum = ImGui::GetItemRectMin();
+						const ImVec2 HitMaximum = ImGui::GetItemRectMax();
+						// BeginPin adds a zero-sized item before this custom hit region. The
+						// group's default bounds would therefore span both direction halves;
+						// publish the precise region so the output pin cannot mask the input.
+						NodeEditor::PinRect(HitMinimum, HitMaximum);
+						NodeEditor::PinPivotRect(KnotCenter, KnotCenter);
+						const std::string Tooltip = std::string(DirectionLabel) + " · " + PinTypeLabel(Pin.Type) + " · " +
+							std::to_string(ConnectionCount(Pin.ID)) + " connection(s)";
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tooltip.c_str());
+						NodeEditor::EndPin();
+						NodeEditor::PopStyleVar();
+						EditorGraphCanvasPinPresentation PinPresentation;
+						PinPresentation.PinID = Pin.ID;
+						PinPresentation.Direction = Pin.Direction;
+						PinPresentation.Connected = ConnectionCount(Pin.ID) != 0;
+						PinPresentation.LinkDirection = LinkDirection;
+						PinPresentation.Marker = GraphCanvasDetail::MakePinMarkerGeometry(
+							{ KnotCenter.x, KnotCenter.y }, 8.0, 8.0);
+						PinPresentation.HitBounds = EditorGraphCanvasRect{
+							{ HitMinimum.x, HitMinimum.y }, { HitMaximum.x, HitMaximum.y } };
+						if (State->CapturePresentation) Presentation.Pins.push_back(PinPresentation);
+						PinAnchorCanvasPositions.push_back({ Node.ID, Pin.ID,
+							{ KnotCenter.x, KnotCenter.y } });
+						return *PinPresentation.HitBounds;
+					};
+					const float HitWidth = (GraphRerouteWidth - 8.0f) * 0.5f;
+					const EditorGraphCanvasRect InputHit = DrawKnotPin(*InputPin, 0.0f, "Input");
+					const EditorGraphCanvasRect OutputHit = DrawKnotPin(*OutputPin,
+						GraphRerouteWidth - HitWidth, "Output");
+					ImGui::SetCursorPos(KnotNodeCursor);
+					ImGui::Dummy(ImVec2(GraphRerouteWidth, GraphRerouteHeight));
+					const bool Connected = ConnectionCount(InputPin->ID) || ConnectionCount(OutputPin->ID);
+					const ImU32 KnotColor = ImGui::GetColorU32(Connected ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+					auto* DrawList = ImGui::GetWindowDrawList();
+					DrawList->AddCircleFilled(KnotCenter, 4.0f, KnotColor, 16);
+					if (NodeEditor::IsNodeSelected(CanvasNode))
+						DrawList->AddCircle(KnotCenter, 6.0f, ImGui::GetColorU32(ImGuiCol_HeaderActive), 16, 1.5f);
+					else if (ImGui::IsItemHovered())
+						DrawList->AddCircle(KnotCenter, 6.0f, ImGui::GetColorU32(ImGuiCol_HeaderHovered), 16, 1.5f);
+					Presentation.Position = { Node.X - GraphRerouteWidth * 0.5, Node.Y - GraphRerouteHeight * 0.5 };
+					Presentation.Size = { GraphRerouteWidth, GraphRerouteHeight };
+					Presentation.Zoom = NodeEditor::GetCurrentZoom();
+					Presentation.InputColumnWidth = 0.0;
+					Presentation.OutputColumnWidth = 0.0;
+					(void)InputHit;
+					(void)OutputHit;
+				}
+				NodeEditor::EndNode();
+				const ImVec2 NodeCanvasPosition = NodeEditor::GetNodePosition(CanvasNode);
+				const ImVec2 NodeCanvasSize = NodeEditor::GetNodeSize(CanvasNode);
+				CurrentNodeCanvasPositions.emplace(Node.ID,
+					EditorGraphCanvasPoint{ NodeCanvasPosition.x, NodeCanvasPosition.y });
+				CurrentNodeCanvasSizes.emplace(Node.ID,
+					EditorGraphCanvasPoint{ NodeCanvasSize.x, NodeCanvasSize.y });
+				Presentation.Position = { NodeCanvasPosition.x, NodeCanvasPosition.y };
+				Presentation.Size = { NodeCanvasSize.x, NodeCanvasSize.y };
+				if (State->CapturePresentation) State->Presentation.push_back(std::move(Presentation));
+				NodeEditor::PopStyleVar(2);
+				NodeEditor::PopStyleColor(4);
+				continue;
+			}
 			const std::string HeaderDisplay = FitGraphPresentationText(NodeLabel, 420.0f);
 			ImGui::TextUnformatted(HeaderDisplay.c_str());
 			if (HeaderDisplay != NodeLabel && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", NodeLabel.c_str());
@@ -1981,12 +2170,15 @@ namespace PulseForgeEditor
 			const auto It = State->Handles.find(Node.ID);
 			if (It == State->Handles.end()) continue;
 			const auto Position = NodeEditor::GetNodePosition(NodeEditor::NodeId(It->second));
-			const double CanvasX = std::floor(Node.X);
-			const double CanvasY = std::floor(Node.Y);
+			const double RerouteOffsetX = IsEditorGraphRerouteType(Node.TypeKey) ? GraphRerouteWidth * 0.5 : 0.0;
+			const double RerouteOffsetY = IsEditorGraphRerouteType(Node.TypeKey) ? GraphRerouteHeight * 0.5 : 0.0;
+			const double CanvasX = std::floor(Node.X - RerouteOffsetX);
+			const double CanvasY = std::floor(Node.Y - RerouteOffsetY);
 			if (std::isfinite(Position.x) && std::isfinite(Position.y) &&
 				(std::abs(static_cast<double>(Position.x) - CanvasX) > 0.01 ||
 					std::abs(static_cast<double>(Position.y) - CanvasY) > 0.01))
-				Positions.emplace_back(Node.ID, EditorGraphVector3{ Position.x, Position.y, 0.0 });
+				Positions.emplace_back(Node.ID, EditorGraphVector3{ Position.x + RerouteOffsetX,
+					Position.y + RerouteOffsetY, 0.0 });
 		}
 		if (!Positions.empty())
 		{
@@ -2867,7 +3059,15 @@ namespace PulseForgeEditor
 				auto CanvasPositions = Positions;
 				for (auto& [NodeID, Position] : CanvasPositions)
 				{
-					(void)NodeID;
+					Position.X = std::floor(Position.X);
+					Position.Y = std::floor(Position.Y);
+					const auto Node = std::find_if(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+						[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
+					if (Node != State->History.Graph().Nodes.end() && IsEditorGraphRerouteType(Node->TypeKey))
+					{
+						Position.X += GraphRerouteWidth * 0.5;
+						Position.Y += GraphRerouteHeight * 0.5;
+					}
 					Position.X = std::floor(Position.X);
 					Position.Y = std::floor(Position.Y);
 				}

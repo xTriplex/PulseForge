@@ -1542,8 +1542,114 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 				const auto Serialized = SerializeEditorGraph(History.Graph(), Schema);
 				const auto Reopened = Serialized ? DeserializeEditorGraph(*Serialized, Schema)
 					: std::expected<EditorGraph, std::string>(std::unexpected("reroute serialization failed"));
+				const auto ConnectionsMatchByIdentity = [](const auto& Left, const auto& Right)
+				{
+					if (Left.size() != Right.size()) return false;
+					return std::all_of(Left.begin(), Left.end(), [&Right](const auto& Link)
+					{
+						return std::any_of(Right.begin(), Right.end(), [&Link](const auto& Candidate)
+							{ return Candidate.ID == Link.ID && Candidate.OutputPin == Link.OutputPin &&
+								Candidate.InputPin == Link.InputPin; });
+					});
+				};
 				PF_CHECK(Tests, Reopened && Reopened->Nodes.size() == History.Graph().Nodes.size() &&
-					Reopened->Connections == History.Graph().Connections);
+					ConnectionsMatchByIdentity(Reopened->Connections, History.Graph().Connections));
+			}
+		}
+		{
+			auto Schema = MakeMaterialExpressionFixtureSchema();
+			auto Graph = FixtureGraph(Schema);
+			PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "material.scalar", 0.0) &&
+				AppendNode(*Graph, Schema, "material.multiply", 220.0) &&
+				AppendNode(*Graph, Schema, "material.multiply", 460.0) &&
+				AppendNode(*Graph, Schema, "material.scalar", 700.0));
+			if (Graph)
+			{
+				const auto Producer = FindPin(Graph->Nodes[0], "value")->ID;
+				const auto FirstConsumer = FindPin(Graph->Nodes[1], "a")->ID;
+				const auto SecondConsumer = FindPin(Graph->Nodes[1], "b")->ID;
+				const auto ThirdConsumer = FindPin(Graph->Nodes[2], "a")->ID;
+				const auto SingleProducer = FindPin(Graph->Nodes[3], "value")->ID;
+				EditorGraphCommandHistory History(*Graph);
+				PF_CHECK(Tests, ConnectEditorGraphPins(History, Schema, Producer, FirstConsumer));
+				const auto OriginalConnection = History.Graph().Connections.front().ID;
+				const auto RerouteID = InsertEditorGraphReroute(History, Schema, OriginalConnection, 340.0, 80.0);
+				const auto RerouteNode = RerouteID ? std::find_if(History.Graph().Nodes.begin(), History.Graph().Nodes.end(),
+					[&](const auto& Candidate) { return Candidate.ID == *RerouteID; }) : History.Graph().Nodes.end();
+				const auto* RerouteInput = RerouteNode == History.Graph().Nodes.end() ? nullptr : FindPin(*RerouteNode, "in");
+				const auto* RerouteOutput = RerouteNode == History.Graph().Nodes.end() ? nullptr : FindPin(*RerouteNode, "out");
+				PF_CHECK(Tests, RerouteInput && RerouteOutput && ConnectEditorGraphPins(History, Schema,
+					RerouteOutput->ID, SecondConsumer) && ConnectEditorGraphPins(History, Schema,
+					RerouteOutput->ID, ThirdConsumer) && ValidateEditorGraph(History.Graph(), Schema).empty());
+				if (RerouteInput && RerouteOutput)
+				{
+					auto RestrictedSchema = Schema;
+					const auto ScalarDefinition = std::find_if(RestrictedSchema.Nodes.begin(), RestrictedSchema.Nodes.end(),
+						[](const auto& Definition) { return Definition.TypeKey == "material.scalar"; });
+					if (ScalarDefinition != RestrictedSchema.Nodes.end())
+						if (const auto OutputDefinition = std::find_if(ScalarDefinition->Pins.begin(), ScalarDefinition->Pins.end(),
+							[](const auto& Pin) { return Pin.Key == "value"; }); OutputDefinition != ScalarDefinition->Pins.end())
+							OutputDefinition->Cardinality = EditorGraphPinCardinality::Single;
+					auto RestrictedGraph = History.Graph();
+					if (auto PinIt = std::find_if(RestrictedGraph.Nodes[3].Pins.begin(), RestrictedGraph.Nodes[3].Pins.end(),
+						[](const auto& Pin) { return Pin.Key == "value"; }); PinIt != RestrictedGraph.Nodes[3].Pins.end())
+						PinIt->Cardinality = EditorGraphPinCardinality::Single;
+					EditorGraphCommandHistory RestrictedHistory(std::move(RestrictedGraph));
+					const auto UpstreamConnection = std::find_if(RestrictedHistory.Graph().Connections.begin(),
+						RestrictedHistory.Graph().Connections.end(), [RerouteInput](const auto& Link)
+							{ return Link.InputPin == RerouteInput->ID; });
+					const auto UpstreamID = UpstreamConnection == RestrictedHistory.Graph().Connections.end()
+						? PulseForge::UUID{} : UpstreamConnection->ID;
+					const auto BeforeRejectedReconnect = RestrictedHistory.Graph();
+					const auto Decision = CanConnectEditorGraphPins(RestrictedHistory.Graph(), RestrictedSchema,
+						SingleProducer, RerouteInput->ID, UpstreamID);
+					PF_CHECK(Tests, !Decision.Allowed && Decision.Reason.find("single-cardinality output") != std::string::npos);
+					const auto Reconnected = ReconnectEditorGraphConnection(RestrictedHistory, RestrictedSchema, UpstreamID,
+						SingleProducer, RerouteInput->ID);
+					PF_CHECK(Tests, !Reconnected && RestrictedHistory.Graph() == BeforeRejectedReconnect);
+
+					auto InvalidStored = RestrictedHistory.Graph();
+					auto Upstream = std::find_if(InvalidStored.Connections.begin(), InvalidStored.Connections.end(),
+						[RerouteInput](const auto& Link) { return Link.InputPin == RerouteInput->ID; });
+					if (Upstream != InvalidStored.Connections.end()) Upstream->OutputPin = SingleProducer;
+					const auto Diagnostics = ValidateEditorGraph(InvalidStored, RestrictedSchema);
+					PF_CHECK(Tests, std::any_of(Diagnostics.begin(), Diagnostics.end(), [](const auto& Diagnostic)
+						{ return Diagnostic.Code == "connection.reroute_cardinality"; }));
+				}
+			}
+		}
+		{
+			auto RestrictedSchema = MakeMaterialExpressionFixtureSchema();
+			const auto ScalarDefinition = std::find_if(RestrictedSchema.Nodes.begin(), RestrictedSchema.Nodes.end(),
+				[](const auto& Definition) { return Definition.TypeKey == "material.scalar"; });
+			if (ScalarDefinition != RestrictedSchema.Nodes.end())
+				if (const auto OutputDefinition = std::find_if(ScalarDefinition->Pins.begin(), ScalarDefinition->Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "value"; }); OutputDefinition != ScalarDefinition->Pins.end())
+					OutputDefinition->Cardinality = EditorGraphPinCardinality::Single;
+			auto BranchGraph = FixtureGraph(RestrictedSchema);
+			PF_CHECK(Tests, BranchGraph && AppendNode(*BranchGraph, RestrictedSchema, "material.scalar", 0.0) &&
+				AppendNode(*BranchGraph, RestrictedSchema, "pulseforge.reroute.float", 160.0) &&
+				AppendNode(*BranchGraph, RestrictedSchema, "material.multiply", 320.0) &&
+				AppendNode(*BranchGraph, RestrictedSchema, "material.multiply", 520.0));
+			if (BranchGraph)
+			{
+				const auto Source = FindPin(BranchGraph->Nodes[0], "value")->ID;
+				const auto RouteInput = FindPin(BranchGraph->Nodes[1], "in")->ID;
+				const auto RouteOutput = FindPin(BranchGraph->Nodes[1], "out")->ID;
+				const auto ConsumerA = FindPin(BranchGraph->Nodes[2], "a")->ID;
+				const auto ConsumerB = FindPin(BranchGraph->Nodes[3], "a")->ID;
+				EditorGraphCommandHistory BranchHistory(*BranchGraph);
+				PF_CHECK(Tests, ConnectEditorGraphPins(BranchHistory, RestrictedSchema, Source, RouteInput) &&
+					ConnectEditorGraphPins(BranchHistory, RestrictedSchema, RouteOutput, ConsumerA));
+				const auto BranchPreview = CanConnectEditorGraphPins(BranchHistory.Graph(), RestrictedSchema,
+					RouteOutput, ConsumerB);
+				PF_CHECK(Tests, !BranchPreview.Allowed &&
+					BranchPreview.Reason.find("single-cardinality output") != std::string::npos);
+				auto InvalidBranch = BranchHistory.Graph();
+				InvalidBranch.Connections.push_back({ ID(0xf055), RouteOutput, ConsumerB });
+				const auto Diagnostics = ValidateEditorGraph(InvalidBranch, RestrictedSchema);
+				PF_CHECK(Tests, std::any_of(Diagnostics.begin(), Diagnostics.end(), [](const auto& Diagnostic)
+					{ return Diagnostic.Code == "connection.reroute_cardinality"; }));
 			}
 		}
 		{
@@ -1562,6 +1668,9 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 				const auto Diagnostics = ValidateEditorGraph(*Graph, Schema);
 				PF_CHECK(Tests, std::any_of(Diagnostics.begin(), Diagnostics.end(), [](const auto& Diagnostic)
 					{ return Diagnostic.Code == "connection.reroute_cycle"; }));
+				const auto CyclePreview = CanConnectEditorGraphPins(*Graph, Schema, SecondOutput, FirstInput,
+					ID(0xf102));
+				PF_CHECK(Tests, !CyclePreview.Allowed && CyclePreview.Reason.find("reroute-only cycle") != std::string::npos);
 			}
 		}
 	}

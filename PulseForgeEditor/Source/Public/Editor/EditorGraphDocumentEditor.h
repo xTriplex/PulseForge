@@ -60,7 +60,9 @@ namespace PulseForgeEditor
 		EditorGraphPinDirection Direction = EditorGraphPinDirection::Input;
 		bool Connected = false;
 		bool Visible = true;
+		EditorGraphCanvasPoint LinkDirection;
 		EditorGraphCanvasPinMarkerGeometry Marker;
+		std::optional<EditorGraphCanvasRect> HitBounds;
 		std::optional<EditorGraphCanvasRect> Label;
 		std::optional<EditorGraphCanvasRect> PropertyControl;
 	};
@@ -68,6 +70,7 @@ namespace PulseForgeEditor
 	struct EditorGraphCanvasNodePresentation
 	{
 		PulseForge::UUID NodeID;
+		bool IsReroute = false;
 		EditorGraphCanvasPoint Position;
 		EditorGraphCanvasPoint Size;
 		size_t HiddenPinCount = 0;

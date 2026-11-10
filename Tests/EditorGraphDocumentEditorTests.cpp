@@ -77,6 +77,7 @@ namespace PulseForgeEditor
 			return Editor.GetLastHoveredPinForTesting(Session);
 		}
 
+
 		static void SetPinHidden(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			PulseForge::UUID PinID, bool Hidden)
 		{
@@ -1643,9 +1644,10 @@ namespace
 		PF_CHECK(Tests, !PrimaryLink.IsNil() && !FanOutLink.IsNil() && !OccupiedLink.IsNil());
 		const EditorGraph Baseline = *Graph;
 		bool AllowUnconnectedSourceAConnection = false;
+		bool AllowPinB = false;
 		auto Schema = BaseSchema;
 		Schema.ReroutePolicyAware = true;
-		Schema.ConnectionPolicy = [SourceAValue, &AllowUnconnectedSourceAConnection](const EditorGraph&,
+		Schema.ConnectionPolicy = [SourceAValue, &AllowUnconnectedSourceAConnection, &AllowPinB](const EditorGraph&,
 			const EditorGraphConnectionPolicyContext& Context)
 			-> std::optional<std::string>
 		{
@@ -1654,7 +1656,7 @@ namespace
 				!AllowUnconnectedSourceAConnection)
 				return "This test policy requires the original wire to be removed during preview";
 			if (Context.Purpose == EditorGraphConnectionPolicyPurpose::ProposedOperation &&
-				Context.Input.PinKey == "b") return "This test schema forbids connections to input b";
+				Context.Input.PinKey == "b" && !AllowPinB) return "This test schema forbids connections to input b";
 			return std::nullopt;
 		};
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Baseline, Schema);
@@ -2344,6 +2346,10 @@ namespace
 			DrawFrame(ImVec2(-1000.0f, -1000.0f));
 			const auto Downstream = std::find_if(AfterReroute.Connections.begin(), AfterReroute.Connections.end(),
 				[PrimaryLink](const auto& Link) { return Link.ID == PrimaryLink; });
+			UUID RerouteNodeID;
+			UUID RerouteInputID;
+			UUID RerouteOutputID;
+			UUID RerouteUpstreamID;
 			PF_CHECK(Tests, Downstream != AfterReroute.Connections.end() && Downstream->InputPin == TargetAA &&
 				Downstream->OutputPin != SourceAValue);
 			if (Downstream != AfterReroute.Connections.end())
@@ -2363,12 +2369,40 @@ namespace
 						[](const auto& Pin) { return Pin.Key == "out"; });
 					const auto* RerouteInput = RerouteInputIt == RerouteNode->Pins.end() ? nullptr : &*RerouteInputIt;
 					const auto* RerouteOutput = RerouteOutputIt == RerouteNode->Pins.end() ? nullptr : &*RerouteOutputIt;
+					if (RerouteInput && RerouteOutput)
+					{
+						RerouteNodeID = RerouteNode->ID;
+						RerouteInputID = RerouteInput->ID;
+						RerouteOutputID = RerouteOutput->ID;
+						const auto UpstreamSegment = std::find_if(AfterReroute.Connections.begin(), AfterReroute.Connections.end(),
+							[RerouteInput](const auto& Link) { return Link.InputPin == RerouteInput->ID; });
+						if (UpstreamSegment != AfterReroute.Connections.end()) RerouteUpstreamID = UpstreamSegment->ID;
+					}
 					PF_CHECK(Tests, RerouteInput && RerouteOutput &&
 						std::abs(RerouteNode->X - ExpectedReroutePosition.X) < 1.0 &&
 						std::abs(RerouteNode->Y - ExpectedReroutePosition.Y) < 1.0 &&
 						RerouteInput->Type == EditorGraphPinType::Float && RerouteOutput->Type == EditorGraphPinType::Float);
 					if (ReroutePresentation != ReroutePresentations.end())
-						PF_CHECK(Tests, ReroutePresentation->Size.X < 200.0 && ReroutePresentation->Size.Y < 110.0);
+					{
+						const auto InputPresentation = std::find_if(ReroutePresentation->Pins.begin(), ReroutePresentation->Pins.end(),
+							[&](const auto& Pin) { return Pin.PinID == RerouteInput->ID; });
+						const auto OutputPresentation = std::find_if(ReroutePresentation->Pins.begin(), ReroutePresentation->Pins.end(),
+							[&](const auto& Pin) { return Pin.PinID == RerouteOutput->ID; });
+						PF_CHECK(Tests, ReroutePresentation->IsReroute && ReroutePresentation->Size.X <= 40.0 &&
+							ReroutePresentation->Size.Y <= 30.0 && InputPresentation != ReroutePresentation->Pins.end() &&
+							OutputPresentation != ReroutePresentation->Pins.end() && !InputPresentation->Label &&
+							!OutputPresentation->Label && !InputPresentation->PropertyControl && !OutputPresentation->PropertyControl &&
+							InputPresentation->HitBounds && OutputPresentation->HitBounds &&
+							InputPresentation->Marker.Anchor.X == OutputPresentation->Marker.Anchor.X &&
+							InputPresentation->Marker.Anchor.Y == OutputPresentation->Marker.Anchor.Y &&
+							InputPresentation->HitBounds->Maximum.X <= OutputPresentation->HitBounds->Minimum.X);
+						if (InputPresentation != ReroutePresentation->Pins.end() &&
+							OutputPresentation != ReroutePresentation->Pins.end())
+							PF_CHECK(Tests, std::abs(InputPresentation->LinkDirection.X) > 0.99 &&
+								std::abs(InputPresentation->LinkDirection.Y) < 0.01 &&
+								std::abs(OutputPresentation->LinkDirection.X) > 0.99 &&
+								std::abs(OutputPresentation->LinkDirection.Y) < 0.01);
+					}
 				}
 			}
 			PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
@@ -2379,7 +2413,232 @@ namespace
 			const auto RerouteBytes = ReadBytes(Project->GetRootPath() / Fixture->ProjectRelativePath);
 			const auto ReopenedReroute = RerouteBytes ? DeserializeEditorGraph(*RerouteBytes, Schema)
 				: std::expected<EditorGraph, std::string>(std::unexpected("saved reroute graph bytes are unavailable"));
+			EditorGraph ReopenedRerouteBaseline = AfterReroute;
 			PF_CHECK(Tests, ReopenedReroute && SameGraphByIdentity(*ReopenedReroute, AfterReroute));
+			if (ReopenedReroute)
+			{
+				ReopenedRerouteBaseline = *ReopenedReroute;
+				const auto ReopenedKnotNode = std::find_if(ReopenedReroute->Nodes.begin(), ReopenedReroute->Nodes.end(),
+					[](const auto& Candidate) { return IsEditorGraphRerouteType(Candidate.TypeKey); });
+				const UUID ReopenedKnotID = ReopenedKnotNode == ReopenedReroute->Nodes.end()
+					? UUID{} : ReopenedKnotNode->ID;
+				EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, *ReopenedReroute, Schema);
+				DrawFrame(ImVec2(-1000.0f, -1000.0f));
+				const auto ReopenedPresentation = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+				const auto ReopenedKnot = std::find_if(ReopenedPresentation.begin(), ReopenedPresentation.end(),
+					[ReopenedKnotID](const auto& Candidate) { return Candidate.NodeID == ReopenedKnotID; });
+				PF_CHECK(Tests, ReopenedKnot != ReopenedPresentation.end() && ReopenedKnot->IsReroute &&
+					ReopenedKnot->Size.X <= 40.0 && ReopenedKnot->Size.Y <= 30.0);
+			}
+			if (!RerouteNodeID.IsNil() && !RerouteInputID.IsNil() && !RerouteOutputID.IsNil() &&
+				!RerouteUpstreamID.IsNil())
+			{
+				EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *Session,
+					"{\"view\":{\"scroll\":{\"x\":-34.0,\"y\":0.0},\"zoom\":0.65}}");
+				DrawFrame(ImVec2(-1000.0f, -1000.0f));
+				const auto HitCenter = [&](UUID PinID)
+				{
+					const auto Metrics = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+					for (const auto& NodeMetric : Metrics)
+						for (const auto& PinMetric : NodeMetric.Pins)
+							if (PinMetric.PinID == PinID && PinMetric.HitBounds)
+							{
+								const EditorGraphCanvasPoint CanvasCenter{
+									(PinMetric.HitBounds->Minimum.X + PinMetric.HitBounds->Maximum.X) * 0.5,
+									(PinMetric.HitBounds->Minimum.Y + PinMetric.HitBounds->Maximum.Y) * 0.5 };
+								const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+									GraphEditor, *Session, CanvasCenter);
+								return ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+							}
+					return ImVec2(-1000.0f, -1000.0f);
+				};
+				const UUID UpstreamID = RerouteUpstreamID;
+				AllowPinB = true;
+				const ImVec2 InputTarget = HitCenter(RerouteInputID);
+				const ImVec2 FreeInput = FindPinScreen(TargetAB);
+				DrawFrame(InputTarget);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == RerouteInputID);
+				DrawFrame(InputTarget, true, false, false, true);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+				DrawFrame(FreeInput, true, false, false, true);
+				const auto InputPinMovePreview = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == TargetAB);
+				PF_CHECK(Tests, InputPinMovePreview.Active);
+				PF_CHECK(Tests, InputPinMovePreview.TargetPin == TargetAB);
+				PF_CHECK(Tests, InputPinMovePreview.TargetAllowed);
+				DrawFrame(FreeInput, false, false, false, false);
+				const auto AfterInputPinTarget = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+				PF_CHECK(Tests, LinkID(AfterInputPinTarget, SourceAValue, TargetAB) == UpstreamID);
+				PF_CHECK(Tests, LinkID(AfterInputPinTarget, RerouteOutputID, TargetAA) == PrimaryLink);
+				PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+					EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == ReopenedRerouteBaseline);
+				AllowPinB = false;
+
+				const ImVec2 OutputTarget = HitCenter(RerouteOutputID);
+				const ImVec2 OtherOutput = FindPinScreen(SourceBValue);
+				DrawFrame(OutputTarget);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == RerouteOutputID);
+				DrawFrame(OutputTarget, true, false, false, true);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session).Active);
+				DrawFrame(OtherOutput, true, false, false, true);
+				const auto OutputMovePreview = EditorGraphDocumentEditorTestAccess::GetPinMove(GraphEditor, *Session);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == SourceBValue);
+				PF_CHECK(Tests, OutputMovePreview.Active);
+				PF_CHECK(Tests, OutputMovePreview.TargetAllowed);
+				DrawFrame(OtherOutput, false, false, false, false);
+				const auto AfterOutputPinTarget = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+				PF_CHECK(Tests, LinkID(AfterOutputPinTarget, SourceBValue, TargetAA) == PrimaryLink &&
+					LinkID(AfterOutputPinTarget, SourceAValue, RerouteInputID) == UpstreamID);
+				PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+					EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == ReopenedRerouteBaseline);
+				const auto RerouteBeforeMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+				const auto RerouteBeforeMoveNode = std::find_if(RerouteBeforeMove.Nodes.begin(), RerouteBeforeMove.Nodes.end(),
+					[RerouteNodeID](const auto& Candidate) { return Candidate.ID == RerouteNodeID; });
+				const auto ReroutePosition = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+					GraphEditor, *Session, { RerouteBeforeMoveNode->X, RerouteBeforeMoveNode->Y });
+				const ImVec2 KnotBodyCenter(static_cast<float>(ReroutePosition.X), static_cast<float>(ReroutePosition.Y));
+				const ImVec2 KnotBodyDrop(KnotBodyCenter.x + 112.0f, KnotBodyCenter.y + 84.0f);
+				DrawFrame(KnotBodyCenter);
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session).IsNil());
+				PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetHoveredConnection(GraphEditor, *Session).IsNil());
+				DrawFrame(KnotBodyCenter, true);
+				DrawFrame(KnotBodyCenter, false);
+				const auto SelectedAtKnotBody = EditorGraphDocumentEditorTestAccess::GetSelectedNodes(GraphEditor, *Session);
+				PF_CHECK(Tests, std::find(SelectedAtKnotBody.begin(), SelectedAtKnotBody.end(), RerouteNodeID) !=
+					SelectedAtKnotBody.end());
+				DrawFrame(KnotBodyCenter, true);
+				DrawFrame(KnotBodyDrop, true);
+				DrawFrame(KnotBodyDrop, true);
+				DrawFrame(KnotBodyDrop, false);
+				const auto RerouteAfterMove = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+				const auto RerouteAfterMoveNode = std::find_if(RerouteAfterMove.Nodes.begin(), RerouteAfterMove.Nodes.end(),
+					[RerouteNodeID](const auto& Candidate) { return Candidate.ID == RerouteNodeID; });
+				PF_CHECK(Tests, RerouteBeforeMoveNode != RerouteBeforeMove.Nodes.end() &&
+					RerouteAfterMoveNode != RerouteAfterMove.Nodes.end() &&
+					(RerouteBeforeMoveNode->X != RerouteAfterMoveNode->X || RerouteBeforeMoveNode->Y != RerouteAfterMoveNode->Y));
+				PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+					EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == ReopenedRerouteBaseline);
+
+				// A vertically aligned reroute chain gets vertical pin tangents while the
+				// upstream and downstream ordinary nodes retain their schema-defined rows.
+				auto RouteGraph = CreateEditorGraph(Schema, Fixture->GraphID);
+				auto RouteSource = CreateEditorGraphNode(Schema, "material.scalar", 100.0, 200.0);
+				auto RouteFirst = CreateEditorGraphNode(Schema, "pulseforge.reroute.float", 500.0, 200.0);
+				auto RouteSecond = CreateEditorGraphNode(Schema, "pulseforge.reroute.float", 500.0, 330.0);
+				auto RouteTarget = CreateEditorGraphNode(Schema, "material.multiply", 500.0, 400.0);
+				PF_CHECK(Tests, RouteGraph && RouteSource && RouteFirst && RouteSecond && RouteTarget);
+				if (RouteGraph && RouteSource && RouteFirst && RouteSecond && RouteTarget)
+				{
+					const auto GetNodePinID = [](const EditorGraphNode& Node, std::string_view Key)
+					{
+						const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(), [Key](const auto& Candidate)
+							{ return Candidate.Key == Key; });
+						return Pin == Node.Pins.end() ? UUID{} : Pin->ID;
+					};
+					const UUID RouteFirstID = RouteFirst->ID;
+					const UUID RouteSecondID = RouteSecond->ID;
+					const UUID RouteSourcePin = GetNodePinID(*RouteSource, "value");
+					const UUID RouteFirstIn = GetNodePinID(*RouteFirst, "in");
+					const UUID RouteFirstOut = GetNodePinID(*RouteFirst, "out");
+					const UUID RouteSecondIn = GetNodePinID(*RouteSecond, "in");
+					const UUID RouteSecondOut = GetNodePinID(*RouteSecond, "out");
+					const UUID RouteTargetPin = GetNodePinID(*RouteTarget, "a");
+					RouteGraph->Nodes.push_back(std::move(*RouteSource));
+					RouteGraph->Nodes.push_back(std::move(*RouteFirst));
+					RouteGraph->Nodes.push_back(std::move(*RouteSecond));
+					RouteGraph->Nodes.push_back(std::move(*RouteTarget));
+					EditorGraphCommandHistory RouteHistory(*RouteGraph);
+					PF_CHECK(Tests, ConnectEditorGraphPins(RouteHistory, Schema, RouteSourcePin, RouteFirstIn));
+					PF_CHECK(Tests, ConnectEditorGraphPins(RouteHistory, Schema, RouteFirstOut, RouteSecondIn));
+					PF_CHECK(Tests, ConnectEditorGraphPins(RouteHistory, Schema, RouteSecondOut, RouteTargetPin));
+					EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, RouteHistory.Graph(), Schema);
+					DrawFrame(ImVec2(-1000.0f, -1000.0f));
+					const auto RoutePresentation = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+					const auto GetPinMetric = [&RoutePresentation](UUID NodeID, UUID PinID) -> const EditorGraphCanvasPinPresentation*
+					{
+						const auto NodeMetric = std::find_if(RoutePresentation.begin(), RoutePresentation.end(),
+							[NodeID](const auto& Candidate) { return Candidate.NodeID == NodeID; });
+						if (NodeMetric == RoutePresentation.end()) return nullptr;
+						const auto PinMetric = std::find_if(NodeMetric->Pins.begin(), NodeMetric->Pins.end(),
+							[PinID](const auto& Candidate) { return Candidate.PinID == PinID; });
+						return PinMetric == NodeMetric->Pins.end() ? nullptr : &*PinMetric;
+					};
+					const auto* FirstOutputMetric = GetPinMetric(RouteFirstID, RouteFirstOut);
+					const auto* SecondInputMetric = GetPinMetric(RouteSecondID, RouteSecondIn);
+					const auto* SecondOutputMetric = GetPinMetric(RouteSecondID, RouteSecondOut);
+					PF_CHECK(Tests, FirstOutputMetric && SecondInputMetric && SecondOutputMetric &&
+						std::abs(FirstOutputMetric->LinkDirection.X) < 0.01 && FirstOutputMetric->LinkDirection.Y > 0.99 &&
+						std::abs(SecondInputMetric->LinkDirection.X) < 0.01 && SecondInputMetric->LinkDirection.Y < -0.99 &&
+						std::abs(SecondOutputMetric->LinkDirection.X) < 0.01 && SecondOutputMetric->LinkDirection.Y > 0.99);
+				}
+
+				// Execution routes keep horizontal runs horizontal, turn through aligned
+				// knots, and return to a horizontal tangent at the downstream node.
+				auto ExecutionSchema = MakeGameplayEventFixtureSchema();
+				auto ExecutionGraph = CreateEditorGraph(ExecutionSchema, Fixture->GraphID);
+				auto EventNode = CreateEditorGraphNode(ExecutionSchema, "gameplay.event.begin", 100.0, 200.0);
+				auto EntryKnot = CreateEditorGraphNode(ExecutionSchema,
+					"pulseforge.reroute.execution", 400.0, 200.0);
+				auto VerticalKnot = CreateEditorGraphNode(ExecutionSchema,
+					"pulseforge.reroute.execution", 400.0, 340.0);
+				auto ExitKnot = CreateEditorGraphNode(ExecutionSchema,
+					"pulseforge.reroute.execution", 700.0, 340.0);
+				auto BranchNode = CreateEditorGraphNode(ExecutionSchema, "gameplay.flow.branch", 1000.0, 340.0);
+				PF_CHECK(Tests, ExecutionGraph && EventNode && EntryKnot && VerticalKnot && ExitKnot && BranchNode);
+				if (ExecutionGraph && EventNode && EntryKnot && VerticalKnot && ExitKnot && BranchNode)
+				{
+					const auto PinID = [](const EditorGraphNode& Node, std::string_view Key)
+					{
+						const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+							[Key](const auto& Candidate) { return Candidate.Key == Key; });
+						return Pin == Node.Pins.end() ? UUID{} : Pin->ID;
+					};
+					const UUID EntryID = EntryKnot->ID;
+					const UUID VerticalID = VerticalKnot->ID;
+					const UUID ExitID = ExitKnot->ID;
+					const UUID EventOut = PinID(*EventNode, "event");
+					const UUID EntryIn = PinID(*EntryKnot, "in");
+					const UUID EntryOut = PinID(*EntryKnot, "out");
+					const UUID VerticalIn = PinID(*VerticalKnot, "in");
+					const UUID VerticalOut = PinID(*VerticalKnot, "out");
+					const UUID ExitIn = PinID(*ExitKnot, "in");
+					const UUID ExitOut = PinID(*ExitKnot, "out");
+					const UUID BranchIn = PinID(*BranchNode, "exec-in");
+					ExecutionGraph->Nodes.push_back(std::move(*EventNode));
+					ExecutionGraph->Nodes.push_back(std::move(*EntryKnot));
+					ExecutionGraph->Nodes.push_back(std::move(*VerticalKnot));
+					ExecutionGraph->Nodes.push_back(std::move(*ExitKnot));
+					ExecutionGraph->Nodes.push_back(std::move(*BranchNode));
+					EditorGraphCommandHistory ExecutionHistory(*ExecutionGraph);
+					PF_CHECK(Tests, ConnectEditorGraphPins(ExecutionHistory, ExecutionSchema, EventOut, EntryIn));
+					PF_CHECK(Tests, ConnectEditorGraphPins(ExecutionHistory, ExecutionSchema, EntryOut, VerticalIn));
+					PF_CHECK(Tests, ConnectEditorGraphPins(ExecutionHistory, ExecutionSchema, VerticalOut, ExitIn));
+					PF_CHECK(Tests, ConnectEditorGraphPins(ExecutionHistory, ExecutionSchema, ExitOut, BranchIn));
+					EditorGraphDocumentEditorTestAccess::SetGraph(
+						GraphEditor, *Session, ExecutionHistory.Graph(), ExecutionSchema);
+					DrawFrame(ImVec2(-1000.0f, -1000.0f));
+					const auto ExecutionPresentation = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+					const auto Direction = [&ExecutionPresentation](UUID NodeID, UUID PinID)
+					{
+						const auto Node = std::find_if(ExecutionPresentation.begin(), ExecutionPresentation.end(),
+							[NodeID](const auto& Candidate) { return Candidate.NodeID == NodeID; });
+						if (Node == ExecutionPresentation.end()) return EditorGraphCanvasPoint{};
+						const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(),
+							[PinID](const auto& Candidate) { return Candidate.PinID == PinID; });
+						return Pin == Node->Pins.end() ? EditorGraphCanvasPoint{} : Pin->LinkDirection;
+					};
+					const auto EntryOutputDirection = Direction(EntryID, EntryOut);
+					const auto VerticalInputDirection = Direction(VerticalID, VerticalIn);
+					const auto VerticalOutputDirection = Direction(VerticalID, VerticalOut);
+					const auto ExitInputDirection = Direction(ExitID, ExitIn);
+					const auto ExitOutputDirection = Direction(ExitID, ExitOut);
+					PF_CHECK(Tests, EntryOutputDirection.Y > 0.99);
+					PF_CHECK(Tests, VerticalInputDirection.Y < -0.99);
+					PF_CHECK(Tests, VerticalOutputDirection.X > 0.99);
+					PF_CHECK(Tests, ExitInputDirection.X < -0.99);
+					PF_CHECK(Tests, ExitOutputDirection.X > 0.99);
+				}
+			}
 		}
 	}
 
