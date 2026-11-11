@@ -1585,14 +1585,45 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 						[ConnectionID](const auto& Link) { return Link.ID == ConnectionID; }); }));
 			}
 
-			std::vector<EditorGraphVector3> MaximumLegalRoute(127, EditorGraphVector3{ 300.0, 260.0, 0.0 });
-			const auto LegalStepBoundary = CanCreateEditorGraphWireRoute(*Graph, Schema, Source, MaximumLegalRoute, InputA);
+			const auto CheckCompletedStepRoute = [&](size_t KnotCount, bool ShouldBeAllowed)
+			{
+				std::vector<EditorGraphVector3> Knots(KnotCount, EditorGraphVector3{ 300.0, 260.0, 0.0 });
+				EditorGraphCommandHistory History(*Graph);
+				const auto Before = History.Graph();
+				const auto Revision = History.GraphRevision();
+				const auto Preview = CanCreateEditorGraphWireRoute(History.Graph(), Schema, Source, Knots, InputA,
+					nullptr, nullptr, nullptr, &History);
+				if (!ShouldBeAllowed)
+				{
+					const bool Dirty = History.IsDirty();
+					const bool CanUndo = History.CanUndo();
+					const bool CanRedo = History.CanRedo();
+					const auto Commit = CreateEditorGraphWireRoute(History, Schema, Source, Knots, InputA);
+					PF_CHECK(Tests, !Preview.Allowed && !Commit && History.Graph() == Before &&
+						History.GraphRevision() == Revision && History.IsDirty() == Dirty &&
+						History.CanUndo() == CanUndo && History.CanRedo() == CanRedo);
+					return;
+				}
+				const auto Commit = CreateEditorGraphWireRoute(History, Schema, Source, Knots, InputA);
+				PF_CHECK(Tests, Preview.Allowed && Commit && History.Graph().Nodes.size() == Before.Nodes.size() + KnotCount &&
+					History.Graph().Connections.size() == Before.Connections.size() + KnotCount + 1);
+				if (!Commit) return;
+				const auto After = History.Graph();
+				for (size_t Step = 0; Step < KnotCount + 1; ++Step) PF_CHECK(Tests, History.Undo());
+				PF_CHECK(Tests, History.Graph() == Before && !History.CanUndo());
+				for (size_t Step = 0; Step < KnotCount + 1; ++Step) PF_CHECK(Tests, History.Redo());
+				PF_CHECK(Tests, History.Graph() == After &&
+					std::all_of(Commit->RerouteNodeIDs.begin(), Commit->RerouteNodeIDs.end(), [&](const auto NodeID)
+					{ return std::any_of(After.Nodes.begin(), After.Nodes.end(),
+						[NodeID](const auto& Node) { return Node.ID == NodeID; }); }) &&
+					std::all_of(Commit->ConnectionIDs.begin(), Commit->ConnectionIDs.end(), [&](const auto ConnectionID)
+					{ return std::any_of(After.Connections.begin(), After.Connections.end(),
+						[ConnectionID](const auto& Link) { return Link.ID == ConnectionID; }); }));
+			};
+			CheckCompletedStepRoute(64, true);
+			CheckCompletedStepRoute(127, true);
 			std::vector<EditorGraphVector3> OverStepRoute(128, EditorGraphVector3{ 300.0, 260.0, 0.0 });
-			const auto OverStepPreview = CanCreateEditorGraphWireRoute(*Graph, Schema, Source, OverStepRoute, InputA);
-			EditorGraphCommandHistory OverStepHistory(*Graph);
-			const auto OverStepCommit = CreateEditorGraphWireRoute(OverStepHistory, Schema, Source, OverStepRoute, InputA);
-			PF_CHECK(Tests, LegalStepBoundary.Allowed && !OverStepPreview.Allowed && !OverStepCommit &&
-				OverStepHistory.Graph() == *Graph && !OverStepHistory.CanUndo());
+			CheckCompletedStepRoute(OverStepRoute.size(), false);
 
 			EditorGraphSchema PrefixPolicySchema = Schema;
 			PrefixPolicySchema.ReroutePolicyAware = true;

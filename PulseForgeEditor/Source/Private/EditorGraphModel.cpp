@@ -2242,6 +2242,7 @@ namespace PulseForgeEditor
 			if (WorkingAdmission.Steps > EditorGraphCommandHistory::MaximumSnapshots ||
 				PlannedSteps > EditorGraphCommandHistory::MaximumSnapshots - WorkingAdmission.Steps)
 				return Fail("The route needs more Undo steps than the history snapshot limit can retain");
+			const size_t TotalPlannedSteps = WorkingAdmission.Steps + PlannedSteps;
 			if (Candidate.SchemaKey != Schema.Key || Candidate.SchemaVersion != Schema.Version)
 				return Fail("The graph does not match the active schema");
 			if (KnotPositions.size() > EditorGraphMaximumNodes ||
@@ -2323,7 +2324,7 @@ namespace PulseForgeEditor
 				if (History)
 				{
 					std::string AdmissionError;
-					if (!History->CanAdmitRoute(WorkingAdmission.Steps + PlannedSteps,
+					if (!History->CanAdmitRoute(TotalPlannedSteps,
 						RouteStateBytes - SmallestRouteStateBytes,
 						CandidatePlanBytes, EstimateBytes(Candidate), AdmissionError)) return AdmissionError;
 				}
