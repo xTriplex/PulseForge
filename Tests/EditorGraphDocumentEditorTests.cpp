@@ -74,6 +74,12 @@ namespace PulseForgeEditor
 			return Editor.GetWireRouteForTesting(Session);
 		}
 
+		static void QueueNodeSearch(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			std::optional<PulseForge::UUID> SourcePin, EditorGraphVector3 Placement)
+		{
+			Editor.QueueNodeSearchForTesting(Session, SourcePin, Placement);
+		}
+
 		static bool IsCanvasInputSuppressed(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
 		{
 			return Editor.IsCanvasInputSuppressedForTesting(Session);
@@ -2974,6 +2980,62 @@ namespace
 			std::any_of(SameNodeRoute.Connections.begin(), SameNodeRoute.Connections.end(),
 				[TargetB](const auto& Link) { return Link.InputPin == TargetB; }));
 
+		// Exercise the registered popup against a single-cardinality producer routed
+		// through a reroute. A second multiply consumer must not be offered.
+		auto TopologySchema = MakeMaterialExpressionFixtureSchema();
+		TopologySchema.ReroutePolicyAware = true;
+		if (auto Definition = std::find_if(TopologySchema.Nodes.begin(), TopologySchema.Nodes.end(),
+			[](const auto& Node) { return Node.TypeKey == "material.scalar"; }); Definition != TopologySchema.Nodes.end())
+			if (auto Pin = std::find_if(Definition->Pins.begin(), Definition->Pins.end(),
+				[](const auto& Value) { return Value.Key == "value"; }); Pin != Definition->Pins.end())
+				Pin->Cardinality = EditorGraphPinCardinality::Single;
+		auto TopologyGraphID = UUID::Generate();
+		auto TopologyGraph = TopologyGraphID ? CreateEditorGraph(TopologySchema, *TopologyGraphID) :
+			std::expected<EditorGraph, std::string>(std::unexpected("topology graph identity unavailable"));
+		const auto AddTopologyNode = [&](std::string_view Type, double X)
+		{
+			if (!TopologyGraph) return UUID{};
+			auto Node = CreateEditorGraphNode(TopologySchema, Type, X, 40.0);
+			if (!Node) return UUID{};
+			const UUID NodeID = Node->ID;
+			TopologyGraph->Nodes.push_back(std::move(*Node));
+			return NodeID;
+		};
+		const UUID TopologyProducer = AddTopologyNode("material.scalar", 100.0);
+		const UUID TopologyReroute = AddTopologyNode("pulseforge.reroute.float", 300.0);
+		const UUID TopologyConsumer = AddTopologyNode("material.multiply", 520.0);
+		if (TopologyGraph && !TopologyProducer.IsNil() && !TopologyReroute.IsNil() && !TopologyConsumer.IsNil())
+		{
+			const auto FindTopologyPin = [&](UUID NodeID, std::string_view Key)
+			{
+				const auto Node = std::find_if(TopologyGraph->Nodes.begin(), TopologyGraph->Nodes.end(),
+					[NodeID](const auto& Value) { return Value.ID == NodeID; });
+				if (Node == TopologyGraph->Nodes.end()) return UUID{};
+				const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(),
+					[Key](const auto& Value) { return Value.Key == Key; });
+				return Pin == Node->Pins.end() ? UUID{} : Pin->ID;
+			};
+			EditorGraphCommandHistory TopologyHistory(*TopologyGraph);
+			PF_CHECK(Tests, ConnectEditorGraphPins(TopologyHistory, TopologySchema,
+				FindTopologyPin(TopologyProducer, "value"), FindTopologyPin(TopologyReroute, "in")) &&
+				ConnectEditorGraphPins(TopologyHistory, TopologySchema,
+				FindTopologyPin(TopologyReroute, "out"), FindTopologyPin(TopologyConsumer, "a")));
+			EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, TopologyHistory.Graph(), TopologySchema);
+			PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+			DrawFrame(ImVec2(-1000.0f, -1000.0f));
+			const ImVec2 TopologySearchRelease(HostOrigin.x + 980.0f, HostOrigin.y + 690.0f);
+			const auto TopologySearchPlacement = ScreenCanvas(TopologySearchRelease);
+			EditorGraphDocumentEditorTestAccess::QueueNodeSearch(GraphEditor, *Session,
+				FindTopologyPin(TopologyReroute, "out"),
+				{ TopologySearchPlacement.X, TopologySearchPlacement.Y, 0.0 });
+			DrawFrame(TopologySearchRelease);
+			const auto FilteredPopup = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+			PF_CHECK(Tests, FilteredPopup.ContextualSearchOpen);
+			PF_CHECK(Tests, std::find(FilteredPopup.SearchActionTypeKeys.begin(), FilteredPopup.SearchActionTypeKeys.end(),
+				"material.multiply") == FilteredPopup.SearchActionTypeKeys.end());
+			DrawFrame(TopologySearchRelease, false, false, true);
+		}
+
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
 		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
 		// An empty-canvas release after placing a knot publishes an open, typed route. Its
@@ -2996,6 +3058,8 @@ namespace
 		const auto SearchTail = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
 		const auto SearchReleaseCanvas = ScreenCanvas(OpenRouteReleasePoint);
 		PF_CHECK(Tests, SearchTail.ContextualSearchOpen &&
+			std::find(SearchTail.SearchActionTypeKeys.begin(), SearchTail.SearchActionTypeKeys.end(), "material.multiply") !=
+				SearchTail.SearchActionTypeKeys.end() &&
 			SearchTail.OpenEnded && SearchTail.PreviewEndpoints.size() == 2 &&
 			std::abs(SearchTail.PreviewEndpoints.back().X - SearchReleaseCanvas.X) < 0.1 &&
 			std::abs(SearchTail.PreviewEndpoints.back().Y - SearchReleaseCanvas.Y) < 0.1 &&
@@ -3017,9 +3081,29 @@ namespace
 		DrawFrame(OpenRouteReleasePoint);
 		DrawFrame(OpenRouteReleasePoint);
 		const EditorGraph OpenRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const std::string SelectedSearchType = SearchTail.SearchActionTypeKeys.empty()
+			? std::string{} : SearchTail.SearchActionTypeKeys.front();
 		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::IsCanvasInputSuppressed(GraphEditor, *Session));
 		PF_CHECK(Tests, OpenRoute.Nodes.size() == Before.Nodes.size() + 3 &&
 			OpenRoute.Connections.size() == Before.Connections.size() + 3 && Session->IsDirty());
+		const auto SelectedSearchNode = std::find_if(OpenRoute.Nodes.begin(), OpenRoute.Nodes.end(),
+			[&](const auto& Node) { return Node.TypeKey == SelectedSearchType &&
+				std::none_of(Before.Nodes.begin(), Before.Nodes.end(), [&Node](const auto& Old) { return Old.ID == Node.ID; }); });
+		UUID SearchTailOutput;
+		for (auto Node = KnotOnlyOpenRoute.Nodes.rbegin(); Node != KnotOnlyOpenRoute.Nodes.rend(); ++Node)
+			if (IsEditorGraphRerouteType(Node->TypeKey))
+			{
+				const auto Output = std::find_if(Node->Pins.begin(), Node->Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "out"; });
+				if (Output != Node->Pins.end()) { SearchTailOutput = Output->ID; break; }
+			}
+		PF_CHECK(Tests, !SelectedSearchType.empty() && SelectedSearchNode != OpenRoute.Nodes.end() &&
+			std::any_of(OpenRoute.Connections.begin(), OpenRoute.Connections.end(), [&](const auto& Link)
+			{
+				return Link.OutputPin == SearchTailOutput && std::any_of(SelectedSearchNode->Pins.begin(),
+					SelectedSearchNode->Pins.end(), [&Link](const auto& Pin)
+						{ return Pin.Direction == EditorGraphPinDirection::Input && Pin.ID == Link.InputPin; });
+			}));
 		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).SearchPlacementAwaitingPinAnchor);
 		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
 			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == KnotOnlyOpenRoute);

@@ -980,7 +980,17 @@ namespace PulseForgeEditor
 	EditorGraphWireRoutePresentation EditorGraphDocumentEditor::GetWireRouteForTesting(EditorDocumentSession& Session)
 	{
 		const auto* State = GetState(Session);
-		return State ? State->WireRoutePresentation : EditorGraphWireRoutePresentation{};
+		if (!State) return {};
+		auto Result = State->WireRoutePresentation;
+		Result.SearchActionTypeKeys.reserve(State->NodeSearch.Actions.size());
+		for (const auto& Action : State->NodeSearch.Actions) Result.SearchActionTypeKeys.push_back(Action.NodeTypeKey);
+		return Result;
+	}
+
+	void EditorGraphDocumentEditor::QueueNodeSearchForTesting(EditorDocumentSession& Session,
+		std::optional<PulseForge::UUID> SourcePin, EditorGraphVector3 Placement)
+	{
+		if (auto* State = GetState(Session)) QueueNodeSearch(*State, Session, SourcePin, Placement);
 	}
 
 	bool EditorGraphDocumentEditor::IsCanvasInputSuppressedForTesting(EditorDocumentSession& Session)

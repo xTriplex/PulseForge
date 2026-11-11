@@ -225,6 +225,7 @@ namespace PulseForgeEditor
 		EditorGraphVector3 SearchDropPoint;
 		EditorGraphScreenPoint SearchDropScreen;
 		EditorGraphCanvasRect FirstSearchResultBounds;
+		std::vector<std::string> SearchActionTypeKeys;
 		std::vector<EditorGraphVector3> KnotPositions;
 		std::vector<EditorGraphCanvasPoint> PreviewEndpoints;
 	};
@@ -504,6 +505,8 @@ namespace PulseForgeEditor
 			EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphPinMovePresentation GetPinMoveForTesting(EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphWireRoutePresentation GetWireRouteForTesting(EditorDocumentSession& Session);
+		void QueueNodeSearchForTesting(EditorDocumentSession& Session, std::optional<PulseForge::UUID> SourcePin,
+			EditorGraphVector3 Placement);
 		[[nodiscard]] bool IsCanvasInputSuppressedForTesting(EditorDocumentSession& Session);
 		[[nodiscard]] PulseForge::UUID GetLastHoveredPinForTesting(EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);

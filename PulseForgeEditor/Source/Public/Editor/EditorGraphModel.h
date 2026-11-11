@@ -126,6 +126,7 @@ namespace PulseForgeEditor
 		size_t PinVisits = 0;
 		size_t ConnectionVisits = 0;
 		size_t TraversedEdges = 0;
+		size_t RerouteTopologyBuilds = 0;
 	};
 
 	class EditorGraphSchemaRegistry final

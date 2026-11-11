@@ -705,6 +705,14 @@ namespace
 
 		const auto BooleanActions = DiscoverEditorGraphNodeActions(*Graph, Schema, BooleanOut->ID);
 		PF_CHECK(Tests, BooleanActions == DiscoverEditorGraphNodeActions(*Graph, Schema, BooleanOut->ID));
+		EditorGraphSchema ExpandedCatalog = Schema;
+		for (size_t Index = 0; Index < 256; ++Index)
+			ExpandedCatalog.Nodes.push_back({ "test.discovery.expanded." + std::to_string(Index), "Expanded",
+				{ { "in", "Input", EditorGraphPinDirection::Input, EditorGraphPinType::Boolean,
+					EditorGraphPinCardinality::Single, false } } });
+		EditorGraphWorkStats DiscoveryWork;
+		const auto ExpandedActions = DiscoverEditorGraphNodeActions(*Graph, ExpandedCatalog, BooleanOut->ID, &DiscoveryWork);
+		PF_CHECK(Tests, ExpandedActions.size() >= 256 && DiscoveryWork.RerouteTopologyBuilds <= 2);
 		PF_CHECK(Tests, BooleanActions.size() == 2);
 		PF_CHECK(Tests, std::all_of(BooleanActions.begin(), BooleanActions.end(), [](const auto& Action)
 			{ return Action.NodeTypeKey == "test.mixed" && Action.ConnectPinKey &&
@@ -962,6 +970,48 @@ namespace
 			LongGraph->Nodes.front().Pins[1].ID, &DiscoveryWork);
 		PF_CHECK(Tests, !Actions.empty() && DiscoveryWork.NodeVisits == NodeCount &&
 			DiscoveryWork.PinVisits == NodeCount * 2 && DiscoveryWork.ConnectionVisits == NodeCount - 1);
+		EditorGraphSchema ExpandedDiscoverySchema = ChainSchema;
+		for (size_t Index = 0; Index < 256; ++Index)
+			ExpandedDiscoverySchema.Nodes.push_back({ "test.discovery.benchmark." + std::to_string(Index), "Expanded",
+				{ { "input", "Input", EditorGraphPinDirection::Input, EditorGraphPinType::Float,
+					EditorGraphPinCardinality::Single, 0.0 } } });
+		const auto MeasureDiscovery = [&](const EditorGraphSchema& DiscoverySchema)
+		{
+			const auto Begin = std::chrono::steady_clock::now();
+			EditorGraphWorkStats Work;
+			for (size_t Iteration = 0; Iteration < 5; ++Iteration)
+				(void)DiscoverEditorGraphNodeActions(*LongGraph, DiscoverySchema,
+					LongGraph->Nodes.front().Pins[1].ID, &Work);
+			const auto End = std::chrono::steady_clock::now();
+			return std::pair{ std::chrono::duration<double, std::milli>(End - Begin).count() / 5.0,
+				Work.RerouteTopologyBuilds };
+		};
+		const auto OrdinaryDiscovery = MeasureDiscovery(ChainSchema);
+		const auto ExpandedDiscovery = MeasureDiscovery(ExpandedDiscoverySchema);
+		std::cout << "G21 optimized discovery [" << BuildFlavor << "] linked_nodes=1000 catalog=ordinary elapsed_ms="
+			<< OrdinaryDiscovery.first << " topology_builds=" << OrdinaryDiscovery.second << '\n';
+		std::cout << "G21 optimized discovery [" << BuildFlavor << "] linked_nodes=1000 catalog=expanded-256 elapsed_ms="
+			<< ExpandedDiscovery.first << " topology_builds=" << ExpandedDiscovery.second << '\n';
+		EditorGraphSchema RouteSchema = ChainSchema;
+		RouteSchema.RerouteTypes = { EditorGraphPinType::Float };
+		const auto MeasureRoute = [&](size_t KnotCount)
+		{
+			std::vector<EditorGraphVector3> Knots(KnotCount);
+			for (size_t Index = 0; Index < KnotCount; ++Index)
+				Knots[Index] = { static_cast<double>(Index * 20), 80.0, 0.0 };
+			const auto Begin = std::chrono::steady_clock::now();
+			const auto Decision = CanCreateEditorGraphWireRoute(*LongGraph, RouteSchema,
+				LongGraph->Nodes.back().Pins[1].ID, Knots);
+			const auto End = std::chrono::steady_clock::now();
+			PF_CHECK(Tests, Decision.Allowed);
+			return std::chrono::duration<double, std::milli>(End - Begin).count();
+		};
+		const double ShortRouteMs = MeasureRoute(2);
+		const double LongRouteMs = MeasureRoute(32);
+		std::cout << "G21 route preview [" << BuildFlavor << "] linked_nodes=1000 knots=2 elapsed_ms="
+			<< ShortRouteMs << '\n';
+		std::cout << "G21 route preview [" << BuildFlavor << "] linked_nodes=1000 knots=32 elapsed_ms="
+			<< LongRouteMs << '\n';
 
 		// Action discovery is graph-context-sensitive. The popup cache keys this result
 		// by the history graph revision, which must change when a committed edge changes
@@ -1507,6 +1557,8 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 			if (OutputCreated)
 			{
 				const auto After = OutputHistory.Graph();
+				const auto ExpectedNodeIDs = OutputCreated->RerouteNodeIDs;
+				const auto ExpectedConnectionIDs = OutputCreated->ConnectionIDs;
 				PF_CHECK(Tests, OutputHistory.Undo() &&
 					OutputHistory.Graph().Nodes.size() == OutputBefore.Nodes.size() + 2 &&
 					OutputHistory.Graph().Connections.size() == OutputBefore.Connections.size() + 2);
@@ -1515,9 +1567,50 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 					OutputHistory.Graph().Connections.size() == OutputBefore.Connections.size() + 1);
 				PF_CHECK(Tests, OutputHistory.Undo() && OutputHistory.Graph() == OutputBefore);
 				PF_CHECK(Tests, OutputHistory.Redo() && OutputHistory.Redo() && OutputHistory.Redo() &&
+					OutputHistory.Graph() == After && OutputHistory.Undo() && OutputHistory.Undo() &&
+					OutputHistory.Graph().Nodes.size() == OutputBefore.Nodes.size() + 1 &&
+					OutputHistory.Redo() && OutputHistory.Graph().Nodes.size() == OutputBefore.Nodes.size() + 2 &&
+					OutputHistory.Undo() && OutputHistory.Undo() && OutputHistory.Graph() == OutputBefore &&
+					OutputHistory.CanRedo());
+				PF_CHECK(Tests, OutputHistory.Redo() && OutputHistory.Redo() && OutputHistory.Redo() &&
 					OutputHistory.Graph() == After);
 				PF_CHECK(Tests, SameConnections(OutputHistory.Graph().Connections, After.Connections));
+				PF_CHECK(Tests, std::all_of(ExpectedNodeIDs.begin(), ExpectedNodeIDs.end(), [&](const auto NodeID)
+					{ return std::any_of(OutputHistory.Graph().Nodes.begin(), OutputHistory.Graph().Nodes.end(),
+						[NodeID](const auto& Node) { return Node.ID == NodeID; }); }) &&
+					std::all_of(ExpectedConnectionIDs.begin(), ExpectedConnectionIDs.end(), [&](const auto ConnectionID)
+					{ return std::any_of(OutputHistory.Graph().Connections.begin(), OutputHistory.Graph().Connections.end(),
+						[ConnectionID](const auto& Link) { return Link.ID == ConnectionID; }); }));
 			}
+
+			std::vector<EditorGraphVector3> MaximumLegalRoute(127, EditorGraphVector3{ 300.0, 260.0, 0.0 });
+			const auto LegalStepBoundary = CanCreateEditorGraphWireRoute(*Graph, Schema, Source, MaximumLegalRoute, InputA);
+			std::vector<EditorGraphVector3> OverStepRoute(128, EditorGraphVector3{ 300.0, 260.0, 0.0 });
+			const auto OverStepPreview = CanCreateEditorGraphWireRoute(*Graph, Schema, Source, OverStepRoute, InputA);
+			EditorGraphCommandHistory OverStepHistory(*Graph);
+			const auto OverStepCommit = CreateEditorGraphWireRoute(OverStepHistory, Schema, Source, OverStepRoute, InputA);
+			PF_CHECK(Tests, LegalStepBoundary.Allowed && !OverStepPreview.Allowed && !OverStepCommit &&
+				OverStepHistory.Graph() == *Graph && !OverStepHistory.CanUndo());
+
+			EditorGraphSchema PrefixPolicySchema = Schema;
+			PrefixPolicySchema.ReroutePolicyAware = true;
+			PrefixPolicySchema.GraphValidationPolicy = [](const EditorGraph& Candidate)
+				-> std::optional<EditorGraphDiagnostic>
+			{
+				const size_t RerouteCount = static_cast<size_t>(std::count_if(Candidate.Nodes.begin(), Candidate.Nodes.end(),
+					[](const auto& Node) { return IsEditorGraphRerouteType(Node.TypeKey); }));
+				if (RerouteCount == 1) return EditorGraphDiagnostic{ "test.route_prefix", "One-knot prefixes are not restorable", {} };
+				return std::nullopt;
+			};
+			const std::array<EditorGraphVector3, 2> PrefixKnots{ EditorGraphVector3{ 350.0, 280.0, 0.0 },
+				EditorGraphVector3{ 410.0, 320.0, 0.0 } };
+			const auto PrefixPreview = CanCreateEditorGraphWireRoute(*Graph, PrefixPolicySchema, Source, PrefixKnots, InputA);
+			EditorGraphCommandHistory PrefixHistory(*Graph);
+			const auto PrefixBefore = PrefixHistory.Graph();
+			const auto PrefixRevision = PrefixHistory.GraphRevision();
+			const auto PrefixCommit = CreateEditorGraphWireRoute(PrefixHistory, PrefixPolicySchema, Source, PrefixKnots, InputA);
+			PF_CHECK(Tests, !PrefixPreview.Allowed && !PrefixCommit && PrefixHistory.Graph() == PrefixBefore &&
+				PrefixHistory.GraphRevision() == PrefixRevision && !PrefixHistory.IsDirty() && !PrefixHistory.CanUndo());
 
 			EditorGraphCommandHistory OpenHistory(*Graph);
 			const std::array<EditorGraphVector3, 2> OpenKnots{ EditorGraphVector3{ 330.0, -40.0, 0.0 },
@@ -1955,6 +2048,82 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 		PF_CHECK(Tests, !BudgetHistory.ExecuteSequence(Schema, TooManyRouteSteps, BudgetError) &&
 			BudgetError.find("Undo steps") != std::string::npos && BudgetHistory.Graph() == BeforeBudgetRejection &&
 			BudgetHistory.GraphRevision() == BeforeBudgetRevision && BudgetHistory.CanRedo());
+	}
+	{
+		using namespace PulseForgeEditor;
+		const auto Schema = MakeGameplayEventFixtureSchema();
+		const auto MakeBoundaryGraph = [&Schema](size_t LogNodeCount, size_t PayloadSize) -> std::optional<EditorGraph>
+		{
+			auto Graph = CreateEditorGraph(Schema, ID(0x703));
+			if (!Graph || !AppendNode(*Graph, Schema, "gameplay.event.begin", 0.0)) return std::nullopt;
+			const std::string Payload(PayloadSize, 'x');
+			for (size_t Index = 0; Index < LogNodeCount; ++Index)
+			{
+				if (!AppendNode(*Graph, Schema, "gameplay.action.log", static_cast<double>(Index + 1) * 20.0))
+					return std::nullopt;
+				auto* LogNode = FindNode(*Graph, "gameplay.action.log", Index);
+				auto MessagePin = LogNode ? std::find_if(LogNode->Pins.begin(), LogNode->Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "message"; }) : std::vector<EditorGraphPin>::iterator{};
+				if (!LogNode || MessagePin == LogNode->Pins.end()) return std::nullopt;
+				MessagePin->DefaultValue = Payload;
+			}
+			return std::move(*Graph);
+		};
+		const auto RejectedGraph = MakeBoundaryGraph(240, 4'096);
+		PF_CHECK(Tests, RejectedGraph.has_value());
+		if (RejectedGraph)
+		{
+			EditorGraphCommandHistory RejectedHistory(*RejectedGraph);
+			const auto MessageID = FindPin(RejectedHistory.Graph().Nodes[1], "message")->ID;
+			const auto RedoEdit = SetEditorGraphPinDefaultValue(RejectedHistory, Schema, MessageID, std::string("redo marker"));
+			PF_CHECK(Tests, RedoEdit.has_value());
+			PF_CHECK(Tests, RedoEdit && RejectedHistory.Undo() && RejectedHistory.CanRedo());
+			const auto Before = RejectedHistory.Graph();
+			const auto Revision = RejectedHistory.GraphRevision();
+			const bool Dirty = RejectedHistory.IsDirty();
+			const bool CanUndoBefore = RejectedHistory.CanUndo();
+			const bool CanRedoBefore = RejectedHistory.CanRedo();
+			const auto* EventPin = FindPin(RejectedHistory.Graph().Nodes.front(), "event");
+			std::array<EditorGraphVector3, 32> Knots{};
+			for (size_t Index = 0; Index < Knots.size(); ++Index)
+				Knots[Index] = { static_cast<double>(Index * 24), 80.0, 0.0 };
+			const auto Rejected = EventPin ? CreateEditorGraphWireRoute(RejectedHistory, Schema, EventPin->ID, Knots) :
+				std::expected<EditorGraphWireRouteDecision, std::string>(std::unexpected("event output unavailable"));
+			PF_CHECK(Tests, !Rejected && RejectedHistory.Graph() == Before && RejectedHistory.GraphRevision() == Revision &&
+				RejectedHistory.IsDirty() == Dirty && RejectedHistory.CanUndo() == CanUndoBefore &&
+				RejectedHistory.CanRedo() == CanRedoBefore);
+			PF_CHECK(Tests, RejectedHistory.Redo() && std::get<std::string>(
+				FindPin(RejectedHistory.Graph().Nodes[1], "message")->DefaultValue) == "redo marker");
+		}
+		const auto AdmissibleGraph = MakeBoundaryGraph(230, 4'096);
+		PF_CHECK(Tests, AdmissibleGraph.has_value());
+		if (AdmissibleGraph)
+		{
+			EditorGraphCommandHistory RouteHistory(*AdmissibleGraph);
+			const auto* EventPin = FindPin(AdmissibleGraph->Nodes.front(), "event");
+			std::array<EditorGraphVector3, 32> Knots{};
+			for (size_t Index = 0; Index < Knots.size(); ++Index)
+				Knots[Index] = { static_cast<double>(Index * 24), 80.0, 0.0 };
+			const auto Created = EventPin ? CreateEditorGraphWireRoute(RouteHistory, Schema, EventPin->ID, Knots) :
+				std::expected<EditorGraphWireRouteDecision, std::string>(std::unexpected("event output unavailable"));
+			PF_CHECK(Tests, Created && Created->RerouteNodeIDs.size() == 32 && Created->ConnectionIDs.size() == 32);
+			if (Created)
+			{
+				const auto FinalGraph = RouteHistory.Graph();
+				PF_CHECK(Tests, RouteHistory.Undo() && RouteHistory.Undo() && RouteHistory.Redo());
+				size_t RemainingUndoSteps = 0;
+				while (RouteHistory.Undo()) ++RemainingUndoSteps;
+				PF_CHECK(Tests, RemainingUndoSteps == 31 && RouteHistory.Graph() == *AdmissibleGraph);
+				while (RouteHistory.Redo()) {}
+				PF_CHECK(Tests, RouteHistory.Graph() == FinalGraph &&
+					std::all_of(Created->RerouteNodeIDs.begin(), Created->RerouteNodeIDs.end(), [&](const auto NodeID)
+					{ return std::any_of(RouteHistory.Graph().Nodes.begin(), RouteHistory.Graph().Nodes.end(),
+						[NodeID](const auto& Node) { return Node.ID == NodeID; }); }) &&
+					std::all_of(Created->ConnectionIDs.begin(), Created->ConnectionIDs.end(), [&](const auto ConnectionID)
+					{ return std::any_of(RouteHistory.Graph().Connections.begin(), RouteHistory.Graph().Connections.end(),
+						[ConnectionID](const auto& Link) { return Link.ID == ConnectionID; }); }));
+			}
+		}
 	}
 	TestMaterialSchemaAndSerialization(Tests);
 	TestGameplaySchemaAndTransactions(Tests);
