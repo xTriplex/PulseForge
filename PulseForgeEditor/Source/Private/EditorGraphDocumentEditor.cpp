@@ -94,7 +94,17 @@ namespace
 		uint64_t GraphRevision = 0;
 		EditorGraphScreenPoint PressPosition;
 		std::vector<EditorGraphVector3> Knots;
+		EditorGraph ValidatedPrefixGraph;
+		PulseForge::UUID ValidatedFreePin;
+		std::string ValidatedSchemaKey;
+		uint32_t ValidatedSchemaVersion = 0;
+		uint64_t ValidatedSchemaRevision = 0;
+		EditorGraphWireRouteAdmission Admission;
+		size_t ValidatedPrefixStates = 0;
 		PulseForge::UUID PreviewTarget;
+		uint64_t PreviewGraphRevision = 0;
+		uint64_t PreviewSchemaRevision = 0;
+		std::vector<EditorGraphVector3> PreviewKnots;
 		EditorGraphWireRouteDecision PreviewDecision;
 	};
 
@@ -250,6 +260,7 @@ namespace
 
 		EditorGraphCommandHistory History;
 		EditorGraphSchema Schema;
+		uint64_t SchemaRevision = 0;
 		std::filesystem::path SourcePath;
 		std::string SavedBytes;
 		std::string Error;
@@ -903,6 +914,7 @@ namespace PulseForgeEditor
 		}
 		State->History.Reset(std::move(*Graph));
 		State->Schema = std::move(*Schema);
+		++State->SchemaRevision;
 		State->PropertyEdits.Reset();
 		State->NodeMoveTransaction = false;
 		State->SavedBytes = std::move(*Source);
@@ -919,6 +931,7 @@ namespace PulseForgeEditor
 		if (!State || Graph.ID != Session.Identity.Asset) return;
 		State->History.Reset(std::move(Graph));
 		State->Schema = std::move(Schema);
+		++State->SchemaRevision;
 		State->Handles.clear();
 		State->Identities.clear();
 		State->NodeSearch = {};
@@ -930,6 +943,15 @@ namespace PulseForgeEditor
 		State->ScreenPinRelease = {};
 		State->PinRelease = {};
 		State->NeedsCanvasSync = true;
+	}
+
+	void EditorGraphDocumentEditor::SetSchemaForTesting(EditorDocumentSession& Session, EditorGraphSchema Schema)
+	{
+		if (auto* State = GetState(Session))
+		{
+			State->Schema = std::move(Schema);
+			++State->SchemaRevision;
+		}
 	}
 
 	void EditorGraphDocumentEditor::CapturePresentationForTesting(EditorDocumentSession& Session, bool Capture)
@@ -1164,6 +1186,8 @@ namespace PulseForgeEditor
 		State->PinVisibilityPopupPresentation = {};
 		State->ReconnectPopupPresentation = {};
 		State->WireRoutePresentation = {};
+		if (State->WireRoute)
+			State->WireRoutePresentation.RoutePrefixStatesValidated = State->WireRoute->ValidatedPrefixStates;
 		State->WireRoutePresentation.SearchPlacementAwaitingPinAnchor = State->RouteSearchPlacementAwaiting;
 		if (!State->Canvas)
 		{
@@ -2311,11 +2335,15 @@ namespace PulseForgeEditor
 					auto& Route = *State->WireRoute;
 					const PulseForge::UUID Target = Route.Direction == EditorGraphPinDirection::Output ?
 						End->second : Start->second;
-					if (Route.PreviewTarget != Target)
+					if (Route.PreviewTarget != Target || Route.PreviewGraphRevision != State->History.GraphRevision() ||
+						Route.PreviewSchemaRevision != State->SchemaRevision || Route.PreviewKnots != Route.Knots)
 					{
 						Route.PreviewTarget = Target;
+						Route.PreviewGraphRevision = State->History.GraphRevision();
+						Route.PreviewSchemaRevision = State->SchemaRevision;
+						Route.PreviewKnots = Route.Knots;
 						Route.PreviewDecision = CanCreateEditorGraphWireRoute(State->History.Graph(), State->Schema,
-							Route.SourcePin, Route.Knots, Target);
+							Route.SourcePin, Route.Knots, Target, nullptr, nullptr, nullptr, &State->History);
 					}
 					const auto& Decision = Route.PreviewDecision;
 					return EditorGraphConnectionDecision{ Decision.Allowed, Decision.Reason,
@@ -3224,11 +3252,33 @@ namespace PulseForgeEditor
 			if (SourcePin && (!State->WireRoute || State->WireRoute->SourcePin == SourceID))
 			{
 				const ImVec2 PointerCanvas = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
-				std::vector<EditorGraphVector3> ProposedKnots = State->WireRoute ?
-					State->WireRoute->Knots : std::vector<EditorGraphVector3>{};
-				ProposedKnots.push_back({ PointerCanvas.x, PointerCanvas.y, 0.0 });
-				const auto RoutePreview = CanCreateEditorGraphWireRoute(State->History.Graph(), State->Schema,
-					SourceID, ProposedKnots);
+				const EditorGraphVector3 NewKnot{ PointerCanvas.x, PointerCanvas.y, 0.0 };
+				EditorGraph PlannedGraph;
+				EditorGraphWorkStats RouteWork;
+				const bool ReusingPrefix = State->WireRoute &&
+					State->WireRoute->ValidatedSchemaKey == State->Schema.Key &&
+					State->WireRoute->ValidatedSchemaVersion == State->Schema.Version &&
+					State->WireRoute->ValidatedSchemaRevision == State->SchemaRevision &&
+					State->WireRoute->Admission.Steps == State->WireRoute->Knots.size() &&
+					!State->WireRoute->ValidatedFreePin.IsNil();
+				const EditorGraph& PlanningGraph = ReusingPrefix ?
+					State->WireRoute->ValidatedPrefixGraph : State->History.Graph();
+				const PulseForge::UUID PlanningSourcePin = ReusingPrefix ?
+					State->WireRoute->ValidatedFreePin : SourceID;
+				EditorGraphWireRouteAdmission NextAdmission = ReusingPrefix ?
+					State->WireRoute->Admission : EditorGraphWireRouteAdmission{};
+				std::vector<EditorGraphVector3> ProposedKnots;
+				if (ReusingPrefix) ProposedKnots.push_back(NewKnot);
+				else
+				{
+					if (State->WireRoute) ProposedKnots = State->WireRoute->Knots;
+					ProposedKnots.push_back(NewKnot);
+				}
+				const auto RoutePreview = CanCreateEditorGraphWireRoute(PlanningGraph, State->Schema,
+					PlanningSourcePin, ProposedKnots, std::nullopt, &PlannedGraph, &RouteWork,
+					&NextAdmission, &State->History);
+				State->WireRoutePresentation.RoutePrefixStatesValidatedThisAttempt =
+					RouteWork.RoutePrefixStatesValidated;
 				if (RoutePreview.Allowed)
 				{
 					if (!State->WireRoute)
@@ -3238,7 +3288,25 @@ namespace PulseForgeEditor
 							{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y }, {}};
 						State->WireRouteOwnsNativeCreateThroughRelease = true;
 					}
-					State->WireRoute->Knots.push_back({ PointerCanvas.x, PointerCanvas.y, 0.0 });
+					State->WireRoute->Knots.push_back(NewKnot);
+					State->WireRoute->ValidatedPrefixGraph = std::move(PlannedGraph);
+					State->WireRoute->ValidatedSchemaKey = State->Schema.Key;
+					State->WireRoute->ValidatedSchemaVersion = State->Schema.Version;
+					State->WireRoute->ValidatedSchemaRevision = State->SchemaRevision;
+					State->WireRoute->Admission = NextAdmission;
+					State->WireRoute->ValidatedPrefixStates += RouteWork.RoutePrefixStatesValidated;
+					const auto NewLastNode = std::find_if(State->WireRoute->ValidatedPrefixGraph.Nodes.begin(),
+						State->WireRoute->ValidatedPrefixGraph.Nodes.end(), [&RoutePreview](const auto& Node)
+						{ return Node.ID == RoutePreview.RerouteNodeIDs.back(); });
+					if (NewLastNode != State->WireRoute->ValidatedPrefixGraph.Nodes.end())
+					{
+						const std::string_view FreePinKey = SourcePin->Direction == EditorGraphPinDirection::Output ? "out" : "in";
+						const auto FreePin = std::find_if(NewLastNode->Pins.begin(), NewLastNode->Pins.end(),
+							[FreePinKey](const auto& Pin) { return Pin.Key == FreePinKey; });
+						if (FreePin != NewLastNode->Pins.end()) State->WireRoute->ValidatedFreePin = FreePin->ID;
+					}
+					State->WireRoutePresentation.RoutePrefixStatesValidated =
+						State->WireRoute->ValidatedPrefixStates;
 					State->WireRoutePresentation.Active = true;
 					State->WireRoutePresentation.SourcePin = SourceID;
 					State->WireRoutePresentation.KnotPositions = State->WireRoute->Knots;

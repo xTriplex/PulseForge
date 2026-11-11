@@ -952,6 +952,54 @@ namespace PulseForgeEditor
 		}
 	}
 
+	bool EditorGraphCommandHistory::CanAdmitRoute(size_t PlannedSteps, size_t RouteSnapshotBytes,
+		size_t CandidatePlanBytes, size_t PlanningGraphBytes, std::string& Error) const
+	{
+		if (m_Transaction)
+		{
+			Error = "Cannot plan a graph route while another graph edit transaction is active";
+			return false;
+		}
+		if (PlannedSteps > MaximumSnapshots || RouteSnapshotBytes > MaximumHistoryBytes)
+		{
+			Error = PlannedSteps > MaximumSnapshots ?
+				"The route needs more Undo steps than the history snapshot limit can retain" :
+				"The route's required Undo snapshots exceed the graph history memory budget";
+			return false;
+		}
+		const size_t AvailableSnapshots = MaximumSnapshots - PlannedSteps;
+		size_t RetainedStart = m_Undo.size();
+		size_t RetainedBytes = RouteSnapshotBytes;
+		while (RetainedStart > 0 && m_Undo.size() - RetainedStart < AvailableSnapshots)
+		{
+			const size_t NextBytes = EstimateBytes(m_Undo[RetainedStart - 1]);
+			if (NextBytes > MaximumHistoryBytes - RetainedBytes) break;
+			RetainedBytes += NextBytes;
+			--RetainedStart;
+		}
+		size_t PeakPreparationBytes = EstimateBytes(m_Graph);
+		const auto AddPreparationBytes = [&PeakPreparationBytes](size_t Amount)
+		{
+			if (Amount > MaximumRoutePreparationBytes ||
+				PeakPreparationBytes > MaximumRoutePreparationBytes - Amount) return false;
+			PeakPreparationBytes += Amount;
+			return true;
+		};
+		for (const auto& Snapshot : m_Undo)
+			if (!AddPreparationBytes(EstimateBytes(Snapshot)))
+			{
+				Error = "The route cannot be prepared within the bounded history allocation budget";
+				return false;
+			}
+		if (!AddPreparationBytes(PlanningGraphBytes) || !AddPreparationBytes(CandidatePlanBytes) ||
+			!AddPreparationBytes(RetainedBytes))
+		{
+			Error = "The route cannot be prepared within the bounded history allocation budget";
+			return false;
+		}
+		return true;
+	}
+
 	bool EditorGraphCommandHistory::ExecuteSequence(const EditorGraphSchema& Schema,
 		std::vector<EditorGraph>&& Candidates, std::string& Error)
 	{
@@ -2169,7 +2217,9 @@ namespace PulseForgeEditor
 	{
 		EditorGraphWireRouteDecision BuildEditorGraphWireRoute(EditorGraph& Candidate, const EditorGraphSchema& Schema,
 			PulseForge::UUID StartPinID, std::span<const EditorGraphVector3> KnotPositions,
-			std::optional<PulseForge::UUID> EndPinID, std::vector<EditorGraph>* HistorySteps = nullptr)
+			std::optional<PulseForge::UUID> EndPinID, std::vector<EditorGraph>* HistorySteps = nullptr,
+			EditorGraphWorkStats* Stats = nullptr, EditorGraphWireRouteAdmission* Admission = nullptr,
+			const EditorGraphCommandHistory* History = nullptr)
 		{
 			EditorGraphWireRouteDecision Result;
 			Result.OpenEnded = !EndPinID.has_value();
@@ -2182,13 +2232,23 @@ namespace PulseForgeEditor
 			};
 			if (KnotPositions.empty()) return Fail("Place at least one reroute before completing a graph route");
 			const size_t PlannedSteps = KnotPositions.size() + (EndPinID ? 1 : 0);
-			if (PlannedSteps > EditorGraphCommandHistory::MaximumSnapshots)
+			EditorGraphWireRouteAdmission WorkingAdmission = Admission ? *Admission : EditorGraphWireRouteAdmission{};
+			if (!WorkingAdmission.Initialized)
+			{
+				WorkingAdmission.TotalStateBytes = EstimateBytes(Candidate);
+				WorkingAdmission.SmallestStateBytes = WorkingAdmission.TotalStateBytes;
+				WorkingAdmission.Initialized = true;
+			}
+			if (WorkingAdmission.Steps > EditorGraphCommandHistory::MaximumSnapshots ||
+				PlannedSteps > EditorGraphCommandHistory::MaximumSnapshots - WorkingAdmission.Steps)
 				return Fail("The route needs more Undo steps than the history snapshot limit can retain");
 			if (Candidate.SchemaKey != Schema.Key || Candidate.SchemaVersion != Schema.Version)
 				return Fail("The graph does not match the active schema");
 			if (KnotPositions.size() > EditorGraphMaximumNodes ||
 				Candidate.Nodes.size() > EditorGraphMaximumNodes - KnotPositions.size())
 				return Fail("The graph has no capacity for the requested reroute chain");
+			if (HistorySteps && PlannedSteps > 0)
+				HistorySteps->reserve(PlannedSteps);
 			if ((Schema.ConnectionPolicy || Schema.GraphValidationPolicy) && !Schema.ReroutePolicyAware)
 				return Fail("This schema has custom connection rules but has not declared transparent reroute semantics");
 			for (const auto& Position : KnotPositions)
@@ -2239,6 +2299,42 @@ namespace PulseForgeEditor
 			}
 
 			Result.ConnectionIDs.reserve(KnotPositions.size() + (EndPinID ? 1 : 0));
+			size_t RouteStateBytes = WorkingAdmission.TotalStateBytes;
+			size_t SmallestRouteStateBytes = WorkingAdmission.SmallestStateBytes;
+			size_t CandidatePlanBytes = WorkingAdmission.PlannedSnapshotBytes;
+			const auto RecordState = [&]() -> std::optional<std::string>
+			{
+				if (const auto Diagnostics = ValidateEditorGraph(Candidate, Schema); !Diagnostics.empty())
+					return Diagnostics.front().Message;
+				if (auto Writable = EnsureGraphSourceIsWritable(Candidate, Schema); !Writable)
+					return Writable.error();
+				if (Stats) ++Stats->RoutePrefixStatesValidated;
+				const size_t StateBytes = EstimateBytes(Candidate);
+				if (CandidatePlanBytes > MaximumRoutePreparationBytes ||
+					StateBytes > MaximumRoutePreparationBytes - CandidatePlanBytes)
+					return "The route's temporary planning snapshots exceed the bounded preparation budget";
+				CandidatePlanBytes += StateBytes;
+				if (StateBytes > std::numeric_limits<size_t>::max() - RouteStateBytes)
+					return "The route's required Undo snapshots exceed the graph history memory budget";
+				RouteStateBytes += StateBytes;
+				SmallestRouteStateBytes = std::min(SmallestRouteStateBytes, StateBytes);
+				if (RouteStateBytes - SmallestRouteStateBytes > EditorGraphCommandHistory::MaximumHistoryBytes)
+					return "The route's required Undo snapshots exceed the graph history memory budget";
+				if (History)
+				{
+					std::string AdmissionError;
+					if (!History->CanAdmitRoute(WorkingAdmission.Steps + PlannedSteps,
+						RouteStateBytes - SmallestRouteStateBytes,
+						CandidatePlanBytes, EstimateBytes(Candidate), AdmissionError)) return AdmissionError;
+				}
+				if (HistorySteps) HistorySteps->push_back(Candidate);
+				++WorkingAdmission.Steps;
+				WorkingAdmission.TotalStateBytes = RouteStateBytes;
+				WorkingAdmission.SmallestStateBytes = SmallestRouteStateBytes;
+				WorkingAdmission.PlannedSnapshotBytes = CandidatePlanBytes;
+				return std::nullopt;
+			};
+			size_t CurrentKnotIndex = 0;
 			const auto AddSegment = [&](PulseForge::UUID OutputID, PulseForge::UUID InputID, bool IsFinalSegment = false)
 				-> std::optional<std::string>
 			{
@@ -2264,15 +2360,16 @@ namespace PulseForgeEditor
 				Result.ConnectionIDs.push_back(*ConnectionID);
 				if (!IsFinalSegment)
 				{
-					const size_t StepIndex = HistorySteps->size();
-					const bool IsUndoSnapshot = EndPinID.has_value() || StepIndex + 1 < KnotPositions.size();
-					if (IsUndoSnapshot) HistorySteps->push_back(Candidate);
+					const bool IsUndoSnapshot = EndPinID.has_value() || CurrentKnotIndex + 1 < KnotPositions.size();
+					if (IsUndoSnapshot)
+						if (const auto Error = RecordState()) return Error;
 				}
 				return std::nullopt;
 			};
 
 			for (size_t Index = 0; Index < Pins.size(); ++Index)
 			{
+				CurrentKnotIndex = Index;
 				Candidate.Nodes.push_back(std::move(RerouteNodes[Index]));
 				const PulseForge::UUID OutputID = StartDirection == EditorGraphPinDirection::Output
 					? (Index == 0 ? StartPinID : Pins[Index - 1].Output) : Pins[Index].Output;
@@ -2289,7 +2386,9 @@ namespace PulseForgeEditor
 					? *EndPinID : Pins.back().Input;
 				if (const auto Error = AddSegment(OutputID, InputID, true)) return Fail(*Error);
 			}
-			HistorySteps->push_back(std::move(Candidate));
+			if (const auto Error = RecordState()) return Fail(*Error);
+			if (HistorySteps) HistorySteps->back() = std::move(Candidate);
+			if (Admission) *Admission = WorkingAdmission;
 			Result.Allowed = true;
 			Result.Reason.clear();
 			return Result;
@@ -2298,26 +2397,31 @@ namespace PulseForgeEditor
 
 	EditorGraphWireRouteDecision CanCreateEditorGraphWireRoute(const EditorGraph& Graph,
 		const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
-		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin)
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin,
+		EditorGraph* PlannedGraph, EditorGraphWorkStats* Stats, EditorGraphWireRouteAdmission* Admission,
+		const EditorGraphCommandHistory* History)
 	{
-		EditorGraph Candidate = Graph;
-		std::vector<EditorGraph> HistorySteps;
-		HistorySteps.reserve(KnotPositions.size() + (EndPin ? 1 : 0));
-		auto Result = BuildEditorGraphWireRoute(Candidate, Schema, StartPin, KnotPositions, EndPin, &HistorySteps);
-		if (!Result.Allowed) return Result;
-		EditorGraphCommandHistory PreviewHistory(Graph);
-		if (!PreviewHistory.ExecuteSequence(Schema, std::move(HistorySteps), Result.Reason))
+		EditorGraph Candidate;
+		try { Candidate = Graph; }
+		catch (const std::bad_alloc&)
 		{
-			Result.Allowed = false;
-			return Result;
+			EditorGraphWireRouteDecision Failure;
+			Failure.OpenEnded = !EndPin.has_value();
+			Failure.Reason = "The route could not reserve its bounded planning graph";
+			return Failure;
 		}
+		auto Result = BuildEditorGraphWireRoute(Candidate, Schema, StartPin, KnotPositions, EndPin,
+			nullptr, Stats, Admission, History);
+		if (!Result.Allowed) return Result;
+		if (PlannedGraph) *PlannedGraph = std::move(Candidate);
 		Result.Reason.clear();
 		return Result;
 	}
 
 	std::expected<EditorGraphWireRouteDecision, std::string> CreateEditorGraphWireRoute(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
-		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin)
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin,
+		EditorGraphWorkStats* Stats)
 	{
 		if (History.HasOpenTransaction())
 			return std::unexpected("Cannot complete a wire route during another graph edit transaction");
@@ -2325,7 +2429,7 @@ namespace PulseForgeEditor
 		HistorySteps.reserve(KnotPositions.size() + (EndPin ? 1 : 0));
 		EditorGraph FinalCandidate = History.Graph();
 		EditorGraphWireRouteDecision Result = BuildEditorGraphWireRoute(
-			FinalCandidate, Schema, StartPin, KnotPositions, EndPin, &HistorySteps);
+			FinalCandidate, Schema, StartPin, KnotPositions, EndPin, &HistorySteps, Stats, nullptr, &History);
 		if (!Result.Allowed) return std::unexpected(Result.Reason);
 		if (HistorySteps.size() != KnotPositions.size() + (EndPin ? 1 : 0))
 			return std::unexpected("The route did not produce the expected history steps");

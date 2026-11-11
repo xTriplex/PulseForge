@@ -1000,18 +1000,20 @@ namespace
 			for (size_t Index = 0; Index < KnotCount; ++Index)
 				Knots[Index] = { static_cast<double>(Index * 20), 80.0, 0.0 };
 			const auto Begin = std::chrono::steady_clock::now();
+			EditorGraphWorkStats Work;
 			const auto Decision = CanCreateEditorGraphWireRoute(*LongGraph, RouteSchema,
-				LongGraph->Nodes.back().Pins[1].ID, Knots);
+				LongGraph->Nodes.back().Pins[1].ID, Knots, std::nullopt, nullptr, &Work);
 			const auto End = std::chrono::steady_clock::now();
 			PF_CHECK(Tests, Decision.Allowed);
-			return std::chrono::duration<double, std::milli>(End - Begin).count();
+			return std::pair{ std::chrono::duration<double, std::milli>(End - Begin).count(),
+				Work.RoutePrefixStatesValidated };
 		};
-		const double ShortRouteMs = MeasureRoute(2);
-		const double LongRouteMs = MeasureRoute(32);
+		const auto ShortRoute = MeasureRoute(2);
+		const auto LongRoute = MeasureRoute(32);
 		std::cout << "G21 route preview [" << BuildFlavor << "] linked_nodes=1000 knots=2 elapsed_ms="
-			<< ShortRouteMs << '\n';
+			<< ShortRoute.first << " prefix_states=" << ShortRoute.second << '\n';
 		std::cout << "G21 route preview [" << BuildFlavor << "] linked_nodes=1000 knots=32 elapsed_ms="
-			<< LongRouteMs << '\n';
+			<< LongRoute.first << " prefix_states=" << LongRoute.second << '\n';
 
 		// Action discovery is graph-context-sensitive. The popup cache keys this result
 		// by the history graph revision, which must change when a committed edge changes
@@ -2069,7 +2071,7 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 			}
 			return std::move(*Graph);
 		};
-		const auto RejectedGraph = MakeBoundaryGraph(240, 4'096);
+		const auto RejectedGraph = MakeBoundaryGraph(420, 4'096);
 		PF_CHECK(Tests, RejectedGraph.has_value());
 		if (RejectedGraph)
 		{
@@ -2087,11 +2089,29 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 			std::array<EditorGraphVector3, 32> Knots{};
 			for (size_t Index = 0; Index < Knots.size(); ++Index)
 				Knots[Index] = { static_cast<double>(Index * 24), 80.0, 0.0 };
-			const auto Rejected = EventPin ? CreateEditorGraphWireRoute(RejectedHistory, Schema, EventPin->ID, Knots) :
+			EditorGraphWorkStats PreviewWork;
+			const auto PreviewStart = std::chrono::steady_clock::now();
+			const auto Preview = EventPin ? CanCreateEditorGraphWireRoute(RejectedHistory.Graph(), Schema,
+				EventPin->ID, Knots, std::nullopt, nullptr, &PreviewWork, nullptr, &RejectedHistory) :
+				EditorGraphWireRouteDecision{};
+			const double PreviewMilliseconds = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - PreviewStart).count();
+			EditorGraphWorkStats CommitWork;
+			const auto CommitStart = std::chrono::steady_clock::now();
+			const auto Rejected = EventPin ? CreateEditorGraphWireRoute(RejectedHistory, Schema, EventPin->ID, Knots,
+				std::nullopt, &CommitWork) :
 				std::expected<EditorGraphWireRouteDecision, std::string>(std::unexpected("event output unavailable"));
+			const double CommitMilliseconds = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - CommitStart).count();
+			std::cout << "G21 oversized route nodes=420 knots=32 preview_ms=" <<
+				PreviewMilliseconds << " preview_states=" << PreviewWork.RoutePrefixStatesValidated <<
+				" commit_ms=" << CommitMilliseconds << " commit_states=" <<
+				CommitWork.RoutePrefixStatesValidated << '\n';
 			PF_CHECK(Tests, !Rejected && RejectedHistory.Graph() == Before && RejectedHistory.GraphRevision() == Revision &&
 				RejectedHistory.IsDirty() == Dirty && RejectedHistory.CanUndo() == CanUndoBefore &&
-				RejectedHistory.CanRedo() == CanRedoBefore);
+				RejectedHistory.CanRedo() == CanRedoBefore && !Preview.Allowed &&
+				PreviewWork.RoutePrefixStatesValidated > 0 && PreviewWork.RoutePrefixStatesValidated < Knots.size() &&
+				CommitWork.RoutePrefixStatesValidated > 0 && CommitWork.RoutePrefixStatesValidated < Knots.size());
 			PF_CHECK(Tests, RejectedHistory.Redo() && std::get<std::string>(
 				FindPin(RejectedHistory.Graph().Nodes[1], "message")->DefaultValue) == "redo marker");
 		}

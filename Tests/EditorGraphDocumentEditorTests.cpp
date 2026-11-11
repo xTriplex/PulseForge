@@ -33,6 +33,12 @@ namespace PulseForgeEditor
 			Editor.SetGraphForTesting(Session, std::move(Graph), std::move(Schema));
 		}
 
+		static void SetSchema(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
+			EditorGraphSchema Schema)
+		{
+			Editor.SetSchemaForTesting(Session, std::move(Schema));
+		}
+
 		static void SetCanvasSettings(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session,
 			std::string Settings)
 		{
@@ -2844,6 +2850,7 @@ namespace
 		PF_CHECK(Tests, !Route.TextInputOwned);
 		PF_CHECK(Tests, !Route.PopupOwned);
 		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 1 &&
+			Route.RoutePrefixStatesValidated == 1 && Route.RoutePrefixStatesValidatedThisAttempt == 1 &&
 			std::abs(Route.KnotPositions.front().X - ScreenCanvas(KnotOne).X) < 0.1 &&
 			std::abs(Route.KnotPositions.front().Y - ScreenCanvas(KnotOne).Y) < 0.1 &&
 			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before && !Session->IsDirty());
@@ -2853,7 +2860,8 @@ namespace
 		DrawFrame(KnotOne, true, false);
 		DrawFrame(KnotTwo, true, true);
 		Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
-		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 2);
+		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 2 &&
+			Route.RoutePrefixStatesValidated == 2 && Route.RoutePrefixStatesValidatedThisAttempt == 1);
 		DrawFrame(KnotTwo, true, false);
 		const ImVec2 TailOne(HostOrigin.x + 650.0f, HostOrigin.y + 320.0f);
 		DrawFrame(TailOne, true);
@@ -3426,6 +3434,41 @@ namespace
 			OverlapRoute.Connections.size() == OverlapGraph.Connections.size() + 2 &&
 			std::any_of(OverlapRoute.Connections.begin(), OverlapRoute.Connections.end(),
 				[OlderInputA](const auto& Link) { return Link.InputPin == OlderInputA; }));
+
+		// A schema revision invalidates the cached prefix. Rebuilding the first
+		// accepted state reaches the policy rejection, while the accepted draft stays intact.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		DrawFrame(ImVec2(-1000.0f, -1000.0f));
+		DrawFrame(SourceAPoint);
+		DrawFrame(SourceAPoint, true);
+		DrawFrame(KnotOne, true);
+		DrawFrame(KnotOne, true, true);
+		Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 1 &&
+			Route.RoutePrefixStatesValidated == 1 && Route.RoutePrefixStatesValidatedThisAttempt == 1);
+		DrawFrame(KnotOne, true, false);
+		auto RejectSecondPrefixSchema = Schema;
+		RejectSecondPrefixSchema.ReroutePolicyAware = true;
+		RejectSecondPrefixSchema.GraphValidationPolicy = [](const EditorGraph& Candidate)
+			-> std::optional<EditorGraphDiagnostic>
+		{
+			const size_t RerouteCount = static_cast<size_t>(std::count_if(Candidate.Nodes.begin(), Candidate.Nodes.end(),
+				[](const auto& Node) { return IsEditorGraphRerouteType(Node.TypeKey); }));
+			if (RerouteCount == 2)
+				return EditorGraphDiagnostic{ "test.route_append", "The appended staged prefix is rejected", {} };
+			return std::nullopt;
+		};
+		EditorGraphDocumentEditorTestAccess::SetSchema(GraphEditor, *Session, RejectSecondPrefixSchema);
+		DrawFrame(KnotTwo, true, true);
+		Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 1 &&
+			Route.RoutePrefixStatesValidated == 1 && Route.RoutePrefixStatesValidatedThisAttempt == 1 &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before && !Session->IsDirty());
+		EditorGraphDocumentEditorTestAccess::SetSchema(GraphEditor, *Session, Schema);
+		DrawFrame(KnotTwo, true, false, true);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+		DrawFrame(TargetAPoint, false);
 		(void)LaterNodeID;
 	}
 

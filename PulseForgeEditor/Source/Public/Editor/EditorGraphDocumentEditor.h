@@ -217,6 +217,8 @@ namespace PulseForgeEditor
 		bool SearchPlacementAwaitingPinAnchor = false;
 		bool ReleaseCommitRequested = false;
 		bool ReleaseCommitSucceeded = false;
+		size_t RoutePrefixStatesValidated = 0;
+		size_t RoutePrefixStatesValidatedThisAttempt = 0;
 		PulseForge::UUID ReleaseTargetPin;
 		std::string Feedback;
 		uintptr_t HoveredPin = 0;
@@ -495,6 +497,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> PrepareClose(const EditorDocumentCloseContext& Context) const;
 		[[nodiscard]] bool ReloadState(EditorDocumentSession& Session) const;
 		void SetGraphForTesting(EditorDocumentSession& Session, EditorGraph Graph, EditorGraphSchema Schema);
+		void SetSchemaForTesting(EditorDocumentSession& Session, EditorGraphSchema Schema);
 		void SetCanvasSettingsForTesting(EditorDocumentSession& Session, std::string Settings);
 		void CapturePresentationForTesting(EditorDocumentSession& Session, bool Capture);
 		[[nodiscard]] std::vector<EditorGraphCanvasNodePresentation> GetPresentationForTesting(

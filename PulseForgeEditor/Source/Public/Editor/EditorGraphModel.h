@@ -127,6 +127,7 @@ namespace PulseForgeEditor
 		size_t ConnectionVisits = 0;
 		size_t TraversedEdges = 0;
 		size_t RerouteTopologyBuilds = 0;
+		size_t RoutePrefixStatesValidated = 0;
 	};
 
 	class EditorGraphSchemaRegistry final
@@ -277,6 +278,15 @@ namespace PulseForgeEditor
 		std::vector<PulseForge::UUID> DisplacedConnectionIDs;
 	};
 
+	struct EditorGraphWireRouteAdmission
+	{
+		size_t Steps = 0;
+		size_t TotalStateBytes = 0;
+		size_t SmallestStateBytes = 0;
+		size_t PlannedSnapshotBytes = 0;
+		bool Initialized = false;
+	};
+
 	struct EditorGraphClipboard
 	{
 		std::string SchemaKey;
@@ -313,6 +323,8 @@ namespace PulseForgeEditor
 			std::span<const EditorGraph> Candidates, std::string& Error);
 		[[nodiscard]] bool ExecuteSequence(const EditorGraphSchema& Schema,
 			std::vector<EditorGraph>&& Candidates, std::string& Error);
+		[[nodiscard]] bool CanAdmitRoute(size_t PlannedSteps, size_t RouteSnapshotBytes,
+			size_t CandidatePlanBytes, size_t PlanningGraphBytes, std::string& Error) const;
 
 	private:
 		void PushUndo(EditorGraph Snapshot);
@@ -428,10 +440,14 @@ namespace PulseForgeEditor
 		PulseForge::UUID ConnectionID, double X, double Y);
 	[[nodiscard]] EditorGraphWireRouteDecision CanCreateEditorGraphWireRoute(
 		const EditorGraph& Graph, const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
-		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin = std::nullopt);
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin = std::nullopt,
+		EditorGraph* PlannedGraph = nullptr, EditorGraphWorkStats* Stats = nullptr,
+		EditorGraphWireRouteAdmission* Admission = nullptr,
+		const EditorGraphCommandHistory* History = nullptr);
 	[[nodiscard]] std::expected<EditorGraphWireRouteDecision, std::string> CreateEditorGraphWireRoute(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
-		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin = std::nullopt);
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin = std::nullopt,
+		EditorGraphWorkStats* Stats = nullptr);
 	[[nodiscard]] std::expected<void, std::string> MoveEditorGraphNodes(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		const std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>>& Positions);
