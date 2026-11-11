@@ -1411,6 +1411,29 @@ namespace
 		auto BaselineGraph = ReadMaterialFixtureGraph(*BaselineBytes);
 		PF_CHECK(Tests, BaselineGraph.has_value());
 		if (!BaselineGraph) return;
+		// A malformed in-memory draft must be rejected by the registered Save path
+		// before publication, leaving both the source bytes and draft recoverable.
+		auto InvalidSaveSchema = MakeMaterialExpressionFixtureSchema();
+		EditorGraphNodeDefinition TextDefinition;
+		TextDefinition.TypeKey = "material.test_text";
+		TextDefinition.Label = "Text";
+		TextDefinition.Pins.push_back({ "text", "Text", EditorGraphPinDirection::Input,
+			EditorGraphPinType::String, EditorGraphPinCardinality::Single, std::string{} });
+		InvalidSaveSchema.Nodes.push_back(TextDefinition);
+		auto InvalidSaveGraph = CreateEditorGraph(InvalidSaveSchema, Identity.Asset);
+		PF_CHECK(Tests, InvalidSaveGraph.has_value());
+		if (!InvalidSaveGraph) return;
+		auto InvalidSaveNode = CreateEditorGraphNode(InvalidSaveSchema, "material.test_text", 100.0, 100.0);
+		PF_CHECK(Tests, InvalidSaveNode.has_value());
+		if (!InvalidSaveNode) return;
+		InvalidSaveNode->Pins.front().DefaultValue = std::string(1, static_cast<char>(0xFF));
+		InvalidSaveGraph->Nodes.push_back(std::move(*InvalidSaveNode));
+		const EditorGraph PreservedInvalidDraft = *InvalidSaveGraph;
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, std::move(*InvalidSaveGraph), InvalidSaveSchema);
+		PF_CHECK(Tests, !GraphEditor.Save(*Session) && ReadBytes(SourcePath) == BaselineBytes &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == PreservedInvalidDraft);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, *BaselineGraph,
+			MakeMaterialExpressionFixtureSchema());
 		const auto* Surface = FindPin(*BaselineGraph, "material.output", "surface");
 		PF_CHECK(Tests, Surface != nullptr);
 		if (!Surface) return;
@@ -3269,6 +3292,57 @@ namespace
 		};
 		VerifyRDoesNotTakePinOrNodeDrag(true, TargetA);
 		VerifyRDoesNotTakePinOrNodeDrag(false, TargetB);
+
+		// Click-to-front reorders equal-Z native nodes without changing their Z values.
+		// Put the older node's A pin under the later node's body, click its exposed title,
+		// then verify an R-route release still resolves that exact visible pin.
+		EditorGraph OverlapGraph = Before;
+		OverlapGraph.Nodes[2].X = 720.0;
+		OverlapGraph.Nodes[2].Y = 250.0;
+		auto LaterMultiply = CreateEditorGraphNode(Schema, "material.multiply", 690.0, 270.0);
+		PF_CHECK(Tests, LaterMultiply.has_value());
+		if (!LaterMultiply) return;
+		const UUID LaterNodeID = LaterMultiply->ID;
+		const UUID OlderNodeID = OverlapGraph.Nodes[2].ID;
+		const UUID OlderInputA = PinID(OverlapGraph, 2, "a");
+		OverlapGraph.Nodes.push_back(std::move(*LaterMultiply));
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, OverlapGraph, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const auto OverlapNodePresentation = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+		const auto OlderPresentation = std::find_if(OverlapNodePresentation.begin(), OverlapNodePresentation.end(),
+			[OlderNodeID](const auto& Node) { return Node.NodeID == OlderNodeID; });
+		PF_CHECK(Tests, OlderPresentation != OverlapNodePresentation.end());
+		ImVec2 ExposedTitlePoint(HostOrigin.x + 34.0f, HostOrigin.y + 8.0f);
+		if (OlderPresentation != OverlapNodePresentation.end())
+		{
+			const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(GraphEditor, *Session,
+				{ OlderPresentation->Position.X + OlderPresentation->Size.X - 8.0,
+					OlderPresentation->Position.Y + 8.0 });
+			ExposedTitlePoint = ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+		}
+		DrawFrame(ExposedTitlePoint);
+		DrawFrame(ExposedTitlePoint, true);
+		DrawFrame(ExposedTitlePoint, false);
+		const ImVec2 OlderTargetPoint = FindPinScreen(OlderInputA);
+		DrawFrame(OlderTargetPoint);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == OlderInputA);
+		const ImVec2 OverlapSourcePoint = FindPinScreen(SourceA);
+		DrawFrame(OverlapSourcePoint);
+		DrawFrame(OverlapSourcePoint, true);
+		DrawFrame(KnotOne, true);
+		DrawFrame(KnotOne, true, true);
+		DrawFrame(KnotOne, true, false);
+		DrawFrame(OlderTargetPoint, true);
+		DrawFrame(OlderTargetPoint, false);
+		const auto OverlapRelease = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const EditorGraph OverlapRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, OverlapRelease.ReleaseCommitSucceeded &&
+			OverlapRelease.ReleaseTargetPin == OlderInputA && !OverlapRelease.ContextualSearchOpen);
+		PF_CHECK(Tests, OverlapRoute.Nodes.size() == OverlapGraph.Nodes.size() + 1 &&
+			OverlapRoute.Connections.size() == OverlapGraph.Connections.size() + 2 &&
+			std::any_of(OverlapRoute.Connections.begin(), OverlapRoute.Connections.end(),
+				[OlderInputA](const auto& Link) { return Link.InputPin == OlderInputA; }));
+		(void)LaterNodeID;
 	}
 
 	void TestGraphCanvasCreateRequestPolling(TestRunner& Tests)

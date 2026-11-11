@@ -413,6 +413,10 @@ IMGUI_NODE_EDITOR_API float GetCurrentZoom();
 
 IMGUI_NODE_EDITOR_API NodeId GetHoveredNode();
 IMGUI_NODE_EDITOR_API PinId GetHoveredPin();
+// Returns clipped, front-to-back control hits from the last completed control pass,
+// including while a native create/drag action owns the pointer.
+IMGUI_NODE_EDITOR_API NodeId GetCurrentHitNode();
+IMGUI_NODE_EDITOR_API PinId GetCurrentHitPin();
 IMGUI_NODE_EDITOR_API LinkId GetHoveredLink();
 IMGUI_NODE_EDITOR_API NodeId GetDoubleClickedNode();
 IMGUI_NODE_EDITOR_API PinId GetDoubleClickedPin();

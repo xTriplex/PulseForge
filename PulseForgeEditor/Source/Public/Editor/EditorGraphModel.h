@@ -20,6 +20,7 @@ namespace PulseForgeEditor
 {
 	inline constexpr size_t EditorGraphMaximumNodes = 2048;
 	inline constexpr size_t EditorGraphMaximumConnections = 8192;
+	inline constexpr size_t EditorGraphMaximumSourceBytes = 16 * 1024 * 1024;
 
 	struct EditorGraphVector3
 	{
@@ -309,6 +310,8 @@ namespace PulseForgeEditor
 			const std::function<std::expected<void, std::string>(EditorGraph&)>& Mutation, std::string& Error);
 		[[nodiscard]] bool ExecuteSequence(const EditorGraphSchema& Schema,
 			std::span<const EditorGraph> Candidates, std::string& Error);
+		[[nodiscard]] bool ExecuteSequence(const EditorGraphSchema& Schema,
+			std::vector<EditorGraph>&& Candidates, std::string& Error);
 
 	private:
 		void PushUndo(EditorGraph Snapshot);

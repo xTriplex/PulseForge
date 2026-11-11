@@ -683,6 +683,16 @@ ax::NodeEditor::PinId ax::NodeEditor::GetHoveredPin()
     return CurrentEditor()->GetHoveredPin();
 }
 
+ax::NodeEditor::NodeId ax::NodeEditor::GetCurrentHitNode()
+{
+    return CurrentEditor()->GetCurrentHitNode();
+}
+
+ax::NodeEditor::PinId ax::NodeEditor::GetCurrentHitPin()
+{
+    return CurrentEditor()->GetCurrentHitPin();
+}
+
 ax::NodeEditor::LinkId ax::NodeEditor::GetHoveredLink()
 {
     return CurrentEditor()->GetHoveredLink();

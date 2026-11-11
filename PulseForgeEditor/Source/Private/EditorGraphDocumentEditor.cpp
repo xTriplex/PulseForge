@@ -30,7 +30,7 @@ namespace
 	using namespace PulseForgeEditor;
 	namespace NodeEditor = ax::NodeEditor;
 	using Json = nlohmann::json;
-	constexpr size_t MaximumGraphFileBytes = 2 * 1024 * 1024;
+	constexpr size_t MaximumGraphFileBytes = EditorGraphMaximumSourceBytes;
 	constexpr size_t MaximumCanvasHandles = 32'768;
 	constexpr float GraphRerouteWidth = 40.0f;
 	constexpr float GraphRerouteHeight = 22.0f;
@@ -1430,10 +1430,8 @@ namespace PulseForgeEditor
 			PulseForge::UUID PinID;
 			EditorGraphCanvasPoint Minimum;
 			EditorGraphCanvasPoint Maximum;
-			size_t SubmissionIndex = 0;
 		};
 		std::vector<CanvasPinHitRegion> CurrentPinHitRegions;
-		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> CurrentNodeSubmissionOrder;
 		struct PinVisibilityChange { PulseForge::UUID NodeID; PulseForge::UUID PinID; bool Hidden = false; };
 		std::vector<PinVisibilityChange> PendingVisibilityChanges;
 		bool PropertyWidgetHovered = false;
@@ -1819,10 +1817,8 @@ namespace PulseForgeEditor
 			QueueNodeSearch(*State, Session, std::nullopt,
 				GraphCanvasDetail::ToEditorGraphPosition(CanvasCenter));
 		}
-		size_t NodeSubmissionIndex = 0;
 		for (const auto& Node : State->History.Graph().Nodes)
 		{
-			CurrentNodeSubmissionOrder.emplace(Node.ID, NodeSubmissionIndex++);
 			const uintptr_t NodeHandle = RegisterHandle(Node.ID);
 			if (!NodeHandle)
 			{
@@ -1891,8 +1887,7 @@ namespace PulseForgeEditor
 						NodeEditor::PinPivotRect(KnotCenter, KnotCenter);
 						CurrentPinHitRegions.push_back({ Node.ID, Pin.ID,
 							{ HitMinimum.x, HitMinimum.y },
-							{ HitMaximum.x, HitMaximum.y },
-							CurrentNodeSubmissionOrder.at(Node.ID) });
+							{ HitMaximum.x, HitMaximum.y } });
 						const std::string Tooltip = std::string(DirectionLabel) + " · " + PinTypeLabel(Pin.Type) + " · " +
 							std::to_string(ConnectionCount(Pin.ID)) + " connection(s)";
 						if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tooltip.c_str());
@@ -2102,8 +2097,7 @@ namespace PulseForgeEditor
 				NodeEditor::EndPin();
 				CurrentPinHitRegions.push_back({ Node.ID, Pin.ID,
 					{ Marker.Minimum.X, Marker.Minimum.Y },
-					{ Marker.Maximum.X, Marker.Maximum.Y },
-					CurrentNodeSubmissionOrder.at(Node.ID) });
+					{ Marker.Maximum.X, Marker.Maximum.Y } });
 				if (std::isfinite(Marker.Anchor.X) && std::isfinite(Marker.Anchor.Y))
 					PinAnchorCanvasPositions.push_back({ Node.ID, Pin.ID, Marker.Anchor });
 				EditorGraphCanvasPinPresentation PinPresentation;
@@ -3050,69 +3044,16 @@ namespace PulseForgeEditor
 			State->PinMove = std::move(BeginPinMoveSelection);
 			State->Error.clear();
 		}
-		const auto ResolveCurrentCanvasHit = [&]()
-		{
-			struct Hit final { PulseForge::UUID NodeID; PulseForge::UUID PinID; };
-			Hit Result;
-			if (!ImGui::IsMouseHoveringRect(CanvasScreenOrigin,
-				ImVec2(CanvasScreenOrigin.x + CanvasScreenSize.x, CanvasScreenOrigin.y + CanvasScreenSize.y), true))
-				return Result;
-			const ImVec2 PointerCanvas = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
-			const PulseForge::UUID* FrontNode = nullptr;
-			float FrontZ = -std::numeric_limits<float>::infinity();
-			size_t FrontSubmission = 0;
-			for (const auto& [NodeID, Position] : CurrentNodeCanvasPositions)
-			{
-				const auto Size = CurrentNodeCanvasSizes.find(NodeID);
-				const auto Handle = State->Handles.find(NodeID);
-				const auto Submission = CurrentNodeSubmissionOrder.find(NodeID);
-				if (Size == CurrentNodeCanvasSizes.end() || Handle == State->Handles.end() ||
-					Submission == CurrentNodeSubmissionOrder.end()) continue;
-				if (PointerCanvas.x < Position.X || PointerCanvas.y < Position.Y ||
-					PointerCanvas.x > Position.X + Size->second.X ||
-					PointerCanvas.y > Position.Y + Size->second.Y) continue;
-				const float Z = NodeEditor::GetNodeZPosition(NodeEditor::NodeId(Handle->second));
-				if (!FrontNode || Z > FrontZ || (Z == FrontZ && Submission->second > FrontSubmission))
-				{
-					FrontNode = &NodeID;
-					FrontZ = Z;
-					FrontSubmission = Submission->second;
-				}
-			}
-			// PinRect and node positions share canvas-local coordinates. Convert the
-			// pointer once through the active frame transform before comparing them.
-			// Markers can protrude slightly beyond the body (notably right-side
-			// outputs); resolve pin rectangles independently, then reject pins behind
-			// a different frontmost node body.
-			const CanvasPinHitRegion* FrontPin = nullptr;
-			float FrontPinZ = -std::numeric_limits<float>::infinity();
-			size_t FrontPinSubmission = 0;
-			for (const auto& Region : CurrentPinHitRegions)
-				if ((!FrontNode || Region.NodeID == *FrontNode) &&
-					PointerCanvas.x >= Region.Minimum.X && PointerCanvas.y >= Region.Minimum.Y &&
-					PointerCanvas.x <= Region.Maximum.X && PointerCanvas.y <= Region.Maximum.Y)
-				{
-					const auto Handle = State->Handles.find(Region.NodeID);
-					const auto Submission = CurrentNodeSubmissionOrder.find(Region.NodeID);
-					if (Handle == State->Handles.end() || Submission == CurrentNodeSubmissionOrder.end()) continue;
-					const float Z = NodeEditor::GetNodeZPosition(NodeEditor::NodeId(Handle->second));
-					if (!FrontPin || Z > FrontPinZ ||
-						(Z == FrontPinZ && Submission->second > FrontPinSubmission))
-					{
-						FrontPin = &Region;
-						FrontPinZ = Z;
-						FrontPinSubmission = Submission->second;
-					}
-				}
-			if (FrontNode) Result.NodeID = *FrontNode;
-			if (FrontPin)
-			{
-				Result.NodeID = FrontPin->NodeID;
-				Result.PinID = FrontPin->PinID;
-			}
-			return Result;
-		};
-		const auto CurrentCanvasHit = ResolveCurrentCanvasHit();
+		struct CanvasHit final { PulseForge::UUID NodeID; PulseForge::UUID PinID; };
+		CanvasHit CurrentCanvasHit;
+		const auto NativeHitNode = NodeEditor::GetCurrentHitNode();
+		if (NativeHitNode.Get() != 0)
+			if (const auto Identity = State->Identities.find(NativeHitNode.Get()); Identity != State->Identities.end())
+				CurrentCanvasHit.NodeID = Identity->second;
+		const auto NativeHitPin = NodeEditor::GetCurrentHitPin();
+		if (NativeHitPin.Get() != 0)
+			if (const auto Identity = State->Identities.find(NativeHitPin.Get()); Identity != State->Identities.end())
+				CurrentCanvasHit.PinID = Identity->second;
 		const bool RouteStartClickOwnsHit = LeftClickedAtFrameStart && Focused && !Input.WantTextInput &&
 			!State->NodeSearch.Active && !State->PinVisibilityPopup && !State->ReconnectPopup &&
 			!State->PinMove && !State->SuppressCanvasInputUntilRelease && !State->NodeMoveTransaction &&
@@ -3124,28 +3065,9 @@ namespace PulseForgeEditor
 		uintptr_t HoveredNodeHandle = 0;
 		if (RouteOwnsHitTest)
 		{
+			// Both values come from the same clipped, front-to-back control pass.
+			// The ordinary hover APIs intentionally return empty during native actions.
 			HoveredPinID = CurrentCanvasHit.PinID;
-			// Prefer the pinned canvas's current control hit when it publishes one;
-			// the adapter geometry path is needed only while CreateItemAction masks
-			// GetHoveredPin during a live wire gesture.
-			if (HoveredPinID.IsNil())
-			{
-				const auto CanvasPin = NodeEditor::GetHoveredPin();
-				if (CanvasPin.Get() != 0)
-					if (const auto Identity = State->Identities.find(CanvasPin.Get());
-						Identity != State->Identities.end())
-					{
-						const bool OwnedByFrontNode = CurrentCanvasHit.NodeID.IsNil() ||
-							std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
-								[&](const auto& Node)
-								{
-									return Node.ID == CurrentCanvasHit.NodeID &&
-										std::any_of(Node.Pins.begin(), Node.Pins.end(), [&](const auto& Pin)
-											{ return Pin.ID == Identity->second; });
-								});
-						if (OwnedByFrontNode) HoveredPinID = Identity->second;
-					}
-			}
 			if (const auto Handle = State->Handles.find(CurrentCanvasHit.NodeID); Handle != State->Handles.end())
 				HoveredNodeHandle = Handle->second;
 		}

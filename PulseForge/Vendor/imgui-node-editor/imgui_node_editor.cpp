@@ -1192,6 +1192,8 @@ ed::EditorContext::EditorContext(const ax::NodeEditor::Config* config)
     , m_FlowAnimationController(this)
     , m_HoveredNode(0)
     , m_HoveredPin(0)
+    , m_CurrentHitNode(0)
+    , m_CurrentHitPin(0)
     , m_HoveredLink(0)
     , m_DoubleClickedNode(0)
     , m_DoubleClickedPin(0)
@@ -1391,6 +1393,8 @@ void ed::EditorContext::End()
 
     m_HoveredNode             = control.HotNode && m_CurrentAction == nullptr ? control.HotNode->m_ID : 0;
     m_HoveredPin              = control.HotPin  && m_CurrentAction == nullptr ? control.HotPin->m_ID  : 0;
+    m_CurrentHitNode          = control.HotNode ? control.HotNode->m_ID : 0;
+    m_CurrentHitPin           = control.HotPin ? control.HotPin->m_ID : 0;
     m_HoveredLink             = control.HotLink && m_CurrentAction == nullptr ? control.HotLink->m_ID : 0;
     m_DoubleClickedNode       = control.DoubleClickedNode ? control.DoubleClickedNode->m_ID : 0;
     m_DoubleClickedPin        = control.DoubleClickedPin  ? control.DoubleClickedPin->m_ID  : 0;

@@ -1553,6 +1553,8 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 			EditorGraphCommandHistory InputHistory(*Graph);
 			const std::array<EditorGraphVector3, 2> InputKnots{ EditorGraphVector3{ 430.0, 80.0, 0.0 },
 				EditorGraphVector3{ 360.0, 140.0, 0.0 } };
+			const auto InputPreview = CanCreateEditorGraphWireRoute(*Graph, Schema, InputB, InputKnots, Source);
+			PF_CHECK(Tests, InputPreview.Allowed && !InputPreview.OpenEnded);
 			const auto InputCreated = CreateEditorGraphWireRoute(InputHistory, Schema, InputB, InputKnots, Source);
 			PF_CHECK(Tests, InputCreated && InputCreated->ConnectionIDs.size() == 3 &&
 				ValidateEditorGraph(InputHistory.Graph(), Schema).empty());
@@ -1780,6 +1782,28 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 					RouteOutput, ConsumerB);
 				PF_CHECK(Tests, !BranchPreview.Allowed &&
 					BranchPreview.Reason.find("single-cardinality output") != std::string::npos);
+				const auto DiscoveredFromRoute = DiscoverEditorGraphNodeActions(BranchHistory.Graph(),
+					RestrictedSchema, RouteOutput);
+				PF_CHECK(Tests, std::none_of(DiscoveredFromRoute.begin(), DiscoveredFromRoute.end(),
+					[](const auto& Action) { return Action.NodeTypeKey == "material.multiply"; }));
+				auto SingleSplitGraph = FixtureGraph(RestrictedSchema);
+				PF_CHECK(Tests, SingleSplitGraph && AppendNode(*SingleSplitGraph, RestrictedSchema,
+					"material.scalar", 0.0) && AppendNode(*SingleSplitGraph, RestrictedSchema,
+					"material.multiply", 220.0));
+				if (SingleSplitGraph)
+				{
+					const auto ProducerOutput = FindPin(SingleSplitGraph->Nodes[0], "value")->ID;
+					const auto ConsumerInput = FindPin(SingleSplitGraph->Nodes[1], "a")->ID;
+					EditorGraphCommandHistory SingleHistory(*SingleSplitGraph);
+					PF_CHECK(Tests, ConnectEditorGraphPins(SingleHistory, RestrictedSchema,
+						ProducerOutput, ConsumerInput).has_value());
+					const auto OriginalID = SingleHistory.Graph().Connections.front().ID;
+					const auto Split = InsertEditorGraphReroute(SingleHistory, RestrictedSchema, OriginalID, 100.0, 60.0);
+					PF_CHECK(Tests, Split && ValidateEditorGraph(SingleHistory.Graph(), RestrictedSchema).empty() &&
+						SingleHistory.Graph().Connections.size() == 2);
+					PF_CHECK(Tests, !CanConnectEditorGraphPins(SingleHistory.Graph(), RestrictedSchema,
+						ProducerOutput, FindPin(SingleHistory.Graph().Nodes[1], "b")->ID).Allowed);
+				}
 				auto InvalidBranch = BranchHistory.Graph();
 				InvalidBranch.Connections.push_back({ ID(0xf055), RouteOutput, ConsumerB });
 				const auto Diagnostics = ValidateEditorGraph(InvalidBranch, RestrictedSchema);
@@ -1808,6 +1832,129 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 				PF_CHECK(Tests, !CyclePreview.Allowed && CyclePreview.Reason.find("reroute-only cycle") != std::string::npos);
 			}
 		}
+	}
+	{
+		using namespace PulseForgeEditor;
+		const auto Schema = MakeGameplayEventFixtureSchema();
+		auto Graph = CreateEditorGraph(Schema, ID(0x702));
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "gameplay.action.log", 0.0));
+		if (!Graph) return;
+		auto* Message = FindPin(*Graph, "gameplay.action.log", "message");
+		PF_CHECK(Tests, Message != nullptr);
+		if (!Message) return;
+		EditorGraphCommandHistory History(*Graph);
+		const auto BeforeInvalidEdit = History.Graph();
+		const uint64_t BeforeInvalidRevision = History.GraphRevision();
+		const std::string MalformedUtf8(1, static_cast<char>(0xFF));
+		const auto RejectedValue = SetEditorGraphPinDefaultValue(History, Schema, Message->ID, MalformedUtf8);
+		PF_CHECK(Tests, !RejectedValue && History.Graph() == BeforeInvalidEdit &&
+			History.GraphRevision() == BeforeInvalidRevision && !History.CanUndo());
+		auto InvalidInMemoryGraph = History.Graph();
+		if (auto Pin = std::find_if(InvalidInMemoryGraph.Nodes.front().Pins.begin(),
+			InvalidInMemoryGraph.Nodes.front().Pins.end(), [](const auto& Value) { return Value.Key == "message"; });
+			Pin != InvalidInMemoryGraph.Nodes.front().Pins.end()) Pin->DefaultValue = MalformedUtf8;
+		PF_CHECK(Tests, !ValidateEditorGraph(InvalidInMemoryGraph, Schema).empty() &&
+			!SerializeEditorGraph(InvalidInMemoryGraph, Schema));
+		auto InvalidClipboard = CopyEditorGraphSubgraph(History.Graph(), { History.Graph().Nodes.front().ID });
+		if (auto Pin = std::find_if(InvalidClipboard.Nodes.front().Pins.begin(),
+			InvalidClipboard.Nodes.front().Pins.end(), [](const auto& Value) { return Value.Key == "message"; });
+			Pin != InvalidClipboard.Nodes.front().Pins.end()) Pin->DefaultValue = MalformedUtf8;
+		PF_CHECK(Tests, !SerializeEditorGraphClipboard(InvalidClipboard));
+
+		const std::string EscapedMultibyte = "quote: \\\"; slash: \\\\; text: " +
+			std::string("caf\xC3\xA9 \xE2\x98\x83");
+		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(History, Schema, Message->ID, EscapedMultibyte).has_value());
+		const auto EncodedClipboard = SerializeEditorGraphClipboard(
+			CopyEditorGraphSubgraph(History.Graph(), { History.Graph().Nodes.front().ID }));
+		PF_CHECK(Tests, EncodedClipboard.has_value());
+		const auto Encoded = SerializeEditorGraph(History.Graph(), Schema);
+		const auto Reopened = Encoded ? DeserializeEditorGraph(*Encoded, Schema) :
+			std::expected<EditorGraph, std::string>(std::unexpected("source encode failed"));
+		const auto* ReopenedMessage = Reopened ? FindPin(Reopened->Nodes.front(), "message") : nullptr;
+		PF_CHECK(Tests, ReopenedMessage && std::get<std::string>(ReopenedMessage->DefaultValue) == EscapedMultibyte);
+
+		EditorGraphCommandHistory LargeHistory(*Graph);
+		std::string AggregateString(4096, 'x');
+		std::string LargeError;
+		const bool LargeEdit = LargeHistory.Execute(Schema, [&](EditorGraph& Candidate) -> std::expected<void, std::string>
+		{
+			Candidate.Nodes.clear();
+			Candidate.Nodes.reserve(500);
+			for (size_t Index = 0; Index < 500; ++Index)
+			{
+				auto Node = CreateEditorGraphNode(Schema, "gameplay.action.log", static_cast<double>(Index) * 20.0, 0.0);
+				if (!Node) return std::unexpected(Node.error());
+				auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(), [](const auto& Value)
+					{ return Value.Key == "message"; });
+				if (Pin == Node->Pins.end()) return std::unexpected("log message pin is missing");
+				Pin->DefaultValue = AggregateString;
+				Candidate.Nodes.push_back(std::move(*Node));
+			}
+			return {};
+		}, LargeError);
+		PF_CHECK(Tests, LargeEdit && LargeError.empty() && LargeHistory.Graph().Nodes.size() == 500);
+		const auto LargeSource = SerializeEditorGraph(LargeHistory.Graph(), Schema);
+		PF_CHECK(Tests, LargeSource && LargeSource->size() > 2 * 1024 * 1024 &&
+			LargeSource->size() <= EditorGraphMaximumSourceBytes);
+		const auto LargeReopened = LargeSource ? DeserializeEditorGraph(*LargeSource, Schema) :
+			std::expected<EditorGraph, std::string>(std::unexpected("aggregate source encode failed"));
+		PF_CHECK(Tests, LargeReopened && LargeReopened->Nodes.size() == 500);
+
+		EditorGraphCommandHistory OversizedHistory(*Graph);
+		const auto OversizedBefore = OversizedHistory.Graph();
+		const uint64_t OversizedRevision = OversizedHistory.GraphRevision();
+		const std::string ControlText(4096, '\x01');
+		std::string OversizedError;
+		const bool OversizedEdit = OversizedHistory.Execute(Schema,
+			[&](EditorGraph& Candidate) -> std::expected<void, std::string>
+			{
+				Candidate.Nodes.clear();
+				Candidate.Nodes.reserve(700);
+				for (size_t Index = 0; Index < 700; ++Index)
+				{
+					auto Node = CreateEditorGraphNode(Schema, "gameplay.action.log", static_cast<double>(Index) * 20.0, 0.0);
+					if (!Node) return std::unexpected(Node.error());
+					auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(), [](const auto& Value)
+						{ return Value.Key == "message"; });
+					if (Pin == Node->Pins.end()) return std::unexpected("log message pin is missing");
+					Pin->DefaultValue = ControlText;
+					Candidate.Nodes.push_back(std::move(*Node));
+				}
+				return {};
+			}, OversizedError);
+		PF_CHECK(Tests, !OversizedEdit && OversizedError.find("16 MiB") != std::string::npos &&
+			OversizedHistory.Graph() == OversizedBefore &&
+			OversizedHistory.GraphRevision() == OversizedRevision && !OversizedHistory.CanUndo());
+		auto OversizedGraph = OversizedBefore;
+		OversizedGraph.Nodes.clear();
+		for (size_t Index = 0; Index < 700; ++Index)
+		{
+			auto Node = CreateEditorGraphNode(Schema, "gameplay.action.log", static_cast<double>(Index) * 20.0, 0.0);
+			if (!Node) break;
+			std::find_if(Node->Pins.begin(), Node->Pins.end(), [](const auto& Value)
+				{ return Value.Key == "message"; })->DefaultValue = ControlText;
+			OversizedGraph.Nodes.push_back(std::move(*Node));
+		}
+		const auto OversizedSource = SerializeEditorGraph(OversizedGraph, Schema);
+		PF_CHECK(Tests, !OversizedSource && OversizedSource.error().find("16 MiB") != std::string::npos);
+
+		EditorGraphCommandHistory BudgetHistory(*Graph);
+		PF_CHECK(Tests, SetEditorGraphPinDefaultValue(BudgetHistory, Schema, Message->ID, std::string("before budget")).has_value());
+		PF_CHECK(Tests, BudgetHistory.Undo() && BudgetHistory.CanRedo());
+		const auto BeforeBudgetRejection = BudgetHistory.Graph();
+		const uint64_t BeforeBudgetRevision = BudgetHistory.GraphRevision();
+		std::vector<EditorGraph> TooManyRouteSteps;
+		TooManyRouteSteps.reserve(129);
+		for (size_t Index = 0; Index < 129; ++Index)
+		{
+			auto Candidate = BeforeBudgetRejection;
+			Candidate.Nodes.front().X += static_cast<double>(Index + 1);
+			TooManyRouteSteps.push_back(std::move(Candidate));
+		}
+		std::string BudgetError;
+		PF_CHECK(Tests, !BudgetHistory.ExecuteSequence(Schema, TooManyRouteSteps, BudgetError) &&
+			BudgetError.find("Undo steps") != std::string::npos && BudgetHistory.Graph() == BeforeBudgetRejection &&
+			BudgetHistory.GraphRevision() == BeforeBudgetRevision && BudgetHistory.CanRedo());
 	}
 	TestMaterialSchemaAndSerialization(Tests);
 	TestGameplaySchemaAndTransactions(Tests);

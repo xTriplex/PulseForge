@@ -18,8 +18,9 @@ namespace
 {
 	using namespace PulseForgeEditor;
 	using Json = nlohmann::ordered_json;
-	constexpr size_t MaximumSourceBytes = 2 * 1024 * 1024;
+	constexpr size_t MaximumSourceBytes = EditorGraphMaximumSourceBytes;
 	constexpr size_t MaximumClipboardBytes = 512 * 1024;
+	constexpr size_t MaximumRoutePreparationBytes = 4 * EditorGraphCommandHistory::MaximumHistoryBytes;
 	constexpr size_t MaximumNodes = EditorGraphMaximumNodes;
 	constexpr size_t MaximumPinsPerNode = 64;
 	constexpr size_t MaximumConnections = EditorGraphMaximumConnections;
@@ -117,6 +118,59 @@ namespace
 		return std::isfinite(Value) && std::abs(Value) <= MaximumCoordinate;
 	}
 
+	bool IsValidUtf8(std::string_view Text)
+	{
+		const auto Continuation = [&Text](size_t Index)
+		{
+			return Index < Text.size() && (static_cast<unsigned char>(Text[Index]) & 0xC0) == 0x80;
+		};
+		for (size_t Index = 0; Index < Text.size();)
+		{
+			const auto First = static_cast<unsigned char>(Text[Index]);
+			if (First <= 0x7F) { ++Index; continue; }
+			if (First >= 0xC2 && First <= 0xDF)
+			{
+				if (!Continuation(Index + 1)) return false;
+				Index += 2;
+				continue;
+			}
+			if (First >= 0xE0 && First <= 0xEF)
+			{
+				if (Index + 2 >= Text.size() || !Continuation(Index + 2)) return false;
+				const auto Second = static_cast<unsigned char>(Text[Index + 1]);
+				if ((First == 0xE0 && (Second < 0xA0 || Second > 0xBF)) ||
+					(First == 0xED && (Second < 0x80 || Second > 0x9F)) ||
+					((First != 0xE0 && First != 0xED) && (Second < 0x80 || Second > 0xBF))) return false;
+				Index += 3;
+				continue;
+			}
+			if (First >= 0xF0 && First <= 0xF4)
+			{
+				if (Index + 3 >= Text.size() || !Continuation(Index + 2) || !Continuation(Index + 3)) return false;
+				const auto Second = static_cast<unsigned char>(Text[Index + 1]);
+				if ((First == 0xF0 && (Second < 0x90 || Second > 0xBF)) ||
+					(First == 0xF4 && (Second < 0x80 || Second > 0x8F)) ||
+					((First != 0xF0 && First != 0xF4) && (Second < 0x80 || Second > 0xBF))) return false;
+				Index += 4;
+				continue;
+			}
+			return false;
+		}
+		return true;
+	}
+
+	bool IsValidPersistedSchemaText(const EditorGraphSchema& Schema)
+	{
+		if (!IsValidUtf8(Schema.Key)) return false;
+		for (const auto& Definition : Schema.Nodes)
+		{
+			if (!IsValidUtf8(Definition.TypeKey) || !IsValidUtf8(Definition.Label)) return false;
+			for (const auto& PinDefinition : Definition.Pins)
+				if (!IsValidUtf8(PinDefinition.Key) || !IsValidUtf8(PinDefinition.Label)) return false;
+		}
+		return true;
+	}
+
 	bool IsValueCompatible(EditorGraphPinType Type, const EditorGraphValue& Value)
 	{
 		switch (Type)
@@ -131,7 +185,8 @@ namespace
 			}
 		case EditorGraphPinType::Boolean: return std::holds_alternative<bool>(Value);
 		case EditorGraphPinType::String:
-			return std::holds_alternative<std::string>(Value) && std::get<std::string>(Value).size() <= 4096;
+			return std::holds_alternative<std::string>(Value) && std::get<std::string>(Value).size() <= 4096 &&
+				IsValidUtf8(std::get<std::string>(Value));
 		case EditorGraphPinType::Execution: return std::holds_alternative<std::monostate>(Value);
 		}
 		return false;
@@ -439,12 +494,14 @@ namespace
 
 	RerouteTopologyIssue InspectRerouteTopology(const EditorGraph& Graph,
 		std::span<const PulseForge::UUID> RemovedConnectionIDs = {},
-		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> Proposed = std::nullopt)
+		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> Proposed = std::nullopt,
+		std::optional<EditorGraphPinCardinality> ProspectiveOutputCardinality = std::nullopt)
 	{
 		std::unordered_map<PulseForge::UUID, const EditorGraphNode*, PulseForge::UUIDHash> PinOwners;
 		std::unordered_map<PulseForge::UUID, PulseForge::UUID, PulseForge::UUIDHash> RerouteOutputs;
 		std::unordered_map<PulseForge::UUID, EditorGraphPinCardinality, PulseForge::UUIDHash> OutputCardinality;
 		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> RerouteNodes;
+		EditorGraphNode ProspectiveNode;
 		for (const auto& Node : Graph.Nodes)
 		{
 			const bool IsReroute = IsEditorGraphRerouteType(Node.TypeKey);
@@ -458,6 +515,12 @@ namespace
 					if (IsReroute && PinValue.Key == "out") RerouteOutputs.emplace(Node.ID, PinValue.ID);
 				}
 			}
+		}
+		if (ProspectiveOutputCardinality)
+		{
+			ProspectiveNode.TypeKey = "<prospective>";
+			PinOwners.emplace(PulseForge::UUID{}, &ProspectiveNode);
+			OutputCardinality.emplace(PulseForge::UUID{}, *ProspectiveOutputCardinality);
 		}
 		std::unordered_map<PulseForge::UUID, std::vector<PulseForge::UUID>, PulseForge::UUIDHash> Outgoing;
 		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> RerouteInDegree;
@@ -514,6 +577,11 @@ namespace
 			{
 				const auto InputPin = PendingInputs.back();
 				PendingInputs.pop_back();
+				if (InputPin.IsNil())
+				{
+					Consumers.insert(InputPin);
+					continue;
+				}
 				const auto InputOwner = PinOwners.find(InputPin);
 				if (InputOwner == PinOwners.end()) continue;
 				if (!RerouteNodes.contains(InputOwner->second->ID))
@@ -576,6 +644,46 @@ namespace
 		if (!Result) return std::unexpected(Result.error().Message);
 		return *Result;
 	}
+
+	std::expected<void, std::string> EnsureGraphSourceIsWritable(const EditorGraph& Graph,
+		const EditorGraphSchema& Schema)
+	{
+		// Every serialized user string can expand by at most six bytes per input
+		// byte under JSON escaping. Include deliberately generous per-record fixed
+		// overhead (UUIDs, keys, indentation, separators and numeric fields). The
+		// bound avoids materializing JSON for ordinary edits and route prefixes; only
+		// states near the source cap take the exact codec path.
+		size_t UpperBound = 1024;
+		const auto AddBounded = [&UpperBound](size_t Amount)
+		{
+			if (Amount > EditorGraphMaximumSourceBytes || UpperBound > EditorGraphMaximumSourceBytes - Amount)
+				UpperBound = EditorGraphMaximumSourceBytes + 1;
+			else UpperBound += Amount;
+		};
+		const auto AddEscapedText = [&AddBounded](size_t Length)
+		{
+			AddBounded(Length > EditorGraphMaximumSourceBytes / 6
+				? EditorGraphMaximumSourceBytes + 1 : Length * 6);
+		};
+		AddEscapedText(Schema.Key.size());
+		for (const auto& Node : Graph.Nodes)
+		{
+			AddBounded(1024);
+			AddEscapedText(Node.TypeKey.size());
+			for (const auto& PinValue : Node.Pins)
+			{
+				AddBounded(1024);
+				AddEscapedText(PinValue.Key.size());
+				if (std::holds_alternative<std::string>(PinValue.DefaultValue))
+					AddEscapedText(std::get<std::string>(PinValue.DefaultValue).size());
+			}
+		}
+		AddBounded(Graph.Connections.size() * 512);
+		if (UpperBound <= EditorGraphMaximumSourceBytes) return {};
+		const auto Source = SerializeEditorGraph(Graph, Schema);
+		if (!Source) return std::unexpected(Source.error());
+		return {};
+	}
 }
 
 namespace PulseForgeEditor
@@ -584,6 +692,8 @@ namespace PulseForgeEditor
 	{
 		if (Schema.Key.empty() || Schema.Version == 0)
 			return std::unexpected("A graph schema requires a stable key and nonzero version");
+		if (!IsValidPersistedSchemaText(Schema))
+			return std::unexpected("Graph schema keys and labels must contain valid UTF-8");
 		if (Schema.Nodes.empty()) return std::unexpected("A graph schema must provide a node catalog");
 		if ((!Schema.RerouteTypes.empty()) && (Schema.ConnectionPolicy || Schema.GraphValidationPolicy) &&
 			!Schema.ReroutePolicyAware)
@@ -700,6 +810,14 @@ namespace PulseForgeEditor
 			BumpGraphRevision();
 			return false;
 		}
+		if (auto Writable = EnsureGraphSourceIsWritable(m_Graph, Schema); !Writable)
+		{
+			Error = Writable.error();
+			m_Graph = std::move(*m_Transaction);
+			m_Transaction.reset();
+			BumpGraphRevision();
+			return false;
+		}
 		if (m_Graph != *m_Transaction)
 		{
 			PushUndo(std::move(*m_Transaction));
@@ -767,6 +885,11 @@ namespace PulseForgeEditor
 			Error = Diagnostics.front().Message;
 			return false;
 		}
+		if (auto Writable = EnsureGraphSourceIsWritable(Candidate, Schema); !Writable)
+		{
+			Error = Writable.error();
+			return false;
+		}
 		if (Candidate == m_Graph) return true;
 		PushUndo(std::move(m_Graph));
 		m_Redo.clear();
@@ -791,6 +914,11 @@ namespace PulseForgeEditor
 			Error = Diagnostics.front().Message;
 			return false;
 		}
+		if (auto Writable = EnsureGraphSourceIsWritable(Candidate, Schema); !Writable)
+		{
+			Error = Writable.error();
+			return false;
+		}
 		if (Candidate == m_Graph) return true;
 		if (!m_Transaction)
 		{
@@ -805,14 +933,41 @@ namespace PulseForgeEditor
 	bool EditorGraphCommandHistory::ExecuteSequence(const EditorGraphSchema& Schema,
 		std::span<const EditorGraph> Candidates, std::string& Error)
 	{
+		if (Candidates.size() > MaximumSnapshots)
+		{
+			Error = "The route needs more Undo steps than the history snapshot limit can retain";
+			return false;
+		}
+		try
+		{
+			std::vector<EditorGraph> OwnedCandidates(Candidates.begin(), Candidates.end());
+			return ExecuteSequence(Schema, std::move(OwnedCandidates), Error);
+		}
+		catch (const std::bad_alloc&)
+		{
+			Error = "The graph edit sequence could not reserve its validation workspace";
+			return false;
+		}
+	}
+
+	bool EditorGraphCommandHistory::ExecuteSequence(const EditorGraphSchema& Schema,
+		std::vector<EditorGraph>&& Candidates, std::string& Error)
+	{
 		if (m_Transaction)
 		{
 			Error = "Cannot publish a graph edit sequence while a transaction is active";
 			return false;
 		}
 		if (Candidates.empty()) return true;
+		if (Candidates.size() > MaximumSnapshots)
+		{
+			Error = "The route needs more Undo steps than the history snapshot limit can retain";
+			return false;
+		}
 
 		const EditorGraph* Previous = &m_Graph;
+		size_t RouteSnapshotBytes = EstimateBytes(m_Graph);
+		size_t CandidatePlanBytes = 0;
 		for (const auto& Candidate : Candidates)
 		{
 			if (Candidate == *Previous)
@@ -826,22 +981,78 @@ namespace PulseForgeEditor
 				Error = Diagnostics.front().Message;
 				return false;
 			}
+			if (auto Writable = EnsureGraphSourceIsWritable(Candidate, Schema); !Writable)
+			{
+				Error = Writable.error();
+				return false;
+			}
+			const size_t CandidateBytes = EstimateBytes(Candidate);
+			if (CandidateBytes > MaximumRoutePreparationBytes - CandidatePlanBytes)
+			{
+				Error = "The route's temporary planning snapshots exceed the bounded preparation budget";
+				return false;
+			}
+			CandidatePlanBytes += CandidateBytes;
+			if (&Candidate != &Candidates.back()) RouteSnapshotBytes += EstimateBytes(Candidate);
 			Previous = &Candidate;
 		}
+		if (RouteSnapshotBytes > MaximumHistoryBytes)
+		{
+			Error = "The route's required Undo snapshots exceed the graph history memory budget";
+			return false;
+		}
 
-		// Prepare the complete undo chain before publishing any state. Each entry is
-		// the graph immediately before its corresponding route operation.
-		auto NextUndo = m_Undo;
-		NextUndo.reserve(NextUndo.size() + Candidates.size());
-		NextUndo.push_back(m_Graph);
-		for (size_t Index = 0; Index + 1 < Candidates.size(); ++Index)
-			NextUndo.push_back(Candidates[Index]);
-		auto NextRedo = std::vector<EditorGraph>{};
-
-		m_Undo = std::move(NextUndo);
-		m_Redo = std::move(NextRedo);
-		m_Graph = Candidates.back();
-		TrimHistory();
+		// Retain the newest unrelated snapshots that fit, while reserving capacity
+		// for every route step. Prepare the graph and history off to the side so an
+		// allocation failure cannot publish a partial route or consume Redo.
+		const size_t RouteSnapshotCount = Candidates.size();
+		const size_t AvailableSnapshots = MaximumSnapshots - RouteSnapshotCount;
+		size_t RetainedStart = m_Undo.size();
+		size_t RetainedBytes = RouteSnapshotBytes;
+		while (RetainedStart > 0 && m_Undo.size() - RetainedStart < AvailableSnapshots)
+		{
+			const size_t NextBytes = EstimateBytes(m_Undo[RetainedStart - 1]);
+			if (NextBytes > MaximumHistoryBytes - RetainedBytes) break;
+			RetainedBytes += NextBytes;
+			--RetainedStart;
+		}
+		size_t PeakPreparationBytes = EstimateBytes(m_Graph);
+		const auto AddPreparationBytes = [&PeakPreparationBytes](size_t Amount)
+		{
+			if (Amount > MaximumRoutePreparationBytes ||
+				PeakPreparationBytes > MaximumRoutePreparationBytes - Amount) return false;
+			PeakPreparationBytes += Amount;
+			return true;
+		};
+		for (const auto& Snapshot : m_Undo)
+			if (!AddPreparationBytes(EstimateBytes(Snapshot)))
+			{
+				Error = "The route cannot be prepared within the bounded history allocation budget";
+				return false;
+			}
+		if (!AddPreparationBytes(CandidatePlanBytes) || !AddPreparationBytes(RetainedBytes))
+		{
+			Error = "The route cannot be prepared within the bounded history allocation budget";
+			return false;
+		}
+		try
+		{
+			std::vector<EditorGraph> NextUndo;
+			NextUndo.reserve(m_Undo.size() - RetainedStart + RouteSnapshotCount);
+			NextUndo.insert(NextUndo.end(), m_Undo.begin() + static_cast<std::ptrdiff_t>(RetainedStart), m_Undo.end());
+			NextUndo.push_back(m_Graph);
+			for (size_t Index = 0; Index + 1 < Candidates.size(); ++Index)
+				NextUndo.push_back(std::move(Candidates[Index]));
+			EditorGraph NextGraph = std::move(Candidates.back());
+			m_Undo.swap(NextUndo);
+			m_Redo.clear();
+			m_Graph = std::move(NextGraph);
+		}
+		catch (const std::bad_alloc&)
+		{
+			Error = "The route could not reserve its complete Undo history; the graph was not changed";
+			return false;
+		}
 		BumpGraphRevision();
 		return true;
 	}
@@ -1031,8 +1242,11 @@ namespace PulseForgeEditor
 		std::vector<EditorGraphDiagnostic> Diagnostics;
 		const auto Add = [&Diagnostics](std::string Code, std::string Message, PulseForge::UUID Element = {})
 			{ Diagnostics.push_back({ std::move(Code), std::move(Message), Element }); };
+		if (!IsValidPersistedSchemaText(Schema))
+			Add("text.utf8", "Graph schema keys and labels must contain valid UTF-8", Graph.ID);
 		if (Graph.ID.IsNil() || Graph.SchemaKey != Schema.Key || Graph.SchemaVersion != Schema.Version)
 			Add("schema", "Graph identity or schema version does not match the active schema", Graph.ID);
+		if (!IsValidUtf8(Graph.SchemaKey)) Add("text.utf8", "Graph schema key must contain valid UTF-8", Graph.ID);
 		if (Graph.Nodes.size() > MaximumNodes) Add("limit.nodes", "Graph node count exceeds the supported limit", Graph.ID);
 		if (Graph.Connections.size() > MaximumConnections) Add("limit.connections", "Graph connection count exceeds the supported limit", Graph.ID);
 		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> IDs;
@@ -1042,6 +1256,7 @@ namespace PulseForgeEditor
 		for (const auto& Node : Graph.Nodes)
 		{
 			if (Node.ID.IsNil() || !IDs.insert(Node.ID).second) Add("identity.node", "Duplicate or nil graph node identity", Node.ID);
+			if (!IsValidUtf8(Node.TypeKey)) Add("text.utf8", "Graph node type key must contain valid UTF-8", Node.ID);
 			Nodes.emplace(Node.ID, &Node);
 			if (!IsFiniteCoordinate(Node.X) || !IsFiniteCoordinate(Node.Y)) Add("layout.position", "Node position is invalid", Node.ID);
 			const auto* Definition = FindDefinition(Schema, Node.TypeKey);
@@ -1056,6 +1271,10 @@ namespace PulseForgeEditor
 			for (const auto& PinValue : Node.Pins)
 			{
 				if (PinValue.ID.IsNil() || !IDs.insert(PinValue.ID).second) Add("identity.pin", "Duplicate or nil graph pin identity", PinValue.ID);
+				if (!IsValidUtf8(PinValue.Key)) Add("text.utf8", "Graph pin key must contain valid UTF-8", PinValue.ID);
+				if (std::holds_alternative<std::string>(PinValue.DefaultValue) &&
+					!IsValidUtf8(std::get<std::string>(PinValue.DefaultValue)))
+					Add("text.utf8", "Graph string defaults must contain valid UTF-8", PinValue.ID);
 				Pins.emplace(PinValue.ID, &PinValue);
 				const auto* Expected = FindPinDefinition(*Definition, PinValue.Key);
 				if (!Expected || Expected->Direction != PinValue.Direction || Expected->Type != PinValue.Type ||
@@ -1254,6 +1473,12 @@ namespace PulseForgeEditor
 					if (IsOccupied && !(SourcePin->Direction == EditorGraphPinDirection::Input && Schema.ReplaceOccupiedInput)) continue;
 				}
 				if (Graph.Connections.size() - RemovedConnectionIDs.size() >= MaximumConnections) continue;
+				const auto ProposedTopology = CandidateIsOutput
+					? std::pair{ PulseForge::UUID{}, *SourcePinID }
+					: std::pair{ *SourcePinID, PulseForge::UUID{} };
+				const auto Topology = InspectRerouteTopology(Graph, RemovedConnectionIDs, ProposedTopology,
+					CandidateIsOutput ? std::optional{ Pin.Cardinality } : std::nullopt);
+				if (Topology.OnlyCycle || !Topology.SingleOutputFanout.IsNil()) continue;
 				if (Schema.ConnectionPolicy)
 				{
 					EditorGraphConnectionPolicyContext Context;
@@ -1333,6 +1558,8 @@ namespace PulseForgeEditor
 
 	std::expected<std::string, std::string> SerializeEditorGraph(const EditorGraph& Graph, const EditorGraphSchema& Schema)
 	{
+		if (!IsValidPersistedSchemaText(Schema))
+			return std::unexpected("Graph schema keys and labels must contain valid UTF-8");
 		const auto Diagnostics = ValidateEditorGraph(Graph, Schema);
 		if (!Diagnostics.empty()) return std::unexpected(Diagnostics.front().Message);
 		std::vector<const EditorGraphNode*> Nodes;
@@ -1348,9 +1575,17 @@ namespace PulseForgeEditor
 		Json Document{ { "format", "PulseForgeGraph" }, { "version", 1 }, { "graph", IdText(Graph.ID) },
 			{ "schema", Graph.SchemaKey }, { "schemaVersion", Graph.SchemaVersion },
 			{ "nodes", std::move(NodeRecords) }, { "connections", std::move(ConnectionRecords) } };
-		const std::string Text = Document.dump(2) + "\n";
-		if (Text.size() > MaximumSourceBytes) return std::unexpected("Serialized graph exceeds the supported size limit");
-		return Text;
+		try
+		{
+			const std::string Text = Document.dump(2) + "\n";
+			if (Text.size() > MaximumSourceBytes)
+				return std::unexpected("Serialized graph exceeds the 16 MiB supported source limit");
+			return Text;
+		}
+		catch (const Json::exception& Error)
+		{
+			return std::unexpected(std::string("Graph source cannot be encoded as valid UTF-8 JSON: ") + Error.what());
+		}
 	}
 
 	std::expected<EditorGraph, std::string> DeserializeEditorGraph(std::string_view Source, const EditorGraphSchema& Schema)
@@ -1424,6 +1659,20 @@ namespace PulseForgeEditor
 	{
 		if (Clipboard.SchemaKey.empty() || Clipboard.Nodes.size() > MaximumNodes || Clipboard.Connections.size() > MaximumConnections)
 			return std::unexpected("Graph clipboard is invalid or exceeds its record limit");
+		if (!IsValidUtf8(Clipboard.SchemaKey))
+			return std::unexpected("Graph clipboard schema key must contain valid UTF-8");
+		for (const auto& Node : Clipboard.Nodes)
+		{
+			if (!IsValidUtf8(Node.TypeKey)) return std::unexpected("Graph clipboard node type key must contain valid UTF-8");
+			for (const auto& PinValue : Node.Pins)
+			{
+				if (!IsValidUtf8(PinValue.Key)) return std::unexpected("Graph clipboard pin key must contain valid UTF-8");
+				if (std::holds_alternative<std::string>(PinValue.DefaultValue) &&
+					(!IsValidUtf8(std::get<std::string>(PinValue.DefaultValue)) ||
+						std::get<std::string>(PinValue.DefaultValue).size() > 4096))
+					return std::unexpected("Graph clipboard string defaults must be valid UTF-8 and at most 4096 bytes");
+			}
+		}
 		std::vector<const EditorGraphNode*> Nodes;
 		for (const auto& Node : Clipboard.Nodes) Nodes.push_back(&Node);
 		std::sort(Nodes.begin(), Nodes.end(), [](const auto* A, const auto* B) { return A->ID < B->ID; });
@@ -1434,11 +1683,18 @@ namespace PulseForgeEditor
 		for (const auto* Node : Nodes) NodeRecords.push_back(SerializeNode(*Node));
 		Json ConnectionRecords = Json::array();
 		for (const auto* Connection : Connections) ConnectionRecords.push_back(SerializeConnection(*Connection));
-		const std::string Text = Json{ { "format", "PulseForgeGraphClipboard" }, { "version", 1 },
-			{ "schema", Clipboard.SchemaKey }, { "schemaVersion", Clipboard.SchemaVersion },
-			{ "nodes", std::move(NodeRecords) }, { "connections", std::move(ConnectionRecords) } }.dump();
-		if (Text.size() > MaximumClipboardBytes) return std::unexpected("Graph clipboard payload exceeds the supported size limit");
-		return Text;
+		try
+		{
+			const std::string Text = Json{ { "format", "PulseForgeGraphClipboard" }, { "version", 1 },
+				{ "schema", Clipboard.SchemaKey }, { "schemaVersion", Clipboard.SchemaVersion },
+				{ "nodes", std::move(NodeRecords) }, { "connections", std::move(ConnectionRecords) } }.dump();
+			if (Text.size() > MaximumClipboardBytes) return std::unexpected("Graph clipboard payload exceeds the supported size limit");
+			return Text;
+		}
+		catch (const Json::exception& Error)
+		{
+			return std::unexpected(std::string("Graph clipboard cannot be encoded as valid UTF-8 JSON: ") + Error.what());
+		}
 	}
 
 	std::expected<std::vector<PulseForge::UUID>, std::string> PasteEditorGraphClipboard(
@@ -1846,8 +2102,6 @@ namespace PulseForgeEditor
 		if (!Output || !Input || Output->Type != Input->Type || Output->Direction != EditorGraphPinDirection::Output ||
 			Input->Direction != EditorGraphPinDirection::Input)
 			return std::unexpected("The selected wire endpoints are invalid");
-		if (Output->Cardinality != EditorGraphPinCardinality::Multiple)
-			return std::unexpected("Reroutes cannot expand a single-cardinality source output");
 		if (std::find(Schema.RerouteTypes.begin(), Schema.RerouteTypes.end(), Output->Type) == Schema.RerouteTypes.end())
 			return std::unexpected("This graph schema does not support reroutes for the selected wire type");
 		const auto* RerouteDefinition = FindDefinition(Schema, GraphRerouteTypeKey(Output->Type));
@@ -1890,10 +2144,11 @@ namespace PulseForgeEditor
 	{
 		EditorGraphWireRouteDecision BuildEditorGraphWireRoute(EditorGraph& Candidate, const EditorGraphSchema& Schema,
 			PulseForge::UUID StartPinID, std::span<const EditorGraphVector3> KnotPositions,
-			std::optional<PulseForge::UUID> EndPinID)
+			std::optional<PulseForge::UUID> EndPinID, std::vector<EditorGraph>* HistorySteps = nullptr)
 		{
 			EditorGraphWireRouteDecision Result;
 			Result.OpenEnded = !EndPinID.has_value();
+			if (HistorySteps) HistorySteps->clear();
 			const auto Fail = [&Result](std::string Reason)
 			{
 				Result.Allowed = false;
@@ -1901,6 +2156,9 @@ namespace PulseForgeEditor
 				return Result;
 			};
 			if (KnotPositions.empty()) return Fail("Place at least one reroute before completing a graph route");
+			const size_t PlannedSteps = KnotPositions.size() + (EndPinID ? 1 : 0);
+			if (HistorySteps && PlannedSteps > EditorGraphCommandHistory::MaximumSnapshots)
+				return Fail("The route needs more Undo steps than the history snapshot limit can retain");
 			if (Candidate.SchemaKey != Schema.Key || Candidate.SchemaVersion != Schema.Version)
 				return Fail("The graph does not match the active schema");
 			if (KnotPositions.size() > EditorGraphMaximumNodes ||
@@ -1935,7 +2193,9 @@ namespace PulseForgeEditor
 
 			struct ReroutePins final { PulseForge::UUID Input; PulseForge::UUID Output; };
 			std::vector<ReroutePins> Pins;
+			std::vector<EditorGraphNode> RerouteNodes;
 			Pins.reserve(KnotPositions.size());
+			RerouteNodes.reserve(KnotPositions.size());
 			Result.RerouteNodeIDs.reserve(KnotPositions.size());
 			for (const auto& Position : KnotPositions)
 			{
@@ -1950,34 +2210,21 @@ namespace PulseForgeEditor
 					return Fail("The registered reroute definition does not preserve the route pin type");
 				Pins.push_back({ Input->ID, Output->ID });
 				Result.RerouteNodeIDs.push_back(Node->ID);
-				Candidate.Nodes.push_back(std::move(*Node));
+				RerouteNodes.push_back(std::move(*Node));
 			}
 
-			std::vector<std::pair<PulseForge::UUID, PulseForge::UUID>> Segments;
-			Segments.reserve(KnotPositions.size() + 1);
-			if (StartDirection == EditorGraphPinDirection::Output)
-			{
-				Segments.emplace_back(StartPinID, Pins.front().Input);
-				for (size_t Index = 1; Index < Pins.size(); ++Index)
-					Segments.emplace_back(Pins[Index - 1].Output, Pins[Index].Input);
-				if (EndPinID) Segments.emplace_back(Pins.back().Output, *EndPinID);
-			}
-			else
-			{
-				if (EndPinID) Segments.emplace_back(*EndPinID, Pins.back().Input);
-				for (size_t Index = Pins.size(); Index > 1; --Index)
-					Segments.emplace_back(Pins[Index - 1].Output, Pins[Index - 2].Input);
-				Segments.emplace_back(Pins.front().Output, StartPinID);
-			}
-
-			Result.ConnectionIDs.reserve(Segments.size());
-			for (const auto& [OutputID, InputID] : Segments)
+			Result.ConnectionIDs.reserve(KnotPositions.size() + (EndPinID ? 1 : 0));
+			size_t RequiredSnapshotBytes = EstimateBytes(Candidate);
+			if (HistorySteps && RequiredSnapshotBytes > EditorGraphCommandHistory::MaximumHistoryBytes)
+				return Fail("The route's required Undo snapshots exceed the graph history memory budget");
+			const auto AddSegment = [&](PulseForge::UUID OutputID, PulseForge::UUID InputID, bool IsFinalSegment = false)
+				-> std::optional<std::string>
 			{
 				const auto Decision = CanConnectEditorGraphPins(Candidate, Schema, OutputID, InputID);
-				if (!Decision.Allowed) return Fail(Decision.Reason);
+				if (!Decision.Allowed) return Decision.Reason;
 				if (Result.OpenEnded && StartDirection == EditorGraphPinDirection::Input &&
 					InputID == StartPinID && !Decision.RemovedConnectionIDs.empty())
-					return Fail("An unfinished route cannot replace an existing connection");
+					return "An unfinished route cannot replace an existing connection";
 				for (const auto RemovedID : Decision.RemovedConnectionIDs)
 				{
 					if (std::find(Result.DisplacedConnectionIDs.begin(), Result.DisplacedConnectionIDs.end(), RemovedID) ==
@@ -1988,15 +2235,54 @@ namespace PulseForgeEditor
 					{ return std::find(Decision.RemovedConnectionIDs.begin(), Decision.RemovedConnectionIDs.end(),
 						Connection.ID) != Decision.RemovedConnectionIDs.end(); }), Candidate.Connections.end());
 				if (Candidate.Connections.size() >= EditorGraphMaximumConnections)
-					return Fail("The graph has no capacity for another route connection");
+					return "The graph has no capacity for another route connection";
 				auto ConnectionID = PulseForge::UUID::Generate();
-				if (!ConnectionID) return Fail(ConnectionID.error().Message);
+				if (!ConnectionID) return ConnectionID.error().Message;
 				Candidate.Connections.push_back({ *ConnectionID, OutputID, InputID });
 				Result.ConnectionIDs.push_back(*ConnectionID);
-			}
+				if (HistorySteps && !IsFinalSegment)
+				{
+					const size_t StepIndex = HistorySteps->size();
+					const bool IsUndoSnapshot = EndPinID.has_value() || StepIndex + 1 < KnotPositions.size();
+					if (IsUndoSnapshot)
+					{
+						const size_t CandidateBytes = EstimateBytes(Candidate);
+						if (CandidateBytes > EditorGraphCommandHistory::MaximumHistoryBytes - RequiredSnapshotBytes)
+							return "The route's required Undo snapshots exceed the graph history memory budget";
+						RequiredSnapshotBytes += CandidateBytes;
+					}
+					HistorySteps->push_back(Candidate);
+				}
+				return std::nullopt;
+			};
 
-			const auto Diagnostics = ValidateEditorGraph(Candidate, Schema);
-			if (!Diagnostics.empty()) return Fail(Diagnostics.front().Message);
+			for (size_t Index = 0; Index < Pins.size(); ++Index)
+			{
+				Candidate.Nodes.push_back(std::move(RerouteNodes[Index]));
+				const PulseForge::UUID OutputID = StartDirection == EditorGraphPinDirection::Output
+					? (Index == 0 ? StartPinID : Pins[Index - 1].Output) : Pins[Index].Output;
+				const PulseForge::UUID InputID = StartDirection == EditorGraphPinDirection::Output
+					? Pins[Index].Input : (Index == 0 ? StartPinID : Pins[Index - 1].Input);
+				const bool IsOpenRouteFinalSegment = !EndPinID && Index + 1 == Pins.size();
+				if (const auto Error = AddSegment(OutputID, InputID, IsOpenRouteFinalSegment)) return Fail(*Error);
+			}
+			if (EndPinID)
+			{
+				const PulseForge::UUID OutputID = StartDirection == EditorGraphPinDirection::Output
+					? Pins.back().Output : *EndPinID;
+				const PulseForge::UUID InputID = StartDirection == EditorGraphPinDirection::Output
+					? *EndPinID : Pins.back().Input;
+				if (const auto Error = AddSegment(OutputID, InputID, true)) return Fail(*Error);
+			}
+			if (HistorySteps) HistorySteps->push_back(std::move(Candidate));
+			// Preview validates its complete proposal here. For a committed route,
+			// ExecuteSequence is the single validation owner for every state that
+			// Undo/Redo can publish, avoiding a second full-graph pass per prefix.
+			if (!HistorySteps)
+			{
+				const auto Diagnostics = ValidateEditorGraph(Candidate, Schema);
+				if (!Diagnostics.empty()) return Fail(Diagnostics.front().Message);
+			}
 			Result.Allowed = true;
 			Result.Reason.clear();
 			return Result;
@@ -2017,92 +2303,15 @@ namespace PulseForgeEditor
 	{
 		if (History.HasOpenTransaction())
 			return std::unexpected("Cannot complete a wire route during another graph edit transaction");
-		const EditorGraph& Original = History.Graph();
-		EditorGraph FinalCandidate = Original;
-		EditorGraphWireRouteDecision Result = BuildEditorGraphWireRoute(
-			FinalCandidate, Schema, StartPin, KnotPositions, EndPin);
-		if (!Result.Allowed) return std::unexpected(Result.Reason);
-
-		const EditorGraphPin* Start = nullptr;
-		if (!FindNodeForPin(Original, StartPin, &Start) || !Start)
-			return std::unexpected("The starting pin no longer exists");
-		EditorGraph Working = Original;
 		std::vector<EditorGraph> HistorySteps;
 		HistorySteps.reserve(KnotPositions.size() + (EndPin ? 1 : 0));
-		const auto FindReroutePin = [&FinalCandidate](PulseForge::UUID NodeID, std::string_view Key)
-			-> const EditorGraphPin*
-		{
-			const auto Node = std::find_if(FinalCandidate.Nodes.begin(), FinalCandidate.Nodes.end(),
-				[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
-			if (Node == FinalCandidate.Nodes.end()) return nullptr;
-			const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(),
-				[Key](const auto& Candidate) { return Candidate.Key == Key; });
-			return Pin == Node->Pins.end() ? nullptr : &*Pin;
-		};
-		const auto AppendSegment = [&](PulseForge::UUID OutputID, PulseForge::UUID InputID) -> std::expected<void, std::string>
-		{
-			const auto Decision = CanConnectEditorGraphPins(Working, Schema, OutputID, InputID);
-			if (!Decision.Allowed) return std::unexpected(Decision.Reason);
-			const auto Link = std::find_if(FinalCandidate.Connections.begin(), FinalCandidate.Connections.end(),
-				[&](const auto& Candidate) { return Candidate.OutputPin == OutputID && Candidate.InputPin == InputID; });
-			if (Link == FinalCandidate.Connections.end() ||
-				std::find(Result.ConnectionIDs.begin(), Result.ConnectionIDs.end(), Link->ID) == Result.ConnectionIDs.end())
-				return std::unexpected("The validated route is missing a planned connection segment");
-			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Removed(
-				Decision.RemovedConnectionIDs.begin(), Decision.RemovedConnectionIDs.end());
-			Working.Connections.erase(std::remove_if(Working.Connections.begin(), Working.Connections.end(),
-				[&Removed](const auto& Candidate) { return Removed.contains(Candidate.ID); }), Working.Connections.end());
-			if (Working.Connections.size() >= EditorGraphMaximumConnections)
-				return std::unexpected("The graph has no capacity for another route connection");
-			Working.Connections.push_back(*Link);
-			const auto Diagnostics = ValidateEditorGraph(Working, Schema);
-			if (!Diagnostics.empty()) return std::unexpected(Diagnostics.front().Message);
-			HistorySteps.push_back(Working);
-			return {};
-		};
-
-		for (size_t Index = 0; Index < Result.RerouteNodeIDs.size(); ++Index)
-		{
-			const PulseForge::UUID NodeID = Result.RerouteNodeIDs[Index];
-			const auto Node = std::find_if(FinalCandidate.Nodes.begin(), FinalCandidate.Nodes.end(),
-				[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
-			if (Node == FinalCandidate.Nodes.end()) return std::unexpected("A planned reroute node is missing");
-			if (Working.Nodes.size() >= EditorGraphMaximumNodes)
-				return std::unexpected("The graph has no capacity for another reroute node");
-			Working.Nodes.push_back(*Node);
-			const auto* KnotInput = FindReroutePin(NodeID, "in");
-			const auto* KnotOutput = FindReroutePin(NodeID, "out");
-			if (!KnotInput || !KnotOutput) return std::unexpected("A planned reroute node has incomplete pins");
-
-			PulseForge::UUID OutputID;
-			PulseForge::UUID InputID;
-			if (Start->Direction == EditorGraphPinDirection::Output)
-			{
-				OutputID = Index == 0 ? StartPin : FindReroutePin(Result.RerouteNodeIDs[Index - 1], "out")->ID;
-				InputID = KnotInput->ID;
-			}
-			else
-			{
-				OutputID = KnotOutput->ID;
-				InputID = Index == 0 ? StartPin : FindReroutePin(Result.RerouteNodeIDs[Index - 1], "in")->ID;
-			}
-			if (auto Added = AppendSegment(OutputID, InputID); !Added) return std::unexpected(Added.error());
-		}
-
-		if (EndPin)
-		{
-			const PulseForge::UUID LastNode = Result.RerouteNodeIDs.back();
-			const auto* LastInput = FindReroutePin(LastNode, "in");
-			const auto* LastOutput = FindReroutePin(LastNode, "out");
-			if (!LastInput || !LastOutput) return std::unexpected("The final reroute node has incomplete pins");
-			const PulseForge::UUID OutputID = Start->Direction == EditorGraphPinDirection::Output ? LastOutput->ID : *EndPin;
-			const PulseForge::UUID InputID = Start->Direction == EditorGraphPinDirection::Output ? *EndPin : LastInput->ID;
-			if (auto Added = AppendSegment(OutputID, InputID); !Added) return std::unexpected(Added.error());
-		}
-
+		EditorGraph FinalCandidate = History.Graph();
+		EditorGraphWireRouteDecision Result = BuildEditorGraphWireRoute(
+			FinalCandidate, Schema, StartPin, KnotPositions, EndPin, &HistorySteps);
+		if (!Result.Allowed) return std::unexpected(Result.Reason);
 		if (HistorySteps.size() != KnotPositions.size() + (EndPin ? 1 : 0))
 			return std::unexpected("The route did not produce the expected history steps");
-		if (!History.ExecuteSequence(Schema, HistorySteps, Result.Reason))
+		if (!History.ExecuteSequence(Schema, std::move(HistorySteps), Result.Reason))
 			return std::unexpected(Result.Reason);
 		return Result;
 	}
@@ -2136,6 +2345,9 @@ namespace PulseForgeEditor
 		const EditorGraphPin* ExistingPin = nullptr;
 		(void)FindNodeForPin(History.Graph(), PinID, &ExistingPin);
 		if (!ExistingPin) return std::unexpected("The graph pin no longer exists");
+		if (ExistingPin->Type == EditorGraphPinType::String && std::holds_alternative<std::string>(Value) &&
+			!IsValidUtf8(std::get<std::string>(Value)))
+			return std::unexpected("String graph defaults must contain valid UTF-8");
 		if (!IsValueCompatible(ExistingPin->Type, Value)) return std::unexpected("Default value does not match the pin's declared type");
 		std::string Error;
 		if (!History.Execute(Schema, [PinID, Value = std::move(Value)](EditorGraph& Graph) mutable -> std::expected<void, std::string>
