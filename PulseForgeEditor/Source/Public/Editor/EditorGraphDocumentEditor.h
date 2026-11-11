@@ -199,6 +199,36 @@ namespace PulseForgeEditor
 		uintptr_t SourcePin = 0;
 	};
 
+	struct EditorGraphWireRoutePresentation
+	{
+		bool Active = false;
+		bool OpenEnded = false;
+		bool KeyPressed = false;
+		bool InputEligible = false;
+		bool Focused = false;
+		bool LeftDown = false;
+		bool EscapeDown = false;
+		bool TextInputOwned = false;
+		bool PopupOwned = false;
+		bool MouseDragging = false;
+		bool HasPendingStart = false;
+		bool PointerInCanvasBackground = false;
+		bool ContextualSearchOpen = false;
+		bool SearchPlacementAwaitingPinAnchor = false;
+		bool ReleaseCommitRequested = false;
+		bool ReleaseCommitSucceeded = false;
+		PulseForge::UUID ReleaseTargetPin;
+		std::string Feedback;
+		uintptr_t HoveredPin = 0;
+		uintptr_t HoveredNode = 0;
+		PulseForge::UUID SourcePin;
+		EditorGraphVector3 SearchDropPoint;
+		EditorGraphScreenPoint SearchDropScreen;
+		EditorGraphCanvasRect FirstSearchResultBounds;
+		std::vector<EditorGraphVector3> KnotPositions;
+		std::vector<EditorGraphCanvasPoint> PreviewEndpoints;
+	};
+
 	struct EditorGraphCanvasPinInput
 	{
 		PulseForge::UUID HoveredPin;
@@ -367,7 +397,8 @@ namespace PulseForgeEditor
 			ResolveLink&& ResolveLinkRequest, AcceptLink&& AcceptLinkRequest,
 			RejectLink&& RejectLinkRequest, QueryNode&& QueryNodeRequest,
 			ResolveNode&& ResolveNodeRequest, AcceptNode&& AcceptNodeRequest,
-			RejectNode&& RejectNodeRequest)
+			RejectNode&& RejectNodeRequest, bool ObserveOnly = false,
+			bool RetireObservedNode = false)
 		{
 			const bool Active = Begin();
 			EditorGraphCreateEnd<std::remove_reference_t<EndCreate>> EndGuard{ End };
@@ -378,6 +409,11 @@ namespace PulseForgeEditor
 			{
 				Result.SawLinkRequest = true;
 				Result.LinkDecision = ResolveLinkRequest(*Link);
+				if (ObserveOnly)
+				{
+					if (RetireObservedNode) RejectNodeRequest();
+					return Result;
+				}
 				if (Result.LinkDecision.Allowed)
 					Result.AcceptedLink = AcceptLinkRequest();
 				else RejectLinkRequest();
@@ -388,6 +424,14 @@ namespace PulseForgeEditor
 			{
 				Result.SawNodeRequest = true;
 				Result.SourcePin = *NodePin;
+				if (ObserveOnly)
+				{
+					// A route gesture takes over the native background-create stage.
+					// Retire that stage now so its accepted drag cannot become a node
+					// move or a delayed create after the route is cancelled.
+					if (RetireObservedNode) RejectNodeRequest();
+					return Result;
+				}
 				if (ResolveNodeRequest(*NodePin)) Result.AcceptedNode = AcceptNodeRequest();
 				else RejectNodeRequest();
 			}
@@ -459,6 +503,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] EditorGraphReconnectPopupPresentation GetReconnectPopupForTesting(
 			EditorDocumentSession& Session);
 		[[nodiscard]] EditorGraphPinMovePresentation GetPinMoveForTesting(EditorDocumentSession& Session);
+		[[nodiscard]] EditorGraphWireRoutePresentation GetWireRouteForTesting(EditorDocumentSession& Session);
 		[[nodiscard]] bool IsCanvasInputSuppressedForTesting(EditorDocumentSession& Session);
 		[[nodiscard]] PulseForge::UUID GetLastHoveredPinForTesting(EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);

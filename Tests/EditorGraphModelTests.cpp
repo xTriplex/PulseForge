@@ -1466,6 +1466,141 @@ namespace
 
 void RunEditorGraphModelTests(TestRunner& Tests)
 {
+	{
+		using namespace PulseForgeEditor;
+		const auto SameConnections = [](const auto& Left, const auto& Right)
+		{
+			if (Left.size() != Right.size()) return false;
+			return std::all_of(Left.begin(), Left.end(), [&Right](const auto& Link)
+			{
+				return std::any_of(Right.begin(), Right.end(), [&Link](const auto& Candidate)
+					{ return Link.ID == Candidate.ID && Link.OutputPin == Candidate.OutputPin &&
+						Link.InputPin == Candidate.InputPin; });
+			});
+		};
+		auto Schema = MakeMaterialExpressionFixtureSchema();
+		auto Graph = FixtureGraph(Schema);
+		PF_CHECK(Tests, Graph && AppendNode(*Graph, Schema, "material.scalar", 0.0) &&
+			AppendNode(*Graph, Schema, "material.multiply", 240.0) &&
+			AppendNode(*Graph, Schema, "material.multiply", 480.0) &&
+			AppendNode(*Graph, Schema, "material.color", 720.0) &&
+			AppendNode(*Graph, Schema, "material.output", 960.0));
+		if (Graph)
+		{
+			const auto Source = FindPin(*Graph, "material.scalar", "value")->ID;
+			const auto InputA = FindPin(*Graph, "material.multiply", "a")->ID;
+			const auto InputB = FindPin(*Graph, "material.multiply", "a", 1)->ID;
+			const auto VectorSource = FindPin(*Graph, "material.color", "color")->ID;
+			const auto VectorTarget = FindPin(*Graph, "material.output", "surface")->ID;
+			const std::vector<EditorGraphVector3> NoKnots;
+			PF_CHECK(Tests, !CanCreateEditorGraphWireRoute(*Graph, Schema, Source, NoKnots, InputA).Allowed);
+
+			EditorGraphCommandHistory OutputHistory(*Graph);
+			const std::array<EditorGraphVector3, 2> OutputKnots{ EditorGraphVector3{ 330.0, 80.0, 0.0 },
+				EditorGraphVector3{ 400.0, 140.0, 0.0 } };
+			const auto OutputBefore = OutputHistory.Graph();
+			const auto OutputDecision = CanCreateEditorGraphWireRoute(OutputBefore, Schema, Source, OutputKnots, InputA);
+			const auto OutputCreated = CreateEditorGraphWireRoute(OutputHistory, Schema, Source, OutputKnots, InputA);
+			PF_CHECK(Tests, OutputDecision.Allowed && OutputCreated && OutputCreated->RerouteNodeIDs.size() == 2 &&
+				OutputHistory.Graph().Connections.size() == OutputBefore.Connections.size() + 3 &&
+				ValidateEditorGraph(OutputHistory.Graph(), Schema).empty());
+			if (OutputCreated)
+			{
+				const auto After = OutputHistory.Graph();
+				PF_CHECK(Tests, OutputHistory.Undo() &&
+					OutputHistory.Graph().Nodes.size() == OutputBefore.Nodes.size() + 2 &&
+					OutputHistory.Graph().Connections.size() == OutputBefore.Connections.size() + 2);
+				PF_CHECK(Tests, OutputHistory.Undo() &&
+					OutputHistory.Graph().Nodes.size() == OutputBefore.Nodes.size() + 1 &&
+					OutputHistory.Graph().Connections.size() == OutputBefore.Connections.size() + 1);
+				PF_CHECK(Tests, OutputHistory.Undo() && OutputHistory.Graph() == OutputBefore);
+				PF_CHECK(Tests, OutputHistory.Redo() && OutputHistory.Redo() && OutputHistory.Redo() &&
+					OutputHistory.Graph() == After);
+				PF_CHECK(Tests, SameConnections(OutputHistory.Graph().Connections, After.Connections));
+			}
+
+			EditorGraphCommandHistory OpenHistory(*Graph);
+			const std::array<EditorGraphVector3, 2> OpenKnots{ EditorGraphVector3{ 330.0, -40.0, 0.0 },
+				EditorGraphVector3{ 390.0, 20.0, 0.0 } };
+			const auto OpenCreated = CreateEditorGraphWireRoute(OpenHistory, Schema, Source, OpenKnots);
+			PF_CHECK(Tests, OpenCreated && OpenCreated->OpenEnded && OpenCreated->ConnectionIDs.size() == 2 &&
+				ValidateEditorGraph(OpenHistory.Graph(), Schema).empty());
+			if (OpenCreated)
+			{
+				const auto OpenAfter = OpenHistory.Graph();
+				PF_CHECK(Tests, OpenHistory.Undo() && OpenHistory.Graph().Nodes.size() == Graph->Nodes.size() + 1 &&
+					OpenHistory.Graph().Connections.size() == Graph->Connections.size() + 1);
+				PF_CHECK(Tests, OpenHistory.Undo() && OpenHistory.Graph() == *Graph);
+				PF_CHECK(Tests, OpenHistory.Redo() && OpenHistory.Redo() && OpenHistory.Graph() == OpenAfter);
+				const auto Serialized = SerializeEditorGraph(OpenHistory.Graph(), Schema);
+				const auto Reopened = Serialized ? DeserializeEditorGraph(*Serialized, Schema) :
+					std::expected<EditorGraph, std::string>(std::unexpected("route serialization failed"));
+				PF_CHECK(Tests, Reopened && SameConnections(Reopened->Connections, OpenHistory.Graph().Connections));
+				if (Reopened)
+				{
+					const auto Knot = std::find_if(Reopened->Nodes.begin(), Reopened->Nodes.end(),
+						[&](const auto& Node) { return Node.ID == OpenCreated->RerouteNodeIDs.back(); });
+					PF_CHECK(Tests, Knot != Reopened->Nodes.end());
+					if (Knot != Reopened->Nodes.end())
+					{
+						const auto* Output = FindPin(*Knot, "out");
+						EditorGraphCommandHistory LaterCompletion(*Reopened);
+						PF_CHECK(Tests, Output && ConnectEditorGraphPins(LaterCompletion, Schema, Output->ID, InputB));
+					}
+				}
+			}
+
+			EditorGraphCommandHistory InputHistory(*Graph);
+			const std::array<EditorGraphVector3, 2> InputKnots{ EditorGraphVector3{ 430.0, 80.0, 0.0 },
+				EditorGraphVector3{ 360.0, 140.0, 0.0 } };
+			const auto InputCreated = CreateEditorGraphWireRoute(InputHistory, Schema, InputB, InputKnots, Source);
+			PF_CHECK(Tests, InputCreated && InputCreated->ConnectionIDs.size() == 3 &&
+				ValidateEditorGraph(InputHistory.Graph(), Schema).empty());
+			if (InputCreated)
+			{
+				const auto InputAfter = InputHistory.Graph();
+				PF_CHECK(Tests, InputHistory.Undo() && InputHistory.Graph().Nodes.size() == Graph->Nodes.size() + 2 &&
+					InputHistory.Graph().Connections.size() == Graph->Connections.size() + 2);
+				PF_CHECK(Tests, InputHistory.Undo() && InputHistory.Graph().Nodes.size() == Graph->Nodes.size() + 1 &&
+					InputHistory.Graph().Connections.size() == Graph->Connections.size() + 1);
+				PF_CHECK(Tests, InputHistory.Undo() && InputHistory.Graph() == *Graph);
+				PF_CHECK(Tests, InputHistory.Redo() && InputHistory.Redo() && InputHistory.Redo() &&
+					InputHistory.Graph() == InputAfter);
+				const auto FirstKnot = std::find_if(InputHistory.Graph().Nodes.begin(), InputHistory.Graph().Nodes.end(),
+					[&](const auto& Node) { return Node.ID == InputCreated->RerouteNodeIDs.front(); });
+				const auto LastKnot = std::find_if(InputHistory.Graph().Nodes.begin(), InputHistory.Graph().Nodes.end(),
+					[&](const auto& Node) { return Node.ID == InputCreated->RerouteNodeIDs.back(); });
+				const auto* FirstInput = FirstKnot == InputHistory.Graph().Nodes.end() ? nullptr : FindPin(*FirstKnot, "in");
+				const auto* LastOutput = LastKnot == InputHistory.Graph().Nodes.end() ? nullptr : FindPin(*LastKnot, "out");
+				PF_CHECK(Tests, FirstInput && LastOutput &&
+					std::any_of(InputHistory.Graph().Connections.begin(), InputHistory.Graph().Connections.end(),
+						[&](const auto& Link) { return Link.OutputPin == LastOutput->ID && Link.InputPin == FirstInput->ID; }) &&
+					std::any_of(InputHistory.Graph().Connections.begin(), InputHistory.Graph().Connections.end(),
+						[&](const auto& Link) { return Link.OutputPin == FirstInput->ID || Link.InputPin == InputB; }));
+			}
+
+			EditorGraphCommandHistory VectorHistory(*Graph);
+			const std::array<EditorGraphVector3, 1> OneKnot{ EditorGraphVector3{ 840.0, 120.0, 0.0 } };
+			const auto VectorRoute = CreateEditorGraphWireRoute(VectorHistory, Schema, VectorSource, OneKnot, VectorTarget);
+			PF_CHECK(Tests, VectorRoute && ValidateEditorGraph(VectorHistory.Graph(), Schema).empty());
+		}
+		{
+			const auto ExecutionSchema = MakeGameplayEventFixtureSchema();
+			auto ExecutionGraph = FixtureGraph(ExecutionSchema);
+			PF_CHECK(Tests, ExecutionGraph && AppendNode(*ExecutionGraph, ExecutionSchema, "gameplay.event.begin", 0.0) &&
+				AppendNode(*ExecutionGraph, ExecutionSchema, "gameplay.flow.branch", 240.0));
+			if (ExecutionGraph)
+			{
+				const auto* Event = FindPin(*ExecutionGraph, "gameplay.event.begin", "event");
+				const auto* Input = FindPin(*ExecutionGraph, "gameplay.flow.branch", "exec-in");
+				const std::array<EditorGraphVector3, 1> Knot{ EditorGraphVector3{ 140.0, 70.0, 0.0 } };
+				EditorGraphCommandHistory History(*ExecutionGraph);
+				const auto Created = Event && Input ? CreateEditorGraphWireRoute(History, ExecutionSchema,
+					Event->ID, Knot, Input->ID) : std::unexpected(std::string("execution route endpoints unavailable"));
+				PF_CHECK(Tests, Created && ValidateEditorGraph(History.Graph(), ExecutionSchema).empty());
+			}
+		}
+	}
 	TestBatchPinConnectionMove(Tests);
 	{
 		using namespace PulseForgeEditor;

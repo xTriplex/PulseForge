@@ -802,6 +802,50 @@ namespace PulseForgeEditor
 		return true;
 	}
 
+	bool EditorGraphCommandHistory::ExecuteSequence(const EditorGraphSchema& Schema,
+		std::span<const EditorGraph> Candidates, std::string& Error)
+	{
+		if (m_Transaction)
+		{
+			Error = "Cannot publish a graph edit sequence while a transaction is active";
+			return false;
+		}
+		if (Candidates.empty()) return true;
+
+		const EditorGraph* Previous = &m_Graph;
+		for (const auto& Candidate : Candidates)
+		{
+			if (Candidate == *Previous)
+			{
+				Error = "A graph edit sequence contains an empty history step";
+				return false;
+			}
+			const auto Diagnostics = ValidateEditorGraph(Candidate, Schema);
+			if (!Diagnostics.empty())
+			{
+				Error = Diagnostics.front().Message;
+				return false;
+			}
+			Previous = &Candidate;
+		}
+
+		// Prepare the complete undo chain before publishing any state. Each entry is
+		// the graph immediately before its corresponding route operation.
+		auto NextUndo = m_Undo;
+		NextUndo.reserve(NextUndo.size() + Candidates.size());
+		NextUndo.push_back(m_Graph);
+		for (size_t Index = 0; Index + 1 < Candidates.size(); ++Index)
+			NextUndo.push_back(Candidates[Index]);
+		auto NextRedo = std::vector<EditorGraph>{};
+
+		m_Undo = std::move(NextUndo);
+		m_Redo = std::move(NextRedo);
+		m_Graph = Candidates.back();
+		TrimHistory();
+		BumpGraphRevision();
+		return true;
+	}
+
 	void EditorGraphCommandHistory::PushUndo(EditorGraph Snapshot)
 	{
 		m_Undo.push_back(std::move(Snapshot));
@@ -1840,6 +1884,227 @@ namespace PulseForgeEditor
 			return {};
 		}, Error)) return std::unexpected(Error);
 		return RerouteID;
+	}
+
+	namespace
+	{
+		EditorGraphWireRouteDecision BuildEditorGraphWireRoute(EditorGraph& Candidate, const EditorGraphSchema& Schema,
+			PulseForge::UUID StartPinID, std::span<const EditorGraphVector3> KnotPositions,
+			std::optional<PulseForge::UUID> EndPinID)
+		{
+			EditorGraphWireRouteDecision Result;
+			Result.OpenEnded = !EndPinID.has_value();
+			const auto Fail = [&Result](std::string Reason)
+			{
+				Result.Allowed = false;
+				Result.Reason = std::move(Reason);
+				return Result;
+			};
+			if (KnotPositions.empty()) return Fail("Place at least one reroute before completing a graph route");
+			if (Candidate.SchemaKey != Schema.Key || Candidate.SchemaVersion != Schema.Version)
+				return Fail("The graph does not match the active schema");
+			if (KnotPositions.size() > EditorGraphMaximumNodes ||
+				Candidate.Nodes.size() > EditorGraphMaximumNodes - KnotPositions.size())
+				return Fail("The graph has no capacity for the requested reroute chain");
+			if ((Schema.ConnectionPolicy || Schema.GraphValidationPolicy) && !Schema.ReroutePolicyAware)
+				return Fail("This schema has custom connection rules but has not declared transparent reroute semantics");
+			for (const auto& Position : KnotPositions)
+				if (!IsFiniteCoordinate(Position.X) || !IsFiniteCoordinate(Position.Y))
+					return Fail("A reroute position is non-finite or outside the supported range");
+
+			const EditorGraphPin* StartPin = nullptr;
+			if (!FindNodeForPin(Candidate, StartPinID, &StartPin) || !StartPin)
+				return Fail("The starting pin no longer exists");
+			const EditorGraphPinDirection StartDirection = StartPin->Direction;
+			const EditorGraphPinType RouteType = StartPin->Type;
+			const auto RerouteType = GraphRerouteTypeKey(RouteType);
+			if (std::find(Schema.RerouteTypes.begin(), Schema.RerouteTypes.end(), RouteType) == Schema.RerouteTypes.end() ||
+				!FindDefinition(Schema, RerouteType))
+				return Fail("The active graph schema does not support reroutes for this pin type");
+
+			const EditorGraphPin* EndPin = nullptr;
+			if (EndPinID)
+			{
+				if (*EndPinID == StartPinID || !FindNodeForPin(Candidate, *EndPinID, &EndPin) || !EndPin)
+					return Fail("The destination pin no longer exists");
+				if (EndPin->Direction == StartDirection)
+					return Fail("A completed route must end at a pin with the opposite direction");
+				if (EndPin->Type != RouteType)
+					return Fail("The destination pin has an incompatible type for this reroute chain");
+			}
+
+			struct ReroutePins final { PulseForge::UUID Input; PulseForge::UUID Output; };
+			std::vector<ReroutePins> Pins;
+			Pins.reserve(KnotPositions.size());
+			Result.RerouteNodeIDs.reserve(KnotPositions.size());
+			for (const auto& Position : KnotPositions)
+			{
+				auto Node = CreateEditorGraphNode(Schema, RerouteType, Position.X, Position.Y);
+				if (!Node) return Fail(Node.error());
+				const auto Input = std::find_if(Node->Pins.begin(), Node->Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "in" && Pin.Direction == EditorGraphPinDirection::Input; });
+				const auto Output = std::find_if(Node->Pins.begin(), Node->Pins.end(),
+					[](const auto& Pin) { return Pin.Key == "out" && Pin.Direction == EditorGraphPinDirection::Output; });
+				if (Input == Node->Pins.end() || Output == Node->Pins.end() ||
+					Input->Type != RouteType || Output->Type != RouteType)
+					return Fail("The registered reroute definition does not preserve the route pin type");
+				Pins.push_back({ Input->ID, Output->ID });
+				Result.RerouteNodeIDs.push_back(Node->ID);
+				Candidate.Nodes.push_back(std::move(*Node));
+			}
+
+			std::vector<std::pair<PulseForge::UUID, PulseForge::UUID>> Segments;
+			Segments.reserve(KnotPositions.size() + 1);
+			if (StartDirection == EditorGraphPinDirection::Output)
+			{
+				Segments.emplace_back(StartPinID, Pins.front().Input);
+				for (size_t Index = 1; Index < Pins.size(); ++Index)
+					Segments.emplace_back(Pins[Index - 1].Output, Pins[Index].Input);
+				if (EndPinID) Segments.emplace_back(Pins.back().Output, *EndPinID);
+			}
+			else
+			{
+				if (EndPinID) Segments.emplace_back(*EndPinID, Pins.back().Input);
+				for (size_t Index = Pins.size(); Index > 1; --Index)
+					Segments.emplace_back(Pins[Index - 1].Output, Pins[Index - 2].Input);
+				Segments.emplace_back(Pins.front().Output, StartPinID);
+			}
+
+			Result.ConnectionIDs.reserve(Segments.size());
+			for (const auto& [OutputID, InputID] : Segments)
+			{
+				const auto Decision = CanConnectEditorGraphPins(Candidate, Schema, OutputID, InputID);
+				if (!Decision.Allowed) return Fail(Decision.Reason);
+				if (Result.OpenEnded && StartDirection == EditorGraphPinDirection::Input &&
+					InputID == StartPinID && !Decision.RemovedConnectionIDs.empty())
+					return Fail("An unfinished route cannot replace an existing connection");
+				for (const auto RemovedID : Decision.RemovedConnectionIDs)
+				{
+					if (std::find(Result.DisplacedConnectionIDs.begin(), Result.DisplacedConnectionIDs.end(), RemovedID) ==
+						Result.DisplacedConnectionIDs.end()) Result.DisplacedConnectionIDs.push_back(RemovedID);
+				}
+				Candidate.Connections.erase(std::remove_if(Candidate.Connections.begin(), Candidate.Connections.end(),
+					[&Decision](const auto& Connection)
+					{ return std::find(Decision.RemovedConnectionIDs.begin(), Decision.RemovedConnectionIDs.end(),
+						Connection.ID) != Decision.RemovedConnectionIDs.end(); }), Candidate.Connections.end());
+				if (Candidate.Connections.size() >= EditorGraphMaximumConnections)
+					return Fail("The graph has no capacity for another route connection");
+				auto ConnectionID = PulseForge::UUID::Generate();
+				if (!ConnectionID) return Fail(ConnectionID.error().Message);
+				Candidate.Connections.push_back({ *ConnectionID, OutputID, InputID });
+				Result.ConnectionIDs.push_back(*ConnectionID);
+			}
+
+			const auto Diagnostics = ValidateEditorGraph(Candidate, Schema);
+			if (!Diagnostics.empty()) return Fail(Diagnostics.front().Message);
+			Result.Allowed = true;
+			Result.Reason.clear();
+			return Result;
+		}
+	}
+
+	EditorGraphWireRouteDecision CanCreateEditorGraphWireRoute(const EditorGraph& Graph,
+		const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin)
+	{
+		EditorGraph Candidate = Graph;
+		return BuildEditorGraphWireRoute(Candidate, Schema, StartPin, KnotPositions, EndPin);
+	}
+
+	std::expected<EditorGraphWireRouteDecision, std::string> CreateEditorGraphWireRoute(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin)
+	{
+		if (History.HasOpenTransaction())
+			return std::unexpected("Cannot complete a wire route during another graph edit transaction");
+		const EditorGraph& Original = History.Graph();
+		EditorGraph FinalCandidate = Original;
+		EditorGraphWireRouteDecision Result = BuildEditorGraphWireRoute(
+			FinalCandidate, Schema, StartPin, KnotPositions, EndPin);
+		if (!Result.Allowed) return std::unexpected(Result.Reason);
+
+		const EditorGraphPin* Start = nullptr;
+		if (!FindNodeForPin(Original, StartPin, &Start) || !Start)
+			return std::unexpected("The starting pin no longer exists");
+		EditorGraph Working = Original;
+		std::vector<EditorGraph> HistorySteps;
+		HistorySteps.reserve(KnotPositions.size() + (EndPin ? 1 : 0));
+		const auto FindReroutePin = [&FinalCandidate](PulseForge::UUID NodeID, std::string_view Key)
+			-> const EditorGraphPin*
+		{
+			const auto Node = std::find_if(FinalCandidate.Nodes.begin(), FinalCandidate.Nodes.end(),
+				[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
+			if (Node == FinalCandidate.Nodes.end()) return nullptr;
+			const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(),
+				[Key](const auto& Candidate) { return Candidate.Key == Key; });
+			return Pin == Node->Pins.end() ? nullptr : &*Pin;
+		};
+		const auto AppendSegment = [&](PulseForge::UUID OutputID, PulseForge::UUID InputID) -> std::expected<void, std::string>
+		{
+			const auto Decision = CanConnectEditorGraphPins(Working, Schema, OutputID, InputID);
+			if (!Decision.Allowed) return std::unexpected(Decision.Reason);
+			const auto Link = std::find_if(FinalCandidate.Connections.begin(), FinalCandidate.Connections.end(),
+				[&](const auto& Candidate) { return Candidate.OutputPin == OutputID && Candidate.InputPin == InputID; });
+			if (Link == FinalCandidate.Connections.end() ||
+				std::find(Result.ConnectionIDs.begin(), Result.ConnectionIDs.end(), Link->ID) == Result.ConnectionIDs.end())
+				return std::unexpected("The validated route is missing a planned connection segment");
+			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Removed(
+				Decision.RemovedConnectionIDs.begin(), Decision.RemovedConnectionIDs.end());
+			Working.Connections.erase(std::remove_if(Working.Connections.begin(), Working.Connections.end(),
+				[&Removed](const auto& Candidate) { return Removed.contains(Candidate.ID); }), Working.Connections.end());
+			if (Working.Connections.size() >= EditorGraphMaximumConnections)
+				return std::unexpected("The graph has no capacity for another route connection");
+			Working.Connections.push_back(*Link);
+			const auto Diagnostics = ValidateEditorGraph(Working, Schema);
+			if (!Diagnostics.empty()) return std::unexpected(Diagnostics.front().Message);
+			HistorySteps.push_back(Working);
+			return {};
+		};
+
+		for (size_t Index = 0; Index < Result.RerouteNodeIDs.size(); ++Index)
+		{
+			const PulseForge::UUID NodeID = Result.RerouteNodeIDs[Index];
+			const auto Node = std::find_if(FinalCandidate.Nodes.begin(), FinalCandidate.Nodes.end(),
+				[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; });
+			if (Node == FinalCandidate.Nodes.end()) return std::unexpected("A planned reroute node is missing");
+			if (Working.Nodes.size() >= EditorGraphMaximumNodes)
+				return std::unexpected("The graph has no capacity for another reroute node");
+			Working.Nodes.push_back(*Node);
+			const auto* KnotInput = FindReroutePin(NodeID, "in");
+			const auto* KnotOutput = FindReroutePin(NodeID, "out");
+			if (!KnotInput || !KnotOutput) return std::unexpected("A planned reroute node has incomplete pins");
+
+			PulseForge::UUID OutputID;
+			PulseForge::UUID InputID;
+			if (Start->Direction == EditorGraphPinDirection::Output)
+			{
+				OutputID = Index == 0 ? StartPin : FindReroutePin(Result.RerouteNodeIDs[Index - 1], "out")->ID;
+				InputID = KnotInput->ID;
+			}
+			else
+			{
+				OutputID = KnotOutput->ID;
+				InputID = Index == 0 ? StartPin : FindReroutePin(Result.RerouteNodeIDs[Index - 1], "in")->ID;
+			}
+			if (auto Added = AppendSegment(OutputID, InputID); !Added) return std::unexpected(Added.error());
+		}
+
+		if (EndPin)
+		{
+			const PulseForge::UUID LastNode = Result.RerouteNodeIDs.back();
+			const auto* LastInput = FindReroutePin(LastNode, "in");
+			const auto* LastOutput = FindReroutePin(LastNode, "out");
+			if (!LastInput || !LastOutput) return std::unexpected("The final reroute node has incomplete pins");
+			const PulseForge::UUID OutputID = Start->Direction == EditorGraphPinDirection::Output ? LastOutput->ID : *EndPin;
+			const PulseForge::UUID InputID = Start->Direction == EditorGraphPinDirection::Output ? *EndPin : LastInput->ID;
+			if (auto Added = AppendSegment(OutputID, InputID); !Added) return std::unexpected(Added.error());
+		}
+
+		if (HistorySteps.size() != KnotPositions.size() + (EndPin ? 1 : 0))
+			return std::unexpected("The route did not produce the expected history steps");
+		if (!History.ExecuteSequence(Schema, HistorySteps, Result.Reason))
+			return std::unexpected(Result.Reason);
+		return Result;
 	}
 
 	std::expected<void, std::string> MoveEditorGraphNodes(EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,

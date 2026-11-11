@@ -86,11 +86,33 @@ namespace
 		size_t CommitCount = 0;
 		bool RequireCompleteSourceSet = true;
 	};
+	struct PendingWireRoute
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID SourcePin;
+		EditorGraphPinDirection Direction = EditorGraphPinDirection::Output;
+		uint64_t GraphRevision = 0;
+		EditorGraphScreenPoint PressPosition;
+		std::vector<EditorGraphVector3> Knots;
+		PulseForge::UUID PreviewTarget;
+		EditorGraphWireRouteDecision PreviewDecision;
+	};
+
+	struct PendingWireRouteStart
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID SourcePin;
+		uint64_t GraphRevision = 0;
+		EditorGraphScreenPoint ScreenPosition;
+		bool Pressed = false;
+	};
+
 
 	class CanvasMouseInputMask final
 	{
 	public:
-		CanvasMouseInputMask() : m_Context(ImGui::GetCurrentContext())
+		CanvasMouseInputMask()
+			: m_Context(ImGui::GetCurrentContext())
 		{
 			if (!m_Context) return;
 			for (int Button = 0; Button < 3; ++Button)
@@ -174,6 +196,8 @@ namespace
 		PulseForge::UUID GraphID;
 		std::optional<PulseForge::UUID> SourcePin;
 		EditorGraphVector3 Placement;
+		bool PlacementIsConnectedPinAnchor = false;
+		std::optional<EditorGraphScreenPoint> PopupScreenAnchor;
 		uint64_t DiscoveryRevision = 0;
 		PulseForge::UUID DiscoveryGraphID;
 		std::optional<PulseForge::UUID> DiscoverySourcePin;
@@ -182,6 +206,19 @@ namespace
 		std::vector<EditorGraphNodeCreationAction> Actions;
 		std::array<char, 256> Search{};
 		int SelectedResult = 0;
+	};
+	struct PendingRouteSearchTail
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID FreePin;
+		EditorGraphVector3 DropPoint;
+	};
+	struct PendingRouteSearchNodePlacement
+	{
+		EditorGraphCanvasDocumentContext Context;
+		PulseForge::UUID NodeID;
+		PulseForge::UUID ConnectedPinID;
+		EditorGraphVector3 PinAnchor;
 	};
 	bool SaveCanvasSettings(const char* Data, size_t Size, NodeEditor::SaveReasonFlags, void* UserPointer);
 	size_t LoadCanvasSettings(char* Data, void* UserPointer);
@@ -236,6 +273,13 @@ namespace
 		EditorGraphPinVisibilityPopupPresentation PinVisibilityPopupPresentation;
 		std::optional<PendingReconnectPopup> ReconnectPopup;
 		std::optional<PendingPinMove> PinMove;
+		std::optional<PendingWireRoute> WireRoute;
+		std::optional<PendingWireRouteStart> WireRouteStart;
+		std::optional<PendingRouteSearchTail> RouteSearchTail;
+		std::optional<PendingRouteSearchNodePlacement> RouteSearchNodePlacement;
+		bool RouteSearchPlacementAwaiting = false;
+		bool WireRouteOwnsNativeCreateThroughRelease = false;
+		EditorGraphWireRoutePresentation WireRoutePresentation;
 		EditorGraphPinMovePresentation PinMovePresentation;
 		EditorGraphReconnectPopupPresentation ReconnectPopupPresentation;
 		std::vector<PinAnchorMeasurement> LastPinAnchors;
@@ -325,7 +369,9 @@ namespace
 	}
 
 	void QueueNodeSearch(GraphDocumentState& State, const EditorDocumentSession& Session,
-		std::optional<PulseForge::UUID> SourcePin, EditorGraphVector3 Placement)
+		std::optional<PulseForge::UUID> SourcePin, EditorGraphVector3 Placement,
+		bool PlacementIsConnectedPinAnchor = false,
+		std::optional<EditorGraphScreenPoint> PopupScreenAnchor = std::nullopt)
 	{
 		State.NodeSearch = {};
 		State.NodeSearch.Active = true;
@@ -337,6 +383,8 @@ namespace
 		State.NodeSearch.GraphID = State.History.Graph().ID;
 		State.NodeSearch.SourcePin = SourcePin;
 		State.NodeSearch.Placement = Placement;
+		State.NodeSearch.PlacementIsConnectedPinAnchor = PlacementIsConnectedPinAnchor;
+		State.NodeSearch.PopupScreenAnchor = PopupScreenAnchor;
 	}
 
 	bool IsNodeSearchSourceAvailable(const GraphDocumentState& State)
@@ -380,6 +428,10 @@ namespace
 		State.PinRelease = {};
 		State.ReconnectPopup.reset();
 		State.PinMove.reset();
+		if (State.RouteSearchNodePlacement && State.History.HasOpenTransaction()) State.History.CancelTransaction();
+		State.RouteSearchNodePlacement.reset();
+		State.RouteSearchPlacementAwaiting = false;
+		State.RouteSearchTail.reset();
 		if (!State.Canvas) State.Error = "Could not restore the graph canvas after cancelling its interaction";
 	}
 
@@ -870,6 +922,9 @@ namespace PulseForgeEditor
 		State->Handles.clear();
 		State->Identities.clear();
 		State->NodeSearch = {};
+		State->RouteSearchTail.reset();
+		State->RouteSearchNodePlacement.reset();
+		State->RouteSearchPlacementAwaiting = false;
 		State->PinVisibilityPopup.reset();
 		State->ReconnectPopup.reset();
 		State->ScreenPinRelease = {};
@@ -920,6 +975,12 @@ namespace PulseForgeEditor
 	{
 		const auto* State = GetState(Session);
 		return State ? State->PinMovePresentation : EditorGraphPinMovePresentation{};
+	}
+
+	EditorGraphWireRoutePresentation EditorGraphDocumentEditor::GetWireRouteForTesting(EditorDocumentSession& Session)
+	{
+		const auto* State = GetState(Session);
+		return State ? State->WireRoutePresentation : EditorGraphWireRoutePresentation{};
 	}
 
 	bool EditorGraphDocumentEditor::IsCanvasInputSuppressedForTesting(EditorDocumentSession& Session)
@@ -1092,6 +1153,8 @@ namespace PulseForgeEditor
 		if (State->CapturePresentation) State->Presentation.clear();
 		State->PinVisibilityPopupPresentation = {};
 		State->ReconnectPopupPresentation = {};
+		State->WireRoutePresentation = {};
+		State->WireRoutePresentation.SearchPlacementAwaitingPinAnchor = State->RouteSearchPlacementAwaiting;
 		if (!State->Canvas)
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", State->Error.c_str());
@@ -1118,11 +1181,18 @@ namespace PulseForgeEditor
 		const bool CancelGesture = (Focused && ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
 			(!ReconnectPopupEscape || State->PinMove)) ||
 			(State->WasFocused && !Focused && !ReconnectPopupOwnsFocus);
+		const bool CancelledWireRoute = State->WireRoute.has_value() && CancelGesture;
 		if (CancelGesture)
 		{
 			const bool CancelledPinMove = State->PinMove.has_value();
-			if (CancelledPinMove && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+			if ((CancelledPinMove || CancelledWireRoute) && ImGui::IsMouseDown(ImGuiMouseButton_Left))
 				State->SuppressCanvasInputUntilRelease = true;
+			State->WireRoute.reset();
+			State->WireRouteStart.reset();
+			State->RouteSearchNodePlacement.reset();
+			State->RouteSearchPlacementAwaiting = false;
+			State->RouteSearchTail.reset();
+			State->WireRouteOwnsNativeCreateThroughRelease = false;
 			State->ScreenPinRelease = {};
 			State->PinRelease = {};
 			if (State->History.HasOpenTransaction())
@@ -1133,12 +1203,11 @@ namespace PulseForgeEditor
 			State->NodeMoveTransaction = false;
 			State->PropertyEdits.Reset();
 			State->PendingSelectionNodeIDs.clear();
-			// Pin-move capture happens before the canvas drag threshold, and its input is
-			// masked from the native canvas for the rest of the gesture. There is no
-			// native action to reset here; destroying the canvas would discard its live
-			// focus/hover state and make the next independent link drag unreliable.
+			// Pin-move capture happens before the canvas drag threshold, so the native
+			// canvas never owns its press. A wire route starts from a native link drag;
+			// recreate that canvas on cancellation to retire its pending create request.
 			if (!CancelledPinMove) CancelCanvasInteraction(*State);
-			if (CancelledPinMove) ImGui::ClearActiveID();
+			if (CancelledPinMove || CancelledWireRoute) ImGui::ClearActiveID();
 		}
 		State->WasFocused = Focused;
 		const ImGuiIO& Input = ImGui::GetIO();
@@ -1149,7 +1218,19 @@ namespace PulseForgeEditor
 		const bool LeftClickedAtFrameStart = ImGui::IsMouseClicked(ImGuiMouseButton_Left, false);
 		const bool LeftReleasedAtFrameStart = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
 		const bool LeftDownAtFrameStart = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+		const bool KeyRPressed = Focused && ImGui::IsKeyPressed(ImGuiKey_R, false) &&
+			!Input.KeyCtrl && !Input.KeyAlt && !Input.KeyShift && !Input.KeySuper;
 		const bool OtherInputOwner = ImGui::IsAnyItemActive();
+		if (State->WireRoute && (!Focused || !ContextMatches(State->WireRoute->Context) ||
+			State->WireRoute->GraphRevision != State->History.GraphRevision() ||
+			(!LeftDownAtFrameStart && !LeftReleasedAtFrameStart)))
+		{
+			if (LeftDownAtFrameStart) State->SuppressCanvasInputUntilRelease = true;
+			State->WireRoute.reset();
+		}
+		if (State->WireRouteStart && (!Focused || !ContextMatches(State->WireRouteStart->Context) ||
+			State->WireRouteStart->GraphRevision != State->History.GraphRevision()))
+			State->WireRouteStart.reset();
 		// A fresh Ctrl+left press is only a candidate here. Let Begin/End resolve this
 		// frame's clipped, front-to-back pin hit before assigning the gesture. A prior
 		// hover is not authoritative after the pointer moves, even by one pixel.
@@ -1222,6 +1303,20 @@ namespace PulseForgeEditor
 			State->NodeSearch.GraphID == State->History.Graph().ID && IsNodeSearchSourceAvailable(*State);
 		bool SearchPopupActive = State->NodeSearch.Active &&
 			(State->NodeSearch.OpenRequested || State->NodeSearch.PopupOpen || ImGui::IsPopupOpen("GraphNodeSearch"));
+		const bool WireRouteInputEligible = Focused && !CancelGesture && LeftDownAtFrameStart &&
+			!LeftReleasedAtFrameStart && !Input.WantTextInput && !SearchPopupActive &&
+			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput && !State->PinMove &&
+			!State->SuppressCanvasInputUntilRelease && !State->NodeMoveTransaction &&
+			!State->PropertyEdits.HasActiveEdit() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+			!Input.KeyCtrl && !Input.KeyAlt && !Input.KeyShift && !Input.KeySuper;
+		const bool WireRouteKeyCandidate = WireRouteInputEligible && KeyRPressed;
+		State->WireRoutePresentation.KeyPressed = KeyRPressed;
+		State->WireRoutePresentation.InputEligible = WireRouteInputEligible;
+		State->WireRoutePresentation.Focused = Focused;
+		State->WireRoutePresentation.LeftDown = LeftDownAtFrameStart;
+		State->WireRoutePresentation.EscapeDown = ImGui::IsKeyDown(ImGuiKey_Escape);
+		State->WireRoutePresentation.TextInputOwned = Input.WantTextInput;
+		State->WireRoutePresentation.PopupOwned = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
 		const bool CapturedAltPinClick = Focused && !Input.WantTextInput && !OtherInputOwner && !SearchPopupActive &&
 			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput &&
 			!State->PinMove && !State->SuppressCanvasInputUntilRelease &&
@@ -1329,6 +1424,16 @@ namespace PulseForgeEditor
 		std::vector<PinAnchorMeasurement> PinAnchorCanvasPositions;
 		std::unordered_map<PulseForge::UUID, EditorGraphCanvasPoint, PulseForge::UUIDHash> CurrentNodeCanvasPositions;
 		std::unordered_map<PulseForge::UUID, EditorGraphCanvasPoint, PulseForge::UUIDHash> CurrentNodeCanvasSizes;
+		struct CanvasPinHitRegion final
+		{
+			PulseForge::UUID NodeID;
+			PulseForge::UUID PinID;
+			EditorGraphCanvasPoint Minimum;
+			EditorGraphCanvasPoint Maximum;
+			size_t SubmissionIndex = 0;
+		};
+		std::vector<CanvasPinHitRegion> CurrentPinHitRegions;
+		std::unordered_map<PulseForge::UUID, size_t, PulseForge::UUIDHash> CurrentNodeSubmissionOrder;
 		struct PinVisibilityChange { PulseForge::UUID NodeID; PulseForge::UUID PinID; bool Hidden = false; };
 		std::vector<PinVisibilityChange> PendingVisibilityChanges;
 		bool PropertyWidgetHovered = false;
@@ -1457,7 +1562,10 @@ namespace PulseForgeEditor
 		const auto CapturedScreenPoint = EditorGraphScreenPoint{
 			ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y };
 		std::optional<CanvasMouseInputMask> CanvasInputMask;
-		if (State->PinMove || State->SuppressCanvasInputUntilRelease) CanvasInputMask.emplace();
+		if (State->PinMove || State->RouteSearchNodePlacement ||
+			(State->WireRoute && !LeftReleasedAtFrameStart) ||
+			State->SuppressCanvasInputUntilRelease)
+			CanvasInputMask.emplace();
 		NodeEditor::Begin("##PulseForgeGraphCanvas", ImVec2(0.0f, 0.0f));
 		const ImVec2 WireDoubleClickCanvasPosition = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
 		const bool PinMovePreviewFrame = State->PinMove && State->PinMove->CtrlDrag &&
@@ -1564,6 +1672,116 @@ namespace PulseForgeEditor
 			else MovingConnectionIDs.clear();
 		}
 		else State->PinMovePresentation.PreviewCurves.clear();
+		if (State->WireRoute && ContextMatches(State->WireRoute->Context) &&
+			State->WireRoute->GraphRevision == State->History.GraphRevision() &&
+			State->LastAnchorCanvas == State->Canvas &&
+			State->LastAnchorGraphRevision == State->WireRoute->GraphRevision &&
+			State->LastAnchorLayoutRevision == State->PinLayoutRevision &&
+			State->LastAnchorContext.Document == CanvasContext.Document &&
+			State->LastAnchorContext.SessionGeneration == CanvasContext.SessionGeneration &&
+			State->LastAnchorContext.HostID == CanvasContext.HostID &&
+			State->LastAnchorContext.GraphID == CanvasContext.GraphID)
+		{
+			const auto SourceAnchor = std::find_if(State->LastPinAnchors.begin(), State->LastPinAnchors.end(),
+				[&](const auto& Anchor) { return Anchor.PinID == State->WireRoute->SourcePin; });
+			const auto SourceOwner = std::find_if(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+				[&](const auto& Node) { return std::any_of(Node.Pins.begin(), Node.Pins.end(),
+					[&](const auto& Pin) { return Pin.ID == State->WireRoute->SourcePin; }); });
+			const auto CachedPosition = SourceOwner == State->History.Graph().Nodes.end()
+				? State->LastAnchorNodePositions.end() : State->LastAnchorNodePositions.find(SourceOwner->ID);
+			const auto CachedSize = SourceOwner == State->History.Graph().Nodes.end()
+				? State->LastAnchorNodeSizes.end() : State->LastAnchorNodeSizes.find(SourceOwner->ID);
+			const auto SourceHandle = SourceOwner == State->History.Graph().Nodes.end()
+				? State->Handles.end() : State->Handles.find(SourceOwner->ID);
+			const bool SourceGeometryCurrent = CachedPosition != State->LastAnchorNodePositions.end() &&
+				CachedSize != State->LastAnchorNodeSizes.end() && SourceHandle != State->Handles.end() &&
+				[&]()
+				{
+					const ImVec2 Position = NodeEditor::GetNodePosition(NodeEditor::NodeId(SourceHandle->second));
+					const ImVec2 Size = NodeEditor::GetNodeSize(NodeEditor::NodeId(SourceHandle->second));
+					return std::abs(Position.x - CachedPosition->second.X) < 0.01 &&
+						std::abs(Position.y - CachedPosition->second.Y) < 0.01 &&
+						std::abs(Size.x - CachedSize->second.X) < 0.01 &&
+						std::abs(Size.y - CachedSize->second.Y) < 0.01;
+				}();
+			if (SourceAnchor != State->LastPinAnchors.end() && SourceGeometryCurrent)
+			{
+				std::vector<ImVec2> RoutePoints;
+				RoutePoints.reserve(State->WireRoute->Knots.size() + 2);
+				const ImVec2 Source(static_cast<float>(SourceAnchor->Position.X),
+					static_cast<float>(SourceAnchor->Position.Y));
+				const ImVec2 Pointer = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+				if (State->WireRoute->Direction == EditorGraphPinDirection::Output)
+				{
+					RoutePoints.push_back(Source);
+					for (const auto& Knot : State->WireRoute->Knots)
+						RoutePoints.emplace_back(static_cast<float>(Knot.X), static_cast<float>(Knot.Y));
+					RoutePoints.push_back(Pointer);
+				}
+				else
+				{
+					RoutePoints.push_back(Pointer);
+					for (auto It = State->WireRoute->Knots.rbegin(); It != State->WireRoute->Knots.rend(); ++It)
+						RoutePoints.emplace_back(static_cast<float>(It->X), static_cast<float>(It->Y));
+					RoutePoints.push_back(Source);
+				}
+				auto* DrawList = ImGui::GetWindowDrawList();
+				const ImU32 RouteColor = IM_COL32(220, 205, 160, 245);
+				State->WireRoutePresentation.Active = true;
+				State->WireRoutePresentation.SourcePin = State->WireRoute->SourcePin;
+				State->WireRoutePresentation.KnotPositions = State->WireRoute->Knots;
+				for (size_t Index = 1; Index < RoutePoints.size(); ++Index)
+				{
+					const ImVec2 Start = RoutePoints[Index - 1];
+					const ImVec2 End = RoutePoints[Index];
+					const bool Vertical = std::abs(End.y - Start.y) > std::abs(End.x - Start.x) * 1.6f;
+					const float Distance = Vertical ? std::abs(End.y - Start.y) : std::abs(End.x - Start.x);
+					const float Handle = (std::max)(18.0f, Distance * 0.5f);
+					const float Sign = Vertical ? (End.y < Start.y ? -1.0f : 1.0f) :
+						(End.x < Start.x ? -1.0f : 1.0f);
+					const ImVec2 ControlStart = Vertical ? ImVec2(Start.x, Start.y + Sign * Handle) :
+						ImVec2(Start.x + Sign * Handle, Start.y);
+					const ImVec2 ControlEnd = Vertical ? ImVec2(End.x, End.y - Sign * Handle) :
+						ImVec2(End.x - Sign * Handle, End.y);
+					DrawList->AddBezierCubic(Start, ControlStart, ControlEnd, End, RouteColor, 2.0f);
+					State->WireRoutePresentation.PreviewEndpoints.push_back({ Start.x, Start.y });
+					State->WireRoutePresentation.PreviewEndpoints.push_back({ End.x, End.y });
+				}
+				for (const auto& Knot : State->WireRoute->Knots)
+					DrawList->AddCircleFilled(ImVec2(static_cast<float>(Knot.X), static_cast<float>(Knot.Y)),
+						4.0f, IM_COL32(230, 218, 184, 255), 16);
+			}
+		}
+		if (State->RouteSearchTail && ContextMatches(State->RouteSearchTail->Context) &&
+			(State->NodeSearch.Active || State->RouteSearchNodePlacement))
+		{
+			const auto& Tail = *State->RouteSearchTail;
+			const EditorGraphPin* FreePin = nullptr;
+			const EditorGraphNode* Owner = nullptr;
+			for (const auto& Node : State->History.Graph().Nodes)
+				for (const auto& Pin : Node.Pins)
+					if (Pin.ID == Tail.FreePin) { FreePin = &Pin; Owner = &Node; break; }
+			if (FreePin && Owner && IsEditorGraphRerouteType(Owner->TypeKey))
+			{
+				ImVec2 Start(static_cast<float>(Owner->X), static_cast<float>(Owner->Y));
+				ImVec2 End(static_cast<float>(Tail.DropPoint.X), static_cast<float>(Tail.DropPoint.Y));
+				if (FreePin->Direction == EditorGraphPinDirection::Input) std::swap(Start, End);
+				const bool Vertical = std::abs(End.y - Start.y) > std::abs(End.x - Start.x) * 1.6f;
+				const float Distance = Vertical ? std::abs(End.y - Start.y) : std::abs(End.x - Start.x);
+				const float Handle = (std::max)(18.0f, Distance * 0.5f);
+				const float Sign = Vertical ? (End.y < Start.y ? -1.0f : 1.0f) :
+					(End.x < Start.x ? -1.0f : 1.0f);
+				const ImVec2 ControlStart = Vertical ? ImVec2(Start.x, Start.y + Sign * Handle) :
+					ImVec2(Start.x + Sign * Handle, Start.y);
+				const ImVec2 ControlEnd = Vertical ? ImVec2(End.x, End.y - Sign * Handle) :
+					ImVec2(End.x - Sign * Handle, End.y);
+				ImGui::GetWindowDrawList()->AddBezierCubic(Start, ControlStart, ControlEnd, End,
+					IM_COL32(220, 205, 160, 245), 2.0f);
+				State->WireRoutePresentation.OpenEnded = true;
+				State->WireRoutePresentation.PreviewEndpoints = {
+					{ Start.x, Start.y }, { End.x, End.y } };
+			}
+		}
 		if (State->ScreenPinRelease.Valid)
 		{
 			const auto& ScreenRelease = State->ScreenPinRelease.Position;
@@ -1601,8 +1819,10 @@ namespace PulseForgeEditor
 			QueueNodeSearch(*State, Session, std::nullopt,
 				GraphCanvasDetail::ToEditorGraphPosition(CanvasCenter));
 		}
+		size_t NodeSubmissionIndex = 0;
 		for (const auto& Node : State->History.Graph().Nodes)
 		{
+			CurrentNodeSubmissionOrder.emplace(Node.ID, NodeSubmissionIndex++);
 			const uintptr_t NodeHandle = RegisterHandle(Node.ID);
 			if (!NodeHandle)
 			{
@@ -1669,6 +1889,10 @@ namespace PulseForgeEditor
 						// publish the precise region so the output pin cannot mask the input.
 						NodeEditor::PinRect(HitMinimum, HitMaximum);
 						NodeEditor::PinPivotRect(KnotCenter, KnotCenter);
+						CurrentPinHitRegions.push_back({ Node.ID, Pin.ID,
+							{ HitMinimum.x, HitMinimum.y },
+							{ HitMaximum.x, HitMaximum.y },
+							CurrentNodeSubmissionOrder.at(Node.ID) });
 						const std::string Tooltip = std::string(DirectionLabel) + " · " + PinTypeLabel(Pin.Type) + " · " +
 							std::to_string(ConnectionCount(Pin.ID)) + " connection(s)";
 						if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tooltip.c_str());
@@ -1876,6 +2100,10 @@ namespace PulseForgeEditor
 					? NodeEditor::PinKind::Input : NodeEditor::PinKind::Output);
 				const auto Marker = DrawGraphPinMarker(Pin, Row.Connected, Tooltip);
 				NodeEditor::EndPin();
+				CurrentPinHitRegions.push_back({ Node.ID, Pin.ID,
+					{ Marker.Minimum.X, Marker.Minimum.Y },
+					{ Marker.Maximum.X, Marker.Maximum.Y },
+					CurrentNodeSubmissionOrder.at(Node.ID) });
 				if (std::isfinite(Marker.Anchor.X) && std::isfinite(Marker.Anchor.Y))
 					PinAnchorCanvasPositions.push_back({ Node.ID, Pin.ID, Marker.Anchor });
 				EditorGraphCanvasPinPresentation PinPresentation;
@@ -1970,6 +2198,42 @@ namespace PulseForgeEditor
 				State->Presentation.push_back(std::move(Presentation));
 			}
 		}
+		// Decide whether an R press can take over the native create gesture before
+		// QueryNewLink/QueryNewNode consumes that frame's request. R over a node or
+		// pin must leave the canvas request path untouched. The geometry collected
+		// above is from this canvas traversal and uses canvas-local coordinates.
+		const ImVec2 RouteKeyCanvasPointer = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+		const ImVec2 CanvasScreenMaximumForRouteKey(CanvasScreenOrigin.x + CanvasScreenSize.x,
+			CanvasScreenOrigin.y + CanvasScreenSize.y);
+		// ImGui's mouse position is canvas-local between Begin() and End(). The
+		// clip rectangle here is screen-space, so use the screen position captured
+		// before Begin() instead of asking IsMouseHoveringRect to compare mixed
+		// coordinate spaces.
+		const bool RouteKeyPointerInsideCanvas = ScreenMousePositionAtFrameStart.x >= CanvasScreenOrigin.x &&
+			ScreenMousePositionAtFrameStart.y >= CanvasScreenOrigin.y &&
+			ScreenMousePositionAtFrameStart.x <= CanvasScreenMaximumForRouteKey.x &&
+			ScreenMousePositionAtFrameStart.y <= CanvasScreenMaximumForRouteKey.y;
+		bool RouteKeyOverNode = false;
+		for (const auto& [NodeID, Position] : CurrentNodeCanvasPositions)
+			if (const auto Size = CurrentNodeCanvasSizes.find(NodeID); Size != CurrentNodeCanvasSizes.end() &&
+				RouteKeyCanvasPointer.x >= Position.X && RouteKeyCanvasPointer.y >= Position.Y &&
+				RouteKeyCanvasPointer.x <= Position.X + Size->second.X &&
+				RouteKeyCanvasPointer.y <= Position.Y + Size->second.Y)
+			{
+				RouteKeyOverNode = true;
+				break;
+			}
+		const bool RouteKeyOverPin = std::any_of(CurrentPinHitRegions.begin(), CurrentPinHitRegions.end(),
+			[&](const auto& Region)
+			{
+				return RouteKeyCanvasPointer.x >= Region.Minimum.X && RouteKeyCanvasPointer.y >= Region.Minimum.Y &&
+					RouteKeyCanvasPointer.x <= Region.Maximum.X && RouteKeyCanvasPointer.y <= Region.Maximum.Y;
+			});
+		const bool WireRouteBackgroundKeyCandidate = WireRouteKeyCandidate &&
+			ImGui::IsMouseDragging(ImGuiMouseButton_Left) && RouteKeyPointerInsideCanvas &&
+			!RouteKeyOverNode && !RouteKeyOverPin;
+		const bool WireRouteTakesBackgroundRequest = State->WireRoute.has_value() ||
+			WireRouteBackgroundKeyCandidate;
 		for (const auto& Connection : State->History.Graph().Connections)
 		{
 			// Do not submit captured links to the canvas while their loose ends are moving.
@@ -2000,18 +2264,26 @@ namespace PulseForgeEditor
 		std::optional<std::pair<PulseForge::UUID, PulseForge::UUID>> CreatedLink;
 		const bool BlockCanvasRequests = CtrlPinMovePressCandidate || PinVisibilityPopupOwnsInput || ReconnectPopupOwnsInput || State->PinMove.has_value() ||
 			State->SuppressCanvasInputUntilRelease ||
-			State->PinVisibilityPopup.has_value() || State->ReconnectPopup.has_value() ||
+			State->PinVisibilityPopup.has_value() || State->ReconnectPopup.has_value() || State->WireRoute.has_value() ||
+			State->RouteSearchNodePlacement.has_value() ||
+			State->WireRouteOwnsNativeCreateThroughRelease ||
 			ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
 		const bool CancelNativeCreateRequest = CtrlPinMovePressCandidate || State->PinMove.has_value() ||
-			State->SuppressCanvasInputUntilRelease;
+			State->SuppressCanvasInputUntilRelease || State->WireRoute.has_value() ||
+			State->WireRouteOwnsNativeCreateThroughRelease;
+		const bool RouteOwnsNativeGesture = State->WireRoute.has_value();
+		const bool ObserveRouteRequests = RouteOwnsNativeGesture || WireRouteTakesBackgroundRequest;
+		std::optional<EditorGraphCanvasLinkRequest> QueriedNativeLink;
 		const auto CreateRequest = GraphCanvasDetail::ProcessEditorGraphCanvasCreateRequestFrame(
-			[] { return NodeEditor::BeginCreate(); },
+			[State] { return NodeEditor::BeginCreate(State->WireRoute ? ImVec4(0, 0, 0, 0) : ImVec4(1, 1, 1, 1),
+				State->WireRoute ? 0.0f : 1.0f); },
 			[] { NodeEditor::EndCreate(); },
-			[BlockCanvasRequests, CancelNativeCreateRequest]() -> std::optional<EditorGraphCanvasLinkRequest>
+			[State, BlockCanvasRequests, CancelNativeCreateRequest, RouteOwnsNativeGesture,
+				&QueriedNativeLink]() -> std::optional<EditorGraphCanvasLinkRequest>
 			{
 				NodeEditor::PinId StartPin;
 				NodeEditor::PinId EndPin;
-				if (BlockCanvasRequests)
+				if (BlockCanvasRequests && !RouteOwnsNativeGesture)
 				{
 					// Query once so a native preview left by the original press can be
 					// explicitly rejected. EndCreate balances any Suspend performed by
@@ -2021,7 +2293,8 @@ namespace PulseForgeEditor
 					return std::nullopt;
 				}
 				if (!NodeEditor::QueryNewLink(&StartPin, &EndPin)) return std::nullopt;
-				return EditorGraphCanvasLinkRequest{ StartPin.Get(), EndPin.Get() };
+				QueriedNativeLink = EditorGraphCanvasLinkRequest{ StartPin.Get(), EndPin.Get() };
+				return QueriedNativeLink;
 			},
 			[State](const EditorGraphCanvasLinkRequest& Request)
 			{
@@ -2029,14 +2302,31 @@ namespace PulseForgeEditor
 				const auto End = State->Identities.find(Request.EndPin);
 				if (Start == State->Identities.end() || End == State->Identities.end())
 					return EditorGraphConnectionDecision{ false, "The dragged pin no longer exists", {}, {} };
+				if (State->WireRoute)
+				{
+					auto& Route = *State->WireRoute;
+					const PulseForge::UUID Target = Route.Direction == EditorGraphPinDirection::Output ?
+						End->second : Start->second;
+					if (Route.PreviewTarget != Target)
+					{
+						Route.PreviewTarget = Target;
+						Route.PreviewDecision = CanCreateEditorGraphWireRoute(State->History.Graph(), State->Schema,
+							Route.SourcePin, Route.Knots, Target);
+					}
+					const auto& Decision = Route.PreviewDecision;
+					return EditorGraphConnectionDecision{ Decision.Allowed, Decision.Reason,
+						Route.Direction == EditorGraphPinDirection::Output ? Start->second : End->second,
+						Route.Direction == EditorGraphPinDirection::Output ? End->second : Start->second,
+						Decision.DisplacedConnectionIDs };
+				}
 				return CanConnectEditorGraphPins(State->History.Graph(), State->Schema, Start->second, End->second);
 			},
-			[] { return NodeEditor::AcceptNewItem(); },
+			[State] { if (State->WireRoute) { NodeEditor::RejectNewItem(); return false; } return NodeEditor::AcceptNewItem(); },
 			[] { NodeEditor::RejectNewItem(); },
-			[BlockCanvasRequests, CancelNativeCreateRequest]() -> std::optional<uintptr_t>
+			[BlockCanvasRequests, CancelNativeCreateRequest, RouteOwnsNativeGesture]() -> std::optional<uintptr_t>
 			{
 				NodeEditor::PinId SourcePin;
-				if (BlockCanvasRequests)
+				if (BlockCanvasRequests && !RouteOwnsNativeGesture)
 				{
 					if (CancelNativeCreateRequest && NodeEditor::QueryNewNode(&SourcePin))
 						NodeEditor::RejectNewItem();
@@ -2054,8 +2344,17 @@ namespace PulseForgeEditor
 						{ return Pin.ID == Identity->second; })) return true;
 				return false;
 			},
-			[] { return NodeEditor::AcceptNewItem(); },
-			[] { NodeEditor::RejectNewItem(); });
+			[RouteOwnsNativeGesture, WireRouteTakesBackgroundRequest]()
+			{
+				if (RouteOwnsNativeGesture || WireRouteTakesBackgroundRequest)
+				{
+					NodeEditor::RejectNewItem();
+					return false;
+				}
+				return NodeEditor::AcceptNewItem();
+			},
+			[] { NodeEditor::RejectNewItem(); }, ObserveRouteRequests,
+			RouteOwnsNativeGesture || WireRouteBackgroundKeyCandidate);
 		if (CreateRequest.SawLinkRequest) State->Error = CreateRequest.LinkDecision.Reason;
 		if (CreateRequest.AcceptedLink)
 			CreatedLink = std::pair{ CreateRequest.LinkDecision.OutputPin, CreateRequest.LinkDecision.InputPin };
@@ -2102,6 +2401,18 @@ namespace PulseForgeEditor
 			State->ScreenPinRelease = {};
 			State->PinRelease = {};
 		}
+
+
+		struct CompletedWireRoute final
+		{
+			PendingWireRoute Draft;
+			std::optional<PulseForge::UUID> EndPin;
+			EditorGraphVector3 DropPoint;
+			EditorGraphScreenPoint DropScreen;
+			bool OpenSearch = false;
+		};
+		std::optional<CompletedWireRoute> RouteCommit;
+		bool WireRouteGestureEnded = false;
 
 		std::vector<PulseForge::UUID> DeletedLinks;
 		std::vector<PulseForge::UUID> DeletedNodes;
@@ -2493,6 +2804,7 @@ namespace PulseForgeEditor
 			EditorGraphNodeCreationAction Action;
 			std::optional<PulseForge::UUID> SourcePin;
 			EditorGraphVector3 Placement;
+			bool PlacementIsConnectedPinAnchor = false;
 		};
 		std::optional<PendingCreation> PendingNodeCreation;
 		if (State->NodeSearch.Active)
@@ -2508,6 +2820,31 @@ namespace PulseForgeEditor
 				State->NodeSearch.OpenRequested = false;
 				State->NodeSearch.PopupOpen = true;
 			}
+			State->WireRoutePresentation.ContextualSearchOpen = State->NodeSearch.Active &&
+				State->NodeSearch.SourcePin.has_value();
+			if (State->NodeSearch.PlacementIsConnectedPinAnchor)
+			{
+				State->WireRoutePresentation.SearchDropPoint = State->NodeSearch.Placement;
+				if (State->NodeSearch.PopupScreenAnchor)
+					State->WireRoutePresentation.SearchDropScreen = *State->NodeSearch.PopupScreenAnchor;
+			}
+			if (ContextValid && State->NodeSearch.PopupScreenAnchor)
+			{
+				const auto* Viewport = ImGui::GetWindowViewport();
+				if (Viewport)
+				{
+					const ImVec2 Anchor(static_cast<float>(State->NodeSearch.PopupScreenAnchor->X),
+						static_cast<float>(State->NodeSearch.PopupScreenAnchor->Y));
+					const ImRect WorkArea(Viewport->WorkPos, ImVec2(Viewport->WorkPos.x + Viewport->WorkSize.x,
+						Viewport->WorkPos.y + Viewport->WorkSize.y));
+					ImGuiDir LastDirection = ImGuiDir_None;
+					const ImVec2 PopupPosition = ImGui::FindBestWindowPosForPopupEx(Anchor,
+						ImVec2(390.0f, 440.0f), &LastDirection, WorkArea, ImRect(Anchor, Anchor),
+						ImGuiPopupPositionPolicy_Default);
+					ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f, 0.0f), ImVec2(390.0f, 440.0f));
+					ImGui::SetNextWindowPos(PopupPosition, ImGuiCond_Appearing);
+				}
+			}
 			const bool PopupVisible = ImGui::BeginPopup("GraphNodeSearch");
 			if (PopupVisible)
 			{
@@ -2516,6 +2853,7 @@ namespace PulseForgeEditor
 					ImGui::TextUnformatted("This graph context is no longer available.");
 					ImGui::CloseCurrentPopup();
 					State->NodeSearch = {};
+					State->RouteSearchTail.reset();
 				}
 				else
 				{
@@ -2577,18 +2915,26 @@ namespace PulseForgeEditor
 								State->NodeSearch.SelectedResult = static_cast<int>(Index);
 								ChosenAction = Action;
 							}
-							if (ImGui::IsItemHovered()) State->NodeSearch.SelectedResult = static_cast<int>(Index);
+							if (Index == 0)
+							{
+								const ImVec2 Minimum = ImGui::GetItemRectMin();
+								const ImVec2 Maximum = ImGui::GetItemRectMax();
+								State->WireRoutePresentation.FirstSearchResultBounds =
+									{ { Minimum.x, Minimum.y }, { Maximum.x, Maximum.y } };
+							}
+			if (ImGui::IsItemHovered()) State->NodeSearch.SelectedResult = static_cast<int>(Index);
 						}
 					}
 					if (Navigation.Cancelled)
 					{
 						ImGui::CloseCurrentPopup();
 						State->NodeSearch = {};
+						State->RouteSearchTail.reset();
 					}
 					else if (ChosenAction)
 					{
 						PendingNodeCreation = PendingCreation{ *ChosenAction, State->NodeSearch.SourcePin,
-							State->NodeSearch.Placement };
+							State->NodeSearch.Placement, State->NodeSearch.PlacementIsConnectedPinAnchor };
 						ImGui::CloseCurrentPopup();
 						State->NodeSearch = {};
 					}
@@ -2597,23 +2943,66 @@ namespace PulseForgeEditor
 			}
 			NodeEditor::Resume();
 			if (State->NodeSearch.Active && !State->NodeSearch.OpenRequested && !ImGui::IsPopupOpen("GraphNodeSearch"))
+			{
 				State->NodeSearch = {};
+				State->RouteSearchTail.reset();
+			}
 		}
 		SearchPopupActive = SearchPopupActive || State->NodeSearch.Active || ImGui::IsPopupOpen("GraphNodeSearch");
 		const bool ShortcutOwnerEligible = Focused && !Input.WantTextInput && !OtherInputOwner &&
 			!ImGui::IsAnyItemActive() && !PropertyWidgetHovered && !SearchPopupActive &&
 			!PinVisibilityPopupOwnsInput && !ReconnectPopupOwnsInput && !State->PinMove &&
 			!State->SuppressCanvasInputUntilRelease && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
-			!State->NodeMoveTransaction && State->GraphShortcutLatchedKey == ImGuiKey_None;
+			!State->NodeMoveTransaction && !State->History.HasOpenTransaction() &&
+			State->GraphShortcutLatchedKey == ImGuiKey_None;
 		NodeEditor::EnableShortcuts(ShortcutOwnerEligible);
 		NodeEditor::End();
 		State->LastPinAnchors = PinAnchorCanvasPositions;
-		State->LastAnchorNodePositions = std::move(CurrentNodeCanvasPositions);
-		State->LastAnchorNodeSizes = std::move(CurrentNodeCanvasSizes);
+		State->LastAnchorNodePositions = CurrentNodeCanvasPositions;
+		State->LastAnchorNodeSizes = CurrentNodeCanvasSizes;
 		State->LastAnchorContext = CanvasContext;
 		State->LastAnchorCanvas = State->Canvas;
 		State->LastAnchorGraphRevision = State->History.GraphRevision();
 		State->LastAnchorLayoutRevision = State->PinLayoutRevision;
+		if (State->RouteSearchNodePlacement)
+		{
+			const auto Pending = *State->RouteSearchNodePlacement;
+			const auto PinAnchor = std::find_if(PinAnchorCanvasPositions.begin(), PinAnchorCanvasPositions.end(),
+				[&](const auto& Anchor) { return Anchor.PinID == Pending.ConnectedPinID; });
+			auto Node = std::find_if(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+				[&](const auto& Candidate) { return Candidate.ID == Pending.NodeID; });
+			if (Focused && ContextMatches(Pending.Context) && State->History.HasOpenTransaction() &&
+				PinAnchor != PinAnchorCanvasPositions.end() && Node != State->History.Graph().Nodes.end())
+			{
+				const EditorGraphVector3 AlignedPosition{ Node->X + Pending.PinAnchor.X - PinAnchor->Position.X,
+					Node->Y + Pending.PinAnchor.Y - PinAnchor->Position.Y, 0.0 };
+				std::string Error;
+				const std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>> PositionEdit{
+					{ Pending.NodeID, AlignedPosition } };
+				const auto Moved = MoveEditorGraphNodes(State->History, State->Schema, PositionEdit);
+				const bool Committed = Moved && State->History.CommitTransaction(State->Schema, Error);
+				if (Committed)
+				{
+					State->NeedsCanvasSync = true;
+					State->WireRoutePresentation.SearchPlacementAwaitingPinAnchor = false;
+					ReconcileDirtyState(*State, m_Documents, Session);
+					State->Error.clear();
+				}
+				else
+				{
+					if (State->History.HasOpenTransaction()) State->History.CancelTransaction();
+					State->Error = Moved ? Error : Moved.error();
+				}
+			}
+			else
+			{
+				if (State->History.HasOpenTransaction()) State->History.CancelTransaction();
+				State->Error = "The routed node placement context or pin anchor became unavailable";
+			}
+			State->RouteSearchNodePlacement.reset();
+			State->RouteSearchPlacementAwaiting = false;
+			State->RouteSearchTail.reset();
+		}
 		const auto DoubleClickedCanvasLink = NodeEditor::GetDoubleClickedLink();
 		if (!State->PinMove && !State->ReconnectPopup && !SearchPopupActive &&
 			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) && !State->PropertyEdits.HasActiveEdit() &&
@@ -2661,16 +3050,301 @@ namespace PulseForgeEditor
 			State->PinMove = std::move(BeginPinMoveSelection);
 			State->Error.clear();
 		}
-		const auto ResolveInteractiveCanvasPin = [&State]()
+		const auto ResolveCurrentCanvasHit = [&]()
 		{
-			// End() publishes BuildControl's current clipped, z-ordered pin result. This is the sole
-			// destination resolver for preview and release; no raw-marker fallback is valid here.
-			const auto CanvasPin = NodeEditor::GetHoveredPin();
-			if (CanvasPin.Get() == 0) return PulseForge::UUID{};
-			const auto Identity = State->Identities.find(CanvasPin.Get());
-			return Identity == State->Identities.end() ? PulseForge::UUID{} : Identity->second;
+			struct Hit final { PulseForge::UUID NodeID; PulseForge::UUID PinID; };
+			Hit Result;
+			if (!ImGui::IsMouseHoveringRect(CanvasScreenOrigin,
+				ImVec2(CanvasScreenOrigin.x + CanvasScreenSize.x, CanvasScreenOrigin.y + CanvasScreenSize.y), true))
+				return Result;
+			const ImVec2 PointerCanvas = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+			const PulseForge::UUID* FrontNode = nullptr;
+			float FrontZ = -std::numeric_limits<float>::infinity();
+			size_t FrontSubmission = 0;
+			for (const auto& [NodeID, Position] : CurrentNodeCanvasPositions)
+			{
+				const auto Size = CurrentNodeCanvasSizes.find(NodeID);
+				const auto Handle = State->Handles.find(NodeID);
+				const auto Submission = CurrentNodeSubmissionOrder.find(NodeID);
+				if (Size == CurrentNodeCanvasSizes.end() || Handle == State->Handles.end() ||
+					Submission == CurrentNodeSubmissionOrder.end()) continue;
+				if (PointerCanvas.x < Position.X || PointerCanvas.y < Position.Y ||
+					PointerCanvas.x > Position.X + Size->second.X ||
+					PointerCanvas.y > Position.Y + Size->second.Y) continue;
+				const float Z = NodeEditor::GetNodeZPosition(NodeEditor::NodeId(Handle->second));
+				if (!FrontNode || Z > FrontZ || (Z == FrontZ && Submission->second > FrontSubmission))
+				{
+					FrontNode = &NodeID;
+					FrontZ = Z;
+					FrontSubmission = Submission->second;
+				}
+			}
+			// PinRect and node positions share canvas-local coordinates. Convert the
+			// pointer once through the active frame transform before comparing them.
+			// Markers can protrude slightly beyond the body (notably right-side
+			// outputs); resolve pin rectangles independently, then reject pins behind
+			// a different frontmost node body.
+			const CanvasPinHitRegion* FrontPin = nullptr;
+			float FrontPinZ = -std::numeric_limits<float>::infinity();
+			size_t FrontPinSubmission = 0;
+			for (const auto& Region : CurrentPinHitRegions)
+				if ((!FrontNode || Region.NodeID == *FrontNode) &&
+					PointerCanvas.x >= Region.Minimum.X && PointerCanvas.y >= Region.Minimum.Y &&
+					PointerCanvas.x <= Region.Maximum.X && PointerCanvas.y <= Region.Maximum.Y)
+				{
+					const auto Handle = State->Handles.find(Region.NodeID);
+					const auto Submission = CurrentNodeSubmissionOrder.find(Region.NodeID);
+					if (Handle == State->Handles.end() || Submission == CurrentNodeSubmissionOrder.end()) continue;
+					const float Z = NodeEditor::GetNodeZPosition(NodeEditor::NodeId(Handle->second));
+					if (!FrontPin || Z > FrontPinZ ||
+						(Z == FrontPinZ && Submission->second > FrontPinSubmission))
+					{
+						FrontPin = &Region;
+						FrontPinZ = Z;
+						FrontPinSubmission = Submission->second;
+					}
+				}
+			if (FrontNode) Result.NodeID = *FrontNode;
+			if (FrontPin)
+			{
+				Result.NodeID = FrontPin->NodeID;
+				Result.PinID = FrontPin->PinID;
+			}
+			return Result;
 		};
-		const PulseForge::UUID HoveredPinID = ResolveInteractiveCanvasPin();
+		const auto CurrentCanvasHit = ResolveCurrentCanvasHit();
+		const bool RouteStartClickOwnsHit = LeftClickedAtFrameStart && Focused && !Input.WantTextInput &&
+			!State->NodeSearch.Active && !State->PinVisibilityPopup && !State->ReconnectPopup &&
+			!State->PinMove && !State->SuppressCanvasInputUntilRelease && !State->NodeMoveTransaction &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+			!Input.KeyCtrl && !Input.KeyAlt && !Input.KeyShift && !Input.KeySuper;
+		const bool RouteOwnsHitTest = State->WireRoute.has_value() || WireRouteKeyCandidate ||
+			RouteStartClickOwnsHit || (LeftDownAtFrameStart && State->WireRouteStart.has_value());
+		PulseForge::UUID HoveredPinID;
+		uintptr_t HoveredNodeHandle = 0;
+		if (RouteOwnsHitTest)
+		{
+			HoveredPinID = CurrentCanvasHit.PinID;
+			// Prefer the pinned canvas's current control hit when it publishes one;
+			// the adapter geometry path is needed only while CreateItemAction masks
+			// GetHoveredPin during a live wire gesture.
+			if (HoveredPinID.IsNil())
+			{
+				const auto CanvasPin = NodeEditor::GetHoveredPin();
+				if (CanvasPin.Get() != 0)
+					if (const auto Identity = State->Identities.find(CanvasPin.Get());
+						Identity != State->Identities.end())
+					{
+						const bool OwnedByFrontNode = CurrentCanvasHit.NodeID.IsNil() ||
+							std::any_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+								[&](const auto& Node)
+								{
+									return Node.ID == CurrentCanvasHit.NodeID &&
+										std::any_of(Node.Pins.begin(), Node.Pins.end(), [&](const auto& Pin)
+											{ return Pin.ID == Identity->second; });
+								});
+						if (OwnedByFrontNode) HoveredPinID = Identity->second;
+					}
+			}
+			if (const auto Handle = State->Handles.find(CurrentCanvasHit.NodeID); Handle != State->Handles.end())
+				HoveredNodeHandle = Handle->second;
+		}
+		else
+		{
+			const auto CanvasPin = NodeEditor::GetHoveredPin();
+			if (CanvasPin.Get() != 0)
+				if (const auto Identity = State->Identities.find(CanvasPin.Get()); Identity != State->Identities.end())
+					HoveredPinID = Identity->second;
+			HoveredNodeHandle = NodeEditor::GetHoveredNode().Get();
+		}
+		State->WireRoutePresentation.MouseDragging = ImGui::IsMouseDragging(ImGuiMouseButton_Left);
+		State->WireRoutePresentation.HoveredPin = RouteOwnsHitTest ?
+			(State->Handles.contains(HoveredPinID) ? State->Handles.at(HoveredPinID) : 0) : NodeEditor::GetHoveredPin().Get();
+		State->WireRoutePresentation.HoveredNode = RouteOwnsHitTest ? HoveredNodeHandle : NodeEditor::GetHoveredNode().Get();
+		const ImVec2 CanvasScreenMaximum(CanvasScreenOrigin.x + CanvasScreenSize.x,
+			CanvasScreenOrigin.y + CanvasScreenSize.y);
+		const bool PointerInsideCanvas = ImGui::IsMouseHoveringRect(CanvasScreenOrigin,
+			CanvasScreenMaximum, true);
+		const bool PointerInCanvasBackground = PointerInsideCanvas &&
+			(RouteOwnsHitTest ? CurrentCanvasHit.NodeID.IsNil() :
+				HoveredPinID.IsNil() && NodeEditor::GetHoveredNode().Get() == 0);
+		State->WireRoutePresentation.PointerInCanvasBackground = PointerInCanvasBackground;
+		State->WireRoutePresentation.ReleaseTargetPin = LeftReleasedAtFrameStart ? HoveredPinID : PulseForge::UUID{};
+		if (State->WireRoute && LeftReleasedAtFrameStart)
+		{
+			WireRouteGestureEnded = true;
+			const PendingWireRoute Draft = *State->WireRoute;
+			if (ContextMatches(Draft.Context) && Draft.GraphRevision == State->History.GraphRevision())
+			{
+				if (QueriedNativeLink)
+				{
+					const auto Start = State->Identities.find(QueriedNativeLink->StartPin);
+					const auto End = State->Identities.find(QueriedNativeLink->EndPin);
+					if (PointerInsideCanvas && !HoveredPinID.IsNil() &&
+						Start != State->Identities.end() && End != State->Identities.end())
+					{
+						const auto Target = Start->second == Draft.SourcePin ? End->second :
+							End->second == Draft.SourcePin ? Start->second : PulseForge::UUID{};
+						if (Target == HoveredPinID)
+						{
+							State->WireRoutePresentation.ReleaseTargetPin = Target;
+							RouteCommit = CompletedWireRoute{ Draft, Target,
+								{ WireDoubleClickCanvasPosition.x, WireDoubleClickCanvasPosition.y, 0.0 }, CapturedScreenPoint, false };
+						}
+					}
+				}
+				if (!RouteCommit && QueriedNativeLink == std::nullopt)
+				{
+					if (!HoveredPinID.IsNil()) RouteCommit = CompletedWireRoute{ Draft, HoveredPinID,
+						{ WireDoubleClickCanvasPosition.x, WireDoubleClickCanvasPosition.y, 0.0 }, CapturedScreenPoint, false };
+					// The current geometry hit resolver distinguishes a genuinely empty canvas
+					// from a pin or node body even while the native create action suppresses
+					// its public hovered-object result.
+					else if (PointerInCanvasBackground)
+						RouteCommit = CompletedWireRoute{ Draft, std::nullopt,
+							{ WireDoubleClickCanvasPosition.x, WireDoubleClickCanvasPosition.y, 0.0 }, CapturedScreenPoint, true };
+					else if (PointerInsideCanvas && HoveredPinID.IsNil() &&
+						!CurrentCanvasHit.NodeID.IsNil() && !Draft.Knots.empty())
+						RouteCommit = CompletedWireRoute{ Draft, std::nullopt,
+							{ WireDoubleClickCanvasPosition.x, WireDoubleClickCanvasPosition.y, 0.0 }, CapturedScreenPoint, false };
+				}
+			}
+			else State->Error = "The graph changed before the wire route was completed";
+			State->WireRoute.reset();
+			State->WireRouteStart.reset();
+			// The underlay for this frame was submitted before the release decision.
+			// Clear staged presentation immediately; a rejected pin target must not
+			// leave the just-ended draft visible until the next frame.
+			State->WireRoutePresentation.Active = false;
+			State->WireRoutePresentation.KnotPositions.clear();
+			State->WireRoutePresentation.PreviewEndpoints.clear();
+			State->WireRoutePresentation.ReleaseCommitRequested = RouteCommit.has_value();
+		}
+		if (RouteCommit)
+		{
+			const auto Finished = FinishPropertyEdit(*State, m_Documents, Session);
+			if (!Finished.Error.empty()) State->Error = Finished.Error;
+			else if (State->History.HasOpenTransaction())
+				State->Error = "Finish the active graph edit before completing the wire route";
+			else
+			{
+				auto Created = CreateEditorGraphWireRoute(State->History, State->Schema,
+					RouteCommit->Draft.SourcePin, RouteCommit->Draft.Knots, RouteCommit->EndPin);
+				if (!Created) State->Error = Created.error();
+				else
+				{
+					State->WireRoutePresentation.ReleaseCommitSucceeded = true;
+					GraphChanged = true;
+					State->NeedsCanvasSync = true;
+					State->Error.clear();
+					State->WireRoutePresentation.Active = false;
+					State->WireRoutePresentation.KnotPositions.clear();
+					State->WireRoutePresentation.PreviewEndpoints.clear();
+					if (!RouteCommit->EndPin && RouteCommit->OpenSearch && !Created->RerouteNodeIDs.empty())
+					{
+						const PulseForge::UUID LastKnotID = Created->RerouteNodeIDs.back();
+						const auto LastKnot = std::find_if(State->History.Graph().Nodes.begin(),
+							State->History.Graph().Nodes.end(), [LastKnotID](const auto& Node) { return Node.ID == LastKnotID; });
+						const std::string_view FreePinKey = RouteCommit->Draft.Direction == EditorGraphPinDirection::Output
+							? "out" : "in";
+						if (LastKnot != State->History.Graph().Nodes.end())
+						{
+							const auto FreePin = std::find_if(LastKnot->Pins.begin(), LastKnot->Pins.end(),
+								[FreePinKey](const auto& Pin) { return Pin.Key == FreePinKey; });
+							if (FreePin != LastKnot->Pins.end())
+							{
+								QueueNodeSearch(*State, Session, FreePin->ID, RouteCommit->DropPoint, true,
+									RouteCommit->DropScreen);
+								State->RouteSearchTail = PendingRouteSearchTail{ CanvasContext, FreePin->ID,
+									RouteCommit->DropPoint };
+							}
+						}
+					}
+					ReconcileDirtyState(*State, m_Documents, Session);
+				}
+			}
+			State->WireRoutePresentation.Feedback = State->Error;
+		}
+		const bool HasValidPendingRouteSource = State->WireRouteStart &&
+			ContextMatches(State->WireRouteStart->Context) &&
+			State->WireRouteStart->GraphRevision == State->History.GraphRevision();
+		const auto NativeRouteSource = CreateRequest.SawNodeRequest ?
+			State->Identities.find(CreateRequest.SourcePin) : State->Identities.end();
+		const bool HasValidNativeRouteSource = WireRouteKeyCandidate && CreateRequest.SawNodeRequest &&
+			CreateRequest.SourcePin != 0 && NativeRouteSource != State->Identities.end();
+		const bool HasValidRouteSource = State->WireRoute ?
+			ContextMatches(State->WireRoute->Context) &&
+			State->WireRoute->GraphRevision == State->History.GraphRevision() :
+			(HasValidPendingRouteSource || HasValidNativeRouteSource);
+		if (WireRouteKeyCandidate && HasValidRouteSource && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+			PointerInCanvasBackground)
+		{
+			const auto SourceID = State->WireRoute ? State->WireRoute->SourcePin : HasValidPendingRouteSource ?
+				State->WireRouteStart->SourcePin : NativeRouteSource->second;
+			const EditorGraphPin* SourcePin = nullptr;
+			for (const auto& Node : State->History.Graph().Nodes)
+				if (const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+					[SourceID](const auto& Candidate) { return Candidate.ID == SourceID; }); Pin != Node.Pins.end())
+				{
+					SourcePin = &*Pin;
+					break;
+				}
+			if (SourcePin && (!State->WireRoute || State->WireRoute->SourcePin == SourceID))
+			{
+				const ImVec2 PointerCanvas = NodeEditor::ScreenToCanvas(ScreenMousePositionAtFrameStart);
+				std::vector<EditorGraphVector3> ProposedKnots = State->WireRoute ?
+					State->WireRoute->Knots : std::vector<EditorGraphVector3>{};
+				ProposedKnots.push_back({ PointerCanvas.x, PointerCanvas.y, 0.0 });
+				const auto RoutePreview = CanCreateEditorGraphWireRoute(State->History.Graph(), State->Schema,
+					SourceID, ProposedKnots);
+				if (RoutePreview.Allowed)
+				{
+					if (!State->WireRoute)
+					{
+						State->WireRoute = PendingWireRoute{ CanvasContext, SourceID, SourcePin->Direction,
+							State->History.GraphRevision(),
+							{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y }, {}};
+						State->WireRouteOwnsNativeCreateThroughRelease = true;
+					}
+					State->WireRoute->Knots.push_back({ PointerCanvas.x, PointerCanvas.y, 0.0 });
+					State->WireRoutePresentation.Active = true;
+					State->WireRoutePresentation.SourcePin = SourceID;
+					State->WireRoutePresentation.KnotPositions = State->WireRoute->Knots;
+					State->Error.clear();
+				}
+				else if (!RoutePreview.Reason.empty()) State->Error = RoutePreview.Reason;
+			}
+		}
+		State->WireRoutePresentation.Feedback = State->Error;
+		const bool WireRouteStartInputEligible = Focused && !CancelGesture && !Input.WantTextInput &&
+			!State->WireRoute && !State->PinMove && !State->SuppressCanvasInputUntilRelease &&
+			!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+			!Input.KeyCtrl && !Input.KeyAlt && !Input.KeyShift && !Input.KeySuper;
+		if (!LeftDownAtFrameStart)
+		{
+			if (WireRouteStartInputEligible && !HoveredPinID.IsNil())
+				State->WireRouteStart = PendingWireRouteStart{ CanvasContext, HoveredPinID,
+					State->History.GraphRevision(),
+					{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y }, false };
+			else State->WireRouteStart.reset();
+		}
+		else if (WireRouteStartInputEligible)
+		{
+			if (!HoveredPinID.IsNil())
+				State->WireRouteStart = PendingWireRouteStart{ CanvasContext, HoveredPinID,
+					State->History.GraphRevision(),
+					{ ScreenMousePositionAtFrameStart.x, ScreenMousePositionAtFrameStart.y }, true };
+			else if (State->WireRouteStart && !State->WireRouteStart->Pressed)
+			{
+				const double DeltaX = ScreenMousePositionAtFrameStart.x - State->WireRouteStart->ScreenPosition.X;
+				const double DeltaY = ScreenMousePositionAtFrameStart.y - State->WireRouteStart->ScreenPosition.Y;
+				if (DeltaX * DeltaX + DeltaY * DeltaY <= 0.5 * 0.5)
+					State->WireRouteStart->Pressed = true;
+				else State->WireRouteStart.reset();
+			}
+		}
+		else State->WireRouteStart.reset();
+		State->WireRoutePresentation.HasPendingStart = State->WireRouteStart.has_value();
 		if (CtrlPinMovePressCandidate && !State->PinMove)
 		{
 			// The pinned canvas publishes its hit only after End() has run the current
@@ -2965,11 +3639,38 @@ namespace PulseForgeEditor
 			bool DirtyStateReconciled = false;
 			if (PendingNodeCreation->Action.ConnectPinKey && PendingNodeCreation->SourcePin)
 			{
-				auto Created = CreateEditorGraphNodeAndConnect(State->History, State->Schema,
-					PendingNodeCreation->Action.NodeTypeKey, *PendingNodeCreation->Action.ConnectPinKey,
-					*PendingNodeCreation->SourcePin, PendingNodeCreation->Placement.X, PendingNodeCreation->Placement.Y);
-				if (!Created) Added = std::unexpected(Created.error());
-				else Added = {};
+				const bool AnchorPlacement = PendingNodeCreation->PlacementIsConnectedPinAnchor &&
+					State->RouteSearchTail && State->RouteSearchTail->FreePin == *PendingNodeCreation->SourcePin;
+				if (AnchorPlacement && !State->History.BeginTransaction())
+					Added = std::unexpected("Could not begin the routed node placement transaction");
+				else
+				{
+					auto Created = CreateEditorGraphNodeAndConnect(State->History, State->Schema,
+						PendingNodeCreation->Action.NodeTypeKey, *PendingNodeCreation->Action.ConnectPinKey,
+						*PendingNodeCreation->SourcePin, PendingNodeCreation->Placement.X, PendingNodeCreation->Placement.Y);
+					if (!Created)
+					{
+						if (AnchorPlacement) State->History.CancelTransaction();
+						Added = std::unexpected(Created.error());
+					}
+					else
+					{
+						Added = {};
+						if (AnchorPlacement && Created->ConnectedPinID)
+						{
+							State->RouteSearchNodePlacement = PendingRouteSearchNodePlacement{
+								CanvasContext, Created->NodeID, *Created->ConnectedPinID, PendingNodeCreation->Placement };
+							State->RouteSearchPlacementAwaiting = true;
+							State->WireRoutePresentation.SearchPlacementAwaitingPinAnchor = true;
+							DirtyStateReconciled = true;
+						}
+						else if (AnchorPlacement)
+						{
+							State->History.CancelTransaction();
+							Added = std::unexpected("The routed node action did not expose its connected pin");
+						}
+					}
+				}
 			}
 			else
 			{
@@ -3111,5 +3812,15 @@ namespace PulseForgeEditor
 			State->LastHoveredPin = {};
 			if (m_PresentationChanged) m_PresentationChanged();
 		}
+		if (WireRouteGestureEnded)
+		{
+			// The release frame is intentionally unmasked so the native canvas can
+			// retire its original CreateItemAction. The request path above rejects
+			// any direct link/node result while the route remains its owner.
+			State->WireRouteOwnsNativeCreateThroughRelease = false;
+			State->LastHoveredPin = {};
+		}
+		if (!State->WireRoute && !LeftDownAtFrameStart && !LeftReleasedAtFrameStart)
+			State->WireRouteOwnsNativeCreateThroughRelease = false;
 	}
 }

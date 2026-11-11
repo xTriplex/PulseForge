@@ -14,6 +14,7 @@
 #include <iterator>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
 #include <utility>
 
 namespace PulseForgeEditor
@@ -65,6 +66,12 @@ namespace PulseForgeEditor
 			EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
 		{
 			return Editor.GetPinMoveForTesting(Session);
+		}
+
+		static EditorGraphWireRoutePresentation GetWireRoute(
+			EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
+		{
+			return Editor.GetWireRouteForTesting(Session);
 		}
 
 		static bool IsCanvasInputSuppressed(EditorGraphDocumentEditor& Editor, EditorDocumentSession& Session)
@@ -1672,7 +1679,7 @@ namespace
 		bool LastQueuedCtrlLeftPress = false;
 		const auto DrawFrame = [&](ImVec2 Mouse, bool LeftDown = false, bool RightDown = false,
 			bool Escape = false, bool Control = false, std::optional<EditorGraphCanvasRect> ScreenClip = std::nullopt,
-			bool ProcessQueuedInputTogether = false)
+			bool ProcessQueuedInputTogether = false, bool RDown = false)
 		{
 			IO.DisplaySize = ImVec2(1440.0f, 900.0f);
 			IO.AddMousePosEvent(Mouse.x, Mouse.y);
@@ -1680,6 +1687,7 @@ namespace
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Right, RightDown);
 			IO.MouseDown[ImGuiMouseButton_Right] = RightDown;
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
+			IO.AddKeyEvent(ImGuiKey_R, RDown);
 			IO.AddKeyEvent(ImGuiMod_Ctrl, Control);
 			const bool PreviousInputTrickle = IO.ConfigInputTrickleEventQueue;
 			if (ProcessQueuedInputTogether) IO.ConfigInputTrickleEventQueue = false;
@@ -1697,6 +1705,9 @@ namespace
 			auto* EscapeKey = ImGui::GetKeyData(ImGuiKey_Escape);
 			EscapeKey->Down = Escape;
 			EscapeKey->DownDuration = Escape ? 0.0f : -1.0f;
+			auto* RKey = ImGui::GetKeyData(ImGuiKey_R);
+			RKey->Down = RDown;
+			RKey->DownDuration = RDown ? 0.0f : -1.0f;
 			if (FocusReconnectHost)
 			{
 				ImGui::SetNextWindowFocus();
@@ -2642,6 +2653,624 @@ namespace
 		}
 	}
 
+	void TestGraphCanvasWireRouteGesture(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		ImGuiContextScope ImGuiScope;
+		PF_CHECK(Tests, ImGuiScope.Context != nullptr);
+		if (!ImGuiScope.Context) return;
+		ImGuiIO& IO = ImGui::GetIO();
+		IO.IniFilename = nullptr;
+		IO.LogFilename = nullptr;
+		IO.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+		IO.DeltaTime = 1.0f / 60.0f;
+
+		TemporaryGraphProject Temporary;
+		const auto ProjectID = UUID::Generate();
+		PF_CHECK(Tests, ProjectID.has_value());
+		if (!ProjectID) return;
+		Temporary.Path = std::filesystem::temp_directory_path() / ProjectID->ToString();
+		std::error_code FileError;
+		std::filesystem::create_directories(Temporary.Path, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		auto Project = PulseForge::Project::Create(Temporary.Path / "GraphWireRouteProject.pfproj", "Graph wire route test");
+		PF_CHECK(Tests, Project.has_value());
+		if (!Project) return;
+
+		EditorDocumentManager Documents;
+		EditorDocumentEditorRegistry Editors;
+		EditorGraphDocumentEditor GraphEditor(Documents, Editors);
+		PF_CHECK(Tests, GraphEditor.Register().has_value());
+		const auto Fixture = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::MaterialExpression);
+		PF_CHECK(Tests, Fixture.has_value());
+		if (!Fixture) return;
+		const EditorDocumentIdentity Identity{ Project->GetDescription().ID, Fixture->GraphID, EditorDocumentKind::Graph };
+		PF_CHECK(Tests, Documents.Open(Identity, Fixture->ProjectRelativePath, Fixture->DisplayName,
+			EditorDocumentOpenPreference::MainDocumentStrip).has_value());
+		auto* Session = Documents.Find(Identity);
+		const EditorDocumentEditorContext LoadContext{ Identity, Project->GetRootPath(), Fixture->ProjectRelativePath,
+			Fixture->DisplayName, nullptr };
+		PF_CHECK(Tests, Session && Editors.Load(*Session, LoadContext));
+		if (!Session) return;
+
+		const auto Schema = MakeMaterialExpressionFixtureSchema();
+		const auto MakeGraph = [&]()
+		{
+			auto Graph = CreateEditorGraph(Schema, Fixture->GraphID);
+			if (!Graph) return Graph;
+			for (const auto& [Type, X, Y] : std::array<std::tuple<std::string_view, double, double>, 5>{
+				std::tuple{ "material.scalar", 80.0, 160.0 },
+				std::tuple{ "material.scalar", 360.0, 440.0 },
+				std::tuple{ "material.multiply", 720.0, 250.0 },
+				std::tuple{ "material.color", 820.0, 100.0 },
+				std::tuple{ "material.output", 1060.0, 100.0 } })
+			{
+				auto Node = CreateEditorGraphNode(Schema, Type, X, Y);
+				if (!Node) return std::expected<EditorGraph, std::string>(std::unexpected(Node.error()));
+				Graph->Nodes.push_back(std::move(*Node));
+			}
+			return Graph;
+		};
+		auto Graph = MakeGraph();
+		PF_CHECK(Tests, Graph.has_value());
+		if (!Graph) return;
+		const auto PinID = [](const EditorGraph& Source, size_t NodeIndex, std::string_view Key)
+		{
+			if (NodeIndex >= Source.Nodes.size()) return UUID{};
+			const auto Pin = std::find_if(Source.Nodes[NodeIndex].Pins.begin(), Source.Nodes[NodeIndex].Pins.end(),
+				[Key](const auto& Candidate) { return Candidate.Key == Key; });
+			return Pin == Source.Nodes[NodeIndex].Pins.end() ? UUID{} : Pin->ID;
+		};
+		const UUID SourceA = PinID(*Graph, 0, "value");
+		const UUID SourceB = PinID(*Graph, 1, "value");
+		const UUID TargetA = PinID(*Graph, 2, "a");
+		const UUID TargetB = PinID(*Graph, 2, "b");
+		const UUID VectorTarget = PinID(*Graph, 4, "surface");
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, *Graph, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		EditorGraphDocumentEditorTestAccess::SetCanvasSettings(GraphEditor, *Session,
+			"{\"view\":{\"scroll\":{\"x\":-83.0,\"y\":34.0},\"zoom\":0.82}}");
+		EditorGraphDocumentEditorTestAccess::CapturePresentation(GraphEditor, *Session, true);
+
+		ImVec2 HostOrigin(73.0f, 37.0f);
+		bool SearchOwnsHostFocus = false;
+		const auto DrawFrame = [&](ImVec2 Mouse, bool LeftDown = false, bool RDown = false, bool Escape = false)
+		{
+			IO.DisplaySize = ImVec2(1440.0f, 900.0f);
+			IO.AddMousePosEvent(Mouse.x, Mouse.y);
+			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
+			IO.AddKeyEvent(ImGuiKey_R, RDown);
+			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
+			const bool PreviousInputTrickle = IO.ConfigInputTrickleEventQueue;
+			IO.ConfigInputTrickleEventQueue = false;
+			ImGui::NewFrame();
+			IO.ConfigInputTrickleEventQueue = PreviousInputTrickle;
+			IO.MousePos = Mouse;
+			IO.MouseDown[ImGuiMouseButton_Left] = LeftDown;
+			ImGui::SetNextWindowPos(HostOrigin);
+			ImGui::SetNextWindowSize(ImVec2(1367.0f, 850.0f));
+			ImGui::Begin("GraphWireRouteHost", nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+			if (!SearchOwnsHostFocus) ImGui::SetWindowFocus();
+			EditorGraphDocumentEditorTestAccess::Draw(GraphEditor, *Session);
+			ImGui::End();
+			ImGui::Render();
+			SearchOwnsHostFocus = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).ContextualSearchOpen;
+		};
+		const auto FindPinScreen = [&](UUID PinID)
+		{
+			DrawFrame(ImVec2(-1000.0f, -1000.0f));
+			for (const auto& Node : EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session))
+				for (const auto& Pin : Node.Pins)
+					if (Pin.PinID == PinID)
+					{
+						const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+							GraphEditor, *Session, Pin.Marker.Anchor);
+						return ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+					}
+			return ImVec2(-1000.0f, -1000.0f);
+		};
+		const auto ScreenCanvas = [&](ImVec2 Screen)
+		{
+			return EditorGraphDocumentEditorTestAccess::ScreenToCanvas(GraphEditor, *Session, { Screen.x, Screen.y });
+		};
+		const auto CurrentPinScreen = [&](UUID PinID)
+		{
+			for (const auto& Node : EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session))
+				for (const auto& Pin : Node.Pins)
+					if (Pin.PinID == PinID)
+					{
+						const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+							GraphEditor, *Session, Pin.Marker.Anchor);
+						return ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+					}
+			return ImVec2(-1000.0f, -1000.0f);
+		};
+
+		const EditorGraph Before = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const ImVec2 SourceAPoint = FindPinScreen(SourceA);
+		const ImVec2 TargetAPoint = FindPinScreen(TargetA);
+		const ImVec2 TargetBPoint = FindPinScreen(TargetB);
+		const ImVec2 KnotOne(HostOrigin.x + 520.0f, HostOrigin.y + 285.0f);
+		const ImVec2 KnotTwo(HostOrigin.x + 600.0f, HostOrigin.y + 390.0f);
+		DrawFrame(SourceAPoint);
+		DrawFrame(SourceAPoint, true);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).HoveredPin != 0);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).HasPendingStart);
+		DrawFrame(KnotOne, true);
+		auto DragProbe = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, DragProbe.MouseDragging);
+		PF_CHECK(Tests, DragProbe.HoveredPin == 0 && DragProbe.HoveredNode == 0);
+		PF_CHECK(Tests, DragProbe.HasPendingStart);
+		PF_CHECK(Tests, DragProbe.PointerInCanvasBackground);
+		DrawFrame(KnotOne, true, true);
+		auto Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, Route.KeyPressed);
+		PF_CHECK(Tests, Route.InputEligible);
+		PF_CHECK(Tests, Route.Focused);
+		PF_CHECK(Tests, Route.LeftDown);
+		PF_CHECK(Tests, !Route.EscapeDown);
+		PF_CHECK(Tests, !Route.TextInputOwned);
+		PF_CHECK(Tests, !Route.PopupOwned);
+		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 1 &&
+			std::abs(Route.KnotPositions.front().X - ScreenCanvas(KnotOne).X) < 0.1 &&
+			std::abs(Route.KnotPositions.front().Y - ScreenCanvas(KnotOne).Y) < 0.1 &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before && !Session->IsDirty());
+		DrawFrame(KnotOne, true, true);
+		Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 1);
+		DrawFrame(KnotOne, true, false);
+		DrawFrame(KnotTwo, true, true);
+		Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, Route.Active && Route.KnotPositions.size() == 2);
+		DrawFrame(KnotTwo, true, false);
+		const ImVec2 TailOne(HostOrigin.x + 650.0f, HostOrigin.y + 320.0f);
+		DrawFrame(TailOne, true);
+		const auto PreviewOne = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const auto TailOneCanvas = ScreenCanvas(TailOne);
+		PF_CHECK(Tests, PreviewOne.Active && PreviewOne.PreviewEndpoints.size() == 6 &&
+			std::abs(PreviewOne.PreviewEndpoints.back().X - TailOneCanvas.X) < 0.1 &&
+			std::abs(PreviewOne.PreviewEndpoints.back().Y - TailOneCanvas.Y) < 0.1);
+		const ImVec2 TailTwo(HostOrigin.x + 670.0f, HostOrigin.y + 345.0f);
+		DrawFrame(TailTwo, true);
+		const auto PreviewTwo = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const auto TailTwoCanvas = ScreenCanvas(TailTwo);
+		PF_CHECK(Tests, PreviewTwo.PreviewEndpoints.size() == 6 &&
+			PreviewTwo.PreviewEndpoints.back().X != PreviewOne.PreviewEndpoints.back().X &&
+			std::abs(PreviewTwo.PreviewEndpoints.back().X - TailTwoCanvas.X) < 0.1 &&
+			std::abs(PreviewTwo.PreviewEndpoints.back().Y - TailTwoCanvas.Y) < 0.1);
+		DrawFrame(TargetAPoint, false);
+		const auto RouteRelease = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, !RouteRelease.ReleaseTargetPin.IsNil());
+		PF_CHECK(Tests, RouteRelease.ReleaseCommitRequested);
+		PF_CHECK(Tests, RouteRelease.ReleaseCommitSucceeded);
+		const EditorGraph AfterRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, AfterRoute.Nodes.size() == Before.Nodes.size() + 2 &&
+			AfterRoute.Connections.size() == Before.Connections.size() + 3 && Session->IsDirty());
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		const EditorGraph AfterFinalUndo = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, AfterFinalUndo.Nodes.size() == Before.Nodes.size() + 2 &&
+			AfterFinalUndo.Connections.size() == Before.Connections.size() + 2);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		const EditorGraph AfterSecondKnotUndo = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, AfterSecondKnotUndo.Nodes.size() == Before.Nodes.size() + 1 &&
+			AfterSecondKnotUndo.Connections.size() == Before.Connections.size() + 1);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == AfterRoute);
+
+		// Releasing an R-staged route on a node body commits the knots as an open
+		// route, but does not treat the body (including its inline controls) as a
+		// search drop or as a final connection target.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		DrawFrame(SourceAPoint);
+		const auto MultiplyPresentation = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+		ImVec2 MultiplyControlPoint(-1000.0f, -1000.0f);
+		for (const auto& Node : MultiplyPresentation)
+			if (Node.NodeID == Graph->Nodes[2].ID)
+				for (const auto& Pin : Node.Pins)
+					if (Pin.PinID == TargetA && Pin.PropertyControl)
+						MultiplyControlPoint = ImVec2(
+							static_cast<float>((Pin.PropertyControl->Minimum.X + Pin.PropertyControl->Maximum.X) * 0.5),
+							static_cast<float>((Pin.PropertyControl->Minimum.Y + Pin.PropertyControl->Maximum.Y) * 0.5));
+		PF_CHECK(Tests, MultiplyControlPoint.x > HostOrigin.x && MultiplyControlPoint.y > HostOrigin.y);
+		DrawFrame(SourceAPoint, true);
+		DrawFrame(KnotOne, true);
+		DrawFrame(KnotOne, true, true);
+		DrawFrame(KnotOne, true, false);
+		DrawFrame(KnotTwo, true);
+		DrawFrame(KnotTwo, true, true);
+		DrawFrame(KnotTwo, true, false);
+		DrawFrame(MultiplyControlPoint, true);
+		DrawFrame(MultiplyControlPoint, false);
+		const auto BodyDrop = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const EditorGraph BodyRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, BodyDrop.ReleaseCommitRequested && BodyDrop.ReleaseCommitSucceeded &&
+			BodyDrop.ReleaseTargetPin.IsNil() && !BodyDrop.ContextualSearchOpen && BodyDrop.KnotPositions.empty());
+		PF_CHECK(Tests, BodyRoute.Nodes.size() == Before.Nodes.size() + 2 &&
+			BodyRoute.Connections.size() == Before.Connections.size() + 2 && Session->IsDirty());
+		PF_CHECK(Tests, std::none_of(BodyRoute.Connections.begin(), BodyRoute.Connections.end(),
+			[&](const auto& Link) { return Link.InputPin == TargetA || Link.InputPin == TargetB; }));
+		const auto OriginalMultiply = std::find_if(Before.Nodes.begin(), Before.Nodes.end(),
+			[&](const auto& Node) { return Node.ID == Graph->Nodes[2].ID; });
+		const auto BodyDropMultiply = std::find_if(BodyRoute.Nodes.begin(), BodyRoute.Nodes.end(),
+			[&](const auto& Node) { return Node.ID == Graph->Nodes[2].ID; });
+		PF_CHECK(Tests, OriginalMultiply != Before.Nodes.end() && BodyDropMultiply != BodyRoute.Nodes.end() &&
+			*OriginalMultiply == *BodyDropMultiply);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo));
+		const EditorGraph BodyRouteOneKnot = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, BodyRouteOneKnot.Nodes.size() == Before.Nodes.size() + 1 &&
+			BodyRouteOneKnot.Connections.size() == Before.Connections.size() + 1);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == BodyRoute);
+
+		// Input-origin routes use the same body-drop behavior and retain the start
+		// pin as the free endpoint. A pin on that same node still wins over its body.
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 InputBodySourcePoint = FindPinScreen(TargetB);
+		DrawFrame(InputBodySourcePoint, true);
+		DrawFrame(KnotOne, true, true);
+		DrawFrame(KnotOne, true, false);
+		DrawFrame(KnotTwo, true);
+		DrawFrame(KnotTwo, true, true);
+		DrawFrame(KnotTwo, true, false);
+		DrawFrame(MultiplyControlPoint, true);
+		DrawFrame(MultiplyControlPoint, false);
+		const auto InputBodyDrop = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const EditorGraph InputBodyRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, InputBodyDrop.ReleaseCommitSucceeded && InputBodyDrop.ReleaseTargetPin.IsNil() &&
+			!InputBodyDrop.ContextualSearchOpen && InputBodyRoute.Nodes.size() == Before.Nodes.size() + 2 &&
+			InputBodyRoute.Connections.size() == Before.Connections.size() + 2);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 SameNodeTargetPoint = CurrentPinScreen(TargetB);
+		DrawFrame(SourceAPoint, true);
+		DrawFrame(KnotOne, true, true);
+		DrawFrame(KnotOne, true, false);
+		DrawFrame(KnotTwo, true);
+		DrawFrame(KnotTwo, true, true);
+		DrawFrame(KnotTwo, true, false);
+		DrawFrame(SameNodeTargetPoint, true);
+		DrawFrame(SameNodeTargetPoint, false);
+		const auto SameNodePinDrop = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const EditorGraph SameNodeRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, SameNodePinDrop.ReleaseCommitSucceeded && SameNodePinDrop.ReleaseTargetPin == TargetB &&
+			!SameNodePinDrop.ContextualSearchOpen);
+		PF_CHECK(Tests, SameNodeRoute.Nodes.size() == Before.Nodes.size() + 2 &&
+			SameNodeRoute.Connections.size() == Before.Connections.size() + 3 &&
+			std::any_of(SameNodeRoute.Connections.begin(), SameNodeRoute.Connections.end(),
+				[TargetB](const auto& Link) { return Link.InputPin == TargetB; }));
+
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		// An empty-canvas release after placing a knot publishes an open, typed route. Its
+		// free reroute pin remains available to a later ordinary canvas link operation.
+		const ImVec2 OpenKnot(HostOrigin.x + 1180.0f, HostOrigin.y + 700.0f);
+		const ImVec2 OpenKnotTwo(HostOrigin.x + 1110.0f, HostOrigin.y + 625.0f);
+		const ImVec2 FreshOpenSourcePoint = FindPinScreen(SourceA);
+		DrawFrame(FreshOpenSourcePoint);
+		DrawFrame(FreshOpenSourcePoint, true);
+		DrawFrame(OpenKnot, true);
+		DrawFrame(OpenKnot, true, true);
+		DrawFrame(OpenKnot, true, false);
+		DrawFrame(OpenKnotTwo, true);
+		DrawFrame(OpenKnotTwo, true, true);
+		DrawFrame(OpenKnotTwo, true, false);
+		const ImVec2 OpenRouteReleasePoint(HostOrigin.x + 980.0f, HostOrigin.y + 690.0f);
+		DrawFrame(OpenRouteReleasePoint, true);
+		DrawFrame(OpenRouteReleasePoint, false);
+		DrawFrame(OpenRouteReleasePoint);
+		const auto SearchTail = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const auto SearchReleaseCanvas = ScreenCanvas(OpenRouteReleasePoint);
+		PF_CHECK(Tests, SearchTail.ContextualSearchOpen &&
+			SearchTail.OpenEnded && SearchTail.PreviewEndpoints.size() == 2 &&
+			std::abs(SearchTail.PreviewEndpoints.back().X - SearchReleaseCanvas.X) < 0.1 &&
+			std::abs(SearchTail.PreviewEndpoints.back().Y - SearchReleaseCanvas.Y) < 0.1 &&
+			std::abs(SearchTail.SearchDropPoint.X - SearchReleaseCanvas.X) < 0.1 &&
+			std::abs(SearchTail.SearchDropPoint.Y - SearchReleaseCanvas.Y) < 0.1 &&
+			std::abs(SearchTail.SearchDropScreen.X - OpenRouteReleasePoint.x) < 0.1 &&
+			std::abs(SearchTail.SearchDropScreen.Y - OpenRouteReleasePoint.y) < 0.1);
+		const EditorGraph KnotOnlyOpenRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const ImVec2 SearchResultPoint(
+			static_cast<float>((SearchTail.FirstSearchResultBounds.Minimum.X + SearchTail.FirstSearchResultBounds.Maximum.X) * 0.5),
+			static_cast<float>((SearchTail.FirstSearchResultBounds.Minimum.Y + SearchTail.FirstSearchResultBounds.Maximum.Y) * 0.5));
+		DrawFrame(SearchResultPoint);
+		const auto BrowsingTail = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, BrowsingTail.ContextualSearchOpen && BrowsingTail.PreviewEndpoints.size() == 2 &&
+			std::abs(BrowsingTail.PreviewEndpoints.back().X - SearchReleaseCanvas.X) < 0.1 &&
+			std::abs(BrowsingTail.PreviewEndpoints.back().Y - SearchReleaseCanvas.Y) < 0.1);
+		DrawFrame(SearchResultPoint, true);
+		DrawFrame(SearchResultPoint, false);
+		DrawFrame(OpenRouteReleasePoint);
+		DrawFrame(OpenRouteReleasePoint);
+		const EditorGraph OpenRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::IsCanvasInputSuppressed(GraphEditor, *Session));
+		PF_CHECK(Tests, OpenRoute.Nodes.size() == Before.Nodes.size() + 3 &&
+			OpenRoute.Connections.size() == Before.Connections.size() + 3 && Session->IsDirty());
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).SearchPlacementAwaitingPinAnchor);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == KnotOnlyOpenRoute);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session).Nodes.size() == Before.Nodes.size() + 1);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == OpenRoute);
+		UUID OpenRerouteOutput;
+		const EditorGraphNode* LastReroute = nullptr;
+		for (auto Node = OpenRoute.Nodes.rbegin(); Node != OpenRoute.Nodes.rend(); ++Node)
+			if (IsEditorGraphRerouteType(Node->TypeKey))
+			{
+				LastReroute = &*Node;
+				break;
+			}
+		if (LastReroute)
+		{
+			const auto Output = std::find_if(LastReroute->Pins.begin(), LastReroute->Pins.end(),
+				[](const auto& Pin) { return Pin.Key == "out"; });
+			const auto Input = std::find_if(LastReroute->Pins.begin(), LastReroute->Pins.end(),
+				[](const auto& Pin) { return Pin.Key == "in"; });
+			const bool HasRerouteInputLink = Input != LastReroute->Pins.end() &&
+				std::any_of(OpenRoute.Connections.begin(), OpenRoute.Connections.end(), [&](const auto& Link)
+				{
+					if (Link.InputPin != Input->ID) return false;
+					for (const auto& CandidateNode : OpenRoute.Nodes)
+						if (IsEditorGraphRerouteType(CandidateNode.TypeKey) &&
+							std::any_of(CandidateNode.Pins.begin(), CandidateNode.Pins.end(),
+								[&](const auto& CandidatePin)
+								{ return CandidatePin.ID == Link.OutputPin && CandidatePin.Key == "out"; })) return true;
+					return Link.OutputPin == SourceA;
+				});
+			PF_CHECK(Tests, Output != LastReroute->Pins.end() && Input != LastReroute->Pins.end() &&
+				HasRerouteInputLink);
+			if (Output != LastReroute->Pins.end()) OpenRerouteOutput = Output->ID;
+		}
+		if (!OpenRerouteOutput.IsNil())
+		{
+			const auto CreatedLink = std::find_if(OpenRoute.Connections.begin(), OpenRoute.Connections.end(),
+				[OpenRerouteOutput](const auto& Link) { return Link.OutputPin == OpenRerouteOutput; });
+			PF_CHECK(Tests, CreatedLink != OpenRoute.Connections.end());
+			if (CreatedLink != OpenRoute.Connections.end())
+			{
+				const auto UpdatedPresentation = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+				const auto CreatedPin = std::find_if(UpdatedPresentation.begin(), UpdatedPresentation.end(),
+					[&](const auto& Node) { return std::any_of(Node.Pins.begin(), Node.Pins.end(),
+						[&](const auto& Pin) { return Pin.PinID == CreatedLink->InputPin; }); });
+				PF_CHECK(Tests, CreatedPin != UpdatedPresentation.end());
+				if (CreatedPin != UpdatedPresentation.end())
+				{
+					const auto Pin = std::find_if(CreatedPin->Pins.begin(), CreatedPin->Pins.end(),
+						[&](const auto& Candidate) { return Candidate.PinID == CreatedLink->InputPin; });
+					PF_CHECK(Tests, Pin != CreatedPin->Pins.end());
+					if (Pin != CreatedPin->Pins.end())
+					{
+						const auto PinScreen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+							GraphEditor, *Session, Pin->Marker.Anchor);
+						PF_CHECK(Tests, std::abs(PinScreen.X - OpenRouteReleasePoint.x) < 1.0 &&
+							std::abs(PinScreen.Y - OpenRouteReleasePoint.y) < 1.0);
+					}
+				}
+			}
+		}
+		if (!OpenRerouteOutput.IsNil())
+		{
+			const ImVec2 RefreshedTargetBPoint = FindPinScreen(TargetB);
+			const auto ReroutePresentations = EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session);
+			const auto OutputGeometry = std::find_if(ReroutePresentations.begin(), ReroutePresentations.end(),
+				[OpenRerouteOutput](const auto& Node)
+				{
+					return std::any_of(Node.Pins.begin(), Node.Pins.end(), [OpenRerouteOutput](const auto& Pin)
+						{ return Pin.PinID == OpenRerouteOutput && Pin.HitBounds.has_value(); });
+				});
+			ImVec2 OpenOutputPoint(-1000.0f, -1000.0f);
+			if (OutputGeometry != ReroutePresentations.end())
+				if (const auto Pin = std::find_if(OutputGeometry->Pins.begin(), OutputGeometry->Pins.end(),
+					[OpenRerouteOutput](const auto& Candidate) { return Candidate.PinID == OpenRerouteOutput; });
+					Pin != OutputGeometry->Pins.end() && Pin->HitBounds)
+				{
+					const EditorGraphCanvasPoint HitCenter{
+						(Pin->HitBounds->Minimum.X + Pin->HitBounds->Maximum.X) * 0.5,
+						(Pin->HitBounds->Minimum.Y + Pin->HitBounds->Maximum.Y) * 0.5 };
+					const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(
+						GraphEditor, *Session, HitCenter);
+					OpenOutputPoint = ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+				}
+			DrawFrame(RefreshedTargetBPoint);
+			PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == TargetB);
+			DrawFrame(OpenOutputPoint);
+			PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == OpenRerouteOutput);
+			DrawFrame(OpenOutputPoint, true);
+			DrawFrame(RefreshedTargetBPoint, true);
+			DrawFrame(RefreshedTargetBPoint, true);
+			DrawFrame(RefreshedTargetBPoint, false);
+			DrawFrame(RefreshedTargetBPoint, false);
+			const EditorGraph CompletedOpenRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			PF_CHECK(Tests, CompletedOpenRoute.Nodes.size() == OpenRoute.Nodes.size());
+			PF_CHECK(Tests, CompletedOpenRoute.Connections.size() == OpenRoute.Connections.size() + 1);
+			PF_CHECK(Tests,
+				std::any_of(CompletedOpenRoute.Connections.begin(), CompletedOpenRoute.Connections.end(),
+					[&](const auto& Link) { return Link.OutputPin == OpenRerouteOutput && Link.InputPin == TargetB; }));
+			if (CompletedOpenRoute.Connections.size() == OpenRoute.Connections.size() + 1)
+			{
+				PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+					EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == OpenRoute);
+				PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Redo) &&
+					EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == CompletedOpenRoute);
+			}
+		}
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const auto OpenRouteBytes = ReadBytes(Project->GetRootPath() / Fixture->ProjectRelativePath);
+		if (OpenRouteBytes)
+		{
+			const auto OpenRouteRoundTrip = DeserializeEditorGraph(*OpenRouteBytes, Schema);
+			const EditorGraph SavedRouteGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			const bool SameConnections = OpenRouteRoundTrip &&
+				OpenRouteRoundTrip->Connections.size() == SavedRouteGraph.Connections.size() &&
+				std::all_of(SavedRouteGraph.Connections.begin(), SavedRouteGraph.Connections.end(),
+					[&](const auto& Expected)
+					{
+						return std::find_if(OpenRouteRoundTrip->Connections.begin(), OpenRouteRoundTrip->Connections.end(),
+							[&](const auto& Actual)
+								{ return Actual.ID == Expected.ID && Actual.OutputPin == Expected.OutputPin &&
+									Actual.InputPin == Expected.InputPin; }) != OpenRouteRoundTrip->Connections.end();
+					});
+			PF_CHECK(Tests, OpenRouteRoundTrip && OpenRouteRoundTrip->Nodes.size() == SavedRouteGraph.Nodes.size() &&
+				SameConnections);
+		}
+		else PF_CHECK(Tests, false);
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		const ImVec2 DismissSourcePoint = FindPinScreen(SourceA);
+		DrawFrame(DismissSourcePoint);
+		DrawFrame(DismissSourcePoint, true);
+		DrawFrame(OpenKnot, true);
+		DrawFrame(OpenKnot, true, true);
+		DrawFrame(OpenKnot, true, false);
+		DrawFrame(OpenKnotTwo, true);
+		DrawFrame(OpenKnotTwo, true, true);
+		DrawFrame(OpenKnotTwo, true, false);
+		DrawFrame(OpenRouteReleasePoint, true);
+		DrawFrame(OpenRouteReleasePoint, false);
+		DrawFrame(OpenRouteReleasePoint);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).ContextualSearchOpen);
+		DrawFrame(OpenRouteReleasePoint, false, false, true);
+		DrawFrame(OpenRouteReleasePoint);
+		const auto DismissedSearchRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, DismissedSearchRoute.Nodes.size() == Before.Nodes.size() + 2 &&
+			DismissedSearchRoute.Connections.size() == Before.Connections.size() + 2 && Session->IsDirty());
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).ContextualSearchOpen);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session).Nodes.size() == Before.Nodes.size() + 1 &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session).Connections.size() == Before.Connections.size() + 1);
+		PF_CHECK(Tests, Editors.DispatchFocusedCommand(*Session, EditorDocumentCommand::Undo) &&
+			EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		// An incompatible target and an off-canvas release cancel the staged draft without
+		// changing graph contents, dirty state, or the clean history's Undo availability.
+		const ImVec2 InvalidTargetPoint = FindPinScreen(VectorTarget);
+		const ImVec2 InvalidRouteKnot(HostOrigin.x + 1050.0f, HostOrigin.y + 690.0f);
+		DrawFrame(SourceAPoint);
+		DrawFrame(SourceAPoint, true);
+		DrawFrame(InvalidRouteKnot, true);
+		DrawFrame(InvalidRouteKnot, true, true);
+		DrawFrame(InvalidTargetPoint, true);
+		DrawFrame(InvalidTargetPoint, false);
+		const auto InvalidRelease = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, InvalidRelease.ReleaseTargetPin == VectorTarget && !InvalidRelease.ReleaseCommitSucceeded);
+		const auto AfterInvalidRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, AfterInvalidRoute == Before);
+		PF_CHECK(Tests, !Session->IsDirty());
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+		const ImVec2 OutsideRouteKnot(HostOrigin.x + 1100.0f, HostOrigin.y + 690.0f);
+		const ImVec2 FreshOutsideSourcePoint = FindPinScreen(SourceA);
+		DrawFrame(FreshOutsideSourcePoint);
+		DrawFrame(FreshOutsideSourcePoint, true);
+		DrawFrame(OutsideRouteKnot, true);
+		DrawFrame(OutsideRouteKnot, true, true);
+		const auto OutsideRouteStage = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, OutsideRouteStage.PointerInCanvasBackground);
+		PF_CHECK(Tests, OutsideRouteStage.Active);
+		DrawFrame(ImVec2(-20.0f, -20.0f), false);
+		const auto OutsideRelease = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		const auto OutsideGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		PF_CHECK(Tests, OutsideRelease.ReleaseTargetPin.IsNil() && !OutsideRelease.ReleaseCommitRequested);
+		PF_CHECK(Tests, OutsideGraph == Before);
+		PF_CHECK(Tests, !Session->IsDirty());
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::IsCanvasInputSuppressed(GraphEditor, *Session));
+		const ImVec2 InputKnot(HostOrigin.x + 450.0f, HostOrigin.y + 560.0f);
+		const ImVec2 InputStartPoint = FindPinScreen(TargetB);
+		DrawFrame(InputStartPoint);
+		PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+		DrawFrame(InputStartPoint, true);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).HasPendingStart);
+		DrawFrame(InputKnot, true, true);
+		const auto InputRouteStage = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, InputRouteStage.Active);
+		PF_CHECK(Tests, InputRouteStage.SourcePin == TargetB);
+		DrawFrame(InputKnot, true, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+		const ImVec2 CurrentSourceBPoint = CurrentPinScreen(SourceB);
+		DrawFrame(CurrentSourceBPoint, true);
+		const auto InputRouteHover = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, InputRouteHover.HoveredPin != 0);
+		PF_CHECK(Tests, InputRouteHover.HoveredNode != 0);
+		DrawFrame(CurrentSourceBPoint, false);
+		const auto InputRouteStatus = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+		PF_CHECK(Tests, InputRouteStatus.ReleaseCommitRequested);
+		PF_CHECK(Tests, InputRouteStatus.ReleaseCommitSucceeded);
+		const EditorGraph InputRoute = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+		const bool HasInputRouteSourceSegment = std::any_of(InputRoute.Connections.begin(), InputRoute.Connections.end(),
+			[SourceB, TargetB](const auto& Link) { return Link.OutputPin == SourceB && Link.InputPin != TargetB; });
+		const bool HasInputRouteTargetSegment = std::any_of(InputRoute.Connections.begin(), InputRoute.Connections.end(),
+			[TargetB](const auto& Link) { return Link.InputPin == TargetB; });
+		PF_CHECK(Tests, InputRoute.Nodes.size() == Before.Nodes.size() + 1);
+		PF_CHECK(Tests, InputRoute.Connections.size() == Before.Connections.size() + 2);
+		PF_CHECK(Tests, HasInputRouteSourceSegment);
+		PF_CHECK(Tests, HasInputRouteTargetSegment);
+
+		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+		DrawFrame(FindPinScreen(SourceA), true);
+		DrawFrame(KnotOne, true, true);
+		DrawFrame(KnotOne, true, false, true);
+		DrawFrame(KnotOne, false);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session) == Before &&
+			!Session->IsDirty() && !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+
+		// R is a route waypoint only over empty canvas. Pressing it while a native
+		// connection drag is over a node body or pin must leave that native drag
+		// available to complete as an ordinary direct connection.
+		const auto NodeCenterScreen = [&](UUID NodeID)
+		{
+			for (const auto& Node : EditorGraphDocumentEditorTestAccess::GetPresentation(GraphEditor, *Session))
+				if (Node.NodeID == NodeID)
+				{
+					const auto Screen = EditorGraphDocumentEditorTestAccess::CanvasToScreen(GraphEditor, *Session,
+						{ Node.Position.X + Node.Size.X * 0.5, Node.Position.Y + Node.Size.Y * 0.5 });
+					return ImVec2(static_cast<float>(Screen.X), static_cast<float>(Screen.Y));
+				}
+			return ImVec2(-1000.0f, -1000.0f);
+		};
+		const auto VerifyRDoesNotTakePinOrNodeDrag = [&](bool PressOnNode, UUID DestinationPin)
+		{
+			EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
+			PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
+			const ImVec2 FreshSource = FindPinScreen(SourceA);
+			const ImVec2 RPressPoint = PressOnNode ? NodeCenterScreen(Graph->Nodes[2].ID) :
+				CurrentPinScreen(DestinationPin);
+			DrawFrame(FreshSource);
+			DrawFrame(FreshSource, true);
+			DrawFrame(RPressPoint, true, true);
+			const auto RPress = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
+			PF_CHECK(Tests, !RPress.Active && RPress.KnotPositions.empty());
+			PF_CHECK(Tests, PressOnNode ? RPress.HoveredNode != 0 : RPress.HoveredPin != 0);
+			PF_CHECK(Tests, RPress.KeyPressed && RPress.InputEligible && RPress.HasPendingStart);
+			DrawFrame(RPressPoint, true, false);
+			// The key did not take over the native drag. Return to its source and
+			// release there; this no-op must leave graph content and dirty state alone.
+			DrawFrame(FreshSource, true);
+			DrawFrame(FreshSource, false);
+			const auto UnchangedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *Session);
+			PF_CHECK(Tests, UnchangedGraph == Before && !Session->IsDirty());
+			PF_CHECK(Tests, !EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).Active);
+		};
+		VerifyRDoesNotTakePinOrNodeDrag(true, TargetA);
+		VerifyRDoesNotTakePinOrNodeDrag(false, TargetB);
+	}
+
 	void TestGraphCanvasCreateRequestPolling(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -3515,6 +4144,7 @@ void RunEditorGraphDocumentEditorTests(TestRunner& Tests)
 	TestGraphNodeSizingInProductionAdapter(Tests);
 	TestGraphDocumentSaveRevisionAccounting(Tests);
 	TestGraphCanvasReconnectContextMenu(Tests);
+	TestGraphCanvasWireRouteGesture(Tests);
 	TestGraphCanvasCreateRequestPolling(Tests);
 	TestGraphCanvasNodeCreationRequestPolling(Tests);
 	TestGraphNodeSearchNavigation(Tests);

@@ -265,6 +265,16 @@ namespace PulseForgeEditor
 		std::optional<PulseForge::UUID> ConnectionID;
 	};
 
+	struct EditorGraphWireRouteDecision
+	{
+		bool Allowed = false;
+		bool OpenEnded = false;
+		std::string Reason;
+		std::vector<PulseForge::UUID> RerouteNodeIDs;
+		std::vector<PulseForge::UUID> ConnectionIDs;
+		std::vector<PulseForge::UUID> DisplacedConnectionIDs;
+	};
+
 	struct EditorGraphClipboard
 	{
 		std::string SchemaKey;
@@ -297,6 +307,8 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool Replace(EditorGraph Candidate, const EditorGraphSchema& Schema, std::string& Error);
 		[[nodiscard]] bool Execute(const EditorGraphSchema& Schema,
 			const std::function<std::expected<void, std::string>(EditorGraph&)>& Mutation, std::string& Error);
+		[[nodiscard]] bool ExecuteSequence(const EditorGraphSchema& Schema,
+			std::span<const EditorGraph> Candidates, std::string& Error);
 
 	private:
 		void PushUndo(EditorGraph Snapshot);
@@ -410,6 +422,12 @@ namespace PulseForgeEditor
 	[[nodiscard]] std::expected<PulseForge::UUID, std::string> InsertEditorGraphReroute(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		PulseForge::UUID ConnectionID, double X, double Y);
+	[[nodiscard]] EditorGraphWireRouteDecision CanCreateEditorGraphWireRoute(
+		const EditorGraph& Graph, const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin = std::nullopt);
+	[[nodiscard]] std::expected<EditorGraphWireRouteDecision, std::string> CreateEditorGraphWireRoute(
+		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema, PulseForge::UUID StartPin,
+		std::span<const EditorGraphVector3> KnotPositions, std::optional<PulseForge::UUID> EndPin = std::nullopt);
 	[[nodiscard]] std::expected<void, std::string> MoveEditorGraphNodes(
 		EditorGraphCommandHistory& History, const EditorGraphSchema& Schema,
 		const std::vector<std::pair<PulseForge::UUID, EditorGraphVector3>>& Positions);
