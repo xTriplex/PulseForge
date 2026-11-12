@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
 
 namespace
@@ -15,11 +16,28 @@ namespace
 	constexpr size_t MaximumWorkspaceBytes = 2 * 1024 * 1024;
 	constexpr size_t MaximumWorkspaceHosts = 64;
 	constexpr size_t MaximumWorkspaceDocuments = 512;
+	constexpr size_t MaximumGraphPinVisibility = 32'768;
+
+	std::expected<uint32_t, std::string> ReadWorkspaceVersion(const Json& Value)
+	{
+		uint64_t FullWidth = 0;
+		if (Value.is_number_unsigned()) FullWidth = Value.get<uint64_t>();
+		else if (Value.is_number_integer())
+		{
+			const int64_t Signed = Value.get<int64_t>();
+			if (Signed < 0) return std::unexpected("Document workspace version cannot be negative");
+			FullWidth = static_cast<uint64_t>(Signed);
+		}
+		else return std::unexpected("Document workspace version must be an integer");
+		if (FullWidth > std::numeric_limits<uint32_t>::max())
+			return std::unexpected("Document workspace version is outside the supported integer range");
+		return static_cast<uint32_t>(FullWidth);
+	}
 
 	bool IsValidKind(int64_t Value)
 	{
 		return Value >= static_cast<int64_t>(EditorDocumentKind::Level) &&
-			Value <= static_cast<int64_t>(EditorDocumentKind::RuntimeUI);
+			Value <= static_cast<int64_t>(EditorDocumentKind::Graph);
 	}
 
 	bool IsValidHostID(std::string_view ID, EditorDocumentHostRole Role)
@@ -43,7 +61,7 @@ namespace
 
 	std::expected<void, std::string> ValidateWorkspace(const EditorDocumentWorkspaceState& State)
 	{
-		if (State.Version != 4 || State.Project.IsNil() ||
+		if (State.Version != 5 || State.Project.IsNil() ||
 			(State.MaterialDetailsAsset && State.MaterialDetailsAsset->IsNil()))
 			return std::unexpected("Document workspace version or project identity is invalid");
 		if (State.Hosts.empty() || State.Hosts.size() > MaximumWorkspaceHosts)
@@ -57,7 +75,7 @@ namespace
 		for (const EditorDocumentHost& Host : State.Hosts)
 		{
 			if (!IsValidHostID(Host.ID, Host.Role) || !HostIDs.insert(Host.ID).second ||
-				static_cast<uint8_t>(Host.PlacementKind) > static_cast<uint8_t>(EditorDocumentKind::RuntimeUI) ||
+				static_cast<uint8_t>(Host.PlacementKind) > static_cast<uint8_t>(EditorDocumentKind::Graph) ||
 				!IsValidBounds(Host.Bounds))
 				return std::unexpected("Document workspace contains an invalid or duplicate host");
 			if (Host.Role == EditorDocumentHostRole::Main)
@@ -75,7 +93,7 @@ namespace
 			for (const EditorDocumentIdentity& Identity : Host.Documents)
 			{
 				if (Identity.Project != State.Project ||
-					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::RuntimeUI) ||
+					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::Graph) ||
 					(Host.Role == EditorDocumentHostRole::Native && Identity.Kind != Host.PlacementKind) ||
 					(Identity.Kind == EditorDocumentKind::Level &&
 						(Host.Role != EditorDocumentHostRole::Main || !Identity.Asset.IsNil())) ||
@@ -101,6 +119,18 @@ namespace
 				!IsValidBounds(Placement.Bounds) ||
 				Placement.LiveHostID)
 				return std::unexpected("Document workspace contains an invalid remembered placement");
+		}
+		if (State.HiddenGraphPins.size() > MaximumGraphPinVisibility)
+			return std::unexpected("Document workspace contains too many graph pin visibility settings");
+		std::unordered_set<std::string> HiddenGraphPinKeys;
+		for (const auto& Setting : State.HiddenGraphPins)
+		{
+			if (Setting.Document.Project != State.Project || Setting.Document.Kind != EditorDocumentKind::Graph ||
+				Setting.Document.Asset != Setting.GraphID || Setting.GraphID.IsNil() || Setting.NodeID.IsNil() || Setting.PinID.IsNil())
+				return std::unexpected("Document workspace contains an invalid graph pin visibility setting");
+			const std::string Key = Setting.Document.Asset.ToString() + ":" + Setting.NodeID.ToString() + ":" + Setting.PinID.ToString();
+			if (!HiddenGraphPinKeys.insert(Key).second)
+				return std::unexpected("Document workspace contains duplicate graph pin visibility settings");
 		}
 		return {};
 	}
@@ -228,6 +258,14 @@ namespace PulseForgeEditor
 				} }
 			});
 		}
+		Root["hiddenGraphPins"] = Json::array();
+		for (const auto& Setting : State.HiddenGraphPins)
+			Root["hiddenGraphPins"].push_back({
+				{ "document", SerializeIdentity(Setting.Document) },
+				{ "graph", Setting.GraphID.ToString() },
+				{ "node", Setting.NodeID.ToString() },
+				{ "pin", Setting.PinID.ToString() }
+			});
 
 		try
 		{
@@ -261,8 +299,10 @@ namespace PulseForgeEditor
 			if (!Project || *Project != ExpectedProject)
 				return std::unexpected("Document workspace belongs to a different or invalid project");
 			EditorDocumentWorkspaceState State;
-			State.Version = Root["version"].get<uint32_t>();
-			if (State.Version != 1 && State.Version != 2 && State.Version != 3 && State.Version != 4)
+			const auto Version = ReadWorkspaceVersion(Root["version"]);
+			if (!Version) return std::unexpected(Version.error());
+			State.Version = *Version;
+			if (State.Version != 1 && State.Version != 2 && State.Version != 3 && State.Version != 4 && State.Version != 5)
 				return std::unexpected("Document workspace version is unsupported");
 			State.LegacyMaterialDetailsMigration = State.Version <= 3;
 			if (State.Version >= 2)
@@ -419,7 +459,26 @@ namespace PulseForgeEditor
 						EditorDocumentPlacement{ EditorDocumentHostRole::Native, Host->Bounds, std::nullopt });
 				}
 			}
-			State.Version = 4;
+			if (State.Version >= 5)
+			{
+				if (!Root.contains("hiddenGraphPins") || !Root["hiddenGraphPins"].is_array() ||
+					Root["hiddenGraphPins"].size() > MaximumGraphPinVisibility)
+					return std::unexpected("Graph pin visibility settings are malformed or exceed the safety limit");
+				for (const Json& Entry : Root["hiddenGraphPins"])
+				{
+					if (!Entry.is_object() || !Entry.contains("document") || !Entry.contains("graph") ||
+						!Entry["graph"].is_string() || !Entry.contains("node") || !Entry["node"].is_string() ||
+						!Entry.contains("pin") || !Entry["pin"].is_string()) continue;
+					auto Identity = DeserializeIdentity(Entry["document"], State.Project);
+					const auto GraphID = PulseForge::UUID::Parse(Entry["graph"].get<std::string>());
+					const auto NodeID = PulseForge::UUID::Parse(Entry["node"].get<std::string>());
+					const auto PinID = PulseForge::UUID::Parse(Entry["pin"].get<std::string>());
+					if (!Identity || !GraphID || !NodeID || !PinID || Identity->Kind != EditorDocumentKind::Graph ||
+						Identity->Asset != *GraphID || GraphID->IsNil() || NodeID->IsNil() || PinID->IsNil()) continue;
+					State.HiddenGraphPins.push_back({ *Identity, *GraphID, *NodeID, *PinID });
+				}
+			}
+			State.Version = 5;
 
 			auto Valid = ValidateWorkspace(State);
 			if (!Valid)

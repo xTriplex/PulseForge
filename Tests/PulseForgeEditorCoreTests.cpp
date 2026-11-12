@@ -12,6 +12,7 @@
 
 void RunEditorDocumentCloseRequestTests(TestRunner& Tests);
 void RunEditorDocumentTabInteractionTests(TestRunner& Tests);
+void RunEditorGraphModelTests(TestRunner& Tests);
 
 namespace
 {
@@ -116,6 +117,7 @@ int main()
 	RunEditorViewportGizmoGeometryTests(Tests);
 	RunEditorViewportGizmoInteractionTests(Tests);
 	RunEditorDocumentTabInteractionTests(Tests);
+	RunEditorGraphModelTests(Tests);
 	PulseForgeEditor::EditorConsoleHistory Console;
 	std::vector<PulseForgeEditor::EditorConsoleMessage> Messages;
 	uint64_t Revision = 0;

@@ -4,6 +4,7 @@
 #include "Editor/EditorDocumentWorkspaceRead.h"
 
 #include <sstream>
+#include <limits>
 
 namespace
 {
@@ -20,8 +21,9 @@ namespace
 		const auto Project = UUID::Generate();
 		const auto MaterialA = UUID::Generate();
 		const auto MaterialB = UUID::Generate();
-		PF_CHECK(Tests, Project && MaterialA && MaterialB);
-		if (!Project || !MaterialA || !MaterialB) return;
+		const auto GraphFixture = UUID::Generate();
+		PF_CHECK(Tests, Project && MaterialA && MaterialB && GraphFixture);
+		if (!Project || !MaterialA || !MaterialB || !GraphFixture) return;
 
 		const EditorDocumentIdentity Level{ *Project, UUID{}, EditorDocumentKind::Level };
 		const EditorDocumentIdentity Amber{ *Project, *MaterialA, EditorDocumentKind::Material };
@@ -49,12 +51,38 @@ namespace
 		State.RememberedPlacements.emplace_back(
 			EditorDocumentKind::Texture, EditorDocumentPlacement{ EditorDocumentHostRole::Main, Native.Bounds, std::nullopt });
 		State.FocusedHostID = Native.ID;
+		const auto GraphNodeID = UUID::Generate();
+		const auto GraphPinID = UUID::Generate();
+		PF_CHECK(Tests, GraphNodeID && GraphPinID);
+		if (!GraphNodeID || !GraphPinID) return;
+		const EditorDocumentIdentity GraphPinDocument{ *Project, *GraphFixture, EditorDocumentKind::Graph };
+		State.HiddenGraphPins.push_back({ GraphPinDocument, *GraphFixture, *GraphNodeID, *GraphPinID });
 		const auto Serialized = EditorDocumentWorkspaceCodec::Serialize(State);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
 
 		const auto Restored = EditorDocumentWorkspaceCodec::Deserialize(*Serialized, *Project);
 		PF_CHECK(Tests, Restored.has_value());
+		if (Serialized)
+		{
+			auto VersionProbe = nlohmann::json::parse(*Serialized);
+			for (const auto Version : { nlohmann::json(3), nlohmann::json(4), nlohmann::json(5) })
+			{
+				VersionProbe["version"] = Version;
+				PF_CHECK(Tests, EditorDocumentWorkspaceCodec::Deserialize(VersionProbe.dump(), *Project).has_value());
+			}
+			for (const auto Version : { nlohmann::json(6), nlohmann::json(uint64_t{ 4294967301ull }),
+				nlohmann::json(std::numeric_limits<uint64_t>::max()), nlohmann::json(-1), nlohmann::json(5.0),
+				nlohmann::json(true), nlohmann::json("5"), nlohmann::json(nullptr) })
+			{
+				VersionProbe["version"] = Version;
+				PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(VersionProbe.dump(), *Project));
+			}
+			const std::string BeyondUnsigned = Serialized->substr(0, Serialized->find("\"version\": 5")) +
+				"\"version\": 18446744073709551616" +
+				Serialized->substr(Serialized->find("\"version\": 5") + std::string("\"version\": 5").size());
+			PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(BeyondUnsigned, *Project));
+		}
 		if (Restored)
 		{
 			PF_CHECK(Tests, Restored->Hosts.size() == 2 && Restored->Hosts[1].Documents.size() == 2);
@@ -62,6 +90,8 @@ namespace
 			PF_CHECK(Tests, Restored->Hosts[1].ActiveDocument == Blue);
 			PF_CHECK(Tests, Restored->Hosts[1].Bounds.X == -1920.0f && Restored->Hosts[1].Bounds.Maximized);
 			PF_CHECK(Tests, Restored->FocusedHostID == Native.ID && Restored->RememberedPlacements.size() == 2);
+			PF_CHECK(Tests, Restored->HiddenGraphPins.size() == 1 &&
+				Restored->HiddenGraphPins.front() == State.HiddenGraphPins.front());
 			const auto NativePlacement = std::find_if(Restored->RememberedPlacements.begin(), Restored->RememberedPlacements.end(),
 				[](const auto& Entry) { return Entry.first == EditorDocumentKind::Material; });
 			const auto MainPlacement = std::find_if(Restored->RememberedPlacements.begin(), Restored->RememberedPlacements.end(),
@@ -75,8 +105,26 @@ namespace
 			const auto Candidates = GetMaterialDetailsMigrationCandidates(*Restored);
 			PF_CHECK(Tests, Candidates.empty());
 		}
+		EditorDocumentWorkspaceState GraphState = State;
+		const EditorDocumentIdentity GraphIdentity{ *Project, *GraphFixture, EditorDocumentKind::Graph };
+		EditorDocumentHost GraphNative = Native;
+		GraphNative.ID = "native:" + GraphFixture->ToString();
+		GraphNative.PlacementKind = EditorDocumentKind::Graph;
+		GraphNative.Documents = { GraphIdentity };
+		GraphNative.ActiveDocument = GraphIdentity;
+		GraphState.Hosts.push_back(GraphNative);
+		GraphState.RememberedPlacements.emplace_back(
+			EditorDocumentKind::Graph, EditorDocumentPlacement{ EditorDocumentHostRole::Native, GraphNative.Bounds, std::nullopt });
+		const auto GraphWorkspace = EditorDocumentWorkspaceCodec::Serialize(GraphState);
+		const auto RestoredGraphWorkspace = GraphWorkspace
+			? EditorDocumentWorkspaceCodec::Deserialize(*GraphWorkspace, *Project)
+			: std::expected<EditorDocumentWorkspaceState, std::string>(std::unexpected("graph workspace serialization failed"));
+		PF_CHECK(Tests, RestoredGraphWorkspace && RestoredGraphWorkspace->Hosts.size() == 3 &&
+			RestoredGraphWorkspace->Hosts.back().PlacementKind == EditorDocumentKind::Graph &&
+			RestoredGraphWorkspace->Hosts.back().ActiveDocument == GraphIdentity);
 		auto LegacyWorkspace = nlohmann::json::parse(*Serialized);
 		LegacyWorkspace["version"] = 2;
+			LegacyWorkspace.erase("hiddenGraphPins");
 		LegacyWorkspace.erase("rememberedPlacements");
 		LegacyWorkspace["rememberedHosts"] =
 			nlohmann::json::array({ { { "kind", static_cast<uint8_t>(EditorDocumentKind::Material) }, { "host", Native.ID } },
@@ -85,7 +133,7 @@ namespace
 		PF_CHECK(Tests, MigratedLegacy.has_value());
 		if (MigratedLegacy)
 		{
-			PF_CHECK(Tests, MigratedLegacy->Version == 4 && MigratedLegacy->MaterialDetailsAsset == MaterialA);
+			PF_CHECK(Tests, MigratedLegacy->Version == 5 && MigratedLegacy->MaterialDetailsAsset == MaterialA);
 			PF_CHECK(Tests, MigratedLegacy->Hosts[1].Documents.size() == 2);
 			PF_CHECK(Tests,
 				MigratedLegacy->RememberedPlacements.size() == 1 && MigratedLegacy->RememberedPlacements.front().second.Bounds.Maximized);
@@ -116,6 +164,7 @@ namespace
 		{
 			auto LegacyMainStrip = nlohmann::json::parse(*LegacyMainStripJSON);
 			LegacyMainStrip["version"] = 1;
+			LegacyMainStrip.erase("hiddenGraphPins");
 			LegacyMainStrip.erase("materialDetailsAsset");
 			LegacyMainStrip.erase("rememberedPlacements");
 			LegacyMainStrip["rememberedHosts"] = nlohmann::json::array();
