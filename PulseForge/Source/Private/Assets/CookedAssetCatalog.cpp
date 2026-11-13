@@ -87,6 +87,7 @@ namespace PulseForge
 			case CookedAssetProductKind::Scene: return "scene";
 			case CookedAssetProductKind::Prefab: return "prefab";
 			case CookedAssetProductKind::Material: return "material";
+			case CookedAssetProductKind::GraphMaterial: return "graph-material";
 			case CookedAssetProductKind::Script: return "script";
 			case CookedAssetProductKind::Audio: return "audio";
 			case CookedAssetProductKind::MeshPrimitive: return "mesh-primitive";
@@ -102,7 +103,7 @@ namespace PulseForge
 		std::optional<CookedAssetProductKind> ParseProduct(std::string_view Name) noexcept
 		{
 			for (const CookedAssetProductKind Kind : { CookedAssetProductKind::Scene, CookedAssetProductKind::Prefab,
-				 CookedAssetProductKind::Material, CookedAssetProductKind::Script, CookedAssetProductKind::Audio,
+				 CookedAssetProductKind::Material, CookedAssetProductKind::GraphMaterial, CookedAssetProductKind::Script, CookedAssetProductKind::Audio,
 				 CookedAssetProductKind::MeshPrimitive, CookedAssetProductKind::Texture,
 				 CookedAssetProductKind::Environment, CookedAssetProductKind::GameplayInput,
 				 CookedAssetProductKind::RuntimeUI, CookedAssetProductKind::Font })
@@ -415,7 +416,7 @@ namespace PulseForge
 			if (!Root.is_object() || !Root.contains("version") || !Root["version"].is_number_integer())
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest version is missing or invalid"));
 			const int64_t Version = Root["version"].get<int64_t>();
-			if (Version != 2 && Version != 3 && Version != ManifestVersion)
+			if (Version != 2 && Version != 3 && Version != 4 && Version != ManifestVersion)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedVersion, ManifestPath, "Cook manifest version is unsupported"));
 			const bool HasScriptPaths = Version >= 3;
 			const bool HasAudioMixDefaults = Version >= 4;

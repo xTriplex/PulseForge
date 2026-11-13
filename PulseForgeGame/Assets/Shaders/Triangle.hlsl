@@ -71,6 +71,10 @@ TextureCube<float> PointShadowMap0 : register(t0, space3);
 TextureCube<float> PointShadowMap1 : register(t1, space3);
 SamplerState PointShadowSampler : register(s0, space3);
 
+#if defined(PULSEFORGE_MATERIAL_GRAPH)
+#include "MaterialGraph.generated.hlsli"
+#endif
+
 float3 SafeNormalize(float3 Value, float3 Fallback)
 {
 	const float LengthSquared = dot(Value, Value);
@@ -314,7 +318,11 @@ float4 PSMain(VertexOutput Input, bool IsFrontFace : SV_IsFrontFace) : SV_Target
 	if (AlphaParameters.x > 0.5f && AlphaParameters.x < 1.5f && Alpha < AlphaParameters.y)
 		discard;
 	const float4 MetallicRoughnessSample = MetallicRoughnessTexture.Sample(DiffuseSampler, Input.TexCoord);
+#if defined(PULSEFORGE_MATERIAL_GRAPH)
+	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * GraphMaterialBaseColor(), 0.0f);
+#else
 	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * BaseColorFactor.rgb, 0.0f);
+#endif
 	const float Metallic = saturate(SurfaceParameters.x * MetallicRoughnessSample.b);
 	const float Roughness = clamp(SurfaceParameters.y * MetallicRoughnessSample.g, 0.045f, 1.0f);
 	const float3 GeometricNormal = SafeNormalize(Input.Normal, float3(0.0f, 0.0f, 1.0f));

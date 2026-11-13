@@ -15,7 +15,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t MaterialFormatVersion = 4;
+		constexpr int64_t MaterialFormatVersion = 5;
 		constexpr size_t MaximumMaterialFileSize = 1024 * 1024;
 		constexpr std::string_view MaterialFormatName = "PulseForgeMaterial";
 
@@ -30,8 +30,9 @@ namespace PulseForge
 											   Key == "emissiveTexture" || Key == "normalScale" || Key == "occlusionStrength" ||
 											   Key == "emissiveFactor";
 				const bool VersionFourField = Key == "alphaMode" || Key == "alphaCutoff" || Key == "doubleSided";
+				const bool VersionFiveField = Key == "graph";
 				if (!CommonField && !(Version >= 2 && VersionTwoField) && !(Version >= 3 && VersionThreeField) &&
-					!(Version >= 4 && VersionFourField))
+					!(Version >= 4 && VersionFourField) && !(Version >= 5 && VersionFiveField))
 					return Key;
 			}
 			return std::nullopt;
@@ -98,6 +99,13 @@ namespace PulseForge
 				return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
 					"Emissive factor components must be finite values in the range [0, 10000]"));
 		}
+		if (Description.Graph)
+		{
+			const auto GraphValidation = ValidateMaterialGraphSource(*Description.Graph);
+			if (!GraphValidation.IsValid())
+				return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+					"Material graph source is invalid: " + GraphValidation.Diagnostics.front().Message));
+		}
 		return {};
 	}
 
@@ -110,7 +118,7 @@ namespace PulseForge
 		{
 			Json Document = Json::object();
 			Document["format"] = MaterialFormatName;
-			Document["version"] = MaterialFormatVersion;
+			Document["version"] = Material.Graph ? MaterialFormatVersion : MaterialFormatVersion - 1;
 			Document["baseColorTexture"] = Material.BaseColorTexture.IsNil()
 				? Json(nullptr) : Json(Material.BaseColorTexture.ToString());
 			Document["metallicRoughnessTexture"] = Material.MetallicRoughnessTexture.IsNil()
@@ -140,6 +148,12 @@ namespace PulseForge
 				Material.AlphaMode == MaterialAlphaMode::Blend ? "BLEND" : "OPAQUE";
 			Document["alphaCutoff"] = Material.AlphaCutoff;
 			Document["doubleSided"] = Material.DoubleSided;
+			if (Material.Graph)
+			{
+				const auto GraphBytes = SerializeMaterialGraphSource(*Material.Graph);
+				if (!GraphBytes) return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription, GraphBytes.error()));
+				Document["graph"] = Json::parse(*GraphBytes);
+			}
 			return Document.dump(2) + "\n";
 		}
 		catch (const std::exception& Exception)
@@ -315,6 +329,16 @@ namespace PulseForge
 						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, "doubleSided must be a boolean"));
 					Material.DoubleSided = DoubleSided->get<bool>();
 				}
+			}
+			if (DocumentVersion >= 5)
+			{
+				const auto Graph = Document.find("graph");
+				if (Graph == Document.end() || !Graph->is_object())
+					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+						"Material graph source must be an object"));
+				const auto GraphSource = DeserializeMaterialGraphSource(Graph->dump());
+				if (!GraphSource) return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, GraphSource.error()));
+				Material.Graph = *GraphSource;
 			}
 
 			if (auto Validation = ValidateMaterialAssetDescription(Material); !Validation)

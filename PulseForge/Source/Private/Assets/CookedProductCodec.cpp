@@ -17,6 +17,7 @@ namespace PulseForge
 		constexpr uint32_t MeshCodecVersion = Detail::MeshProductSchemaVersion;
 		constexpr uint32_t TextureCodecVersion = Detail::TextureProductSchemaVersion;
 		constexpr uint32_t MaterialCodecVersion = Detail::MaterialProductSchemaVersion;
+		constexpr uint32_t GraphMaterialCodecVersion = Detail::GraphMaterialProductSchemaVersion;
 		constexpr uint32_t EnvironmentCodecVersion = 1;
 		constexpr uint32_t BrdfCodecVersion = 1;
 		constexpr uint64_t MaximumEnvironmentPayloadBytes = 64ull * 1024ull * 1024ull;
@@ -427,6 +428,96 @@ namespace PulseForge
 			Product.OcclusionStrength < 0.0f || Product.OcclusionStrength > 1.0f || Product.AlphaCutoff < 0.0f ||
 			Product.AlphaCutoff > 1.0f)
 			return std::unexpected("Material product factors are outside supported ranges");
+		return Product;
+	}
+
+	std::expected<std::vector<std::byte>, std::string> Detail::EncodeGraphMaterialProduct(
+		const CookedGraphMaterialProduct& Material)
+	{
+		if (Material.ArtifactVersion != GraphMaterialCodecVersion || Material.RecipeFingerprint.size() != 32 ||
+			Material.SpirV.size() < 20 || Material.SpirV.size() > 16u * 1024u * 1024u || Material.SpirV.size() % 4 != 0 ||
+			Material.Parameters.size() > 256 ||
+			Material.SpirV[0] != std::byte{ 0x03 } || Material.SpirV[1] != std::byte{ 0x02 } ||
+			Material.SpirV[2] != std::byte{ 0x23 } || Material.SpirV[3] != std::byte{ 0x07 })
+			return std::unexpected("Graph material product has invalid version, recipe, or SPIR-V data");
+		std::vector<std::byte> Output;
+		Output.reserve(48 + Material.SpirV.size() + Material.Parameters.size() * 80);
+		Output.insert(Output.end(), { std::byte{'P'}, std::byte{'F'}, std::byte{'G'}, std::byte{'M'} });
+		AppendU32(Output, Material.ArtifactVersion);
+		AppendU32(Output, static_cast<uint32_t>(Material.SpirV.size()));
+		for (const char C : Material.RecipeFingerprint) Output.push_back(static_cast<std::byte>(C));
+		AppendU32(Output, static_cast<uint32_t>(Material.Parameters.size()));
+		for (size_t Index = 0; Index < Material.Parameters.size(); ++Index)
+		{
+			const auto& Parameter = Material.Parameters[Index];
+			const bool ValidName = !Parameter.Name.empty() && Parameter.Name.size() <= 64 &&
+				((Parameter.Name.front() >= 'A' && Parameter.Name.front() <= 'Z') ||
+				 (Parameter.Name.front() >= 'a' && Parameter.Name.front() <= 'z') || Parameter.Name.front() == '_') &&
+				std::ranges::all_of(Parameter.Name.begin() + 1, Parameter.Name.end(), [](char Character)
+				{
+					return (Character >= 'A' && Character <= 'Z') || (Character >= 'a' && Character <= 'z') ||
+						(Character >= '0' && Character <= '9') || Character == '_';
+				});
+			if (Parameter.ID.IsNil() || !ValidName || !std::isfinite(Parameter.DefaultValue))
+				return std::unexpected("Graph material parameter binding is invalid");
+			for (size_t Previous = 0; Previous < Index; ++Previous)
+				if (Material.Parameters[Previous].ID == Parameter.ID || Material.Parameters[Previous].Name == Parameter.Name)
+					return std::unexpected("Graph material parameter identities and names must be unique");
+			AppendU64(Output, Parameter.ID.GetHigh());
+			AppendU64(Output, Parameter.ID.GetLow());
+			AppendU32(Output, static_cast<uint32_t>(Parameter.Name.size()));
+			for (const char Character : Parameter.Name) Output.push_back(static_cast<std::byte>(Character));
+			AppendFloat(Output, Parameter.DefaultValue);
+		}
+		Output.insert(Output.end(), Material.SpirV.begin(), Material.SpirV.end());
+		return Output;
+	}
+
+	std::expected<CookedGraphMaterialProduct, std::string> Detail::DecodeGraphMaterialProduct(
+		std::span<const std::byte> Input)
+	{
+		constexpr size_t HeaderBytes = 48;
+		constexpr size_t MaximumParameterBytes = 256u * (16u + 4u + 64u + 4u);
+		constexpr size_t MaximumPayloadBytes = HeaderBytes + 16u * 1024u * 1024u + MaximumParameterBytes;
+		if (Input.size() < HeaderBytes + 20 || Input.size() > MaximumPayloadBytes ||
+			Input[0] != std::byte{'P'} || Input[1] != std::byte{'F'} || Input[2] != std::byte{'G'} || Input[3] != std::byte{'M'})
+			return std::unexpected("Graph material product has invalid magic or size");
+		size_t Offset = 4;
+		uint32_t Version = 0, ParameterCount = 0;
+		uint32_t SpirVBytes = 0;
+		if (!ReadU32(Input, Offset, Version) || Version != GraphMaterialCodecVersion || !ReadU32(Input, Offset, SpirVBytes) ||
+			SpirVBytes < 20 || SpirVBytes % 4 != 0)
+			return std::unexpected("Graph material product schema or SPIR-V length is unsupported");
+		CookedGraphMaterialProduct Product;
+		Product.ArtifactVersion = Version;
+		Product.RecipeFingerprint.reserve(32);
+		for (size_t Index = 0; Index < 32; ++Index) Product.RecipeFingerprint.push_back(static_cast<char>(std::to_integer<uint8_t>(Input[Offset++])));
+		if (!ReadU32(Input, Offset, ParameterCount) || ParameterCount > 256)
+			return std::unexpected("Graph material product parameter count exceeds its bound");
+		Product.Parameters.reserve(ParameterCount);
+		for (uint32_t Index = 0; Index < ParameterCount; ++Index)
+		{
+			uint64_t High = 0, Low = 0;
+			uint32_t NameBytes = 0;
+			if (!ReadU64(Input, Offset, High) || !ReadU64(Input, Offset, Low) || !ReadU32(Input, Offset, NameBytes) ||
+				NameBytes == 0 || NameBytes > 64 || Offset > Input.size() || NameBytes > Input.size() - Offset)
+				return std::unexpected("Graph material parameter binding is truncated or invalid");
+			CookedGraphMaterialProduct::Parameter Parameter;
+			Parameter.ID = UUID(High, Low);
+			Parameter.Name.assign(reinterpret_cast<const char*>(Input.data() + Offset), NameBytes);
+			Offset += NameBytes;
+			if (!ReadFloat(Input, Offset, Parameter.DefaultValue) || Parameter.ID.IsNil())
+				return std::unexpected("Graph material parameter identity or default is invalid");
+			Product.Parameters.push_back(std::move(Parameter));
+		}
+		if (SpirVBytes != Input.size() - Offset) return std::unexpected("Graph material SPIR-V length does not match the payload");
+		Product.SpirV.assign(Input.begin() + static_cast<std::ptrdiff_t>(Offset), Input.end());
+		if (Product.RecipeFingerprint.find_first_not_of("0123456789abcdef") != std::string::npos ||
+			Product.SpirV[0] != std::byte{ 0x03 } || Product.SpirV[1] != std::byte{ 0x02 } ||
+			Product.SpirV[2] != std::byte{ 0x23 } || Product.SpirV[3] != std::byte{ 0x07 })
+			return std::unexpected("Graph material product contains invalid recipe or SPIR-V bytes");
+		auto Canonical = Detail::EncodeGraphMaterialProduct(Product);
+		if (!Canonical) return std::unexpected(Canonical.error());
 		return Product;
 	}
 

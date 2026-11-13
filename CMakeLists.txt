@@ -76,6 +76,13 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeAssetDeployment.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeVisualStudioLaunch.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeEditorTargets.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeShaderBuild.cmake")
+if(TARGET PulseForgeMaterialGraphCompiler AND PULSEFORGE_DXC)
+	file(TO_CMAKE_PATH "${PULSEFORGE_DXC}" PULSEFORGE_DXC_CXX_PATH)
+	target_compile_definitions(PulseForgeMaterialGraphCompiler PRIVATE
+		"PF_HOST_DXC_EXECUTABLE=\"${PULSEFORGE_DXC_CXX_PATH}\""
+		"PF_HOST_DXC_VERSION=\"${PULSEFORGE_DXC_VERSION}\""
+		"PF_MATERIAL_GRAPH_PBR_TEMPLATE=\"${PULSEFORGE_TRIANGLE_HLSL}\"")
+endif()
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgePlayerTemplate.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeGpuValidationAnalysis.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeQualityValidation.cmake")

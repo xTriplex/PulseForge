@@ -1,14 +1,15 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Assets/MaterialGraphSource.h"
 #include "Core/Core.h"
 
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -38,6 +39,7 @@ namespace PulseForge
 		MaterialAlphaMode AlphaMode = MaterialAlphaMode::Opaque;
 		float AlphaCutoff = 0.5f;
 		bool DoubleSided = false;
+		std::optional<MaterialGraphSource> Graph;
 	};
 
 	struct MaterialAssetSourceSnapshot

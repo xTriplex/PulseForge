@@ -5,6 +5,7 @@
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "Editor/EditorMaterialDocumentEditor.h"
 #include "Editor/EditorStyle.h"
+#include "Assets/MaterialAssetService.h"
 
 #include <fstream>
 #include <iterator>
@@ -161,7 +162,7 @@ namespace
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{invalid"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"OtherMaterial\",\"version\":1}"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"PulseForgeMaterial\",\"version\":99}"));
-		for (const std::string_view UnsupportedVersion : { "0", "-1", "5" })
+		for (const std::string_view UnsupportedVersion : { "0", "-1", "6" })
 		{
 			const std::string UnsupportedDocument =
 				"{\"format\":\"PulseForgeMaterial\",\"version\":" + std::string(UnsupportedVersion) + ",\"baseColorFactor\":[1,1,1,1]}";
@@ -532,6 +533,33 @@ namespace
 		PF_CHECK(Tests, UnchangedSave.has_value());
 		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, Material->ID) != nullptr);
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
+		PulseForge::MaterialGraphSource Graph;
+		Graph.GraphID = PulseForge::UUID(20, 1);
+		Graph.Nodes = {
+			{ PulseForge::UUID(20, 2), PulseForge::MaterialGraphNodeKind::FloatConstant, 0.4f, {} },
+			{ PulseForge::UUID(20, 3), PulseForge::MaterialGraphNodeKind::FloatConstant, 0.1f, {} },
+			{ PulseForge::UUID(20, 4), PulseForge::MaterialGraphNodeKind::Add, 0.0f, {} },
+			{ PulseForge::UUID(20, 5), PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
+		};
+		Graph.Connections = {
+			{ PulseForge::UUID(21, 1), PulseForge::UUID(20, 2), PulseForge::UUID(20, 4), 0 },
+			{ PulseForge::UUID(21, 2), PulseForge::UUID(20, 3), PulseForge::UUID(20, 4), 1 },
+			{ PulseForge::UUID(21, 3), PulseForge::UUID(20, 4), PulseForge::UUID(20, 5), 0 }
+		};
+		const auto BeforeGraph = *Drafts.FindDraft(ProjectValue, Material->ID);
+		const bool GraphEditStarted = Drafts.BeginEdit(ProjectValue, Material->ID, BeforeGraph);
+		Drafts.FindDraft(ProjectValue, Material->ID)->Graph = Graph;
+		if (GraphEditStarted) PF_CHECK(Tests, Documents.MarkEdited(Identity));
+		Drafts.FinalizePendingEdits(false);
+		PF_CHECK(Tests, MaterialSession->IsDirty() && Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, EditorRegistry.DispatchFocusedCommand(*MaterialSession, PulseForgeEditor::EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, !Drafts.FindDraft(ProjectValue, Material->ID)->Graph.has_value());
+		PF_CHECK(Tests, EditorRegistry.DispatchFocusedCommand(*MaterialSession, PulseForgeEditor::EditorDocumentCommand::Redo));
+		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, Material->ID)->Graph == Graph);
+		PF_CHECK(Tests, EditorRegistry.Save(*MaterialSession));
+		auto SavedGraphSource = MaterialAssetService::LoadSourceSnapshot(
+			Material->ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
+		PF_CHECK(Tests, SavedGraphSource && SavedGraphSource->Description.Graph == Graph);
 		auto SecondMaterial = MaterialAssetService::Create(ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(),
 			"Assets/Materials/Independent.material", Initial);
 		PF_CHECK(Tests, SecondMaterial.has_value());

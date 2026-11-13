@@ -49,7 +49,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PRIVATE PulseForge/Source/Public PulseForge/Vendor/json/include
 	)
 	target_link_libraries(PulseForgeEditorCore
-		PUBLIC PulseForgeAssetServices PulseForgeAssetDependencyCatalog PulseForgeScene
+		PUBLIC PulseForgeAssetServices PulseForgeAssetDependencyCatalog PulseForgeScene PulseForgeMaterialGraph
 		PRIVATE PulseForgeCore PulseForgeAssetImporters PulseForgeSceneSerialization
 	)
 	target_precompile_headers(PulseForgeEditorCore PRIVATE

@@ -100,6 +100,73 @@ namespace PulseForgeEditor
 		const std::vector<PulseForge::AssetRecord> Assets = m_AssetListProvider();
 		m_Panel.DrawEditorContents(*Project, Session.Identity.Asset, Assets, m_Drafts,
 			m_AssetSelector, m_Style, m_Actions, false);
+		if (PulseForge::MaterialAssetDesc* Draft = m_Drafts.FindDraft(*Project, Session.Identity.Asset))
+		{
+			ImGui::SeparatorText("Material Graph Source");
+			if (!Draft->Graph)
+			{
+				if (ImGui::Button("Create scalar PBR graph"))
+				{
+					const auto GraphID = PulseForge::UUID::Generate();
+					const auto ConstantID = PulseForge::UUID::Generate();
+					const auto ZeroID = PulseForge::UUID::Generate();
+					const auto AddID = PulseForge::UUID::Generate();
+					const auto OutputID = PulseForge::UUID::Generate();
+					const auto FirstConnectionID = PulseForge::UUID::Generate();
+					const auto SecondConnectionID = PulseForge::UUID::Generate();
+					const auto OutputConnectionID = PulseForge::UUID::Generate();
+					if (!GraphID || !ConstantID || !ZeroID || !AddID || !OutputID || !FirstConnectionID ||
+						!SecondConnectionID || !OutputConnectionID)
+						Current->Error = "Could not allocate stable graph source identities.";
+					else
+					{
+						const PulseForge::MaterialAssetDesc Before = *Draft;
+						PulseForge::MaterialGraphSource Graph;
+						Graph.GraphID = *GraphID;
+						Graph.Nodes = {
+							{ *ConstantID, PulseForge::MaterialGraphNodeKind::FloatConstant, Draft->BaseColorFactor.r, {} },
+							{ *ZeroID, PulseForge::MaterialGraphNodeKind::FloatConstant, 0.0f, {} },
+							{ *AddID, PulseForge::MaterialGraphNodeKind::Add, 0.0f, {} },
+							{ *OutputID, PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
+						};
+						Graph.Connections = {
+							{ *FirstConnectionID, *ConstantID, *AddID, 0 },
+							{ *SecondConnectionID, *ZeroID, *AddID, 1 },
+							{ *OutputConnectionID, *AddID, *OutputID, 0 }
+						};
+						Draft->Graph = std::move(Graph);
+						if (m_Drafts.BeginEdit(*Project, Session.Identity.Asset, Before))
+							(void)m_Documents.MarkEdited(Session.Identity);
+						Current->Error.clear();
+					}
+				}
+				ImGui::TextWrapped("Creates a versioned constant-plus-add source graph from the material's current red base-color value. The graph source is saved with this Material asset.");
+			}
+			else
+			{
+				const auto Validation = PulseForge::ValidateMaterialGraphSource(*Draft->Graph);
+				if (!Validation.IsValid())
+					ImGui::TextColored(m_Style.GetColor(EditorColorToken::Error), "Graph source is invalid: %s",
+						Validation.Diagnostics.front().Message.c_str());
+				else
+					ImGui::TextDisabled("Graph source is valid. Cooking compiles this graph to a Vulkan SPIR-V product.");
+				auto Constant = std::find_if(Draft->Graph->Nodes.begin(), Draft->Graph->Nodes.end(), [](const auto& Node)
+					{ return Node.Kind == PulseForge::MaterialGraphNodeKind::FloatConstant; });
+				if (Constant != Draft->Graph->Nodes.end())
+				{
+					float Value = Constant->Value;
+					ImGui::SetNextItemWidth(240.0f);
+					if (ImGui::DragFloat("PBR base-color scalar", &Value, 0.01f, 0.0f, 1.0f, "%.3f"))
+					{
+						const PulseForge::MaterialAssetDesc Before = *Draft;
+						Constant->Value = Value;
+						if (m_Drafts.BeginEdit(*Project, Session.Identity.Asset, Before))
+							(void)m_Documents.MarkEdited(Session.Identity);
+					}
+				}
+				ImGui::TextDisabled("This first graph slice maps a scalar expression into grayscale base color; fixed material values remain available in Details.");
+			}
+		}
 		ImGui::SeparatorText("Draft Preview");
 		if (m_Preview)
 		{

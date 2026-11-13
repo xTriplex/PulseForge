@@ -26,7 +26,8 @@ namespace PulseForge
 	bool MaterialAssetCache::IsRegistered(const AssetID& Asset) const noexcept
 	{
 		if (Asset.IsNil()) return false;
-		if (m_CookedProvider) return m_CookedProvider->FindMaterial(Asset) != nullptr;
+		if (m_CookedProvider)
+			return m_CookedProvider->FindMaterial(Asset) != nullptr || m_CookedProvider->FindGraphMaterial(Asset) != nullptr;
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		return m_Registry && m_Registry->Find(Asset).has_value();
 #else

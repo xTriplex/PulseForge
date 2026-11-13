@@ -102,12 +102,29 @@ namespace PulseForge
 		bool DoubleSided = false;
 	};
 
+	struct CookedGraphMaterialProduct final
+	{
+		struct Parameter final
+		{
+			UUID ID;
+			std::string Name;
+			float DefaultValue = 0.0f;
+			friend bool operator==(const Parameter&, const Parameter&) = default;
+		};
+
+		uint32_t ArtifactVersion = 1;
+		std::string RecipeFingerprint;
+		std::vector<Parameter> Parameters;
+		std::vector<std::byte> SpirV;
+	};
+
 	namespace Detail
 	{
 		inline constexpr uint32_t MeshProductSchemaVersion = 1;
 		inline constexpr uint32_t TextureProductSchemaVersion = 1;
 		inline constexpr uint32_t EnvironmentProductSchemaVersion = 1;
 		inline constexpr uint32_t MaterialProductSchemaVersion = 1;
+		inline constexpr uint32_t GraphMaterialProductSchemaVersion = 1;
 
 		enum class ImageColorSpace : uint8_t
 		{
@@ -141,6 +158,10 @@ namespace PulseForge
 		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeMaterialProduct(
 			const CookedMaterialProduct& Material);
 		[[nodiscard]] PULSEFORGE_API std::expected<CookedMaterialProduct, std::string> DecodeMaterialProduct(
+			std::span<const std::byte> Bytes);
+		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeGraphMaterialProduct(
+			const CookedGraphMaterialProduct& Material);
+		[[nodiscard]] PULSEFORGE_API std::expected<CookedGraphMaterialProduct, std::string> DecodeGraphMaterialProduct(
 			std::span<const std::byte> Bytes);
 
 		struct DecodedEnvironmentCpuProduct final

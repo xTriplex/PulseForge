@@ -11,6 +11,7 @@
 #include "Renderer/Detail/RuntimeUIRenderPass.h"
 
 #include "Assets/MaterialAssetCache.h"
+#include "Assets/CookedProductCodec.h"
 #include "Assets/AssetPathResolver.h"
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPreparationService.h"
@@ -29,6 +30,7 @@
 
 #include <cmath>
 #include <atomic>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -39,6 +41,15 @@
 
 namespace PulseForge
 {
+	struct GraphMaterialRuntime final
+	{
+		std::string RecipeFingerprint;
+		ShaderHandle FragmentShader;
+		BindingLayoutHandle MaterialLayout;
+		BufferHandle ParameterBuffer;
+		BindingSetHandle MaterialBindings;
+	};
+
 	struct SceneRenderer::TransientMaterialOverride final
 	{
 		AssetID Material;
@@ -754,6 +765,7 @@ namespace PulseForge
 		m_PreparedMeshResources.clear();
 		m_PreparedRuntimeUITextures.clear();
 		m_PreparedMaterialBindings.clear();
+		m_PreparedGraphMaterials.clear();
 		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
 		m_PreparedEnvironmentBinding = nullptr;
 		m_PreparedEnvironmentRevision = 0;
@@ -953,6 +965,70 @@ namespace PulseForge
 				return std::unexpected(std::move(MaterialBinding.error()));
 			}
 			m_PreparedMaterialBindings.insert_or_assign(Instance.Entity, *MaterialBinding);
+			if (m_ProjectAssetCaches->CookedContent && Instance.MaterialAsset &&
+				m_ProjectAssetCaches->CookedContent->FindGraphMaterial(*Instance.MaterialAsset))
+			{
+				GraphMaterialRuntime* GraphMaterial = nullptr;
+				const auto Existing = m_GraphMaterialResources.find(*Instance.MaterialAsset);
+				if (Existing != m_GraphMaterialResources.end())
+					GraphMaterial = Existing->second.get();
+				else
+				{
+					auto Product = m_ProjectAssetCaches->CookedContent->LoadGraphMaterialProduct(*Instance.MaterialAsset);
+					if (!Product)
+						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+							*Instance.MaterialAsset, "Could not load cooked graph material: " + Product.error().Message });
+
+					ShaderDesc ShaderDescription;
+					ShaderDescription.Stage = ShaderStage::Fragment;
+					ShaderDescription.EntryPoint = "PSMain";
+					ShaderDescription.DebugName = "PulseForge cooked graph material " + Product->RecipeFingerprint;
+					auto Shader = m_Runtime.CreateShader(ShaderDescription, Product->SpirV);
+					if (!Shader)
+						return std::unexpected(MakeResourceError("Could not create cooked graph material shader: " + Shader.error().Message));
+
+					BindingLayoutDesc GraphLayoutDescription;
+					GraphLayoutDescription.Visibility = ShaderVisibility::Fragment;
+					GraphLayoutDescription.ShaderRegisterSpace = 4;
+					GraphLayoutDescription.Items.push_back({ BindingResourceType::ConstantBuffer, 0 });
+					GraphLayoutDescription.DebugName = "PulseForge graph material parameters";
+					auto GraphLayout = m_Runtime.CreateBindingLayout(GraphLayoutDescription);
+					if (!GraphLayout)
+						return std::unexpected(MakeResourceError("Could not create graph-material binding layout: " + GraphLayout.error().Message));
+
+					auto Parameters = Product->Parameters;
+					std::ranges::sort(Parameters, {}, &CookedGraphMaterialProduct::Parameter::Name);
+					const size_t RegisterCount = (std::max)(size_t{ 1 }, (Parameters.size() + 3) / 4);
+					std::vector<std::byte> ParameterBytes(RegisterCount * 16, std::byte{ 0 });
+					for (size_t Index = 0; Index < Parameters.size(); ++Index)
+						std::memcpy(ParameterBytes.data() + Index * sizeof(float), &Parameters[Index].DefaultValue, sizeof(float));
+					BufferDesc ParameterBufferDescription;
+					ParameterBufferDescription.ByteSize = ParameterBytes.size();
+					ParameterBufferDescription.Usage = BufferUsage::Constant;
+					ParameterBufferDescription.DebugName = "PulseForge cooked graph parameter values";
+					auto ParameterBuffer = m_Runtime.CreateBuffer(ParameterBufferDescription, ParameterBytes);
+					if (!ParameterBuffer)
+						return std::unexpected(MakeResourceError("Could not create graph-material parameter data: " +
+							ParameterBuffer.error().Message));
+					BindingSetDesc GraphBindingsDescription;
+					GraphBindingsDescription.Layout = *GraphLayout;
+					GraphBindingsDescription.Buffers.push_back({ 0, std::cref(**ParameterBuffer) });
+					auto GraphBindings = m_Runtime.CreateBindingSet(GraphBindingsDescription);
+					if (!GraphBindings)
+						return std::unexpected(MakeResourceError("Could not create graph-material parameter bindings: " +
+							GraphBindings.error().Message));
+
+					auto RuntimeMaterial = std::make_unique<GraphMaterialRuntime>();
+					RuntimeMaterial->RecipeFingerprint = Product->RecipeFingerprint;
+					RuntimeMaterial->FragmentShader = std::move(*Shader);
+					RuntimeMaterial->MaterialLayout = std::move(*GraphLayout);
+					RuntimeMaterial->ParameterBuffer = std::move(*ParameterBuffer);
+					RuntimeMaterial->MaterialBindings = std::move(*GraphBindings);
+					GraphMaterial = RuntimeMaterial.get();
+					m_GraphMaterialResources.emplace(*Instance.MaterialAsset, std::move(RuntimeMaterial));
+				}
+				m_PreparedGraphMaterials.insert_or_assign(Instance.Entity, GraphMaterial);
+			}
 			ReadyMeshes.push_back(Instance);
 		}
 		Snapshot->Meshes = std::move(ReadyMeshes);
@@ -1467,15 +1543,33 @@ namespace PulseForge
 											  const MaterialAssetDesc& Material) -> std::expected<void, SceneRendererError>
 		{
 			const bool AlphaBlend = Material.AlphaMode == MaterialAlphaMode::Blend;
-			if (auto PipelineResult =
+			const auto GraphMaterial = m_PreparedGraphMaterials.find(Instance.Entity);
+			const GraphMaterialRuntime* Graph = GraphMaterial != m_PreparedGraphMaterials.end() ? GraphMaterial->second : nullptr;
+			if (Graph)
+			{
+				if (auto PipelineResult = m_PipelineCache->EnsureGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint,
+						Graph->FragmentShader, Graph->MaterialLayout, AlphaBlend, Material.DoubleSided, Instance.Orientation);
+					!PipelineResult)
+					return std::unexpected(std::move(PipelineResult.error()));
+			}
+			else if (auto PipelineResult =
 					m_PipelineCache->EnsureScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
 				!PipelineResult)
 				return std::unexpected(std::move(PipelineResult.error()));
-			const GraphicsPipeline* Pipeline =
-				m_PipelineCache->FindScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
+			const GraphicsPipeline* Pipeline = Graph
+				? m_PipelineCache->FindGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint, AlphaBlend, Material.DoubleSided,
+					Instance.Orientation)
+				: m_PipelineCache->FindScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
 			if (!Pipeline) return std::unexpected(MakeResourceError("Prepared material graphics pipeline is unavailable"));
-			auto MaterialBinding = ResolveMaterialBinding(Instance);
-			if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
+			const BindingSet* MaterialBinding = nullptr;
+			if (Graph)
+				MaterialBinding = Graph->MaterialBindings.get();
+			else
+			{
+				auto ResolvedMaterialBinding = ResolveMaterialBinding(Instance);
+				if (!ResolvedMaterialBinding) return std::unexpected(std::move(ResolvedMaterialBinding.error()));
+				MaterialBinding = *ResolvedMaterialBinding;
+			}
 			const Mesh* MeshResource = FindPreparedMesh(m_PreparedMeshResources, Instance.MeshAsset);
 			if (!MeshResource)
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, Instance.MeshAsset,
@@ -1505,9 +1599,13 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ MeshResource->GetIndexCount(), 1, 0, 0 };
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionPass->GetSceneBindingSet();
-			const std::array<const BindingSet*, 4> BindingSets = { *MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
+			const std::array<const BindingSet*, 5> GraphBindingSets = { MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
+				AmbientOcclusionBindings, &m_ShadowTargetCache->PointLightBindings(), Graph ? Graph->MaterialBindings.get() : nullptr };
+			const std::array<const BindingSet*, 4> FixedBindingSets = { MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
 				AmbientOcclusionBindings, &m_ShadowTargetCache->PointLightBindings() };
-			const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, BindingSets);
+			const GraphicsResult Draw = Graph
+				? m_Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, GraphBindingSets)
+				: m_Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, FixedBindingSets);
 			if (!Draw)
 			{
 				return std::unexpected(SceneRendererError{

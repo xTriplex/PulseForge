@@ -38,6 +38,7 @@ namespace PulseForge
 	class SceneRendererMaterialBindingCache;
 	class Mesh;
 	class CookedContentProvider;
+	struct GraphMaterialRuntime;
 
 	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
 	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
@@ -321,6 +322,8 @@ namespace PulseForge
 		// Non-owning frame pins. The next PrepareSnapshot clears them before cache publication advances any resource.
 		PreparedMeshResourceMap m_PreparedMeshResources;
 		PreparedMaterialBindingMap m_PreparedMaterialBindings;
+		std::unordered_map<UUID, const GraphMaterialRuntime*, UUIDHash> m_PreparedGraphMaterials;
+		std::unordered_map<AssetID, std::unique_ptr<GraphMaterialRuntime>, UUIDHash> m_GraphMaterialResources;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;

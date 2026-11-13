@@ -42,6 +42,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadMaterial(const AssetID& Asset) const;
 		[[nodiscard]] std::expected<CookedMaterialProduct, CookedAssetCatalogError> LoadMaterialProduct(
 			const AssetID& Asset) const;
+		[[nodiscard]] const CookedAssetEntry* FindGraphMaterial(const AssetID& Asset) const noexcept;
+		[[nodiscard]] std::expected<CookedGraphMaterialProduct, CookedAssetCatalogError> LoadGraphMaterialProduct(
+			const AssetID& Asset) const;
 
 		[[nodiscard]] const CookedAssetEntry* FindScript(const AssetID& Asset) const noexcept;
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadScript(const AssetID& Asset) const;

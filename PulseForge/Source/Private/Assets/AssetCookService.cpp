@@ -10,6 +10,8 @@
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/MaterialAsset.h"
+#include "Assets/MaterialGraphCompiler.h"
+#include "Assets/DerivedDataArtifactStore.h"
 #include "Assets/Project.h"
 #include "Assets/PrefabSerializer.h"
 #include "Core/PlatformServices.h"
@@ -699,6 +701,8 @@ namespace PulseForge
 
 		std::vector<std::vector<std::byte>> Payloads;
 		std::vector<CookedAssetEntry> Entries;
+		DerivedDataArtifactStore GraphCompilerArtifacts({
+			Request.SourceSnapshot->GetProjectRootPath() / ".pulseforge" / "DerivedData" / "MaterialGraph" });
 		Payloads.reserve(Plan.Products.size());
 		Entries.reserve(Plan.Products.size());
 		for (const AssetCookPlannedProduct& Product : Plan.Products)
@@ -708,6 +712,7 @@ namespace PulseForge
 					Product.SourcePath, Product.Asset));
 			std::vector<std::byte> Bytes;
 			uint32_t Version = 1;
+			CookedAssetProductKind EntryProduct = Product.Product;
 			if (Product.Product == CookedAssetProductKind::MeshPrimitive)
 			{
 				uint32_t MeshIndex = 0, PrimitiveIndex = 0;
@@ -835,6 +840,37 @@ namespace PulseForge
 					const std::string Text(Bytes.empty() ? "" : reinterpret_cast<const char*>(Bytes.data()), Bytes.size());
 					auto Material = MaterialAssetSerializer::Deserialize(Text);
 					if (!Material) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Material.error().Message, Product.SourcePath, Product.Asset));
+					if (Material->Graph)
+					{
+						if (Request.Compatibility.RendererBackend != "Vulkan")
+							return std::unexpected(Error(AssetCookErrorCode::UnsupportedTarget,
+								"Graph materials currently compile only for the Vulkan SPIR-V renderer", Product.SourcePath, Product.Asset));
+						MaterialGraphCompileRequest CompileRequest;
+						CompileRequest.Source = *Material->Graph;
+						CompileRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
+						CompileRequest.ArtifactStore = &GraphCompilerArtifacts;
+						CompileRequest.CancellationToken = Request.CancellationToken;
+						if (CompileRequest.ToolchainFingerprint.empty())
+							return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+								"Configured pinned DXC toolchain is unavailable for graph material cooking", Product.SourcePath, Product.Asset));
+						auto Compiled = MaterialGraphCompiler::Compile(CompileRequest);
+						if (!Compiled)
+							return std::unexpected(Error(Compiled.error().Code == MaterialGraphCompileErrorCode::Cancelled
+								? AssetCookErrorCode::Cancelled : AssetCookErrorCode::ProductProcessingFailed,
+								"Graph material compilation failed: " + Compiled.error().Message, Product.SourcePath, Product.Asset));
+						CookedGraphMaterialProduct GraphProduct;
+						GraphProduct.RecipeFingerprint = Compiled->RecipeFingerprint;
+						for (const auto& Parameter : Compiled->Parameters)
+							GraphProduct.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
+						GraphProduct.SpirV = std::move(Compiled->SpirV);
+						auto Encoded = Detail::EncodeGraphMaterialProduct(GraphProduct);
+						if (!Encoded) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Encoded.error(), Product.SourcePath, Product.Asset));
+						Bytes = std::move(*Encoded);
+						EntryProduct = CookedAssetProductKind::GraphMaterial;
+						Version = Detail::GraphMaterialProductSchemaVersion;
+					}
+					else
+					{
 					CookedMaterialProduct Cooked;
 					Cooked.BaseColorTexture = Material->BaseColorTexture;
 					Cooked.MetallicRoughnessTexture = Material->MetallicRoughnessTexture;
@@ -856,6 +892,7 @@ namespace PulseForge
 					if (!Encoded) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Encoded.error(), Product.SourcePath, Product.Asset));
 					Bytes = std::move(*Encoded);
 					Version = Detail::MaterialProductSchemaVersion;
+					}
 				}
 				else if (Product.Product == CookedAssetProductKind::Audio)
 				{
@@ -884,7 +921,7 @@ namespace PulseForge
 					Digest.error(), Product.SourcePath, Product.Asset));
 			CookedAssetEntry Entry;
 			Entry.Asset = Product.Asset;
-			Entry.Product = Product.Product;
+			Entry.Product = EntryProduct;
 			Entry.Subresource = Product.Subresource;
 			Entry.PayloadVersion = Version;
 			Entry.PayloadBytes = Bytes.size();

@@ -126,6 +126,10 @@ if(BUILD_TESTING)
 		Tests/ExportBuildProfileTests.cpp
 		Tests/AssetExportServiceTests.cpp
 	)
+	add_executable(PulseForgeMaterialGraphCompilerProcessFixture Tests/MaterialGraphCompilerProcessFixture.cpp)
+	target_compile_definitions(PulseForgeAssetTests PRIVATE
+		"PF_MATERIAL_GRAPH_COMPILER_FIXTURE=\"$<TARGET_FILE:PulseForgeMaterialGraphCompilerProcessFixture>\"")
+	add_dependencies(PulseForgeAssetTests PulseForgeMaterialGraphCompilerProcessFixture)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeAssetTests PRIVATE
 		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\""
@@ -134,7 +138,7 @@ if(BUILD_TESTING)
 			"PF_PHYSICS_QUERIES_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PhysicsQueries/PhysicsQueries.pfproj\""
 			"PF_RUNTIME_UI_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
-		PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
+		PulseForgeMaterialGraph PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeRuntime)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeBuildProfiles)
@@ -173,6 +177,14 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeCookedAssetCatalogConsumer PRIVATE PulseForgeCookedRuntimeProvider)
 	set_property(TARGET PulseForgeCookedAssetCatalogConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 	add_test(NAME PulseForge.CookedAssetCatalogConsumer COMMAND PulseForgeCookedAssetCatalogConsumer)
+	add_executable(PulseForgeMaterialGraphConsumer Tests/ModuleConsumers/MaterialGraphConsumer.cpp)
+	target_link_libraries(PulseForgeMaterialGraphConsumer PRIVATE PulseForgeMaterialGraph)
+	set_property(TARGET PulseForgeMaterialGraphConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.MaterialGraphConsumer COMMAND PulseForgeMaterialGraphConsumer)
+	add_executable(PulseForgeCookedGraphMaterialConsumer Tests/ModuleConsumers/CookedGraphMaterialConsumer.cpp)
+	target_link_libraries(PulseForgeCookedGraphMaterialConsumer PRIVATE PulseForgeCookedRuntimeProvider)
+	set_property(TARGET PulseForgeCookedGraphMaterialConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.CookedGraphMaterialConsumer COMMAND PulseForgeCookedGraphMaterialConsumer)
 	add_executable(PulseForgeDerivedDataTests
 		Tests/PulseForgeDerivedDataTests.cpp
 		Tests/AssetPreparationServiceTests.cpp
@@ -429,6 +441,8 @@ if(BUILD_TESTING)
 		PulseForgeScriptSourceMetadataConsumer
 		PulseForgeCookedAssetCatalogTests
 		PulseForgeCookedAssetCatalogConsumer
+		PulseForgeMaterialGraphConsumer
+		PulseForgeCookedGraphMaterialConsumer
 		PulseForgeDerivedDataTests
 		PulseForgeDerivedDataConsumer
 		PulseForgeSceneRendererConsumer

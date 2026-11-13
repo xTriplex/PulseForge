@@ -39,6 +39,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/PulseForgeRuntimeTargetClosure.cmake")
 
 foreach(ForbiddenTarget IN ITEMS
 		PulseForge PulseForgeAssetImporters PulseForgeAssetServices PulseForgeAssetDependencyCatalog
-		PulseForgeAssetCpuProducts PulseForgeDerivedData PulseForgeAssetCatalog)
+		PulseForgeAssetCpuProducts PulseForgeDerivedData PulseForgeAssetCatalog PulseForgeMaterialGraphCompiler)
 	pulseforge_assert_no_runtime_target_dependency(PulseForgeCookedGame "${ForbiddenTarget}")
 endforeach()

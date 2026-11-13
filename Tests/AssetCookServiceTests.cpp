@@ -10,6 +10,9 @@
 #include "Assets/Detail/AssetCpuProducts.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
+#include "Assets/MaterialGraphSource.h"
+#include "Assets/MaterialGraphCompiler.h"
+#include "Assets/DerivedDataArtifactStore.h"
 #include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
 #include "Scripting/ScriptRuntime.h"
@@ -21,10 +24,14 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <span>
 #include <iostream>
+#include <future>
 #include <string>
+#include <string_view>
+#include <thread>
 
 namespace
 {
@@ -52,6 +59,7 @@ namespace
 		AssetID AlternateSceneAsset;
 		AssetID ScriptAsset;
 		AssetID MaterialAsset;
+		AssetID GraphMaterialAsset;
 		CookedAssetCompatibility Compatibility;
 
 		CookFixture()
@@ -100,6 +108,28 @@ namespace
 			auto MaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(MaterialPath);
 			if (!MaterialMetadata) { Root.clear(); return; }
 			MaterialAsset = MaterialMetadata->ID;
+			MaterialGraphSource Graph;
+			Graph.GraphID = UUID(10, 1);
+			Graph.Nodes = {
+				{ UUID(10, 2), MaterialGraphNodeKind::FloatConstant, 0.4f, {} },
+				{ UUID(10, 3), MaterialGraphNodeKind::FloatParameter, 0.1f, "Accent" },
+				{ UUID(10, 4), MaterialGraphNodeKind::Add, 0.0f, {} },
+				{ UUID(10, 5), MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
+			};
+			Graph.Connections = {
+				{ UUID(11, 1), UUID(10, 2), UUID(10, 4), 0 },
+				{ UUID(11, 2), UUID(10, 3), UUID(10, 4), 1 },
+				{ UUID(11, 3), UUID(10, 4), UUID(10, 5), 0 }
+			};
+			MaterialAssetDesc GraphDescription;
+			GraphDescription.Graph = Graph;
+			auto GraphBytes = MaterialAssetSerializer::Serialize(GraphDescription);
+			if (!GraphBytes) { Root.clear(); return; }
+			const auto GraphPath = Source / "Assets" / "Graph.material";
+			WriteText(GraphPath, *GraphBytes);
+			auto GraphMetadata = AssetMetadataSerializer::CreateForNewAsset(GraphPath);
+			if (!GraphMetadata) { Root.clear(); return; }
+			GraphMaterialAsset = GraphMetadata->ID;
 			auto OpenedProject = Project::Open(ProjectFile);
 			if (!OpenedProject || !OpenedProject->SetStartScene(SceneAsset)) { Root.clear(); return; }
 			GameplayActionMap ActionMap;
@@ -690,8 +720,233 @@ namespace
 	}
 }
 
+void RunMaterialGraphSourceTests(TestRunner& Tests)
+{
+	using namespace PulseForge;
+	MaterialGraphSource Source;
+	Source.GraphID = UUID(1, 1);
+	Source.Nodes = {
+		{ UUID(1, 2), MaterialGraphNodeKind::FloatConstant, 0.25f, {} },
+		{ UUID(1, 3), MaterialGraphNodeKind::FloatConstant, 0.75f, {} },
+		{ UUID(1, 4), MaterialGraphNodeKind::Add, 0.0f, {} },
+		{ UUID(1, 5), MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
+	};
+	Source.Connections = {
+		{ UUID(2, 1), UUID(1, 2), UUID(1, 4), 0 },
+		{ UUID(2, 2), UUID(1, 3), UUID(1, 4), 1 },
+		{ UUID(2, 3), UUID(1, 4), UUID(1, 5), 0 }
+	};
+	PF_CHECK(Tests, ValidateMaterialGraphSource(Source).IsValid());
+	const auto Serialized = SerializeMaterialGraphSource(Source);
+	PF_CHECK(Tests, Serialized.has_value());
+	if (!Serialized) return;
+	const auto Restored = DeserializeMaterialGraphSource(*Serialized);
+	PF_CHECK(Tests, Restored.has_value());
+	if (Restored) PF_CHECK(Tests, *Restored == Source);
+	const auto IR = LowerMaterialGraphToIR(Source);
+	PF_CHECK(Tests, IR && IR->Expressions.size() == 3 && IR->OutputNode == UUID(1, 5));
+	if (IR)
+	{
+		PF_CHECK(Tests, IR->Expressions[IR->OutputExpression].SourceNode == UUID(1, 4));
+		PF_CHECK(Tests, IR->Expressions[IR->OutputExpression].Op == MaterialGraphExpressionOp::Add);
+	}
+	MaterialGraphCompileRequest CompileRequest;
+	CompileRequest.Source = Source;
+	CompileRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
+	PF_CHECK(Tests, CompileRequest.ToolchainFingerprint.find("dxc-1.9.2602.24") != std::string::npos);
+	const auto CacheID = UUID::Generate();
+	PF_CHECK(Tests, CacheID.has_value());
+	if (!CacheID) return;
+	const auto CacheRoot = std::filesystem::temp_directory_path() / ("PF-MaterialGraphDDC-" + CacheID->ToString());
+	struct MaterialGraphCacheCleanup final
+	{
+		std::filesystem::path Root;
+		~MaterialGraphCacheCleanup() { std::error_code Ignored; std::filesystem::remove_all(Root, Ignored); }
+	} CacheCleanup{ CacheRoot };
+	DerivedDataArtifactStore CompilerArtifacts({ CacheRoot, true, 8 * 1024 * 1024, 4 * 1024 * 1024, 16 });
+	CompileRequest.ArtifactStore = &CompilerArtifacts;
+	auto Compiled = MaterialGraphCompiler::Compile(CompileRequest);
+	PF_CHECK(Tests, Compiled.has_value());
+	if (Compiled)
+	{
+		PF_CHECK(Tests, Compiled->SourceNodes.size() == 3 &&
+			std::find(Compiled->SourceNodes.begin(), Compiled->SourceNodes.end(), UUID(1, 4)) != Compiled->SourceNodes.end());
+		PF_CHECK(Tests, Compiled->SpirV.size() >= 20);
+		PF_CHECK(Tests, Compiled->SpirV[0] == std::byte{ 0x03 } && Compiled->SpirV[1] == std::byte{ 0x02 } &&
+			Compiled->SpirV[2] == std::byte{ 0x23 } && Compiled->SpirV[3] == std::byte{ 0x07 });
+		PF_CHECK(Tests, Compiled->RecipeFingerprint.size() == 32);
+		auto Moved = Source;
+		std::reverse(Moved.Nodes.begin(), Moved.Nodes.end());
+		std::reverse(Moved.Connections.begin(), Moved.Connections.end());
+		auto Recompiled = MaterialGraphCompiler::Compile(MaterialGraphCompileRequest{
+			Moved, {}, CompileRequest.ToolchainFingerprint });
+		PF_CHECK(Tests, Recompiled && Recompiled->RecipeFingerprint == Compiled->RecipeFingerprint);
+		auto Rerouted = Source;
+		Rerouted.Nodes.push_back({ UUID(1, 6), MaterialGraphNodeKind::Reroute, 0.0f, {} });
+		std::erase_if(Rerouted.Connections, [](const MaterialGraphConnection& Connection)
+			{ return Connection.ID == UUID(2, 1); });
+		Rerouted.Connections.push_back({ UUID(2, 8), UUID(1, 2), UUID(1, 6), 0 });
+		Rerouted.Connections.push_back({ UUID(2, 9), UUID(1, 6), UUID(1, 4), 0 });
+		const auto ReroutedIR = LowerMaterialGraphToIR(Rerouted);
+		PF_CHECK(Tests, ReroutedIR && ReroutedIR->Expressions.size() == IR->Expressions.size());
+		MaterialGraphCompileRequest ReroutedRequest = CompileRequest;
+		ReroutedRequest.Source = Rerouted;
+		const auto ReroutedCompile = MaterialGraphCompiler::Compile(ReroutedRequest);
+		PF_CHECK(Tests, ReroutedCompile && ReroutedCompile->RecipeFingerprint == Compiled->RecipeFingerprint);
+		auto SemanticEdit = Source;
+		SemanticEdit.Nodes[0].Value += 0.125f;
+		auto SemanticRecompiled = MaterialGraphCompiler::Compile(MaterialGraphCompileRequest{
+			SemanticEdit, {}, CompileRequest.ToolchainFingerprint });
+		PF_CHECK(Tests, SemanticRecompiled && SemanticRecompiled->RecipeFingerprint != Compiled->RecipeFingerprint);
+		MaterialGraphCompileRequest CachedCompile = CompileRequest;
+		CachedCompile.CompilerExecutable = "missing-after-first-compile.exe";
+		auto CacheHit = MaterialGraphCompiler::Compile(CachedCompile);
+		PF_CHECK(Tests, CacheHit && CacheHit->SpirV == Compiled->SpirV &&
+			CacheHit->RecipeFingerprint == Compiled->RecipeFingerprint);
+		auto ParameterGraph = Source;
+		ParameterGraph.Nodes[0].Kind = MaterialGraphNodeKind::FloatParameter;
+		ParameterGraph.Nodes[0].ParameterName = "BaseTint";
+		MaterialGraphCompileRequest ParameterRequest{ ParameterGraph, {}, CompileRequest.ToolchainFingerprint };
+		ParameterRequest.ArtifactStore = &CompilerArtifacts;
+		auto ParameterCompiled = MaterialGraphCompiler::Compile(ParameterRequest);
+		PF_CHECK(Tests, ParameterCompiled.has_value());
+		if (ParameterCompiled)
+		{
+			ParameterGraph.Nodes[0].Value += 0.2f;
+			ParameterRequest.Source = ParameterGraph;
+			ParameterRequest.CompilerExecutable = "missing-after-parameter-edit.exe";
+			auto ParameterValueChanged = MaterialGraphCompiler::Compile(ParameterRequest);
+			PF_CHECK(Tests, ParameterValueChanged &&
+				ParameterValueChanged->RecipeFingerprint == ParameterCompiled->RecipeFingerprint);
+			PF_CHECK(Tests, ParameterValueChanged && ParameterValueChanged->Parameters.size() == 1 &&
+				std::abs(ParameterValueChanged->Parameters[0].DefaultValue - 0.45f) < 0.0001f);
+		}
+	}
+	MaterialGraphCompileRequest MissingCompiler;
+	MissingCompiler.Source = Source;
+	MissingCompiler.CompilerExecutable = "missing-dxc.exe";
+	MissingCompiler.ToolchainFingerprint = "test";
+	const auto Missing = MaterialGraphCompiler::Compile(MissingCompiler);
+	PF_CHECK(Tests, !Missing && Missing.error().Code == MaterialGraphCompileErrorCode::CompilerUnavailable);
+	MaterialGraphCompileRequest StaleCompile;
+	StaleCompile.Source = Source;
+	StaleCompile.ToolchainFingerprint = "test";
+	StaleCompile.IsGenerationCurrent = [](uint64_t) { return false; };
+	const auto Stale = MaterialGraphCompiler::Compile(StaleCompile);
+	PF_CHECK(Tests, !Stale && Stale.error().Code == MaterialGraphCompileErrorCode::StaleGeneration);
+	std::stop_source CancelBeforeLaunch;
+	CancelBeforeLaunch.request_stop();
+	MaterialGraphCompileRequest CancelledCompile;
+	CancelledCompile.Source = Source;
+	CancelledCompile.ToolchainFingerprint = "test";
+	CancelledCompile.CancellationToken = CancelBeforeLaunch.get_token();
+	const auto Cancelled = MaterialGraphCompiler::Compile(CancelledCompile);
+	PF_CHECK(Tests, !Cancelled && Cancelled.error().Code == MaterialGraphCompileErrorCode::Cancelled);
+#if defined(PF_MATERIAL_GRAPH_COMPILER_FIXTURE)
+	MaterialGraphCompileRequest ProcessFailure;
+	ProcessFailure.Source = Source;
+	ProcessFailure.Source.Nodes[0].Value = 777.0f;
+	ProcessFailure.CompilerExecutable = PF_MATERIAL_GRAPH_COMPILER_FIXTURE;
+	ProcessFailure.ToolchainFingerprint = "process-fixture";
+	const auto Crashed = MaterialGraphCompiler::Compile(ProcessFailure);
+	PF_CHECK(Tests, !Crashed && Crashed.error().Code == MaterialGraphCompileErrorCode::CompilerFailed);
+	MaterialGraphCompileRequest ProcessTimeout = ProcessFailure;
+	ProcessTimeout.Source.Nodes[0].Value = 778.0f;
+	ProcessTimeout.Timeout = std::chrono::milliseconds(100);
+	const auto TimedOut = MaterialGraphCompiler::Compile(ProcessTimeout);
+	PF_CHECK(Tests, !TimedOut && TimedOut.error().Code == MaterialGraphCompileErrorCode::TimedOut);
+	MaterialGraphCompileRequest StaleDuringProcess = ProcessTimeout;
+	StaleDuringProcess.Timeout = std::chrono::seconds(2);
+	std::atomic_size_t GenerationChecks = 0;
+	StaleDuringProcess.IsGenerationCurrent = [&](uint64_t) { return ++GenerationChecks == 1; };
+	const auto StaleChild = MaterialGraphCompiler::Compile(StaleDuringProcess);
+	PF_CHECK(Tests, !StaleChild && StaleChild.error().Code == MaterialGraphCompileErrorCode::StaleGeneration);
+	MaterialGraphCompileRequest CancelDuringProcess = ProcessTimeout;
+	CancelDuringProcess.Timeout = std::chrono::seconds(2);
+	std::stop_source CancelRunning;
+	CancelDuringProcess.CancellationToken = CancelRunning.get_token();
+	std::jthread CancelTimer([&](std::stop_token Stop)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(40));
+		if (!Stop.stop_requested()) CancelRunning.request_stop();
+	});
+	const auto CancelledChild = MaterialGraphCompiler::Compile(CancelDuringProcess);
+	CancelTimer.request_stop();
+	PF_CHECK(Tests, !CancelledChild && CancelledChild.error().Code == MaterialGraphCompileErrorCode::Cancelled);
+#endif
+	MaterialAssetDesc Material;
+	Material.Graph = Source;
+	const auto MaterialBytes = MaterialAssetSerializer::Serialize(Material);
+	PF_CHECK(Tests, MaterialBytes.has_value());
+	if (MaterialBytes)
+	{
+		const auto MaterialRoundTrip = MaterialAssetSerializer::Deserialize(*MaterialBytes);
+		PF_CHECK(Tests, MaterialRoundTrip.has_value());
+		if (MaterialRoundTrip) PF_CHECK(Tests, MaterialRoundTrip->Graph == Material.Graph);
+		PF_CHECK(Tests, MaterialBytes->find("\"version\": 5") != std::string::npos);
+	}
+	const auto FixedMaterial = MaterialAssetSerializer::Serialize(MaterialAssetDesc{});
+	PF_CHECK(Tests, FixedMaterial && FixedMaterial->find("\"version\": 4") != std::string::npos);
+	if (Compiled)
+	{
+		CookedGraphMaterialProduct Product;
+		Product.RecipeFingerprint = Compiled->RecipeFingerprint;
+		for (const auto& Parameter : Compiled->Parameters)
+			Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
+		Product.SpirV = Compiled->SpirV;
+		auto ProductBytes = Detail::EncodeGraphMaterialProduct(Product);
+		PF_CHECK(Tests, ProductBytes.has_value());
+		if (ProductBytes)
+		{
+			auto ProductReadBack = Detail::DecodeGraphMaterialProduct(*ProductBytes);
+			PF_CHECK(Tests, ProductReadBack && ProductReadBack->RecipeFingerprint == Product.RecipeFingerprint &&
+				ProductReadBack->SpirV == Product.SpirV && ProductReadBack->Parameters == Product.Parameters);
+			auto FutureProduct = *ProductBytes;
+			FutureProduct[4] = std::byte{ 2 };
+			PF_CHECK(Tests, !Detail::DecodeGraphMaterialProduct(FutureProduct));
+			ProductBytes->front() ^= std::byte{ 1 };
+			PF_CHECK(Tests, !Detail::DecodeGraphMaterialProduct(*ProductBytes));
+		}
+	}
+	{
+		CookedGraphMaterialProduct MaximumBoundedProduct;
+		MaximumBoundedProduct.RecipeFingerprint = std::string(32, 'a');
+		MaximumBoundedProduct.SpirV.resize(16u * 1024u * 1024u);
+		MaximumBoundedProduct.SpirV[0] = std::byte{ 0x03 };
+		MaximumBoundedProduct.SpirV[1] = std::byte{ 0x02 };
+		MaximumBoundedProduct.SpirV[2] = std::byte{ 0x23 };
+		MaximumBoundedProduct.SpirV[3] = std::byte{ 0x07 };
+		for (uint64_t Index = 0; Index < 256; ++Index)
+		{
+			std::string Name = "Parameter_" + std::to_string(Index);
+			Name.resize(64, '_');
+			MaximumBoundedProduct.Parameters.push_back({ UUID(8, Index + 1), std::move(Name), 0.0f });
+		}
+		auto MaximumBytes = Detail::EncodeGraphMaterialProduct(MaximumBoundedProduct);
+		PF_CHECK(Tests, MaximumBytes.has_value());
+		if (MaximumBytes)
+		{
+			const auto MaximumRoundTrip = Detail::DecodeGraphMaterialProduct(*MaximumBytes);
+			PF_CHECK(Tests, MaximumRoundTrip && MaximumRoundTrip->Parameters == MaximumBoundedProduct.Parameters &&
+				MaximumRoundTrip->SpirV == MaximumBoundedProduct.SpirV);
+		}
+	}
+	auto Cyclic = Source;
+	Cyclic.Connections.push_back({ UUID(2, 4), UUID(1, 4), UUID(1, 2), 0 });
+	PF_CHECK(Tests, !ValidateMaterialGraphSource(Cyclic).IsValid());
+	const auto UnsupportedVersion = Serialized->find("\"version\": 1");
+	PF_CHECK(Tests, UnsupportedVersion != std::string::npos);
+	if (UnsupportedVersion != std::string::npos)
+	{
+		auto Future = *Serialized;
+		Future.replace(UnsupportedVersion, std::string("\"version\": 1").size(), "\"version\": 99");
+		PF_CHECK(Tests, !DeserializeMaterialGraphSource(Future).has_value());
+	}
+}
+
 void RunAssetCookServiceTests(TestRunner& Tests)
 {
+	RunMaterialGraphSourceTests(Tests);
 	using namespace PulseForge;
 	CookFixture Fixture;
 	PF_CHECK(Tests, !Fixture.Root.empty());
@@ -793,6 +1048,32 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 				const std::array<float, 4> ExpectedFactor{ 0.25f, 0.5f, 0.75f, 1.0f };
 				PF_CHECK(Tests, CookedMaterial->BaseColorFactor == ExpectedFactor);
 			}
+		}
+	}
+	auto GraphMaterialRequest = Fixture.Request(*Snapshot);
+	GraphMaterialRequest.DynamicRoots = { Fixture.GraphMaterialAsset };
+	GraphMaterialRequest.OutputRoot = Fixture.Root / "GraphMaterialCook";
+	const auto GraphMaterialCook = RunCookWithBoundary("saved-graph-material-cook", [&]
+		{ return AssetCookService::Cook(GraphMaterialRequest); });
+	PF_CHECK(Tests, GraphMaterialCook.has_value());
+	if (GraphMaterialCook)
+	{
+		auto GraphProvider = CookedContentProvider::Open(GraphMaterialRequest.OutputRoot, Fixture.Compatibility);
+		PF_CHECK(Tests, GraphProvider.has_value());
+		if (GraphProvider)
+		{
+			PF_CHECK(Tests, (*GraphProvider)->FindGraphMaterial(Fixture.GraphMaterialAsset) != nullptr);
+			auto CookedGraph = (*GraphProvider)->LoadGraphMaterialProduct(Fixture.GraphMaterialAsset);
+			PF_CHECK(Tests, CookedGraph.has_value());
+			if (CookedGraph)
+			{
+				PF_CHECK(Tests, CookedGraph->RecipeFingerprint.size() == 32);
+				PF_CHECK(Tests, CookedGraph->SpirV.size() >= 20);
+				PF_CHECK(Tests, CookedGraph->Parameters.size() == 1 &&
+					CookedGraph->Parameters[0].ID == UUID(10, 3) && CookedGraph->Parameters[0].Name == "Accent" &&
+					std::abs(CookedGraph->Parameters[0].DefaultValue - 0.1f) < 0.0001f);
+			}
+			PF_CHECK(Tests, !(*GraphProvider)->FindMaterial(Fixture.GraphMaterialAsset));
 		}
 	}
 	auto StartupOverrideRequest = Fixture.Request(*Snapshot);

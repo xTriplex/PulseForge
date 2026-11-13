@@ -79,6 +79,48 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsureGraphScenePipeline(
+		ColorTargetFormat ColorFormat,
+		std::string_view RecipeFingerprint,
+		ShaderHandle FragmentShader,
+		BindingLayoutHandle MaterialLayout,
+		bool AlphaBlend,
+		bool DoubleSided,
+		WorldTransformOrientation Orientation)
+	{
+		if (Orientation == WorldTransformOrientation::Singular)
+			return std::unexpected(MakeResourceError("Cannot create a graph-material pipeline for a singular mesh transform"));
+		if (RecipeFingerprint.empty() || !FragmentShader || !MaterialLayout)
+			return std::unexpected(MakeResourceError("Graph-material pipeline identity or shader resources are incomplete"));
+		const auto Key = std::tuple{ std::string(RecipeFingerprint), ColorFormat, AlphaBlend, DoubleSided, Orientation };
+		if (m_GraphScenePipelines.contains(Key)) return {};
+		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
+		if (!m_VertexLayout)
+			return std::unexpected(MakeResourceError("Cannot create a graph-material pipeline before a mesh vertex layout is prepared"));
+
+		ScopedDiagnosticTimer Timer(m_Runtime.GetDiagnosticRecorder(), "Graph material pipeline creation", "SceneRendererPipelineCache");
+		GraphicsPipelineDesc Description;
+		Description.VertexShader = m_Resources->SceneVertexShader;
+		Description.FragmentShader = std::move(FragmentShader);
+		Description.BindingLayouts = { m_Resources->SceneMaterialLayout, m_Resources->DirectionalShadowLayout,
+			m_Resources->AmbientOcclusionLayout, m_Resources->PointLightShadowLayout, std::move(MaterialLayout) };
+		Description.VertexLayout = *m_VertexLayout;
+		Description.ColorFormat = ColorFormat;
+		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
+		Description.Rasterizer.FrontCounterClockwise = UsesCounterClockwiseFrontFace(Orientation);
+		Description.Blend.Enabled = AlphaBlend;
+		Description.Depth.TestEnabled = true;
+		Description.Depth.WriteEnabled = !AlphaBlend;
+		Description.Depth.Compare = DepthCompareOperation::Less;
+		Description.DebugName = AlphaBlend ? "PulseForge transparent graph material pipeline" : "PulseForge graph material pipeline";
+		if (Orientation == WorldTransformOrientation::Mirrored) Description.DebugName += " (mirrored transform)";
+		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+		if (!Pipeline)
+			return std::unexpected(MakeResourceError("Could not create graph-material graphics pipeline: " + Pipeline.error().Message));
+		m_GraphScenePipelines.emplace(Key, std::move(*Pipeline));
+		return {};
+	}
+
 	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsureBackgroundPipeline(ColorTargetFormat ColorFormat)
 	{
 		if (m_BackgroundPipelines.contains(ColorFormat)) return {};
@@ -177,6 +219,19 @@ namespace PulseForge
 		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
 		const auto Found = m_ScenePipelines.find(std::tuple{ ColorFormat, AlphaBlend, DoubleSided, Orientation });
 		return Found != m_ScenePipelines.end() ? Found->second.get() : nullptr;
+	}
+
+	const GraphicsPipeline* SceneRendererPipelineCache::FindGraphScenePipeline(
+		ColorTargetFormat ColorFormat,
+		std::string_view RecipeFingerprint,
+		bool AlphaBlend,
+		bool DoubleSided,
+		WorldTransformOrientation Orientation) const noexcept
+	{
+		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
+		const auto Found = m_GraphScenePipelines.find(
+			{ std::string(RecipeFingerprint), ColorFormat, AlphaBlend, DoubleSided, Orientation });
+		return Found != m_GraphScenePipelines.end() ? Found->second.get() : nullptr;
 	}
 
 	const GraphicsPipeline* SceneRendererPipelineCache::FindBackgroundPipeline(ColorTargetFormat ColorFormat) const noexcept

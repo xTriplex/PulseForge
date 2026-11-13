@@ -5,6 +5,7 @@
 #include <array>
 #include <map>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <tuple>
 
@@ -40,6 +41,14 @@ namespace PulseForge
 
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureScenePipeline(ColorTargetFormat ColorFormat, bool AlphaBlend = false,
 			bool DoubleSided = false, WorldTransformOrientation Orientation = WorldTransformOrientation::Normal);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureGraphScenePipeline(
+			ColorTargetFormat ColorFormat,
+			std::string_view RecipeFingerprint,
+			ShaderHandle FragmentShader,
+			BindingLayoutHandle MaterialLayout,
+			bool AlphaBlend = false,
+			bool DoubleSided = false,
+			WorldTransformOrientation Orientation = WorldTransformOrientation::Normal);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(
 			float DepthBias, bool DoubleSided = false, WorldTransformOrientation Orientation = WorldTransformOrientation::Normal);
@@ -48,6 +57,8 @@ namespace PulseForge
 
 		[[nodiscard]] const GraphicsPipeline* FindScenePipeline(ColorTargetFormat ColorFormat, bool AlphaBlend, bool DoubleSided,
 			WorldTransformOrientation Orientation = WorldTransformOrientation::Normal) const noexcept;
+		[[nodiscard]] const GraphicsPipeline* FindGraphScenePipeline(ColorTargetFormat ColorFormat, std::string_view RecipeFingerprint,
+			bool AlphaBlend, bool DoubleSided, WorldTransformOrientation Orientation) const noexcept;
 		[[nodiscard]] const GraphicsPipeline* FindBackgroundPipeline(ColorTargetFormat ColorFormat) const noexcept;
 		[[nodiscard]] const GraphicsPipeline* FindShadowPipeline(
 			int32_t RasterBias, bool DoubleSided, WorldTransformOrientation Orientation = WorldTransformOrientation::Normal) const noexcept;
@@ -65,6 +76,8 @@ namespace PulseForge
 		std::map<std::tuple<int32_t, bool, WorldTransformOrientation>, GraphicsPipelineHandle> m_ShadowPipelines;
 		std::array<GraphicsPipelineHandle, 4> m_PointShadowPipelines;
 		std::map<std::tuple<ColorTargetFormat, bool, bool, WorldTransformOrientation>, GraphicsPipelineHandle> m_ScenePipelines;
+		std::map<std::tuple<std::string, ColorTargetFormat, bool, bool, WorldTransformOrientation>, GraphicsPipelineHandle>
+			m_GraphScenePipelines;
 		std::map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
 	};
 } // namespace PulseForge

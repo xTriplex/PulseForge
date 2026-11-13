@@ -157,10 +157,26 @@ namespace PulseForge
 	std::expected<CookedMaterialProduct, CookedAssetCatalogError> CookedContentProvider::LoadMaterialProduct(
 		const AssetID& Asset) const
 	{
+		if (FindGraphMaterial(Asset)) return CookedMaterialProduct{};
 		auto Bytes = ReadMaterial(Asset);
 		if (!Bytes) return std::unexpected(std::move(Bytes.error()));
 		auto Product = Detail::DecodeMaterialProduct(*Bytes);
 		if (!Product) return std::unexpected(InvalidProduct(Asset, "Cooked material product is invalid: " + Product.error()));
+		return std::move(*Product);
+	}
+
+	const CookedAssetEntry* CookedContentProvider::FindGraphMaterial(const AssetID& Asset) const noexcept
+	{
+		return Find(Asset, CookedAssetProductKind::GraphMaterial);
+	}
+
+	std::expected<CookedGraphMaterialProduct, CookedAssetCatalogError> CookedContentProvider::LoadGraphMaterialProduct(
+		const AssetID& Asset) const
+	{
+		auto Bytes = Read(Asset, CookedAssetProductKind::GraphMaterial);
+		if (!Bytes) return std::unexpected(std::move(Bytes.error()));
+		auto Product = Detail::DecodeGraphMaterialProduct(*Bytes);
+		if (!Product) return std::unexpected(InvalidProduct(Asset, "Cooked graph material product is invalid: " + Product.error()));
 		return std::move(*Product);
 	}
 
