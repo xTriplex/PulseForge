@@ -180,6 +180,12 @@ namespace
 	bool GraphShortcutSyntheticKeyObserved = false;
 	bool GraphShortcutSyntheticHostFocused = false;
 
+	void QueueGraphPrimaryModifier(ImGuiIO& IO, bool Down)
+	{
+		// AddKeyEvent takes a physical modifier. macOS Cmd maps to logical Ctrl.
+		IO.AddKeyEvent(IO.ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl, Down);
+	}
+
 	const char* GetGraphTestClipboard(ImGuiContext*)
 	{
 		return GraphTestClipboard.c_str();
@@ -577,7 +583,7 @@ namespace
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Left, LeftDown);
 			IO.AddMouseButtonEvent(ImGuiMouseButton_Right, RightDown);
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
-			IO.AddKeyEvent(ImGuiMod_Ctrl, Control);
+			QueueGraphPrimaryModifier(IO, Control);
 			for (const ImGuiKey Key : { ImGuiKey_C, ImGuiKey_V, ImGuiKey_X, ImGuiKey_D, ImGuiKey_Delete })
 				IO.AddKeyEvent(Key, Key == PressedKey);
 			ImGui::NewFrame();
@@ -1723,7 +1729,7 @@ namespace
 			IO.MouseDown[ImGuiMouseButton_Right] = RightDown;
 			IO.AddKeyEvent(ImGuiKey_Escape, Escape);
 			IO.AddKeyEvent(ImGuiKey_R, RDown);
-			IO.AddKeyEvent(ImGuiMod_Ctrl, Control);
+			QueueGraphPrimaryModifier(IO, Control);
 			const bool PreviousInputTrickle = IO.ConfigInputTrickleEventQueue;
 			if (ProcessQueuedInputTogether) IO.ConfigInputTrickleEventQueue = false;
 			ImGui::NewFrame();
@@ -3439,9 +3445,11 @@ namespace
 		// accepted state reaches the policy rejection, while the accepted draft stays intact.
 		EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *Session, Before, Schema);
 		PF_CHECK(Tests, GraphEditor.Save(*Session) && !Session->IsDirty());
-		DrawFrame(ImVec2(-1000.0f, -1000.0f));
-		DrawFrame(SourceAPoint);
-		DrawFrame(SourceAPoint, true);
+		const ImVec2 ResyncedSourceAPoint = FindPinScreen(SourceA);
+		DrawFrame(ResyncedSourceAPoint);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetLastHoveredPin(GraphEditor, *Session) == SourceA);
+		DrawFrame(ResyncedSourceAPoint, true);
+		PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session).HasPendingStart);
 		DrawFrame(KnotOne, true);
 		DrawFrame(KnotOne, true, true);
 		Route = EditorGraphDocumentEditorTestAccess::GetWireRoute(GraphEditor, *Session);
