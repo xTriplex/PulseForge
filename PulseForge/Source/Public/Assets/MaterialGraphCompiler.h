@@ -16,6 +16,13 @@ namespace PulseForge
 {
 	class DerivedDataArtifactStore;
 
+	enum class MaterialGraphCompileTarget : uint8_t
+	{
+		VulkanSpirV,
+		Direct3DDXIL,
+		OpenGLSpirV
+	};
+
 	struct MaterialGraphCompileRequest final
 	{
 		MaterialGraphSource Source;
@@ -27,6 +34,7 @@ namespace PulseForge
 		std::function<bool(uint64_t)> IsGenerationCurrent;
 		DerivedDataArtifactStore* ArtifactStore = nullptr;
 		std::stop_token CancellationToken;
+		MaterialGraphCompileTarget Target = MaterialGraphCompileTarget::VulkanSpirV;
 	};
 
 	struct MaterialGraphCompiledArtifact final
@@ -53,6 +61,7 @@ namespace PulseForge
 		InvalidRequest,
 		CompilerUnavailable,
 		CompilerFailed,
+		UnsupportedTarget,
 		TimedOut,
 		Cancelled,
 		StaleGeneration,

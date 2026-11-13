@@ -222,6 +222,9 @@ namespace PulseForge
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::Cancelled, "Material compilation was cancelled before launch"));
 		if (Request.IsGenerationCurrent && !Request.IsGenerationCurrent(Request.Generation))
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::StaleGeneration, "Material generation is stale before launch"));
+		if (Request.Target != MaterialGraphCompileTarget::VulkanSpirV)
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::UnsupportedTarget,
+				"Material graph compilation currently supports only Vulkan SPIR-V"));
 		if (Request.Timeout <= std::chrono::milliseconds::zero() || Request.Timeout > std::chrono::minutes(2) ||
 			Request.MaximumOutputBytes < 20 || Request.MaximumOutputBytes > 64u * 1024u * 1024u || Request.ToolchainFingerprint.empty())
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest, "Compiler timeout, output bound, or toolchain fingerprint is invalid"));

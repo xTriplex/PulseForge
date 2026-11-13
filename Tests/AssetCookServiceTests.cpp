@@ -828,6 +828,10 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	MissingCompiler.ToolchainFingerprint = "test";
 	const auto Missing = MaterialGraphCompiler::Compile(MissingCompiler);
 	PF_CHECK(Tests, !Missing && Missing.error().Code == MaterialGraphCompileErrorCode::CompilerUnavailable);
+	MaterialGraphCompileRequest UnsupportedTarget = MissingCompiler;
+	UnsupportedTarget.Target = MaterialGraphCompileTarget::Direct3DDXIL;
+	const auto Unsupported = MaterialGraphCompiler::Compile(UnsupportedTarget);
+	PF_CHECK(Tests, !Unsupported && Unsupported.error().Code == MaterialGraphCompileErrorCode::UnsupportedTarget);
 	MaterialGraphCompileRequest StaleCompile;
 	StaleCompile.Source = Source;
 	StaleCompile.ToolchainFingerprint = "test";
@@ -850,6 +854,10 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	ProcessFailure.ToolchainFingerprint = "process-fixture";
 	const auto Crashed = MaterialGraphCompiler::Compile(ProcessFailure);
 	PF_CHECK(Tests, !Crashed && Crashed.error().Code == MaterialGraphCompileErrorCode::CompilerFailed);
+	MaterialGraphCompileRequest PartialOutput = ProcessFailure;
+	PartialOutput.Source.Nodes[0].Value = 0.5f;
+	const auto InvalidOutput = MaterialGraphCompiler::Compile(PartialOutput);
+	PF_CHECK(Tests, !InvalidOutput && InvalidOutput.error().Code == MaterialGraphCompileErrorCode::OutputInvalid);
 	MaterialGraphCompileRequest ProcessTimeout = ProcessFailure;
 	ProcessTimeout.Source.Nodes[0].Value = 778.0f;
 	ProcessTimeout.Timeout = std::chrono::milliseconds(100);
