@@ -863,6 +863,13 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	PartialOutput.Source.Nodes[0].Value = 0.5f;
 	const auto InvalidOutput = MaterialGraphCompiler::Compile(PartialOutput);
 	PF_CHECK(Tests, !InvalidOutput && InvalidOutput.error().Code == MaterialGraphCompileErrorCode::OutputInvalid);
+	MaterialGraphCompileRequest MissingParameterBinding = ProcessFailure;
+	MissingParameterBinding.Source.Nodes[0].Kind = MaterialGraphNodeKind::FloatParameter;
+	MissingParameterBinding.Source.Nodes[0].ParameterName = "MissingBinding";
+	MissingParameterBinding.Source.Nodes[0].Value = 0.25f;
+	const auto MissingBindingOutput = MaterialGraphCompiler::Compile(MissingParameterBinding);
+	PF_CHECK(Tests, !MissingBindingOutput &&
+		MissingBindingOutput.error().Code == MaterialGraphCompileErrorCode::OutputInvalid);
 	MaterialGraphCompileRequest ProcessTimeout = ProcessFailure;
 	ProcessTimeout.Source.Nodes[0].Value = 778.0f;
 	ProcessTimeout.Timeout = std::chrono::milliseconds(100);

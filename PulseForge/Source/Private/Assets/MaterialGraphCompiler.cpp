@@ -8,6 +8,7 @@
 #include <chrono>
 #include <charconv>
 #include <cstddef>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -185,15 +186,89 @@ namespace PulseForge
 			return Builder.Finish();
 		}
 
-		bool IsSpirV(std::span<const std::byte> Bytes, size_t MaximumBytes)
+		uint32_t ReadSpirVWord(std::span<const std::byte> Bytes, size_t WordIndex)
 		{
-			return Bytes.size() >= 20 && Bytes.size() <= MaximumBytes && Bytes.size() % 4 == 0 &&
-				Bytes[0] == std::byte{ 0x03 } && Bytes[1] == std::byte{ 0x02 } &&
-				Bytes[2] == std::byte{ 0x23 } && Bytes[3] == std::byte{ 0x07 };
+			uint32_t Word = 0;
+			std::memcpy(&Word, Bytes.data() + WordIndex * sizeof(Word), sizeof(Word));
+			return Word;
+		}
+
+		bool IsSpirV(std::span<const std::byte> Bytes, size_t MaximumBytes, bool RequiresGraphParameterBinding)
+		{
+			if (Bytes.size() < 20 || Bytes.size() > MaximumBytes || Bytes.size() % 4 != 0) return false;
+			const size_t WordCount = Bytes.size() / sizeof(uint32_t);
+			const uint32_t Version = ReadSpirVWord(Bytes, 1);
+			const uint32_t IDBound = ReadSpirVWord(Bytes, 3);
+			if (ReadSpirVWord(Bytes, 0) != 0x07230203 || (Version >> 16) != 1 || (Version & 0xff) > 6 ||
+				IDBound == 0 || IDBound > 16 * 1024 * 1024 || ReadSpirVWord(Bytes, 4) != 0)
+				return false;
+
+			constexpr uint16_t OpMemoryModel = 14;
+			constexpr uint16_t OpEntryPoint = 15;
+			constexpr uint16_t OpVariable = 59;
+			constexpr uint16_t OpDecorate = 71;
+			constexpr uint32_t DecorationBinding = 33;
+			constexpr uint32_t DecorationDescriptorSet = 34;
+			constexpr uint32_t StorageClassUniform = 2;
+			std::unordered_map<uint32_t, std::pair<std::optional<uint32_t>, std::optional<uint32_t>>> DecorationsByID;
+			std::unordered_map<uint32_t, uint32_t> StorageClassByID;
+			bool HasMemoryModel = false;
+			bool HasFragmentEntryPoint = false;
+			for (size_t Offset = 5; Offset < WordCount;)
+			{
+				const uint32_t Instruction = ReadSpirVWord(Bytes, Offset);
+				const uint16_t InstructionWords = static_cast<uint16_t>(Instruction >> 16);
+				const uint16_t Opcode = static_cast<uint16_t>(Instruction & 0xffff);
+				if (InstructionWords == 0 || InstructionWords > WordCount - Offset) return false;
+				if (Opcode == OpMemoryModel)
+				{
+					if (InstructionWords != 3 || HasMemoryModel) return false;
+					HasMemoryModel = true;
+				}
+				else if (Opcode == OpEntryPoint)
+				{
+					if (InstructionWords < 4) return false;
+					if (ReadSpirVWord(Bytes, Offset + 1) == 4) HasFragmentEntryPoint = true;
+				}
+				else if (Opcode == OpVariable)
+				{
+					if (InstructionWords < 4) return false;
+					const uint32_t ResultID = ReadSpirVWord(Bytes, Offset + 2);
+					const uint32_t StorageClass = ReadSpirVWord(Bytes, Offset + 3);
+					if (ResultID == 0 || ResultID >= IDBound || !StorageClassByID.emplace(ResultID, StorageClass).second)
+						return false;
+				}
+				else if (Opcode == OpDecorate)
+				{
+					if (InstructionWords < 3) return false;
+					const uint32_t TargetID = ReadSpirVWord(Bytes, Offset + 1);
+					const uint32_t Decoration = ReadSpirVWord(Bytes, Offset + 2);
+					if (TargetID == 0 || TargetID >= IDBound) return false;
+					if (Decoration == DecorationBinding || Decoration == DecorationDescriptorSet)
+					{
+						if (InstructionWords != 4) return false;
+						auto& Pair = DecorationsByID[TargetID];
+						auto& Value = Decoration == DecorationBinding ? Pair.first : Pair.second;
+						if (Value) return false;
+						Value = ReadSpirVWord(Bytes, Offset + 3);
+					}
+				}
+				Offset += InstructionWords;
+			}
+			if (!HasMemoryModel || !HasFragmentEntryPoint) return false;
+			if (!RequiresGraphParameterBinding) return true;
+			for (const auto& [ID, Decorations] : DecorationsByID)
+			{
+				const auto Variable = StorageClassByID.find(ID);
+				if (Variable != StorageClassByID.end() && Variable->second == StorageClassUniform &&
+					Decorations.first == 0 && Decorations.second == 4)
+					return true;
+			}
+			return false;
 		}
 
 		std::expected<std::vector<std::byte>, MaterialGraphCompileError> ReadBoundedFile(
-			const std::filesystem::path& Path, size_t MaximumBytes)
+			const std::filesystem::path& Path, size_t MaximumBytes, bool RequiresGraphParameterBinding)
 		{
 			std::error_code Error;
 			const uintmax_t Size = std::filesystem::file_size(Path, Error);
@@ -203,8 +278,9 @@ namespace PulseForge
 			if (!Stream) return std::unexpected(Failure(MaterialGraphCompileErrorCode::OutputInvalid, "Could not read compiler output"));
 			std::vector<std::byte> Bytes(static_cast<size_t>(Size));
 			Stream.read(reinterpret_cast<char*>(Bytes.data()), static_cast<std::streamsize>(Bytes.size()));
-			if (!Stream || !IsSpirV(Bytes, MaximumBytes))
-				return std::unexpected(Failure(MaterialGraphCompileErrorCode::OutputInvalid, "Compiler output is not a valid SPIR-V module"));
+			if (!Stream || !IsSpirV(Bytes, MaximumBytes, RequiresGraphParameterBinding))
+				return std::unexpected(Failure(MaterialGraphCompileErrorCode::OutputInvalid,
+					"Compiler output is not a valid fragment SPIR-V module or lacks the graph parameter binding"));
 			return Bytes;
 		}
 
@@ -273,7 +349,8 @@ namespace PulseForge
 		if (Request.ArtifactStore)
 		{
 			auto Cached = Request.ArtifactStore->Read(ArtifactKey);
-			if (Cached.Status == DerivedDataArtifactReadStatus::Hit && IsSpirV(Cached.Payload, Request.MaximumOutputBytes))
+			if (Cached.Status == DerivedDataArtifactReadStatus::Hit &&
+				IsSpirV(Cached.Payload, Request.MaximumOutputBytes, !Generated->Parameters.empty()))
 				return MaterialGraphCompiledArtifact{ std::move(Cached.Payload), Generated->Hlsl, Recipe.DigestHex, {},
 					std::move(SourceNodes), std::move(Generated->Parameters), Request.Generation };
 		}
@@ -408,7 +485,7 @@ namespace PulseForge
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::Cancelled, "DXC completed after cancellation"));
 		if (Request.IsGenerationCurrent && !Request.IsGenerationCurrent(Request.Generation))
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::StaleGeneration, "DXC completed for a stale material generation"));
-		auto SpirV = ReadBoundedFile(OutputPath, Request.MaximumOutputBytes);
+		auto SpirV = ReadBoundedFile(OutputPath, Request.MaximumOutputBytes, !Generated->Parameters.empty());
 		if (!SpirV) return std::unexpected(SpirV.error());
 		if (Request.ArtifactStore) (void)Request.ArtifactStore->Write(ArtifactKey, *SpirV);
 		return MaterialGraphCompiledArtifact{ std::move(*SpirV), Generated->Hlsl, Recipe.DigestHex, std::move(Diagnostics),

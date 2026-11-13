@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -19,5 +20,19 @@ int main(int ArgumentCount, char** Arguments)
 	if (Source.find("777.0") != std::string::npos) return 23;
 	if (Source.find("778.0") != std::string::npos) std::this_thread::sleep_for(std::chrono::seconds(3));
 	std::ofstream Output(OutputPath, std::ios::binary | std::ios::trunc);
+	if (Source.find("g_MissingBinding") != std::string::npos)
+	{
+		const uint32_t FragmentWithoutBinding[] = {
+			0x07230203, 0x00010600, 0, 2, 0,
+			0x0003000e, 0, 1,
+			0x0004000f, 4, 1, 0x6e69616d
+		};
+		Output.write(reinterpret_cast<const char*>(FragmentWithoutBinding), sizeof(FragmentWithoutBinding));
+	}
+	else
+	{
+		const uint32_t MalformedSpirVHeader[] = { 0x07230203, 0x00010600, 0, 1, 0 };
+		Output.write(reinterpret_cast<const char*>(MalformedSpirVHeader), sizeof(MalformedSpirVHeader));
+	}
 	return Output ? 0 : 24;
 }
