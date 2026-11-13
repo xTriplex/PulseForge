@@ -11,6 +11,7 @@
 #include "Renderer/AssetCache/TextureAssetCache.h"
 #include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Renderer/EnvironmentLightingCache.h"
+#include "Renderer/SceneRendererPipelineCache.h"
 #include "Renderer/SceneRendererMaterialBindingCache.h"
 
 #include <chrono>
@@ -173,6 +174,26 @@ namespace
 		std::shared_ptr<FakeBindingLifetime> m_Lifetime;
 	};
 
+	class FakeShader final : public PulseForge::Shader
+	{
+	public:
+		explicit FakeShader(PulseForge::ShaderDesc Description) : m_Description(std::move(Description)) {}
+		[[nodiscard]] const PulseForge::ShaderDesc& GetDescription() const noexcept override { return m_Description; }
+
+	private:
+		PulseForge::ShaderDesc m_Description;
+	};
+
+	class FakeGraphicsPipeline final : public PulseForge::GraphicsPipeline
+	{
+	public:
+		explicit FakeGraphicsPipeline(PulseForge::GraphicsPipelineDesc Description) : m_Description(std::move(Description)) {}
+		[[nodiscard]] const PulseForge::GraphicsPipelineDesc& GetDescription() const noexcept override { return m_Description; }
+
+	private:
+		PulseForge::GraphicsPipelineDesc m_Description;
+	};
+
 	class FakeRenderTarget final : public PulseForge::RenderTarget
 	{
 	public:
@@ -300,9 +321,13 @@ namespace
 		{
 			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "unused" });
 		}
-		[[nodiscard]] PulseForge::GraphicsPipelineCreateResult CreateGraphicsPipeline(const PulseForge::GraphicsPipelineDesc&) override
+		[[nodiscard]] PulseForge::GraphicsPipelineCreateResult CreateGraphicsPipeline(
+			const PulseForge::GraphicsPipelineDesc& Description) override
 		{
-			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "unused" });
+			if (!AllowPipelineCreation)
+				return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "unused" });
+			++PipelineCreations;
+			return PulseForge::GraphicsPipelineHandle(std::make_unique<FakeGraphicsPipeline>(Description));
 		}
 		[[nodiscard]] PulseForge::GraphicsResult Draw(const PulseForge::GraphicsPipeline&, const PulseForge::Buffer&,
 			const PulseForge::DrawArguments&, std::span<const PulseForge::BindingSet* const>) override
@@ -331,18 +356,89 @@ namespace
 		bool FailNextClearEnd = false;
 		bool AllowBufferCreation = false;
 		bool AllowBindingCreation = false;
+		bool AllowPipelineCreation = false;
 		PulseForge::DiagnosticRecorder* Diagnostics = nullptr;
 		size_t TextureCreationFailuresRemaining = 0;
 		size_t RenderTargetCreations = 0;
 		size_t TextureCreations = 0;
 		size_t ClearBegins = 0;
 		size_t ClearEnds = 0;
+		size_t PipelineCreations = 0;
 		std::shared_ptr<FakeTextureLifetime> LastTextureLifetime;
 		std::shared_ptr<FakeBufferLifetime> LastBufferLifetime;
 		std::vector<std::weak_ptr<FakeBufferLifetime>> BufferLifetimes;
 		std::shared_ptr<FakeBindingLifetime> LastBindingLifetime;
 		std::vector<std::weak_ptr<FakeBindingLifetime>> BindingLifetimes;
 	};
+
+	void TestGraphMaterialPipelinesCoexistWithFixedMaterials(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		FakeRenderDevice Runtime;
+		Runtime.AllowPipelineCreation = true;
+		const auto MakeShader = [](ShaderStage Stage, std::string Name)
+		{
+			ShaderDesc Description;
+			Description.Stage = Stage;
+			Description.DebugName = std::move(Name);
+			return std::make_shared<FakeShader>(std::move(Description));
+		};
+		const auto MakeLayout = [](uint32_t Set)
+		{
+			BindingLayoutDesc Description;
+			Description.ShaderRegisterSpace = Set;
+			Description.Items.push_back({ BindingResourceType::ConstantBuffer, 0 });
+			return std::make_shared<FakeBindingLayout>(std::move(Description));
+		};
+		SceneRendererPipelineCache Cache(Runtime);
+		SceneRendererPipelineCache::Resources Resources;
+		Resources.SceneVertexShader = MakeShader(ShaderStage::Vertex, "scene vertex");
+		Resources.SceneFragmentShader = MakeShader(ShaderStage::Fragment, "fixed fragment");
+		Resources.BackgroundVertexShader = MakeShader(ShaderStage::Vertex, "background vertex");
+		Resources.BackgroundFragmentShader = MakeShader(ShaderStage::Fragment, "background fragment");
+		Resources.ShadowVertexShader = MakeShader(ShaderStage::Vertex, "shadow vertex");
+		Resources.ShadowFragmentShader = MakeShader(ShaderStage::Fragment, "shadow fragment");
+		Resources.PointShadowVertexShader = MakeShader(ShaderStage::Vertex, "point shadow vertex");
+		Resources.PointShadowFragmentShader = MakeShader(ShaderStage::Fragment, "point shadow fragment");
+		Resources.SceneMaterialLayout = MakeLayout(0);
+		Resources.DirectionalShadowLayout = MakeLayout(1);
+		Resources.AmbientOcclusionLayout = MakeLayout(2);
+		Resources.PointLightShadowLayout = MakeLayout(3);
+		Resources.ShadowObjectLayout = MakeLayout(1);
+		Resources.PointShadowObjectLayout = MakeLayout(3);
+		PF_CHECK(Tests, Cache.Initialize(std::move(Resources)).has_value());
+
+		VertexLayoutDesc VertexLayout;
+		VertexLayout.Stride = sizeof(float) * 3;
+		VertexLayout.Attributes.push_back({ VertexSemantic::Position, VertexFormat::Float3, 0 });
+		PF_CHECK(Tests, Cache.SetVertexLayout(VertexLayout).has_value());
+		PF_CHECK(Tests, Cache.EnsureScenePipeline(ColorTargetFormat::RGBA16_Float).has_value());
+		const GraphicsPipeline* const FixedPipeline = Cache.FindScenePipeline(
+			ColorTargetFormat::RGBA16_Float, false, false, WorldTransformOrientation::Normal);
+		PF_CHECK(Tests, FixedPipeline != nullptr && FixedPipeline->GetDescription().BindingLayouts.size() == 4);
+
+		const auto GraphShader = MakeShader(ShaderStage::Fragment, "graph fragment");
+		const auto GraphLayout = MakeLayout(4);
+		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
+			GraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
+		const size_t OneGraphPipeline = Runtime.PipelineCreations;
+		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
+			GraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
+		PF_CHECK(Tests, Runtime.PipelineCreations == OneGraphPipeline);
+		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-b", GraphShader,
+			GraphLayout).has_value());
+		const GraphicsPipeline* const GraphPipeline = Cache.FindGraphScenePipeline(
+			ColorTargetFormat::RGBA16_Float, "recipe-a", true, true, WorldTransformOrientation::Mirrored);
+		PF_CHECK(Tests, GraphPipeline && GraphPipeline != FixedPipeline);
+		if (GraphPipeline)
+		{
+			const auto& Description = GraphPipeline->GetDescription();
+			PF_CHECK(Tests, Description.FragmentShader == GraphShader && Description.BindingLayouts.size() == 5);
+			PF_CHECK(Tests, Description.BindingLayouts.back()->GetDescription().ShaderRegisterSpace == 4);
+			PF_CHECK(Tests, Description.Blend.Enabled && !Description.Depth.WriteEnabled);
+			PF_CHECK(Tests, Description.Rasterizer.Cull == CullMode::None && !Description.Rasterizer.FrontCounterClockwise);
+		}
+	}
 
 	class FakeTextureRegistry final : public PulseForgeEditor::EditorTextureRegistry
 	{
@@ -1451,6 +1547,7 @@ namespace
 
 void RunEditorViewportSceneRenderViewTests(TestRunner& Tests)
 {
+	TestGraphMaterialPipelinesCoexistWithFixedMaterials(Tests);
 	TestMeshPublicationWaitsForPreparedFrameBoundary(Tests);
 	TestMaterialBindingPublicationWaitsForNewPreparedFrame(Tests);
 	TestTextureUploadFailureReleasesCpuProductAndRequiresExplicitRetry(Tests);
