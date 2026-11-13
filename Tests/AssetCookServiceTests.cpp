@@ -28,6 +28,7 @@
 #include <cmath>
 #include <span>
 #include <iostream>
+#include <limits>
 #include <future>
 #include <string>
 #include <string_view>
@@ -778,6 +779,10 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		auto Moved = Source;
 		std::reverse(Moved.Nodes.begin(), Moved.Nodes.end());
 		std::reverse(Moved.Connections.begin(), Moved.Connections.end());
+		Moved.Nodes.front().X = 512.0;
+		Moved.Nodes.front().Y = 144.0;
+		const auto MovedSerialized = SerializeMaterialGraphSource(Moved);
+		PF_CHECK(Tests, MovedSerialized && *MovedSerialized != *Serialized);
 		auto Recompiled = MaterialGraphCompiler::Compile(MaterialGraphCompileRequest{
 			Moved, {}, CompileRequest.ToolchainFingerprint });
 		PF_CHECK(Tests, Recompiled && Recompiled->RecipeFingerprint == Compiled->RecipeFingerprint);
@@ -942,6 +947,9 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	auto Cyclic = Source;
 	Cyclic.Connections.push_back({ UUID(2, 4), UUID(1, 4), UUID(1, 2), 0 });
 	PF_CHECK(Tests, !ValidateMaterialGraphSource(Cyclic).IsValid());
+	auto InvalidPresentation = Source;
+	InvalidPresentation.Nodes.front().X = std::numeric_limits<double>::infinity();
+	PF_CHECK(Tests, !ValidateMaterialGraphSource(InvalidPresentation).IsValid());
 	const auto UnsupportedVersion = Serialized->find("\"version\": 1");
 	PF_CHECK(Tests, UnsupportedVersion != std::string::npos);
 	if (UnsupportedVersion != std::string::npos)

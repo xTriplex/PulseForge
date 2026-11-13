@@ -28,6 +28,8 @@ namespace PulseForge
 		MaterialGraphNodeKind Kind = MaterialGraphNodeKind::FloatConstant;
 		float Value = 0.0f;
 		std::string ParameterName;
+		double X = 0.0;
+		double Y = 0.0;
 		friend bool operator==(const MaterialGraphNode&, const MaterialGraphNode&) = default;
 	};
 

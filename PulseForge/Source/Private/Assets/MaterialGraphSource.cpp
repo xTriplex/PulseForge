@@ -67,6 +67,9 @@ namespace PulseForge
 		for (const MaterialGraphNode& Node : Source.Nodes)
 		{
 			if (Node.ID.IsNil() || !Nodes.emplace(Node.ID, &Node).second) Add(Node.ID, "Node identity is nil or duplicated");
+			if (!std::isfinite(Node.X) || !std::isfinite(Node.Y) || std::abs(Node.X) > 1'000'000.0 ||
+				std::abs(Node.Y) > 1'000'000.0)
+				Add(Node.ID, "Node presentation coordinates must be finite and within the supported range");
 			if (Node.Kind == MaterialGraphNodeKind::PbrOutput) ++OutputCount;
 			if ((Node.Kind == MaterialGraphNodeKind::FloatConstant || Node.Kind == MaterialGraphNodeKind::FloatParameter) &&
 				!std::isfinite(Node.Value)) Add(Node.ID, "Float node value must be finite");
@@ -206,7 +209,7 @@ namespace PulseForge
 		std::sort(Nodes.begin(), Nodes.end(), [](const auto& A, const auto& B) { return A.ID < B.ID; });
 		for (const auto& Node : Nodes)
 			Document["nodes"].push_back({ { "id", Node.ID.ToString() }, { "kind", KindName(Node.Kind) },
-				{ "value", Node.Value }, { "parameter", Node.ParameterName } });
+				{ "value", Node.Value }, { "parameter", Node.ParameterName }, { "x", Node.X }, { "y", Node.Y } });
 		auto Connections = Source.Connections;
 		std::sort(Connections.begin(), Connections.end(), [](const auto& A, const auto& B) { return A.ID < B.ID; });
 		for (const auto& Connection : Connections)
@@ -241,7 +244,8 @@ namespace PulseForge
 				const auto ID = UUID::Parse(Item.at("id").get<std::string>());
 				const auto Kind = ParseKind(Item.at("kind").get<std::string>());
 				if (!ID || !Kind) return std::unexpected("Material graph node identity or kind is invalid");
-				Source.Nodes.push_back({ *ID, *Kind, Item.value("value", 0.0f), Item.value("parameter", std::string{}) });
+				Source.Nodes.push_back({ *ID, *Kind, Item.value("value", 0.0f), Item.value("parameter", std::string{}),
+					Item.value("x", 0.0), Item.value("y", 0.0) });
 			}
 			for (const auto& Item : Document["connections"])
 			{
