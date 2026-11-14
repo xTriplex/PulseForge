@@ -97,6 +97,14 @@ namespace PulseForge
 				return std::nullopt;
 			};
 			if (!Services.GetBlueprintProgramGeneration) Services.GetBlueprintProgramGeneration = [] { return uint64_t{ 1 }; };
+			if (!Services.ReadBlueprintScalarProperty)
+			{
+				Services.ReadBlueprintScalarProperty = [](const Entity& Target, std::string_view PropertyId) -> std::optional<float>
+				{
+					const auto Existing = Target.GetBlueprint();
+					return Existing && Existing->has_value() ? (**Existing).FindFloatProperty(PropertyId) : std::nullopt;
+				};
+			}
 			if (!Services.ApplyBlueprintPropertyWrites)
 			{
 				Services.ApplyBlueprintPropertyWrites = [](const Entity& Target, std::span<const BlueprintScalarPropertyWrite> Writes)

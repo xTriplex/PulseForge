@@ -218,6 +218,12 @@ namespace PulseForge
 					ProgramInstance.Revision = Instance.Revision;
 					ProgramInstance.PropertyIds = ProgramSource.ScalarPropertyIds;
 					ProgramInstance.ScalarState.resize(ProgramSource.ScalarPropertyIds.size(), 0.0f);
+					if (Services.ReadBlueprintScalarProperty)
+					{
+						for (size_t PropertyIndex = 0; PropertyIndex < ProgramInstance.PropertyIds.size(); ++PropertyIndex)
+							if (const auto InitialValue = Services.ReadBlueprintScalarProperty(Target, ProgramInstance.PropertyIds[PropertyIndex]))
+								ProgramInstance.ScalarState[PropertyIndex] = *InitialValue;
+					}
 				}
 				else if (ProgramInstance.PropertyIds != ProgramSource.ScalarPropertyIds)
 				{

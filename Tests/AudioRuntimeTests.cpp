@@ -433,7 +433,7 @@ namespace
 		PF_CHECK(Tests, SerializedScene.has_value());
 		if (!SerializedScene)
 			return;
-		PF_CHECK(Tests, SerializedScene->find("\"version\": 13") != std::string::npos);
+		PF_CHECK(Tests, SerializedScene->find("\"version\": 14") != std::string::npos);
 		PF_CHECK(Tests, SerializedScene->find("\"bus\": \"music\"") != std::string::npos);
 
 		Scene LoadedScene;

@@ -69,6 +69,8 @@ namespace PulseForge
 		std::function<std::optional<BlueprintProgramBinding>(const Entity&, BlueprintEventKind)> ResolveBlueprintProgram;
 		// Changes invalidate per-entity Blueprint state and force the resolver to bind the new immutable revision.
 		std::function<uint64_t()> GetBlueprintProgramGeneration;
+		// Reads authored initial scalar values once when an asset instance is first bound.
+		std::function<std::optional<float>(const Entity&, std::string_view)> ReadBlueprintScalarProperty;
 		// Applies one event's scalar property writes as a single owner-thread transaction.
 		std::function<bool(const Entity&, std::span<const BlueprintScalarPropertyWrite>)> ApplyBlueprintPropertyWrites;
 		// Accepted requests are committed by the owning host after SceneRuntime::Advance returns.

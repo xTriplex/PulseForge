@@ -112,12 +112,29 @@ namespace
 			OnCreate.Constants = { 2.0f };
 			OnCreate.ScalarPropertyIds = { "health" };
 			OnCreate.Instructions = {
-				{ BlueprintOpcode::PushConstant, 0, 0, UUID(30, 1) },
-				{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(30, 2) },
-				{ BlueprintOpcode::Return, 0, 0, UUID(30, 3) }
+				{ BlueprintOpcode::LoadScalar, 0, 0, UUID(30, 1) },
+				{ BlueprintOpcode::PushConstant, 0, 0, UUID(30, 2) },
+				{ BlueprintOpcode::Add, 0, 0, UUID(30, 3) },
+				{ BlueprintOpcode::StoreScalar, 0, 0, UUID(30, 4) },
+				{ BlueprintOpcode::LoadScalar, 0, 0, UUID(30, 5) },
+				{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(30, 6) },
+				{ BlueprintOpcode::Return, 0, 0, UUID(30, 7) }
 			};
-			const std::array<BlueprintEventProgramSource, 1> BlueprintEvents{
-				BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, std::move(OnCreate) }
+			BlueprintProgramSource OnUpdate;
+			OnUpdate.Constants = { 1.0f };
+			OnUpdate.ScalarPropertyIds = { "health" };
+			OnUpdate.Instructions = {
+				{ BlueprintOpcode::LoadScalar, 0, 0, UUID(31, 1) },
+				{ BlueprintOpcode::PushConstant, 0, 0, UUID(31, 2) },
+				{ BlueprintOpcode::Add, 0, 0, UUID(31, 3) },
+				{ BlueprintOpcode::StoreScalar, 0, 0, UUID(31, 4) },
+				{ BlueprintOpcode::LoadScalar, 0, 0, UUID(31, 5) },
+				{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(31, 6) },
+				{ BlueprintOpcode::Return, 0, 0, UUID(31, 7) }
+			};
+			const std::array<BlueprintEventProgramSource, 2> BlueprintEvents{
+				BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, std::move(OnCreate) },
+				BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, std::move(OnUpdate) }
 			};
 			auto BlueprintBytes = SerializeBlueprintAsset(BlueprintEvents);
 			if (!BlueprintBytes) { Root.clear(); return; }
@@ -134,7 +151,7 @@ namespace
 			if (!SceneSerializer::LoadFromFile(SceneSourcePath, AttachedScene)) { Root.clear(); return; }
 			auto AttachedEntity = AttachedScene.GetEntities().front();
 			BlueprintComponent AttachedBlueprint{ BlueprintAsset, true };
-			if (!AttachedBlueprint.SetFloatProperty("health", 0.0f) || !AttachedEntity.SetBlueprint(AttachedBlueprint))
+			if (!AttachedBlueprint.SetFloatProperty("health", 40.0f) || !AttachedEntity.SetBlueprint(AttachedBlueprint))
 				{ Root.clear(); return; }
 			const auto AttachedSceneText = SceneSerializer::Serialize(AttachedScene);
 			if (!AttachedSceneText) { Root.clear(); return; }
@@ -817,11 +834,11 @@ namespace
 		const CookedAssetEntry* Entry = (*Provider)->FindBlueprintProgram(Fixture.BlueprintAsset);
 		PF_CHECK(Tests, Entry != nullptr && Entry->PayloadVersion == BlueprintAssetFormatVersion);
 		auto Program = (*Provider)->LoadBlueprintProgram(Fixture.BlueprintAsset);
-		PF_CHECK(Tests, Program && Program->GetEvents().size() == 1);
-		if (Program && Program->GetEvents().size() == 1)
+		PF_CHECK(Tests, Program && Program->GetEvents().size() == 2);
+		if (Program && Program->GetEvents().size() == 2)
 		{
 			PF_CHECK(Tests, Program->GetEvents().front().Event == BlueprintEventKind::OnCreate);
-			PF_CHECK(Tests, Program->GetEvents().front().Program.GetSource().Instructions[1].SourceNode == UUID(30, 2));
+			PF_CHECK(Tests, Program->GetEvents().front().Program.GetSource().Instructions[5].SourceNode == UUID(30, 6));
 		}
 
 		SceneRuntimeDesc RuntimeDescription;
@@ -834,7 +851,12 @@ namespace
 			const auto RuntimeEntity = Session.GetActiveScene()->GetEntities().front();
 			const auto RuntimeBlueprint = RuntimeEntity.GetBlueprint();
 			PF_CHECK(Tests, RuntimeBlueprint && RuntimeBlueprint->has_value() &&
-				RuntimeBlueprint->value().FindFloatProperty("health") == 2.0f);
+				RuntimeBlueprint->value().FindFloatProperty("health") == 42.0f);
+			const auto Advanced = Session.Advance(Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, Advanced.has_value());
+			const auto UpdatedBlueprint = RuntimeEntity.GetBlueprint();
+			PF_CHECK(Tests, UpdatedBlueprint && UpdatedBlueprint->has_value() &&
+				UpdatedBlueprint->value().FindFloatProperty("health") == 43.0f);
 		}
 		Session.Stop();
 	}
