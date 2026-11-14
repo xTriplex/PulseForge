@@ -6,6 +6,7 @@ void RunGameplayInputTests(TestRunner& Tests);
 void RunGameplayInputLifecycleTests(TestRunner& Tests);
 void RunGameplayInputStoreTests(TestRunner& Tests);
 void RunBlueprintProgramTests(TestRunner& Tests);
+void RunBlueprintSceneRuntimeTests(TestRunner& Tests);
 
 int main()
 {
@@ -17,5 +18,6 @@ int main()
 	RunGameplayInputLifecycleTests(Tests);
 	RunGameplayInputStoreTests(Tests);
 	RunBlueprintProgramTests(Tests);
+	RunBlueprintSceneRuntimeTests(Tests);
 	return Tests.Finish();
 }

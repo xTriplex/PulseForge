@@ -16,10 +16,12 @@
 
 #include <optional>
 #include <algorithm>
+#include <array>
 #include <exception>
 #include <atomic>
 #include <fstream>
 #include <iterator>
+#include <unordered_map>
 
 namespace PulseForge
 {
@@ -90,6 +92,26 @@ namespace PulseForge
 
 	struct SceneRuntime::Impl final
 	{
+		struct BoundBlueprintEvent final
+		{
+			Entity BoundEntity;
+			bool Resolved = false;
+			AssetID Asset;
+			uint64_t Revision = 0;
+			std::shared_ptr<const VerifiedBlueprintProgram> Program;
+			bool Faulted = false;
+		};
+		struct BlueprintInstanceState final
+		{
+			Entity BoundEntity;
+			AssetID Asset;
+			uint64_t Revision = 0;
+			std::vector<std::string> PropertyIds;
+			std::vector<float> ScalarState;
+		};
+		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnUIAction) + 1;
+		using BlueprintEventStates = std::array<BoundBlueprintEvent, BlueprintEventCount>;
+
 		struct RuntimeUICanvasState final
 		{
 			Entity Owner;
@@ -108,6 +130,10 @@ namespace PulseForge
 		std::unique_ptr<PhysicsSceneRuntime> Physics;
 		std::unique_ptr<ScriptRuntime> Scripting;
 		std::optional<RuntimeUICanvasState> RuntimeUI;
+		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
+		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
+		std::unordered_map<UUID, Entity, UUIDHash> BlueprintKnownEntities;
+		std::vector<BlueprintRuntimeDiagnostic> BlueprintDiagnostics;
 		RuntimeUIViewport RuntimeUIView{};
 		std::vector<RuntimeUIInputEvent> RuntimeUIEvents;
 		std::vector<RuntimeUIDrawCommand> RuntimeUIDrawCommands;
@@ -121,7 +147,149 @@ namespace PulseForge
 		std::optional<SceneRuntimeBoundaryRequest> BoundaryRequest;
 		std::optional<bool> RequestedPause;
 		uint64_t SessionGeneration = 0;
+		uint64_t BlueprintProgramGeneration = 0;
 		uint64_t NextBoundaryRequestGeneration = 0;
+
+		void RecordBlueprintDiagnostic(
+			const Entity& Target,
+			const BlueprintProgramBinding* Binding,
+			BlueprintEventKind Event,
+			BlueprintProgramErrorCode Code,
+			UUID SourceNode,
+			std::string Message)
+		{
+			if (BlueprintDiagnostics.size() == 256) BlueprintDiagnostics.erase(BlueprintDiagnostics.begin());
+			BlueprintDiagnostics.push_back({ Target.GetUUID(), Binding ? Binding->Asset : AssetID{}, Event, Code,
+				SourceNode, std::move(Message) });
+		}
+
+		void DispatchBlueprintEvent(
+			Scene& SceneValue,
+			const Entity& Target,
+			BlueprintEventKind Event,
+			const SceneRuntimeServices& Services)
+		{
+			if (!Services.ResolveBlueprintProgram || !Target.IsValid()) return;
+			try
+			{
+				const auto Current = SceneValue.FindEntity(Target.GetUUID());
+				if (!Current || *Current != Target) return;
+				const size_t EventIndex = static_cast<size_t>(Event);
+				if (EventIndex >= BlueprintEventCount)
+				{
+					RecordBlueprintDiagnostic(Target, nullptr, Event, BlueprintProgramErrorCode::InvalidOperand, {},
+						"Blueprint event binding uses an unknown event");
+					return;
+				}
+
+				BoundBlueprintEvent& Instance = BlueprintEvents[Target.GetUUID()][EventIndex];
+				if (Instance.BoundEntity != Target)
+				{
+					Instance = {};
+					Instance.BoundEntity = Target;
+				}
+				if (!Instance.Resolved)
+				{
+					const auto Binding = Services.ResolveBlueprintProgram(Target, Event);
+					Instance.Resolved = true;
+					if (!Binding || !Binding->Program) return;
+					if (Binding->Asset.IsNil())
+					{
+						RecordBlueprintDiagnostic(Target, &*Binding, Event, BlueprintProgramErrorCode::InvalidOperand, {},
+							"Blueprint event binding is missing a stable asset identity");
+						Instance.Faulted = true;
+						return;
+					}
+					Instance.Asset = Binding->Asset;
+					Instance.Revision = Binding->Revision;
+					Instance.Program = Binding->Program;
+				}
+				if (!Instance.Program) return;
+				const BlueprintProgramBinding Binding{ Instance.Asset, Instance.Revision, Instance.Program };
+				if (Instance.Faulted) return;
+				BlueprintInstanceState& ProgramInstance = BlueprintInstances[Target.GetUUID()][Instance.Asset];
+				const BlueprintProgramSource& ProgramSource = Instance.Program->GetSource();
+				if (ProgramInstance.BoundEntity != Target || ProgramInstance.Asset != Instance.Asset ||
+					ProgramInstance.Revision != Instance.Revision)
+				{
+					ProgramInstance = {};
+					ProgramInstance.BoundEntity = Target;
+					ProgramInstance.Asset = Instance.Asset;
+					ProgramInstance.Revision = Instance.Revision;
+					ProgramInstance.PropertyIds = ProgramSource.ScalarPropertyIds;
+					ProgramInstance.ScalarState.resize(ProgramSource.ScalarPropertyIds.size(), 0.0f);
+				}
+				else if (ProgramInstance.PropertyIds != ProgramSource.ScalarPropertyIds)
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::InvalidOperand, {},
+						"Blueprint event programs for one asset disagree on their scalar property schema");
+					Instance.Faulted = true;
+					return;
+				}
+
+				std::vector<float> CandidateState = ProgramInstance.ScalarState;
+				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState);
+				if (!Result)
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, Result.error().Code, Result.error().SourceNode,
+						std::move(Result.error().Message));
+					Instance.Faulted = true;
+					return;
+				}
+				if (!Result->PropertyWrites.empty() &&
+					(!Services.ApplyBlueprintPropertyWrites || !Services.ApplyBlueprintPropertyWrites(Target, Result->PropertyWrites)))
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedPropertyWrite,
+						Result->PropertyWrites.front().SourceNode,
+						"Scene runtime host rejected the Blueprint property transaction");
+					Instance.Faulted = true;
+					return;
+				}
+				ProgramInstance.ScalarState = std::move(CandidateState);
+			}
+			catch (const std::exception& Exception)
+			{
+				RecordBlueprintDiagnostic(Target, nullptr, Event, BlueprintProgramErrorCode::HostFailure, {}, Exception.what());
+				const auto Found = BlueprintEvents.find(Target.GetUUID());
+				if (Found != BlueprintEvents.end()) Found->second[static_cast<size_t>(Event)].Faulted = true;
+			}
+			catch (...)
+			{
+				RecordBlueprintDiagnostic(Target, nullptr, Event, BlueprintProgramErrorCode::HostFailure, {},
+					"Blueprint host callback failed with a non-standard exception");
+				const auto Found = BlueprintEvents.find(Target.GetUUID());
+				if (Found != BlueprintEvents.end()) Found->second[static_cast<size_t>(Event)].Faulted = true;
+			}
+		}
+
+		void ReconcileBlueprintEntities(Scene& SceneValue, const SceneRuntimeServices& Services)
+		{
+			std::unordered_map<UUID, Entity, UUIDHash> LiveEntities;
+			const std::vector<Entity> Entities = SceneValue.GetEntities();
+			LiveEntities.reserve(Entities.size());
+			for (const Entity& EntityValue : Entities) LiveEntities.emplace(EntityValue.GetUUID(), EntityValue);
+
+			for (auto Iterator = BlueprintKnownEntities.begin(); Iterator != BlueprintKnownEntities.end();)
+			{
+				const auto Live = LiveEntities.find(Iterator->first);
+				if (Live == LiveEntities.end() || Live->second != Iterator->second)
+				{
+					BlueprintEvents.erase(Iterator->first);
+					BlueprintInstances.erase(Iterator->first);
+					Iterator = BlueprintKnownEntities.erase(Iterator);
+				}
+				else ++Iterator;
+			}
+
+			for (const Entity& EntityValue : Entities)
+			{
+				const UUID Identifier = EntityValue.GetUUID();
+				const auto Known = BlueprintKnownEntities.find(Identifier);
+				if (Known != BlueprintKnownEntities.end()) continue;
+				BlueprintKnownEntities.emplace(Identifier, EntityValue);
+				DispatchBlueprintEvent(SceneValue, EntityValue, BlueprintEventKind::OnCreate, Services);
+			}
+		}
 	};
 
 	#if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -392,6 +560,13 @@ namespace PulseForge
 					"Could not start scene scripting: " + Result.error().Message));
 
 			Candidate->State = Impl::Lifecycle::Active;
+			if (m_Services.GetBlueprintProgramGeneration)
+				Candidate->BlueprintProgramGeneration = m_Services.GetBlueprintProgramGeneration();
+			for (const Entity& EntityValue : Source.GetEntities())
+			{
+				Candidate->BlueprintKnownEntities.emplace(EntityValue.GetUUID(), EntityValue);
+				Candidate->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnCreate, m_Services);
+			}
 			m_Impl = std::move(Candidate);
 			return {};
 		}
@@ -545,6 +720,12 @@ namespace PulseForge
 		return m_Impl ? m_Impl->Scripting->GetDiagnostics() : std::span<const ScriptDiagnostic>{};
 	}
 
+	std::span<const BlueprintRuntimeDiagnostic> SceneRuntime::GetBlueprintDiagnostics() const noexcept
+	{
+		return m_Impl ? std::span<const BlueprintRuntimeDiagnostic>(m_Impl->BlueprintDiagnostics) :
+			std::span<const BlueprintRuntimeDiagnostic>{};
+	}
+
 	std::optional<SceneRuntimeBoundaryRequest> SceneRuntime::GetPendingBoundaryRequest() const noexcept
 	{
 		if (!m_Impl || m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending) return std::nullopt;
@@ -599,11 +780,36 @@ namespace PulseForge
 				SceneRuntimeErrorCode::InvalidDeltaTime,
 				SceneRuntimeSubsystem::None,
 				"Scene runtime frame delta must be finite and non-negative"));
+		if (m_Services.GetBlueprintProgramGeneration)
+		{
+			uint64_t CurrentProgramGeneration = 0;
+			try
+			{
+				CurrentProgramGeneration = m_Services.GetBlueprintProgramGeneration();
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
+					std::string("Could not read Blueprint catalog generation: ") + Exception.what()));
+			}
+			catch (...)
+			{
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
+					"Could not read Blueprint catalog generation"));
+			}
+			if (CurrentProgramGeneration != m_Impl->BlueprintProgramGeneration)
+			{
+				m_Impl->BlueprintEvents.clear();
+				m_Impl->BlueprintInstances.clear();
+				m_Impl->BlueprintProgramGeneration = CurrentProgramGeneration;
+			}
+		}
 		if (m_Impl->AudioSessionState)
 			m_Impl->AudioSessionState->PollDeviceState();
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+		m_Impl->ReconcileBlueprintEntities(Source, m_Services);
 		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
 				"Could not service queued script reloads: " + Result.error().Message));
@@ -626,6 +832,7 @@ namespace PulseForge
 				for (const RuntimeUIAction& Action : Actions)
 				{
 					(void)m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name);
+					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Services);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 						return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
@@ -661,6 +868,8 @@ namespace PulseForge
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+		for (const Entity& EntityValue : Source.GetEntities())
+			m_Impl->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnUpdate, m_Services);
 		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
 				"Could not apply queued audio controls: " + Result.error().Message));
@@ -687,6 +896,13 @@ namespace PulseForge
 		{
 			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
 				return SceneRuntimeFrameResult{ .PhysicsSteps = *PhysicsResult, .PhysicsStats = m_Impl->Physics->GetStats() };
+			const BlueprintEventKind BlueprintEvent = Event.IsSensorPair
+				? Event.Phase == PhysicsContactPhase::Begin ? BlueprintEventKind::OnTriggerEnter
+					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnTriggerStay : BlueprintEventKind::OnTriggerExit
+				: Event.Phase == PhysicsContactPhase::Begin ? BlueprintEventKind::OnCollisionBegin
+					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnCollisionStay : BlueprintEventKind::OnCollisionEnd;
+			m_Impl->DispatchBlueprintEvent(Source, Event.First, BlueprintEvent, m_Services);
+			m_Impl->DispatchBlueprintEvent(Source, Event.Second, BlueprintEvent, m_Services);
 		}
 		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,

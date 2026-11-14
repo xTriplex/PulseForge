@@ -277,6 +277,7 @@ if(BUILD_TESTING)
 		Tests/GameplayInputStoreTests.cpp
 		Tests/ScriptRuntimeTests.cpp
 		Tests/BlueprintProgramTests.cpp
+		Tests/BlueprintSceneRuntimeTests.cpp
 	)
 	target_include_directories(PulseForgeScriptingRuntimeTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeScriptingRuntimeTests PRIVATE

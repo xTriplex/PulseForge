@@ -243,7 +243,7 @@ namespace PulseForge
 			case BlueprintOpcode::WriteScalarProperty:
 			{
 				const float Value = Stack.back(); Stack.pop_back();
-				Result.PropertyWrites.push_back({ Source.ScalarPropertyIds[Instruction.Operand], Value });
+				Result.PropertyWrites.push_back({ Source.ScalarPropertyIds[Instruction.Operand], Value, Instruction.SourceNode });
 				++ProgramCounter;
 				break;
 			}

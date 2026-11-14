@@ -19,6 +19,19 @@ namespace PulseForge
 	inline constexpr size_t BlueprintMaximumPropertyIdentifierLength = 64;
 	inline constexpr uint32_t BlueprintDefaultInstructionBudget = 10000;
 
+	enum class BlueprintEventKind : uint8_t
+	{
+		OnCreate,
+		OnUpdate,
+		OnCollisionBegin,
+		OnCollisionStay,
+		OnCollisionEnd,
+		OnTriggerEnter,
+		OnTriggerStay,
+		OnTriggerExit,
+		OnUIAction
+	};
+
 	enum class BlueprintOpcode : uint8_t
 	{
 		PushConstant,
@@ -61,7 +74,9 @@ namespace PulseForge
 		StackUnderflow,
 		StackMismatch,
 		MissingReturn,
-		InstructionBudgetExceeded
+		InstructionBudgetExceeded,
+		HostRejectedPropertyWrite,
+		HostFailure
 	};
 
 	struct BlueprintProgramError
@@ -87,6 +102,7 @@ namespace PulseForge
 	{
 		std::string PropertyId;
 		float Value = 0.0f;
+		UUID SourceNode;
 	};
 
 	struct BlueprintExecutionResult

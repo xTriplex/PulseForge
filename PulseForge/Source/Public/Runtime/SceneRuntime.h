@@ -6,6 +6,7 @@
 #include "Input/GameplayInput.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scripting/ScriptRuntime.h"
+#include "Scripting/BlueprintProgram.h"
 #include "Scene/Components/RuntimeUICanvasComponent.h"
 #include "UI/RuntimeUI.h"
 
@@ -17,9 +18,11 @@
 #include <optional>
 #include <memory>
 #include <string>
+#include <span>
 
 namespace PulseForge
 {
+	class Entity;
 	class Input;
 	class DiagnosticRecorder;
 	class Project;
@@ -34,6 +37,23 @@ namespace PulseForge
 		ScriptRuntimeDesc Scripting{};
 	};
 
+	struct BlueprintProgramBinding
+	{
+		AssetID Asset;
+		uint64_t Revision = 0;
+		std::shared_ptr<const VerifiedBlueprintProgram> Program;
+	};
+
+	struct BlueprintRuntimeDiagnostic
+	{
+		UUID Entity;
+		AssetID Asset;
+		BlueprintEventKind Event = BlueprintEventKind::OnCreate;
+		BlueprintProgramErrorCode Code = BlueprintProgramErrorCode::InvalidControlFlow;
+		UUID SourceNode;
+		std::string Message;
+	};
+
 	// Non-owning host services supplied by the application to the scene runtime.
 	struct SceneRuntimeServices
 	{
@@ -45,6 +65,12 @@ namespace PulseForge
 		// Optional host policy check; an error rejects a pause change before audio state is modified.
 		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
 		ScriptRuntimeObserver ScriptObserver;
+		// The host resolves immutable, already-verified event programs for the active scene session.
+		std::function<std::optional<BlueprintProgramBinding>(const Entity&, BlueprintEventKind)> ResolveBlueprintProgram;
+		// Changes invalidate per-entity Blueprint state and force the resolver to bind the new immutable revision.
+		std::function<uint64_t()> GetBlueprintProgramGeneration;
+		// Applies one event's scalar property writes as a single owner-thread transaction.
+		std::function<bool(const Entity&, std::span<const BlueprintScalarPropertyWrite>)> ApplyBlueprintPropertyWrites;
 		// Accepted requests are committed by the owning host after SceneRuntime::Advance returns.
 		std::function<bool(const AssetID&)> QueueSceneTransition;
 		std::function<bool()> QueueStop;
@@ -142,6 +168,7 @@ namespace PulseForge
 		// Queues an explicit state-reset reload for one attachment in the active Play/Player scene.
 		[[nodiscard]] std::expected<uint64_t, SceneRuntimeError> RequestScriptReload(const Entity& Target);
 		[[nodiscard]] std::span<const ScriptDiagnostic> GetScriptDiagnostics() const noexcept;
+		[[nodiscard]] std::span<const BlueprintRuntimeDiagnostic> GetBlueprintDiagnostics() const noexcept;
 		// Owners inspect requests only after Advance returns, then acknowledge the matching session/request token.
 		[[nodiscard]] std::optional<SceneRuntimeBoundaryRequest> GetPendingBoundaryRequest() const noexcept;
 		[[nodiscard]] bool ResolveBoundaryRequest(
