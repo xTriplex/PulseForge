@@ -738,6 +738,15 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		{ UUID(2, 3), UUID(1, 4), UUID(1, 5), 0 }
 	};
 	PF_CHECK(Tests, ValidateMaterialGraphSource(Source).IsValid());
+	auto MissingOutputInput = Source;
+	std::erase_if(MissingOutputInput.Connections, [](const MaterialGraphConnection& Connection)
+		{ return Connection.ID == UUID(2, 3); });
+	const auto InvalidGraphCompile = MaterialGraphCompiler::Compile(MaterialGraphCompileRequest{
+		MissingOutputInput, {}, "diagnostic-fixture" });
+	PF_CHECK(Tests, !InvalidGraphCompile && InvalidGraphCompile.error().Code == MaterialGraphCompileErrorCode::InvalidGraph &&
+		std::any_of(InvalidGraphCompile.error().Diagnostics.begin(), InvalidGraphCompile.error().Diagnostics.end(),
+			[](const MaterialGraphDiagnostic& Diagnostic)
+			{ return Diagnostic.Node == UUID(1, 5) && !Diagnostic.Message.empty(); }));
 	const auto Serialized = SerializeMaterialGraphSource(Source);
 	PF_CHECK(Tests, Serialized.has_value());
 	if (!Serialized) return;
@@ -1098,6 +1107,22 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 			}
 			PF_CHECK(Tests, !(*GraphProvider)->FindMaterial(Fixture.GraphMaterialAsset));
 		}
+#ifdef PF_GRAPH_MATERIAL_COOK_TEST_OUTPUT
+		std::error_code RuntimeFixtureError;
+		const std::filesystem::path RuntimeFixtureRoot = std::filesystem::u8path(PF_GRAPH_MATERIAL_COOK_TEST_OUTPUT);
+		std::filesystem::remove_all(RuntimeFixtureRoot, RuntimeFixtureError);
+		if (!RuntimeFixtureError)
+			std::filesystem::copy(GraphMaterialRequest.OutputRoot, RuntimeFixtureRoot,
+				std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing,
+				RuntimeFixtureError);
+		if (!RuntimeFixtureError)
+		{
+			std::ofstream AssetIdentity(RuntimeFixtureRoot / "graph-material-asset-id.txt", std::ios::binary | std::ios::trunc);
+			AssetIdentity << Fixture.GraphMaterialAsset.ToString();
+			if (!AssetIdentity) RuntimeFixtureError = std::make_error_code(std::errc::io_error);
+		}
+		PF_CHECK(Tests, !RuntimeFixtureError);
+#endif
 	}
 	auto StartupOverrideRequest = Fixture.Request(*Snapshot);
 	StartupOverrideRequest.StartupScene = Fixture.AlternateSceneAsset;

@@ -4,10 +4,35 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
-int main()
+int main(int ArgumentCount, char** Arguments)
 {
 	using namespace PulseForge;
+	if (ArgumentCount == 2)
+	{
+	#if defined(_WIN32)
+		CookedAssetCompatibility Compatibility{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) };
+	#elif defined(__APPLE__)
+		CookedAssetCompatibility Compatibility{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) };
+	#else
+		CookedAssetCompatibility Compatibility{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) };
+	#endif
+		auto Provider = CookedContentProvider::Open(std::filesystem::u8path(Arguments[1]), Compatibility);
+		if (!Provider) return 20;
+		const std::filesystem::path ContentRoot = std::filesystem::u8path(Arguments[1]);
+		std::ifstream IdentityFile(ContentRoot / "graph-material-asset-id.txt", std::ios::binary);
+		const std::string IdentityText{ std::istreambuf_iterator<char>(IdentityFile), std::istreambuf_iterator<char>() };
+		const auto Asset = UUID::Parse(IdentityText);
+		if (!IdentityFile.is_open() || !Asset || Asset->IsNil()) return 21;
+		auto Product = (*Provider)->LoadGraphMaterialProduct(*Asset);
+		if (!Product || Product->RecipeFingerprint.size() != 32 || Product->SpirV.size() < 20 ||
+			Product->Parameters.size() != 1 || Product->Parameters.front().Name != "Accent") return 22;
+		if (Product->SpirV[0] != std::byte{ 0x03 } || Product->SpirV[1] != std::byte{ 0x02 } ||
+			Product->SpirV[2] != std::byte{ 0x23 } || Product->SpirV[3] != std::byte{ 0x07 }) return 23;
+		return 0;
+	}
+	if (ArgumentCount != 1) return 24;
 	std::error_code Error;
 	const auto Unique = UUID::Generate();
 	if (!Unique) return 1;

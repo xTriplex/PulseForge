@@ -137,6 +137,8 @@ if(BUILD_TESTING)
 			"PF_LUA_AUTHORING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/LuaAuthoring/PrefabLinkedInstances.pfproj\""
 			"PF_PHYSICS_QUERIES_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PhysicsQueries/PhysicsQueries.pfproj\""
 			"PF_RUNTIME_UI_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj\"")
+	target_compile_definitions(PulseForgeAssetTests PRIVATE
+		"PF_GRAPH_MATERIAL_COOK_TEST_OUTPUT=\"$<TARGET_FILE_DIR:PulseForgeAssetTests>/SavedGraphMaterialCook\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeMaterialGraph PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
@@ -161,6 +163,7 @@ if(BUILD_TESTING)
 	add_test(NAME PulseForge.AssetCook COMMAND PulseForgeAssetTests --cook-only)
 	add_test(NAME PulseForge.AssetExport COMMAND PulseForgeAssetTests --export-only)
 	set_tests_properties(PulseForge.Assets PulseForge.AssetCook PulseForge.AssetExport PROPERTIES TIMEOUT 120)
+	set_tests_properties(PulseForge.AssetCook PROPERTIES FIXTURES_SETUP SavedGraphMaterialCook)
 	add_test(NAME PulseForge.CookCliUsage COMMAND PulseForgeCook)
 	set_tests_properties(PulseForge.CookCliUsage PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME PulseForge.CookConfigurationCLI
@@ -184,7 +187,10 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeCookedGraphMaterialConsumer Tests/ModuleConsumers/CookedGraphMaterialConsumer.cpp)
 	target_link_libraries(PulseForgeCookedGraphMaterialConsumer PRIVATE PulseForgeCookedRuntimeProvider)
 	set_property(TARGET PulseForgeCookedGraphMaterialConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
-	add_test(NAME PulseForge.CookedGraphMaterialConsumer COMMAND PulseForgeCookedGraphMaterialConsumer)
+	add_test(NAME PulseForge.CookedGraphMaterialConsumer
+		COMMAND PulseForgeCookedGraphMaterialConsumer "$<TARGET_FILE_DIR:PulseForgeAssetTests>/SavedGraphMaterialCook")
+	set_tests_properties(PulseForge.CookedGraphMaterialConsumer PROPERTIES FIXTURES_REQUIRED SavedGraphMaterialCook)
+	add_test(NAME PulseForge.CookedGraphMaterialConsumerSynthetic COMMAND PulseForgeCookedGraphMaterialConsumer)
 	add_executable(PulseForgeDerivedDataTests
 		Tests/PulseForgeDerivedDataTests.cpp
 		Tests/AssetPreparationServiceTests.cpp
