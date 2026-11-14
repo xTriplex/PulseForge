@@ -39,6 +39,7 @@ namespace PulseForge
 	class Mesh;
 	class CookedContentProvider;
 	struct GraphMaterialRuntime;
+	struct CookedGraphMaterialProduct;
 
 	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
 	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
@@ -195,8 +196,12 @@ namespace PulseForge
 		// this never changes project or material asset data.
 		[[nodiscard]] std::expected<void, SceneRendererError> SetTransientMaterialOverride(
 			const AssetID& Material, const MaterialAssetDesc& Description, uint64_t Revision);
+		[[nodiscard]] std::expected<void, SceneRendererError> SetTransientGraphMaterialOverride(
+			const AssetID& Material, const MaterialAssetDesc& Description,
+			const CookedGraphMaterialProduct& Product, uint64_t Revision);
 		void SetTransientPreviewMesh(const AssetID& Identity, const Mesh* Geometry) noexcept;
 		void ClearTransientMaterialOverride() noexcept;
+		void ClearTransientGraphMaterialOverride() noexcept;
 		[[nodiscard]] bool SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept;
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;

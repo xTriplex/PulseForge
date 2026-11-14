@@ -54,6 +54,7 @@ namespace PulseForge
 	{
 		AssetID Material;
 		MaterialAssetDesc Description;
+		std::optional<CookedGraphMaterialProduct> GraphProduct;
 		uint64_t Revision = 0;
 	};
 
@@ -965,8 +966,12 @@ namespace PulseForge
 				return std::unexpected(std::move(MaterialBinding.error()));
 			}
 			m_PreparedMaterialBindings.insert_or_assign(Instance.Entity, *MaterialBinding);
-			if (m_ProjectAssetCaches->CookedContent && Instance.MaterialAsset &&
-				m_ProjectAssetCaches->CookedContent->FindGraphMaterial(*Instance.MaterialAsset))
+			const bool HasTransientMaterial = Instance.MaterialAsset && m_TransientMaterialOverride &&
+				m_TransientMaterialOverride->Material == *Instance.MaterialAsset;
+			const bool HasTransientGraph = Instance.MaterialAsset && m_TransientMaterialOverride &&
+				m_TransientMaterialOverride->Material == *Instance.MaterialAsset && m_TransientMaterialOverride->GraphProduct;
+			if (Instance.MaterialAsset && (HasTransientGraph || (!HasTransientMaterial && m_ProjectAssetCaches->CookedContent &&
+				m_ProjectAssetCaches->CookedContent->FindGraphMaterial(*Instance.MaterialAsset))))
 			{
 				GraphMaterialRuntime* GraphMaterial = nullptr;
 				const auto Existing = m_GraphMaterialResources.find(*Instance.MaterialAsset);
@@ -974,15 +979,24 @@ namespace PulseForge
 					GraphMaterial = Existing->second.get();
 				else
 				{
-					auto Product = m_ProjectAssetCaches->CookedContent->LoadGraphMaterialProduct(*Instance.MaterialAsset);
-					if (!Product)
-						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
-							*Instance.MaterialAsset, "Could not load cooked graph material: " + Product.error().Message });
+					std::optional<CookedGraphMaterialProduct> LoadedProduct;
+					const CookedGraphMaterialProduct* Product = nullptr;
+					if (HasTransientGraph)
+						Product = &*m_TransientMaterialOverride->GraphProduct;
+					else
+					{
+						auto Loaded = m_ProjectAssetCaches->CookedContent->LoadGraphMaterialProduct(*Instance.MaterialAsset);
+						if (!Loaded)
+							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+								*Instance.MaterialAsset, "Could not load cooked graph material: " + Loaded.error().Message });
+						LoadedProduct.emplace(std::move(*Loaded));
+						Product = &*LoadedProduct;
+					}
 
 					ShaderDesc ShaderDescription;
 					ShaderDescription.Stage = ShaderStage::Fragment;
 					ShaderDescription.EntryPoint = "PSMain";
-					ShaderDescription.DebugName = "PulseForge cooked graph material " + Product->RecipeFingerprint;
+					ShaderDescription.DebugName = "PulseForge graph material " + Product->RecipeFingerprint;
 					auto Shader = m_Runtime.CreateShader(ShaderDescription, Product->SpirV);
 					if (!Shader)
 						return std::unexpected(MakeResourceError("Could not create cooked graph material shader: " + Shader.error().Message));
@@ -1165,10 +1179,15 @@ namespace PulseForge
 				"A transient material preview requires a valid asset and nonzero draft revision" });
 		try
 		{
-			auto Replacement = std::make_unique<TransientMaterialOverride>(TransientMaterialOverride{ Material, Description, Revision });
+			auto Replacement = std::make_unique<TransientMaterialOverride>();
+			Replacement->Material = Material;
+			Replacement->Description = Description;
+			Replacement->Revision = Revision;
 			m_TransientMaterialOverride = std::move(Replacement);
 			m_PreparedSnapshot.reset();
 			m_PreparedMaterialBindings.clear();
+			m_PreparedGraphMaterials.clear();
+			m_GraphMaterialResources.erase(Material);
 			m_MaterialBindingCache->RefreshMaterialAssets();
 			return {};
 		}
@@ -1179,12 +1198,57 @@ namespace PulseForge
 		}
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::SetTransientGraphMaterialOverride(
+		const AssetID& Material, const MaterialAssetDesc& Description,
+		const CookedGraphMaterialProduct& Product, uint64_t Revision)
+	{
+		if (Material.IsNil() || Revision == 0 || Product.ArtifactVersion != Detail::GraphMaterialProductSchemaVersion ||
+			Product.RecipeFingerprint.size() != 32 || Product.SpirV.empty())
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, Material,
+				"A transient graph preview requires a valid material, artifact and nonzero draft revision" });
+		try
+		{
+			auto Replacement = std::make_unique<TransientMaterialOverride>();
+			Replacement->Material = Material;
+			Replacement->Description = Description;
+			Replacement->GraphProduct = Product;
+			Replacement->Revision = Revision;
+			m_TransientMaterialOverride = std::move(Replacement);
+			m_PreparedSnapshot.reset();
+			m_PreparedMaterialBindings.clear();
+			m_PreparedGraphMaterials.clear();
+			m_GraphMaterialResources.erase(Material);
+			m_MaterialBindingCache->RefreshMaterialAssets();
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, {}, Material,
+				std::string("Could not retain the transient graph material preview: ") + Exception.what() });
+		}
+	}
+
 	void SceneRenderer::ClearTransientMaterialOverride() noexcept
 	{
 		if (!m_TransientMaterialOverride) return;
+		const AssetID Material = m_TransientMaterialOverride->Material;
 		m_TransientMaterialOverride.reset();
 		m_PreparedSnapshot.reset();
 		m_PreparedMaterialBindings.clear();
+		m_PreparedGraphMaterials.clear();
+		m_GraphMaterialResources.erase(Material);
+		m_MaterialBindingCache->RefreshMaterialAssets();
+	}
+
+	void SceneRenderer::ClearTransientGraphMaterialOverride() noexcept
+	{
+		if (!m_TransientMaterialOverride || !m_TransientMaterialOverride->GraphProduct) return;
+		const AssetID Material = m_TransientMaterialOverride->Material;
+		m_TransientMaterialOverride.reset();
+		m_PreparedSnapshot.reset();
+		m_PreparedMaterialBindings.clear();
+		m_PreparedGraphMaterials.clear();
+		m_GraphMaterialResources.erase(Material);
 		m_MaterialBindingCache->RefreshMaterialAssets();
 	}
 

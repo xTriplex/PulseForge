@@ -8,17 +8,277 @@
 #include "Editor/EditorStyle.h"
 
 #include <imgui.h>
+#include <imgui_node_editor.h>
 
 #include <algorithm>
+#include <bit>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace PulseForgeEditor
 {
+	namespace NodeEditor = ax::NodeEditor;
+
 	struct EditorMaterialDocumentEditor::State final : EditorDocumentEditorState
 	{
+		~State() override
+		{
+			if (!Canvas) return;
+			auto* const Previous = NodeEditor::GetCurrentEditor();
+			NodeEditor::SetCurrentEditor(Canvas);
+			NodeEditor::DestroyEditor(Canvas);
+			NodeEditor::SetCurrentEditor(Previous == Canvas ? nullptr : Previous);
+		}
+		NodeEditor::EditorContext* Canvas = nullptr;
+		std::unordered_set<uintptr_t> PositionedNodes;
 		std::string Error;
 	};
+
+	namespace
+	{
+		struct MaterialGraphPinHandle final
+		{
+			PulseForge::UUID Node;
+			bool Output = false;
+			uint8_t Slot = 0;
+		};
+
+		uintptr_t MaterialGraphCanvasHandle(PulseForge::UUID ID, uint64_t Salt) noexcept
+		{
+			uint64_t Value = ID.GetHigh() ^ std::rotl(ID.GetLow(), 23) ^ (Salt * 0x9e3779b97f4a7c15ull);
+			Value ^= Value >> 30;
+			Value *= 0xbf58476d1ce4e5b9ull;
+			Value ^= Value >> 27;
+			Value *= 0x94d049bb133111ebull;
+			Value ^= Value >> 31;
+			return static_cast<uintptr_t>(Value == 0 ? 1 : Value);
+		}
+
+		const char* MaterialGraphNodeLabel(PulseForge::MaterialGraphNodeKind Kind)
+		{
+			switch (Kind)
+			{
+			case PulseForge::MaterialGraphNodeKind::FloatConstant: return "Constant";
+			case PulseForge::MaterialGraphNodeKind::FloatParameter: return "Scalar Parameter";
+			case PulseForge::MaterialGraphNodeKind::Add: return "Add";
+			case PulseForge::MaterialGraphNodeKind::Multiply: return "Multiply";
+			case PulseForge::MaterialGraphNodeKind::Reroute: return "Reroute";
+			case PulseForge::MaterialGraphNodeKind::PbrOutput: return "PBR Output";
+			}
+			return "Unknown";
+		}
+
+		bool IsOnlyUnconnectedMaterialInputs(const PulseForge::MaterialGraphValidation& Validation)
+		{
+			return std::all_of(Validation.Diagnostics.begin(), Validation.Diagnostics.end(), [](const auto& Diagnostic)
+				{ return Diagnostic.Message == "Required material graph input is unconnected"; });
+		}
+
+		template<typename StateType>
+		void DrawMaterialGraphCanvas(StateType& State, EditorDocumentSession& Session, PulseForge::Project& Project,
+			PulseForge::MaterialAssetDesc& Draft, EditorMaterialDraftController& Drafts,
+			EditorDocumentManager& Documents)
+		{
+			if (!Draft.Graph) return;
+			if (!State.Canvas)
+			{
+				NodeEditor::Config Config;
+				Config.SettingsFile = nullptr;
+				State.Canvas = NodeEditor::CreateEditor(&Config);
+				if (!State.Canvas)
+				{
+					State.Error = "Could not create the material graph canvas.";
+					return;
+				}
+			}
+
+			auto* const Previous = NodeEditor::GetCurrentEditor();
+			NodeEditor::SetCurrentEditor(State.Canvas);
+			std::unordered_map<uintptr_t, MaterialGraphPinHandle> Pins;
+			std::unordered_map<uintptr_t, PulseForge::UUID> Connections;
+			std::vector<std::pair<PulseForge::UUID, ImVec2>> UpdatedPositions;
+			std::unordered_set<uintptr_t> ActiveNodeHandles;
+			const auto PinHandle = [&](PulseForge::UUID Node, bool Output, uint8_t Slot)
+			{
+				const uintptr_t Handle = MaterialGraphCanvasHandle(Node,
+					(Output ? 0x100ull : 0x200ull) + Slot);
+				Pins.emplace(Handle, MaterialGraphPinHandle{ Node, Output, Slot });
+				return Handle;
+			};
+
+			ImGui::TextDisabled("Edit graph nodes and typed scalar links. Node positions are saved with the Material source.");
+			const auto AddNode = [&](PulseForge::MaterialGraphNodeKind Kind, const char* Label)
+			{
+				if (!ImGui::Button(Label)) return;
+				const auto NodeID = PulseForge::UUID::Generate();
+				if (!NodeID)
+				{
+					State.Error = NodeID.error().Message;
+					return;
+				}
+				const auto Before = Draft;
+				const float Column = static_cast<float>(Draft.Graph->Nodes.size() % 4);
+				const float Row = static_cast<float>(Draft.Graph->Nodes.size() / 4);
+				std::string ParameterName;
+				if (Kind == PulseForge::MaterialGraphNodeKind::FloatParameter)
+					ParameterName = "Parameter" + std::to_string(Draft.Graph->Nodes.size());
+				Draft.Graph->Nodes.push_back({ *NodeID, Kind, 0.0f, std::move(ParameterName),
+					80.0 + Column * 220.0, 80.0 + Row * 140.0 });
+				if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
+					(void)Documents.MarkEdited(Session.Identity);
+				State.Error.clear();
+			};
+			AddNode(PulseForge::MaterialGraphNodeKind::FloatConstant, "Add Constant"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::FloatParameter, "Add Parameter"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::Add, "Add"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::Multiply, "Multiply"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::Reroute, "Reroute");
+
+			const auto Available = ImGui::GetContentRegionAvail();
+			NodeEditor::Begin("##MaterialGraphCanvas", ImVec2(Available.x, 360.0f));
+			for (auto& Node : Draft.Graph->Nodes)
+			{
+				const uintptr_t NodeHandle = MaterialGraphCanvasHandle(Node.ID, 0x10ull);
+				ActiveNodeHandles.insert(NodeHandle);
+				const NodeEditor::NodeId CanvasNode(NodeHandle);
+				if (State.PositionedNodes.insert(NodeHandle).second)
+					NodeEditor::SetNodePosition(CanvasNode, ImVec2(static_cast<float>(Node.X), static_cast<float>(Node.Y)));
+				NodeEditor::BeginNode(CanvasNode);
+				ImGui::Text("%s", MaterialGraphNodeLabel(Node.Kind));
+				ImGui::TextDisabled("%s", Node.ID.ToString().substr(0, 8).c_str());
+				const bool HasInput = Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::PbrOutput;
+				const bool HasOutput = Node.Kind == PulseForge::MaterialGraphNodeKind::FloatConstant ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::FloatParameter ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute;
+				if (HasInput)
+				{
+					const uint8_t InputCount = Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
+						Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ? 2 : 1;
+					for (uint8_t Slot = 0; Slot < InputCount; ++Slot)
+					{
+						const uintptr_t Handle = PinHandle(Node.ID, false, Slot);
+						NodeEditor::BeginPin(NodeEditor::PinId(Handle), NodeEditor::PinKind::Input);
+						ImGui::Text("In %u", static_cast<unsigned>(Slot));
+						NodeEditor::EndPin();
+					}
+				}
+				if (Node.Kind == PulseForge::MaterialGraphNodeKind::FloatConstant ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::FloatParameter)
+				{
+					float Value = Node.Value;
+					if (ImGui::DragFloat("Value", &Value, 0.01f))
+					{
+						const auto Before = Draft;
+						Node.Value = Value;
+						if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
+							(void)Documents.MarkEdited(Session.Identity);
+					}
+				}
+				if (HasOutput)
+				{
+					const uintptr_t Handle = PinHandle(Node.ID, true, 0);
+					NodeEditor::BeginPin(NodeEditor::PinId(Handle), NodeEditor::PinKind::Output);
+					ImGui::Text("%s", Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ? "Out" : "Value");
+					NodeEditor::EndPin();
+				}
+				NodeEditor::EndNode();
+				const ImVec2 Position = NodeEditor::GetNodePosition(CanvasNode);
+				if (std::abs(Position.x - Node.X) > 0.5f || std::abs(Position.y - Node.Y) > 0.5f)
+					UpdatedPositions.emplace_back(Node.ID, Position);
+			}
+			std::erase_if(State.PositionedNodes, [&](uintptr_t Handle) { return !ActiveNodeHandles.contains(Handle); });
+			for (const auto& Connection : Draft.Graph->Connections)
+			{
+				const uintptr_t LinkHandle = MaterialGraphCanvasHandle(Connection.ID, 0x30ull);
+				const uintptr_t Output = PinHandle(Connection.OutputNode, true, 0);
+				const uintptr_t Input = PinHandle(Connection.InputNode, false, Connection.InputSlot);
+				Connections.emplace(LinkHandle, Connection.ID);
+				NodeEditor::Link(NodeEditor::LinkId(LinkHandle), NodeEditor::PinId(Output), NodeEditor::PinId(Input));
+			}
+
+			if (NodeEditor::BeginCreate())
+			{
+				NodeEditor::PinId First;
+				NodeEditor::PinId Second;
+				while (NodeEditor::QueryNewLink(&First, &Second))
+				{
+					const auto A = Pins.find(static_cast<uintptr_t>(First.Get()));
+					const auto B = Pins.find(static_cast<uintptr_t>(Second.Get()));
+					bool Accepted = false;
+					PulseForge::UUID OutputNode;
+					PulseForge::UUID InputNode;
+					uint8_t InputSlot = 0;
+					if (A != Pins.end() && B != Pins.end() && A->second.Output != B->second.Output)
+					{
+						const auto& Output = A->second.Output ? A->second : B->second;
+						const auto& Input = A->second.Output ? B->second : A->second;
+						OutputNode = Output.Node;
+						InputNode = Input.Node;
+						InputSlot = Input.Slot;
+						if (const auto LinkID = PulseForge::UUID::Generate(); LinkID)
+						{
+							auto Candidate = *Draft.Graph;
+							Candidate.Connections.push_back({ *LinkID, OutputNode, InputNode, InputSlot });
+							const auto Validation = PulseForge::ValidateMaterialGraphSource(Candidate);
+							Accepted = Validation.IsValid() || IsOnlyUnconnectedMaterialInputs(Validation);
+							if (Accepted)
+							{
+								const auto Before = Draft;
+								Draft.Graph = std::move(Candidate);
+								if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
+									(void)Documents.MarkEdited(Session.Identity);
+							}
+						}
+					}
+					if (Accepted) NodeEditor::AcceptNewItem();
+					else NodeEditor::RejectNewItem();
+				}
+				NodeEditor::EndCreate();
+			}
+			if (NodeEditor::BeginDelete())
+			{
+				NodeEditor::LinkId Deleted;
+				while (NodeEditor::QueryDeletedLink(&Deleted))
+				{
+					const auto Link = Connections.find(static_cast<uintptr_t>(Deleted.Get()));
+					if (Link == Connections.end())
+					{
+						NodeEditor::RejectDeletedItem();
+						continue;
+					}
+					NodeEditor::AcceptDeletedItem();
+					const auto Before = Draft;
+					std::erase_if(Draft.Graph->Connections, [&](const auto& Connection) { return Connection.ID == Link->second; });
+					if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
+						(void)Documents.MarkEdited(Session.Identity);
+				}
+				NodeEditor::EndDelete();
+			}
+			NodeEditor::End();
+			NodeEditor::SetCurrentEditor(Previous == State.Canvas ? nullptr : Previous);
+
+			if (!UpdatedPositions.empty())
+			{
+				const auto Before = Draft;
+				for (const auto& [NodeID, Position] : UpdatedPositions)
+					if (auto Node = std::find_if(Draft.Graph->Nodes.begin(), Draft.Graph->Nodes.end(),
+						[NodeID](const auto& Candidate) { return Candidate.ID == NodeID; }); Node != Draft.Graph->Nodes.end())
+					{
+						Node->X = Position.x;
+						Node->Y = Position.y;
+					}
+				if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
+					(void)Documents.MarkEdited(Session.Identity);
+			}
+		}
+	}
 
 	EditorMaterialDocumentEditor::EditorMaterialDocumentEditor(EditorDocumentManager& Documents,
 		EditorDocumentEditorRegistry& Editors, EditorMaterialDraftController& Drafts, EditorMaterialDetailsPanel& Panel,
@@ -124,10 +384,10 @@ namespace PulseForgeEditor
 						PulseForge::MaterialGraphSource Graph;
 						Graph.GraphID = *GraphID;
 						Graph.Nodes = {
-							{ *ConstantID, PulseForge::MaterialGraphNodeKind::FloatConstant, Draft->BaseColorFactor.r, {} },
-							{ *ZeroID, PulseForge::MaterialGraphNodeKind::FloatConstant, 0.0f, {} },
-							{ *AddID, PulseForge::MaterialGraphNodeKind::Add, 0.0f, {} },
-							{ *OutputID, PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
+							{ *ConstantID, PulseForge::MaterialGraphNodeKind::FloatConstant, Draft->BaseColorFactor.r, {}, 80.0, 100.0 },
+							{ *ZeroID, PulseForge::MaterialGraphNodeKind::FloatConstant, 0.0f, {}, 80.0, 260.0 },
+							{ *AddID, PulseForge::MaterialGraphNodeKind::Add, 0.0f, {}, 400.0, 160.0 },
+							{ *OutputID, PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {}, 700.0, 160.0 }
 						};
 						Graph.Connections = {
 							{ *FirstConnectionID, *ConstantID, *AddID, 0 },
@@ -150,21 +410,8 @@ namespace PulseForgeEditor
 						Validation.Diagnostics.front().Message.c_str());
 				else
 					ImGui::TextDisabled("Graph source is valid. Cooking compiles this graph to a Vulkan SPIR-V product.");
-				auto Constant = std::find_if(Draft->Graph->Nodes.begin(), Draft->Graph->Nodes.end(), [](const auto& Node)
-					{ return Node.Kind == PulseForge::MaterialGraphNodeKind::FloatConstant; });
-				if (Constant != Draft->Graph->Nodes.end())
-				{
-					float Value = Constant->Value;
-					ImGui::SetNextItemWidth(240.0f);
-					if (ImGui::DragFloat("PBR base-color scalar", &Value, 0.01f, 0.0f, 1.0f, "%.3f"))
-					{
-						const PulseForge::MaterialAssetDesc Before = *Draft;
-						Constant->Value = Value;
-						if (m_Drafts.BeginEdit(*Project, Session.Identity.Asset, Before))
-							(void)m_Documents.MarkEdited(Session.Identity);
-					}
-				}
-				ImGui::TextDisabled("This first graph slice maps a scalar expression into grayscale base color; fixed material values remain available in Details.");
+				DrawMaterialGraphCanvas(*Current, Session, *Project, *Draft, m_Drafts, m_Documents);
+				ImGui::TextDisabled("The first graph output maps its scalar expression to grayscale base color; fixed material values remain available in Details.");
 			}
 		}
 		ImGui::SeparatorText("Draft Preview");

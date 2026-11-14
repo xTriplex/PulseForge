@@ -6,6 +6,47 @@
 
 namespace PulseForgeEditor
 {
+	class EditorMaterialPreviewCompileState final
+	{
+	public:
+		[[nodiscard]] bool Request(uint64_t Fingerprint) noexcept
+		{
+			if (Fingerprint == 0 || Fingerprint == m_RequestedFingerprint) return false;
+			m_RequestedFingerprint = Fingerprint;
+			m_CompletedFingerprint = 0;
+			m_Pending = true;
+			m_Failed = false;
+			return true;
+		}
+		[[nodiscard]] bool Complete(uint64_t Fingerprint, bool Succeeded) noexcept
+		{
+			if (!m_Pending || Fingerprint == 0 || Fingerprint != m_RequestedFingerprint) return false;
+			m_Pending = false;
+			m_Failed = !Succeeded;
+			m_CompletedFingerprint = Succeeded ? Fingerprint : 0;
+			return true;
+		}
+		[[nodiscard]] bool IsPending(uint64_t Fingerprint) const noexcept
+		{
+			return m_Pending && m_RequestedFingerprint == Fingerprint;
+		}
+		[[nodiscard]] bool IsCurrent(uint64_t Fingerprint) const noexcept
+		{
+			return Fingerprint != 0 && m_CompletedFingerprint == Fingerprint;
+		}
+		[[nodiscard]] bool HasFailed(uint64_t Fingerprint) const noexcept
+		{
+			return m_Failed && m_RequestedFingerprint == Fingerprint;
+		}
+		void Reset() noexcept { *this = {}; }
+
+	private:
+		uint64_t m_RequestedFingerprint = 0;
+		uint64_t m_CompletedFingerprint = 0;
+		bool m_Pending = false;
+		bool m_Failed = false;
+	};
+
 	[[nodiscard]] inline uint64_t ComputeEditorMaterialPreviewFingerprint(std::string_view Bytes) noexcept
 	{
 		uint64_t Hash = 14695981039346656037ull;

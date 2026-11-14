@@ -317,6 +317,19 @@ namespace
 	{
 		using namespace PulseForge;
 		{
+			PulseForgeEditor::EditorMaterialPreviewCompileState Compilation;
+			PF_CHECK(Tests, Compilation.Request(41) && Compilation.IsPending(41));
+			PF_CHECK(Tests, !Compilation.Request(41)); // An unchanged draft does not schedule another DXC invocation.
+			PF_CHECK(Tests, Compilation.Request(42) && Compilation.IsPending(42));
+			PF_CHECK(Tests, !Compilation.Complete(41, true) && !Compilation.IsCurrent(41));
+			PF_CHECK(Tests, Compilation.Complete(42, true) && Compilation.IsCurrent(42));
+			PF_CHECK(Tests, !Compilation.Complete(42, false) && Compilation.IsCurrent(42));
+			PF_CHECK(Tests, Compilation.Request(43) && Compilation.Complete(43, false) && Compilation.HasFailed(43));
+			PF_CHECK(Tests, !Compilation.IsCurrent(42) && !Compilation.IsCurrent(43));
+			Compilation.Reset();
+			PF_CHECK(Tests, Compilation.Request(43) && Compilation.IsPending(43)); // Explicit retry is a fresh generation.
+		}
+		{
 			PulseForgeEditor::EditorMaterialPreviewPublication Publication;
 			MaterialAssetDesc DraftA;
 			DraftA.BaseColorFactor = { 0.25f, 0.4f, 0.7f, 1.0f };

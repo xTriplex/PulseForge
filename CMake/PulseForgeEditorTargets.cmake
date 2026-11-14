@@ -104,7 +104,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore PulseForgeAssetExportService
 		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeAssetDependencyCatalog PulseForgeScriptAssets PulseForgeAudioAssets
-			PulseForgeBuildProfiles
+			PulseForgeBuildProfiles PulseForgeMaterialGraphCompiler
 			PulseForgeImGui PulseForgeImGuiNodeEditor PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
 	)
