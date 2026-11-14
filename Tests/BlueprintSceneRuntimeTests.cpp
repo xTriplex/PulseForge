@@ -137,7 +137,9 @@ namespace
 		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Values[ActorA] == 10.0f && Values[ActorB] == 10.0f);
 		RejectSecondActor = true;
-		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		const auto RejectedWriteFrame = Runtime.Advance(TestScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, RejectedWriteFrame.has_value());
+		PF_CHECK(Tests, RejectedWriteFrame && RejectedWriteFrame->BlueprintInstructionsExecuted == Actors.size() * 7);
 		PF_CHECK(Tests, Values[ActorA] == 20.0f && Values[ActorB] == 10.0f && RejectedActorWrites == 1);
 		const auto Diagnostics = Runtime.GetBlueprintDiagnostics();
 		PF_CHECK(Tests, Diagnostics.size() == 1 && Diagnostics[0].Entity == ActorB &&

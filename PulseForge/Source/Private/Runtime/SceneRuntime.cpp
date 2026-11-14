@@ -258,6 +258,8 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
+				BlueprintInstructionsRemaining -= std::min(BlueprintInstructionsRemaining, Result->InstructionsExecuted);
+				BlueprintInstructionsExecuted += Result->InstructionsExecuted;
 				if (!Result->PropertyWrites.empty() &&
 					(!Services.ApplyBlueprintPropertyWrites || !Services.ApplyBlueprintPropertyWrites(Target, Result->PropertyWrites)))
 				{
@@ -267,8 +269,6 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
-				BlueprintInstructionsRemaining -= std::min(BlueprintInstructionsRemaining, Result->InstructionsExecuted);
-				BlueprintInstructionsExecuted += Result->InstructionsExecuted;
 				ProgramInstance.ScalarState = std::move(CandidateState);
 			}
 			catch (const std::exception& Exception)
@@ -832,11 +832,15 @@ namespace PulseForge
 		}
 		m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 		m_Impl->BlueprintInstructionsExecuted = 0;
+		const auto MakeFrameResult = [&](uint32_t PhysicsSteps = 0)
+		{
+			return SceneRuntimeFrameResult{ PhysicsSteps, m_Impl->Physics->GetStats(), m_Impl->BlueprintInstructionsExecuted };
+		};
 		if (m_Impl->AudioSessionState)
 			m_Impl->AudioSessionState->PollDeviceState();
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
-			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+			return MakeFrameResult();
 		m_Impl->ReconcileBlueprintEntities(Source, m_Services);
 		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
@@ -863,7 +867,7 @@ namespace PulseForge
 					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Services);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
-						return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+						return MakeFrameResult();
 				}
 		}
 		else
@@ -883,7 +887,7 @@ namespace PulseForge
 			if (auto Result = SetPaused(RequestedPause); !Result) return std::unexpected(Result.error());
 		}
 
-		if (m_Impl->Paused) return SceneRuntimeFrameResult{};
+		if (m_Impl->Paused) return MakeFrameResult();
 
 		{
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "ScriptRuntime::Advance", "ScriptRuntime");
@@ -895,7 +899,7 @@ namespace PulseForge
 		}
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
-			return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+			return MakeFrameResult();
 		for (const Entity& EntityValue : Source.GetEntities())
 			m_Impl->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnUpdate, m_Services);
 		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
@@ -906,7 +910,7 @@ namespace PulseForge
 			const bool RequestedPause = *m_Impl->RequestedPause;
 			m_Impl->RequestedPause.reset();
 			if (auto Result = SetPaused(RequestedPause); !Result) return std::unexpected(Result.error());
-			if (m_Impl->Paused) return SceneRuntimeFrameResult{ .PhysicsStats = m_Impl->Physics->GetStats() };
+			if (m_Impl->Paused) return MakeFrameResult();
 		}
 
 		auto PhysicsResult = [&]
@@ -923,7 +927,7 @@ namespace PulseForge
 		for (const PhysicsContactEvent& Event : m_Impl->Physics->TakeContactEvents())
 		{
 			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
-				return SceneRuntimeFrameResult{ .PhysicsSteps = *PhysicsResult, .PhysicsStats = m_Impl->Physics->GetStats() };
+				return MakeFrameResult(*PhysicsResult);
 			const BlueprintEventKind BlueprintEvent = Event.IsSensorPair
 				? Event.Phase == PhysicsContactPhase::Begin ? BlueprintEventKind::OnTriggerEnter
 					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnTriggerStay : BlueprintEventKind::OnTriggerExit
@@ -945,6 +949,6 @@ namespace PulseForge
 					"Could not update scene audio: " + Result.error().Message));
 		}
 
-		return SceneRuntimeFrameResult{ *PhysicsResult, m_Impl->Physics->GetStats(), m_Impl->BlueprintInstructionsExecuted };
+		return MakeFrameResult(*PhysicsResult);
 	}
 }
