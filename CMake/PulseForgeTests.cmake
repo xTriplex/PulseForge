@@ -276,6 +276,7 @@ if(BUILD_TESTING)
 		Tests/GameplayInputLifecycleTests.cpp
 		Tests/GameplayInputStoreTests.cpp
 		Tests/ScriptRuntimeTests.cpp
+		Tests/BlueprintProgramTests.cpp
 	)
 	target_include_directories(PulseForgeScriptingRuntimeTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeScriptingRuntimeTests PRIVATE
@@ -285,6 +286,17 @@ if(BUILD_TESTING)
 		add_dependencies(PulseForgeScriptingRuntimeTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.ScriptingRuntime COMMAND PulseForgeScriptingRuntimeTests)
+
+	add_executable(PulseForgeBlueprintRuntimeTests
+		Tests/BlueprintProgramTestMain.cpp
+		Tests/BlueprintProgramTests.cpp)
+	target_include_directories(PulseForgeBlueprintRuntimeTests PRIVATE Tests)
+	target_link_libraries(PulseForgeBlueprintRuntimeTests PRIVATE PulseForgeBlueprintRuntime)
+	set_property(TARGET PulseForgeBlueprintRuntimeTests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeBlueprintRuntimeTests PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.BlueprintRuntime COMMAND PulseForgeBlueprintRuntimeTests)
 
 	add_executable(PulseForgePlayerLaunchConfigurationTests
 		Tests/PlayerLaunchConfigurationTestMain.cpp

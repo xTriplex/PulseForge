@@ -164,6 +164,9 @@ add_library(PulseForgePhysics STATIC PulseForge/Source/Private/Physics/PhysicsSc
 target_include_directories(PulseForgePhysics PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgePhysics PRIVATE NOMINMAX)
 target_link_libraries(PulseForgePhysics PUBLIC PulseForgeScene PRIVATE Jolt spdlog::spdlog)
+add_library(PulseForgeBlueprintRuntime STATIC PulseForge/Source/Private/Scripting/BlueprintProgram.cpp)
+target_include_directories(PulseForgeBlueprintRuntime PUBLIC PulseForge/Source/Public)
+set_property(TARGET PulseForgeBlueprintRuntime PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeScripting STATIC
 	PulseForge/Source/Private/Scripting/ScriptEnvironment.cpp
 	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
@@ -186,7 +189,7 @@ add_library(PulseForgeRuntime STATIC
 target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
 target_include_directories(PulseForgeRuntime PRIVATE PulseForge/Vendor/json/include)
 target_link_libraries(PulseForgeRuntime
-	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
+	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting PulseForgeBlueprintRuntime
 	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeCookedRuntimeProvider PulseForgeScene
 		PulseForgeInput PulseForgeCore
 )
@@ -225,7 +228,7 @@ target_include_directories(PulseForgeCookedRuntime PUBLIC PulseForge/Source/Publ
 target_include_directories(PulseForgeCookedRuntime PRIVATE PulseForge/Vendor/json/include)
 target_compile_definitions(PulseForgeCookedRuntime PUBLIC PF_COOKED_RUNTIME_ONLY)
 target_link_libraries(PulseForgeCookedRuntime
-	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeCookedScripting PulseForgeCookedRuntimeProvider PulseForgeScene
+	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeCookedScripting PulseForgeBlueprintRuntime PulseForgeCookedRuntimeProvider PulseForgeScene
 	PRIVATE PulseForgeCookedAudioAssets PulseForgeCookedAudioScene PulseForgeInput PulseForgeCore)
 set_property(TARGET PulseForgeCookedRuntime PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeRenderer STATIC
