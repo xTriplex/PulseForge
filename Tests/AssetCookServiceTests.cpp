@@ -1393,6 +1393,38 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 		PF_CHECK(Tests, !RuntimeFixtureError);
 #endif
 	}
+	if (GraphMaterialCook)
+	{
+		const std::filesystem::path GraphSourcePath = Fixture.Source / "Assets" / "Graph.material";
+		std::ifstream SourceStream(GraphSourcePath, std::ios::binary);
+		const std::string ValidSource{ std::istreambuf_iterator<char>(SourceStream), std::istreambuf_iterator<char>() };
+		PF_CHECK(Tests, !ValidSource.empty());
+		std::ifstream ManifestStream(GraphMaterialCook->ManifestPath, std::ios::binary);
+		const std::string LastGoodManifest{ std::istreambuf_iterator<char>(ManifestStream), std::istreambuf_iterator<char>() };
+		PF_CHECK(Tests, !LastGoodManifest.empty());
+		auto InvalidSource = ValidSource;
+		const std::string ExistingNodeID = UUID(10, 4).ToString();
+		const size_t NodeDeclaration = InvalidSource.find(ExistingNodeID);
+		PF_CHECK(Tests, NodeDeclaration != std::string::npos);
+		if (NodeDeclaration != std::string::npos)
+		{
+			InvalidSource.replace(NodeDeclaration, ExistingNodeID.size(), UUID(99, 999).ToString());
+			CookFixture::WriteText(GraphSourcePath, InvalidSource);
+			const auto InvalidSnapshot = Fixture.Build();
+			CookFixture::WriteText(GraphSourcePath, ValidSource);
+			PF_CHECK(Tests, !InvalidSnapshot && InvalidSnapshot.error().Message.find("Material dependency analysis failed") != std::string::npos);
+			std::ifstream RetainedManifestStream(GraphMaterialCook->ManifestPath, std::ios::binary);
+			const std::string RetainedManifest{ std::istreambuf_iterator<char>(RetainedManifestStream), std::istreambuf_iterator<char>() };
+			PF_CHECK(Tests, RetainedManifest == LastGoodManifest);
+			auto LastGoodProvider = CookedContentProvider::Open(GraphMaterialRequest.OutputRoot, Fixture.Compatibility);
+			PF_CHECK(Tests, LastGoodProvider.has_value());
+			if (LastGoodProvider)
+			{
+				const auto LastGoodProduct = (*LastGoodProvider)->LoadGraphMaterialProduct(Fixture.GraphMaterialAsset);
+				PF_CHECK(Tests, LastGoodProduct && LastGoodProduct->RecipeFingerprint.size() == 32);
+			}
+		}
+	}
 	auto StartupOverrideRequest = Fixture.Request(*Snapshot);
 	StartupOverrideRequest.StartupScene = Fixture.AlternateSceneAsset;
 	StartupOverrideRequest.OutputRoot = Fixture.Root / "Override";
