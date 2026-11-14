@@ -759,6 +759,88 @@ namespace
 		Session.Stop();
 #endif
 	}
+
+	void TestSavedPbrGraphMaterialCookedProduct(TestRunner& Tests)
+	{
+#if defined(PF_COOK_FIXTURE_PROJECT)
+		constexpr AssetID FloorMaterial{ 0x1000000000004000ull, 0x8000000000000008ull };
+		const auto Unique = UUID::Generate();
+		PF_CHECK(Tests, Unique.has_value());
+		if (!Unique) return;
+		std::error_code Error;
+		const auto TemporaryRoot = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path(Error), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto SourceRoot = TemporaryRoot / std::filesystem::u8path("PulseForge-PbrGraphCook-" + Unique->ToString());
+		const auto OutputRoot = TemporaryRoot / std::filesystem::u8path("PulseForge-PbrGraphCooked-" + Unique->ToString());
+		struct OwnedRoots final
+		{
+			std::filesystem::path Source;
+			std::filesystem::path Output;
+			~OwnedRoots()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Source, CleanupError);
+				CleanupError.clear();
+				std::filesystem::remove_all(Output, CleanupError);
+			}
+		} Cleanup{ SourceRoot, OutputRoot };
+		const auto SampleRoot = std::filesystem::path(PF_COOK_FIXTURE_PROJECT).parent_path().parent_path() / "PBRMaterials";
+		std::filesystem::copy(SampleRoot, SourceRoot, std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto ProjectValue = Project::Open(SourceRoot / "PBRMaterials.pfproj");
+		PF_CHECK(Tests, ProjectValue.has_value());
+		if (!ProjectValue) return;
+		auto Snapshot = AssetDependencyCatalogBuilder::Build(
+			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		const AssetID StartupScene = ProjectValue->GetDescription().StartScene.value_or(AssetID{});
+		AssetCookRequest Request{
+			*Snapshot, ProjectValue->GetFilePath(), StartupScene, {},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			OutputRoot
+		};
+		auto Plan = AssetCookService::Plan(Request);
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto GraphProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == FloorMaterial && Product.Product == CookedAssetProductKind::GraphMaterial; });
+		PF_CHECK(Tests, GraphProduct != Plan->Products.end());
+		const auto SceneProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [StartupScene](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == StartupScene && Product.Product == CookedAssetProductKind::Scene; });
+		PF_CHECK(Tests, SceneProduct != Plan->Products.end());
+		if (SceneProduct != Plan->Products.end())
+			PF_CHECK(Tests, std::find(SceneProduct->RuntimeDependencies.begin(), SceneProduct->RuntimeDependencies.end(),
+				CookedAssetDependency{ FloorMaterial, CookedAssetProductKind::GraphMaterial, {} }) != SceneProduct->RuntimeDependencies.end());
+		const auto Cooked = AssetCookService::Cook(*Plan);
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		std::filesystem::remove_all(SourceRoot, Error);
+		PF_CHECK(Tests, !Error && !std::filesystem::exists(SourceRoot));
+		if (Error || std::filesystem::exists(SourceRoot)) return;
+		auto Provider = CookedContentProvider::Open(OutputRoot, Request.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		PF_CHECK(Tests, (*Provider)->FindGraphMaterial(FloorMaterial) != nullptr);
+		const auto Loaded = (*Provider)->LoadGraphMaterialProduct(FloorMaterial);
+		PF_CHECK(Tests, Loaded && Loaded->SpirV.size() >= 20 && Loaded->SpirV[0] == std::byte{ 0x03 } &&
+			Loaded->SpirV[1] == std::byte{ 0x02 } && Loaded->SpirV[2] == std::byte{ 0x23 } && Loaded->SpirV[3] == std::byte{ 0x07 });
+		MaterialAssetCache RuntimeMaterials(*Provider);
+		PF_CHECK(Tests, RuntimeMaterials.IsRegistered(FloorMaterial));
+		const auto RuntimeMaterial = RuntimeMaterials.GetOrLoad(FloorMaterial);
+		const glm::vec4 ExpectedBaseColor{ 0.32f, 0.35f, 0.38f, 1.0f };
+		PF_CHECK(Tests, RuntimeMaterial && RuntimeMaterial->get().BaseColorTexture == AssetID(0xa100000000004000ull,
+			0x8000000000000001ull) && RuntimeMaterial->get().BaseColorFactor == ExpectedBaseColor);
+#endif
+	}
 }
 
 void RunMaterialGraphSourceTests(TestRunner& Tests)
@@ -889,7 +971,11 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	PF_CHECK(Tests, TextureCompiled && TextureCompiled->SemanticRecipe.find("PULSEFORGE_GRAPH_SAMPLES_BASE_COLOR_TEXTURE") != std::string::npos &&
 		TextureCompiled->SemanticRecipe.find("DiffuseTexture.Sample(DiffuseSampler, e0).rgb") != std::string::npos &&
 		TextureCompiled->SemanticRecipe.find("float3 GraphMaterialBaseColor(float2 GraphUV0)") != std::string::npos);
-	const auto CacheRoot = std::filesystem::temp_directory_path() / ("PF-MaterialGraphDDC-" + CacheID->ToString());
+	std::error_code CacheRootError;
+	const auto CacheRoot = std::filesystem::canonical(std::filesystem::temp_directory_path(CacheRootError), CacheRootError) /
+		("PF-MaterialGraphDDC-" + CacheID->ToString());
+	PF_CHECK(Tests, !CacheRootError && CacheRoot.is_absolute());
+	if (CacheRootError) return;
 	struct MaterialGraphCacheCleanup final
 	{
 		std::filesystem::path Root;
@@ -939,6 +1025,12 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		auto CacheHit = MaterialGraphCompiler::Compile(CachedCompile);
 		PF_CHECK(Tests, CacheHit && CacheHit->SpirV == Compiled->SpirV &&
 			CacheHit->RecipeFingerprint == Compiled->RecipeFingerprint);
+		int CachedGenerationChecks = 0;
+		CachedCompile.IsGenerationCurrent = [&CachedGenerationChecks](uint64_t)
+			{ return ++CachedGenerationChecks == 1; };
+		const auto StaleCacheHit = MaterialGraphCompiler::Compile(CachedCompile);
+		PF_CHECK(Tests, !StaleCacheHit && StaleCacheHit.error().Code == MaterialGraphCompileErrorCode::StaleGeneration &&
+			CachedGenerationChecks == 2);
 		auto ParameterGraph = Source;
 		ParameterGraph.Nodes[0].Kind = MaterialGraphNodeKind::FloatParameter;
 		ParameterGraph.Nodes[0].ParameterName = "BaseTint";
@@ -1482,4 +1574,5 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	TestLuaAuthoringSampleCookAndRuntime(Tests);
 	TestPhysicsQueriesSampleCookedPlayer(Tests);
 	TestRuntimeUISampleCookedPlayer(Tests);
+	TestSavedPbrGraphMaterialCookedProduct(Tests);
 }

@@ -389,8 +389,16 @@ namespace PulseForge
 			auto Cached = Request.ArtifactStore->Read(ArtifactKey);
 			if (Cached.Status == DerivedDataArtifactReadStatus::Hit &&
 				IsSpirV(Cached.Payload, Request.MaximumOutputBytes, !Generated->Parameters.empty()))
+			{
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Failure(MaterialGraphCompileErrorCode::Cancelled,
+						"Material compilation was cancelled before publishing a cached artifact"));
+				if (Request.IsGenerationCurrent && !Request.IsGenerationCurrent(Request.Generation))
+					return std::unexpected(Failure(MaterialGraphCompileErrorCode::StaleGeneration,
+						"Cached material artifact belongs to a stale generation"));
 				return MaterialGraphCompiledArtifact{ std::move(Cached.Payload), Generated->Hlsl, Recipe.DigestHex, {},
 					std::move(SourceNodes), std::move(Generated->Parameters), Request.Generation };
+			}
 		}
 		const auto Executable = std::filesystem::weakly_canonical(ConfiguredExecutable, PathError);
 		if (PathError || !Executable.is_absolute() || !std::filesystem::is_regular_file(Executable, PathError))

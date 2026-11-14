@@ -38,7 +38,11 @@ int main(int ArgumentCount, char** Arguments)
 	std::error_code Error;
 	const auto Unique = UUID::Generate();
 	if (!Unique) return 1;
-	const auto Temporary = std::filesystem::temp_directory_path(Error) / ("PF-CookedGraphMaterial-" + Unique->ToString());
+	const auto SystemTemporaryRoot = std::filesystem::temp_directory_path(Error);
+	if (Error) return 1;
+	const auto TemporaryRoot = std::filesystem::weakly_canonical(SystemTemporaryRoot, Error);
+	if (Error) return 1;
+	const auto Temporary = TemporaryRoot / ("PF-CookedGraphMaterial-" + Unique->ToString());
 	if (Error || !std::filesystem::create_directories(Temporary, Error) || Error) return 1;
 	struct Cleanup final
 	{

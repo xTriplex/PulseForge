@@ -359,10 +359,10 @@ namespace PulseForge
 			return std::string(TextureSrgbSubresource);
 		}
 
-		CookedAssetDependency ProductDependencyForEdge(const AssetDependencyEdge& Edge, AssetFileType Type)
+		CookedAssetDependency ProductDependencyForEdge(const AssetDependencyEdge& Edge, CookedAssetProductKind TargetProduct)
 		{
 			const auto Product = Edge.Location.starts_with("material.")
-				? CookedAssetProductKind::Texture : ProductForType(Type).value_or(CookedAssetProductKind::Scene);
+				? CookedAssetProductKind::Texture : TargetProduct;
 			std::string Subresource;
 			if (Product == CookedAssetProductKind::MeshPrimitive) Subresource = MeshDefaultSubresource;
 			else if (Product == CookedAssetProductKind::Texture) Subresource = TextureSubresource(Edge);
@@ -517,6 +517,42 @@ namespace PulseForge
 			CookedAssetDependency Product;
 		};
 		std::vector<Pending> Queue;
+		std::map<AssetID, CookedAssetProductKind> ProductsByAsset;
+		const auto ResolveProduct = [&](const AssetRecord& Record) -> std::expected<CookedAssetProductKind, AssetCookError>
+		{
+			if (const auto Existing = ProductsByAsset.find(Record.ID); Existing != ProductsByAsset.end())
+				return Existing->second;
+			const auto Type = GetCookAssetType(Record.ProjectRelativePath);
+			if (!Type || !ProductForType(*Type))
+				return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
+					"Cook source has no registered product adapter", Record.ProjectRelativePath, Record.ID));
+			CookedAssetProductKind Product = *ProductForType(*Type);
+			if (*Type == AssetFileType::Material)
+			{
+				auto SourcePath = AssetPathResolver::ResolveManagedSourcePath(Request.SourceSnapshot->GetProjectRootPath(), Record.ProjectRelativePath);
+				if (!SourcePath) return std::unexpected(Error(AssetCookErrorCode::SourceReadFailed, SourcePath.error().Message,
+					SourcePath.error().Path, Record.ID));
+				auto Bytes = ReadBounded(*SourcePath, 1024ull * 1024ull, Record.ID, Request.CancellationToken);
+				if (!Bytes) return std::unexpected(Bytes.error());
+				const auto Receipt = std::find_if(Request.SourceSnapshot->GetInputReadSet().begin(),
+					Request.SourceSnapshot->GetInputReadSet().end(), [&](const AssetDependencyInputReceipt& Candidate)
+					{ return Candidate.ProjectRelativePath == Record.ProjectRelativePath; });
+				const auto Fingerprint = ComputeAssetContentFingerprintCancellable(*Bytes, Request.CancellationToken);
+				if (!Fingerprint)
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled,
+						"Cook was cancelled while classifying material source", *SourcePath, Record.ID));
+				if (Receipt == Request.SourceSnapshot->GetInputReadSet().end() || !Receipt->Exists || Receipt->Content != *Fingerprint)
+					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+						"Material source changed after dependency analysis", *SourcePath, Record.ID));
+				const std::string Text(Bytes->empty() ? "" : reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
+				auto Material = MaterialAssetSerializer::Deserialize(Text);
+				if (!Material) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+					"Material source could not be classified for cooking: " + Material.error().Message, *SourcePath, Record.ID));
+				if (Material->Graph) Product = CookedAssetProductKind::GraphMaterial;
+			}
+			ProductsByAsset.emplace(Record.ID, Product);
+			return Product;
+		};
 		for (const AssetID& Root : Plan.SortedRoots)
 		{
 			if (Request.CancellationToken.stop_requested())
@@ -525,13 +561,15 @@ namespace PulseForge
 			if (!Record)
 				return std::unexpected(Error(AssetCookErrorCode::InvalidRoot, "Cook root is absent from the captured asset registry", {}, Root));
 			const auto Type = GetCookAssetType(Record->ProjectRelativePath);
-			if (!Type || !ProductForType(*Type))
-				return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct, "Cook root has an unsupported asset type", Record->ProjectRelativePath, Root));
+			const auto ResolvedProduct = ResolveProduct(*Record);
+			if (!Type || !ResolvedProduct) return std::unexpected(ResolvedProduct ?
+				Error(AssetCookErrorCode::UnsupportedProduct, "Cook root has an unsupported asset type", Record->ProjectRelativePath, Root) :
+				ResolvedProduct.error());
 			if (Root == Request.StartupScene && *Type != AssetFileType::Scene)
 				return std::unexpected(Error(AssetCookErrorCode::InvalidRoot, "Startup root must identify a scene asset", Record->ProjectRelativePath, Root));
 			if (auto Path = AssetPathResolver::ResolveManagedSourcePath(Request.SourceSnapshot->GetProjectRootPath(), Record->ProjectRelativePath); !Path)
 				return std::unexpected(Error(AssetCookErrorCode::SourceReadFailed, Path.error().Message, Path.error().Path, Root));
-			CookedAssetDependency Product{ Root, *ProductForType(*Type), {} };
+			CookedAssetDependency Product{ Root, *ResolvedProduct, {} };
 			if (Product.Product == CookedAssetProductKind::MeshPrimitive) Product.Subresource = MeshDefaultSubresource;
 			else if (Product.Product == CookedAssetProductKind::Texture) Product.Subresource = std::string(TextureSrgbSubresource);
 			Queue.push_back({ std::move(Product) });
@@ -548,9 +586,10 @@ namespace PulseForge
 			const auto Record = Request.SourceSnapshot->GetRegistry().Find(Current.Asset);
 			if (!Record) return std::unexpected(Error(AssetCookErrorCode::InvalidDependency, "Resolved cook dependency disappeared from its captured registry", {}, Current.Asset));
 			const auto Type = GetCookAssetType(Record->ProjectRelativePath);
+			const auto ResolvedProduct = ResolveProduct(*Record);
 			const bool MaterialTextureInterpretation = Type && Current.Product == CookedAssetProductKind::Texture &&
 				*Type == AssetFileType::Environment && (Current.Subresource == TextureSrgbSubresource || Current.Subresource == TextureLinearSubresource);
-			if (!Type || (ProductForType(*Type) != Current.Product && !MaterialTextureInterpretation))
+			if (!Type || !ResolvedProduct || (*ResolvedProduct != Current.Product && !MaterialTextureInterpretation))
 				return std::unexpected(Error(AssetCookErrorCode::InvalidDependency, "Dependency product type does not match its registered source type", Record->ProjectRelativePath, Current.Asset));
 			auto SourcePath = AssetPathResolver::ResolveManagedSourcePath(Request.SourceSnapshot->GetProjectRootPath(), Record->ProjectRelativePath);
 			if (!SourcePath) return std::unexpected(Error(AssetCookErrorCode::SourceReadFailed, SourcePath.error().Message, SourcePath.error().Path, Current.Asset));
@@ -581,12 +620,12 @@ namespace PulseForge
 				if (!TargetRecord)
 					return std::unexpected(Error(AssetCookErrorCode::InvalidDependency,
 						"Resolved runtime dependency is not registered at " + Edge.Location, Record->ProjectRelativePath, Edge.Target.Asset));
-				const auto TargetType = GetCookAssetType(TargetRecord->ProjectRelativePath);
-				if (!TargetType || !ProductForType(*TargetType))
+				const auto TargetProduct = ResolveProduct(*TargetRecord);
+				if (!TargetProduct)
 					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
 						"Reachable runtime dependency has no cook adapter at " + Edge.Location,
 						TargetRecord->ProjectRelativePath, Edge.Target.Asset));
-				CookedAssetDependency Dependency = ProductDependencyForEdge(Edge, *TargetType);
+				CookedAssetDependency Dependency = ProductDependencyForEdge(Edge, *TargetProduct);
 				Product.RuntimeDependencies.push_back(Dependency);
 				Queue.push_back({ std::move(Dependency) });
 			}
@@ -835,11 +874,15 @@ namespace PulseForge
 					if (!Valid) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 						"Runtime UI document is invalid: " + Valid.error().Message, Product.SourcePath, Product.Asset));
 				}
-				else if (Product.Product == CookedAssetProductKind::Material)
+				else if (Product.Product == CookedAssetProductKind::Material ||
+					Product.Product == CookedAssetProductKind::GraphMaterial)
 				{
 					const std::string Text(Bytes.empty() ? "" : reinterpret_cast<const char*>(Bytes.data()), Bytes.size());
 					auto Material = MaterialAssetSerializer::Deserialize(Text);
 					if (!Material) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Material.error().Message, Product.SourcePath, Product.Asset));
+					if (Material->Graph.has_value() != (Product.Product == CookedAssetProductKind::GraphMaterial))
+						return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+							"Material source no longer matches its planned cooked product kind", Product.SourcePath, Product.Asset));
 					if (Material->Graph)
 					{
 						if (Request.Compatibility.RendererBackend != "Vulkan")

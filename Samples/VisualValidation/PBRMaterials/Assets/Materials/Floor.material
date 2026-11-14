@@ -1,6 +1,27 @@
 {
-  "format": "PulseForgeMaterial", "version": 3,
+  "format": "PulseForgeMaterial", "version": 5,
   "baseColorTexture": "a1000000-0000-4000-8000-000000000001",
   "baseColorFactor": [0.32, 0.35, 0.38, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.92,
-  "normalScale": 1.0, "occlusionStrength": 1.0, "emissiveFactor": [0.0, 0.0, 0.0]
+  "normalScale": 1.0, "occlusionStrength": 1.0, "emissiveFactor": [0.0, 0.0, 0.0],
+  "alphaMode": "OPAQUE", "alphaCutoff": 0.5, "doubleSided": false,
+  "graph": {
+    "schema": "pulseforge.material-graph", "version": 3,
+    "graph": "a2000000-0000-4000-8000-000000000008",
+    "nodes": [
+      { "id": "a2000000-0000-4000-8000-000000000009", "kind": "uv0", "value": 0.0,
+        "color": [1.0, 1.0, 1.0], "parameter": "", "x": 80.0, "y": 100.0 },
+      { "id": "a2000000-0000-4000-8000-00000000000a", "kind": "baseColorTextureSample", "value": 0.0,
+        "color": [1.0, 1.0, 1.0], "parameter": "", "x": 300.0, "y": 100.0 },
+      { "id": "a2000000-0000-4000-8000-00000000000b", "kind": "pbrOutput", "value": 0.0,
+        "color": [1.0, 1.0, 1.0], "parameter": "", "x": 520.0, "y": 100.0 }
+    ],
+    "connections": [
+      { "id": "a3000000-0000-4000-8000-000000000001",
+        "output": "a2000000-0000-4000-8000-000000000009",
+        "input": "a2000000-0000-4000-8000-00000000000a", "slot": 0 },
+      { "id": "a3000000-0000-4000-8000-000000000002",
+        "output": "a2000000-0000-4000-8000-00000000000a",
+        "input": "a2000000-0000-4000-8000-00000000000b", "slot": 0 }
+    ]
+  }
 }
