@@ -56,6 +56,7 @@ namespace PulseForge
 			if (Value == 0) Value = Generation.fetch_add(1, std::memory_order_relaxed) + 1;
 			return Value;
 		}
+		constexpr uint32_t MaximumBlueprintInstructionsPerFrame = 50'000;
 
 		std::expected<std::string, std::string> ReadRuntimeUIDocumentBytes(
 			const Project* SourceProject, const std::shared_ptr<const CookedContentProvider>& CookedAssets, const AssetID& Asset)
@@ -149,6 +150,8 @@ namespace PulseForge
 		uint64_t SessionGeneration = 0;
 		uint64_t BlueprintProgramGeneration = 0;
 		uint64_t NextBoundaryRequestGeneration = 0;
+		uint32_t BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
+		uint32_t BlueprintInstructionsExecuted = 0;
 
 		void RecordBlueprintDiagnostic(
 			const Entity& Target,
@@ -207,6 +210,13 @@ namespace PulseForge
 				if (!Instance.Program) return;
 				const BlueprintProgramBinding Binding{ Instance.Asset, Instance.Revision, Instance.Program };
 				if (Instance.Faulted) return;
+				if (BlueprintInstructionsRemaining == 0)
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::InstructionBudgetExceeded, {},
+						"Scene Blueprint instruction budget was exhausted for this frame");
+					Instance.Faulted = true;
+					return;
+				}
 				BlueprintInstanceState& ProgramInstance = BlueprintInstances[Target.GetUUID()][Instance.Asset];
 				const BlueprintProgramSource& ProgramSource = Instance.Program->GetSource();
 				if (ProgramInstance.BoundEntity != Target || ProgramInstance.Asset != Instance.Asset ||
@@ -234,9 +244,15 @@ namespace PulseForge
 				}
 
 				std::vector<float> CandidateState = ProgramInstance.ScalarState;
-				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState);
+				const uint32_t ExecutionBudget = std::min(BlueprintInstructionsRemaining, BlueprintDefaultInstructionBudget);
+				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState, ExecutionBudget);
 				if (!Result)
 				{
+					if (Result.error().Code == BlueprintProgramErrorCode::InstructionBudgetExceeded)
+					{
+						BlueprintInstructionsRemaining -= ExecutionBudget;
+						BlueprintInstructionsExecuted += ExecutionBudget;
+					}
 					RecordBlueprintDiagnostic(Target, &Binding, Event, Result.error().Code, Result.error().SourceNode,
 						std::move(Result.error().Message));
 					Instance.Faulted = true;
@@ -251,6 +267,8 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
+				BlueprintInstructionsRemaining -= std::min(BlueprintInstructionsRemaining, Result->InstructionsExecuted);
+				BlueprintInstructionsExecuted += Result->InstructionsExecuted;
 				ProgramInstance.ScalarState = std::move(CandidateState);
 			}
 			catch (const std::exception& Exception)
@@ -566,6 +584,8 @@ namespace PulseForge
 					"Could not start scene scripting: " + Result.error().Message));
 
 			Candidate->State = Impl::Lifecycle::Active;
+			Candidate->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
+			Candidate->BlueprintInstructionsExecuted = 0;
 			if (m_Services.GetBlueprintProgramGeneration)
 				Candidate->BlueprintProgramGeneration = m_Services.GetBlueprintProgramGeneration();
 			for (const Entity& EntityValue : Source.GetEntities())
@@ -810,6 +830,8 @@ namespace PulseForge
 				m_Impl->BlueprintProgramGeneration = CurrentProgramGeneration;
 			}
 		}
+		m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
+		m_Impl->BlueprintInstructionsExecuted = 0;
 		if (m_Impl->AudioSessionState)
 			m_Impl->AudioSessionState->PollDeviceState();
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
@@ -923,6 +945,6 @@ namespace PulseForge
 					"Could not update scene audio: " + Result.error().Message));
 		}
 
-		return SceneRuntimeFrameResult{ *PhysicsResult, m_Impl->Physics->GetStats() };
+		return SceneRuntimeFrameResult{ *PhysicsResult, m_Impl->Physics->GetStats(), m_Impl->BlueprintInstructionsExecuted };
 	}
 }

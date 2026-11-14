@@ -129,6 +129,7 @@ namespace PulseForge
 	{
 		uint32_t PhysicsSteps = 0;
 		PhysicsSceneRuntimeStats PhysicsStats{};
+		uint32_t BlueprintInstructionsExecuted = 0;
 	};
 
 	// Project, optional host services, and started Scene must outlive this coordinator; keep the scene at the same address while running.
