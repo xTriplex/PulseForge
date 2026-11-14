@@ -59,6 +59,7 @@ namespace
 		std::filesystem::path Source;
 		std::filesystem::path Output;
 		std::filesystem::path ProjectFile;
+		std::filesystem::path SceneSourcePath;
 		AssetID SceneAsset;
 		AssetID AlternateSceneAsset;
 		AssetID ScriptAsset;
@@ -91,9 +92,9 @@ namespace
 			if (!SceneData.CreateEntity("Cooked scene content")) { Root.clear(); return; }
 			auto SceneText = SceneSerializer::Serialize(SceneData);
 			if (!SceneText) { Root.clear(); return; }
-			const auto ScenePath = Source / "Assets" / "Startup.scene";
-			WriteText(ScenePath, *SceneText);
-			auto SceneMetadata = AssetMetadataSerializer::CreateForNewAsset(ScenePath);
+			SceneSourcePath = Source / "Assets" / "Startup.scene";
+			WriteText(SceneSourcePath, *SceneText);
+			auto SceneMetadata = AssetMetadataSerializer::CreateForNewAsset(SceneSourcePath);
 			if (!SceneMetadata) { Root.clear(); return; }
 			SceneAsset = SceneMetadata->ID;
 			const auto AlternateScenePath = Source / "Assets" / "Alternate.scene";
@@ -129,6 +130,15 @@ namespace
 			auto BlueprintMetadata = AssetMetadataSerializer::CreateForNewAsset(BlueprintSourcePath);
 			if (!BlueprintMetadata) { Root.clear(); return; }
 			BlueprintAsset = BlueprintMetadata->ID;
+			Scene AttachedScene;
+			if (!SceneSerializer::LoadFromFile(SceneSourcePath, AttachedScene)) { Root.clear(); return; }
+			auto AttachedEntity = AttachedScene.GetEntities().front();
+			BlueprintComponent AttachedBlueprint{ BlueprintAsset, true };
+			if (!AttachedBlueprint.SetFloatProperty("health", 0.0f) || !AttachedEntity.SetBlueprint(AttachedBlueprint))
+				{ Root.clear(); return; }
+			const auto AttachedSceneText = SceneSerializer::Serialize(AttachedScene);
+			if (!AttachedSceneText) { Root.clear(); return; }
+			WriteText(SceneSourcePath, *AttachedSceneText);
 			const auto MaterialPath = Source / "Assets" / "Cooked.material";
 			MaterialAssetDesc MaterialDescription;
 			MaterialDescription.BaseColorFactor = { 0.25f, 0.5f, 0.75f, 1.0f };
@@ -794,7 +804,6 @@ namespace
 		PF_CHECK(Tests, Snapshot.has_value());
 		if (!Snapshot) return;
 		auto Request = Fixture.Request(*Snapshot);
-		Request.DynamicRoots = { Fixture.BlueprintAsset };
 		Request.OutputRoot = Fixture.Root / "BlueprintCook";
 		const auto Cooked = AssetCookService::Cook(Request);
 		PF_CHECK(Tests, Cooked.has_value());
@@ -814,6 +823,20 @@ namespace
 			PF_CHECK(Tests, Program->GetEvents().front().Event == BlueprintEventKind::OnCreate);
 			PF_CHECK(Tests, Program->GetEvents().front().Program.GetSource().Instructions[1].SourceNode == UUID(30, 2));
 		}
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession Session(*Provider, RuntimeDescription);
+		const auto Started = Session.Start();
+		PF_CHECK(Tests, Started.has_value());
+		if (Started && Session.GetActiveScene())
+		{
+			const auto RuntimeEntity = Session.GetActiveScene()->GetEntities().front();
+			const auto RuntimeBlueprint = RuntimeEntity.GetBlueprint();
+			PF_CHECK(Tests, RuntimeBlueprint && RuntimeBlueprint->has_value() &&
+				RuntimeBlueprint->value().FindFloatProperty("health") == 2.0f);
+		}
+		Session.Stop();
 	}
 
 	void TestSavedPbrGraphMaterialCookedProduct(TestRunner& Tests)

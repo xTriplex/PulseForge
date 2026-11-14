@@ -62,6 +62,12 @@ namespace PulseForge
 				ValidateReference(Issues, Registry, CurrentEntity, ScriptComponent->value().ScriptAsset, AssetReferenceKind::Script,
 					AssetFileType::Script);
 
+			const auto BlueprintComponent = CurrentEntity.GetBlueprint();
+			if (!BlueprintComponent) return std::unexpected(BlueprintComponent.error());
+			if (BlueprintComponent->has_value())
+				ValidateReference(Issues, Registry, CurrentEntity, BlueprintComponent->value().BlueprintAsset,
+					AssetReferenceKind::Blueprint, AssetFileType::Blueprint);
+
 			const auto AudioSource = CurrentEntity.GetAudioSource();
 			if (!AudioSource)
 				return std::unexpected(AudioSource.error());

@@ -25,6 +25,7 @@ namespace PulseForge
 		InvalidPhysicsComponent,
 		InvalidAudioComponent,
 		InvalidScriptComponent,
+		InvalidBlueprintComponent,
 		InvalidPointLight,
 		InvalidSpotLight,
 		InvalidPrefabInstance

@@ -253,9 +253,10 @@ namespace PulseForge
 		const auto AudioSource = Source.GetAudioSource();
 		const auto AudioListener = Source.GetAudioListener();
 		const auto Script = Source.GetScript();
+		const auto Blueprint = Source.GetBlueprint();
 		const auto RuntimeUICanvas = Source.GetRuntimeUICanvas();
 		if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
-			!AudioSource || !AudioListener || !Script || !RuntimeUICanvas)
+			!AudioSource || !AudioListener || !Script || !Blueprint || !RuntimeUICanvas)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
 		auto Duplicated = CreateEntity(Tag->Name + " Copy");
@@ -357,6 +358,14 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(ScriptResult.error());
+			}
+		}
+		if (Blueprint->has_value())
+		{
+			if (auto BlueprintResult = Duplicated->SetBlueprint(Blueprint->value()); !BlueprintResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(BlueprintResult.error());
 			}
 		}
 		if (RuntimeUICanvas->has_value())
@@ -1086,6 +1095,49 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a script component"));
 
 		Storage->Registry.remove<ScriptComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<BlueprintComponent>, SceneError> Entity::GetBlueprint() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read Blueprint from an invalid entity"));
+		if (!Storage->Registry.all_of<BlueprintComponent>(*Native))
+			return std::optional<BlueprintComponent>{};
+		return std::optional<BlueprintComponent>{ Storage->Registry.get<BlueprintComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetBlueprint(const BlueprintComponent& Blueprint) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a Blueprint to an invalid entity"));
+		if (const auto Validation = Blueprint.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidBlueprintComponent, Validation.error() });
+		try
+		{
+			Storage->Registry.emplace_or_replace<BlueprintComponent>(*Native, Blueprint);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{ SceneErrorCode::StorageFailure,
+				std::string("Could not set Blueprint component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveBlueprint() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a Blueprint from an invalid entity"));
+		if (!Storage->Registry.all_of<BlueprintComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a Blueprint component"));
+		Storage->Registry.remove<BlueprintComponent>(*Native);
 		return {};
 	}
 

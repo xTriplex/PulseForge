@@ -31,7 +31,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 13;
+		constexpr int64_t SceneFormatVersion = 14;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -515,11 +515,12 @@ namespace PulseForge
 				const auto AudioSource = Current.GetAudioSource();
 				const auto AudioListener = Current.GetAudioListener();
 				const auto Script = Current.GetScript();
+			const auto Blueprint = Current.GetBlueprint();
 				const auto RuntimeUICanvas = Current.GetRuntimeUICanvas();
 				const auto PrefabInstance = Current.GetPrefabInstance();
 				const auto Parent = Current.GetParent();
 				if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
-					!AudioSource || !AudioListener || !Script || !RuntimeUICanvas || !PrefabInstance || !Parent)
+					!AudioSource || !AudioListener || !Script || !Blueprint || !RuntimeUICanvas || !PrefabInstance || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -663,6 +664,21 @@ namespace PulseForge
 					}
 					Record["script"] = std::move(SerializedScript);
 				}
+				if (Blueprint->has_value())
+				{
+					const BlueprintComponent& Component = Blueprint->value();
+					if (auto Validation = Component.Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+					Json SerializedBlueprint = Json::object({ { "asset", Component.BlueprintAsset.ToString() }, { "enabled", Component.Enabled } });
+					if (!Component.FloatProperties.empty())
+					{
+						Json Properties = Json::object();
+						for (const auto& [Identifier, Value] : Component.FloatProperties)
+							Properties[Identifier] = Value;
+						SerializedBlueprint["properties"] = std::move(Properties);
+					}
+					Record["blueprint"] = std::move(SerializedBlueprint);
+				}
 				Record["parent"] = Parent->has_value() ? Json((**Parent).GetUUID().ToString()) : Json(nullptr);
 				if (PrefabInstance->has_value())
 				{
@@ -747,7 +763,7 @@ namespace PulseForge
 				if (auto Fields = ValidateKnownFields(SerializedEntity,
 						{ "uuid", "tag", "transform", "camera", "directionalLight", "environmentLight", "pointLight", "spotLight",
 							"meshRenderer", "rigidbody", "boxCollider", "collider", "audioSource", "audioListener", "script",
-							"runtimeUICanvas", "parent", "prefabInstance" },
+							"runtimeUICanvas", "parent", "prefabInstance", "blueprint" },
 						"Scene entity");
 					!Fields)
 					return std::unexpected(Fields.error());
@@ -760,6 +776,10 @@ namespace PulseForge
 				if (SerializedPrefabInstance != SerializedEntity.end() && DocumentVersion < 9)
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 						"Linked prefab metadata requires scene format version 9"));
+				const auto SerializedBlueprint = SerializedEntity.find("blueprint");
+				if (SerializedBlueprint != SerializedEntity.end() && DocumentVersion < 14)
+					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+						"Blueprint components require scene format version 14"));
 				if (UUIDValue == SerializedEntity.end() || !UUIDValue->is_string() ||
 					Tag == SerializedEntity.end() || !Tag->is_object() ||
 					Transform == SerializedEntity.end() || !Transform->is_object() ||
@@ -1358,6 +1378,49 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 				}
 
+				std::optional<BlueprintComponent> BlueprintData;
+				if (SerializedBlueprint != SerializedEntity.end())
+				{
+					if (!SerializedBlueprint->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Entity Blueprint component must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedBlueprint, { "asset", "enabled", "properties" },
+							"Blueprint component", SceneSerializationErrorCode::InvalidEntityData); !Fields)
+						return std::unexpected(Fields.error());
+					const auto Asset = SerializedBlueprint->find("asset");
+					const auto Enabled = SerializedBlueprint->find("enabled");
+					if (Asset == SerializedBlueprint->end() || !Asset->is_string() || Enabled == SerializedBlueprint->end() || !Enabled->is_boolean())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Blueprint component requires an asset UUID and boolean enabled field"));
+					const auto ParsedAsset = UUID::Parse(Asset->get<std::string>());
+					if (!ParsedAsset || ParsedAsset->IsNil())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							ParsedAsset ? "Blueprint asset UUID must not be nil" : ParsedAsset.error().Message));
+					BlueprintData = BlueprintComponent{ *ParsedAsset, Enabled->get<bool>() };
+					const auto Properties = SerializedBlueprint->find("properties");
+					if (Properties != SerializedBlueprint->end())
+					{
+						if (!Properties->is_object() || Properties->size() > 64)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Blueprint properties must be an object containing at most 64 entries"));
+						for (const auto& [Identifier, Value] : Properties->items())
+						{
+							if (!Value.is_number())
+								return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+									"Blueprint properties require numeric values"));
+							const double NumericValue = Value.get<double>();
+						if (!std::isfinite(NumericValue) || std::abs(NumericValue) > 1'000'000'000.0)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Blueprint property values must be finite and bounded"));
+							const float PropertyValue = static_cast<float>(NumericValue);
+							if (auto Added = BlueprintData->SetFloatProperty(Identifier, PropertyValue); !Added)
+								return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Added.error()));
+						}
+					}
+					if (auto Validation = BlueprintData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+				}
+
 				std::optional<PrefabInstanceComponent> PrefabInstanceData;
 				if (SerializedPrefabInstance != SerializedEntity.end())
 				{
@@ -1431,6 +1494,11 @@ namespace PulseForge
 				{
 					if (auto ScriptResult = Created->SetScript(*ScriptData); !ScriptResult)
 						return std::unexpected(SceneOperationError(ScriptResult.error()));
+				}
+				if (BlueprintData)
+				{
+					if (auto BlueprintResult = Created->SetBlueprint(*BlueprintData); !BlueprintResult)
+						return std::unexpected(SceneOperationError(BlueprintResult.error()));
 				}
 				if (PrefabInstanceData)
 				{

@@ -15,6 +15,7 @@ namespace PulseForge
 		Mesh,
 		Material,
 		Script,
+		Blueprint,
 		Audio,
 		Environment,
 		RuntimeUI

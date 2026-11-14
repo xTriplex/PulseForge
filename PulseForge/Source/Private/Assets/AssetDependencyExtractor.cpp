@@ -299,9 +299,10 @@ namespace PulseForge
 				const auto Environment = EntityValue.GetEnvironmentLight();
 				const auto Audio = EntityValue.GetAudioSource();
 				const auto Script = EntityValue.GetScript();
+				const auto Blueprint = EntityValue.GetBlueprint();
 				const auto RuntimeUICanvas = EntityValue.GetRuntimeUICanvas();
 				const auto PrefabInstance = EntityValue.GetPrefabInstance();
-				if (!Mesh || !Environment || !Audio || !Script || !RuntimeUICanvas || !PrefabInstance)
+				if (!Mesh || !Environment || !Audio || !Script || !Blueprint || !RuntimeUICanvas || !PrefabInstance)
 					return std::unexpected(
 						MakeError(Owner.ProjectRelativePath, "Validated scene entity could not be read through its scene accessors"));
 
@@ -328,6 +329,11 @@ namespace PulseForge
 					AddRuntimeReference(Output, Registry, Referrer, Script->value().ScriptAsset, AssetFileType::Script,
 						"entities/" + EntityKey.substr(7) + "/script.asset", false, Script->value().ScriptAsset.ToString(),
 						FindValidationStatus(EntityValue.GetUUID(), Script->value().ScriptAsset, AssetReferenceKind::Script));
+				if (Blueprint->has_value())
+					AddRuntimeReference(Output, Registry, Referrer, Blueprint->value().BlueprintAsset, AssetFileType::Blueprint,
+						"entities/" + EntityKey.substr(7) + "/blueprint.asset", false,
+						Blueprint->value().BlueprintAsset.ToString(),
+						FindValidationStatus(EntityValue.GetUUID(), Blueprint->value().BlueprintAsset, AssetReferenceKind::Blueprint));
 				if (RuntimeUICanvas->has_value())
 					AddRuntimeReference(Output, Registry, Referrer, RuntimeUICanvas->value().DocumentAsset, AssetFileType::RuntimeUI,
 						"entities/" + EntityKey.substr(7) + "/runtimeUICanvas.documentAsset", false,

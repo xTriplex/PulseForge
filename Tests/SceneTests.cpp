@@ -276,6 +276,9 @@ namespace
 		PF_CHECK(Tests, CapsuleBody->SetCollider(CapsuleCollider).has_value());
 		const RuntimeUICanvasComponent Canvas{ UUID{ 22, 17 }, false, RuntimeUIInputPolicy::NonModal };
 		PF_CHECK(Tests, Body->SetRuntimeUICanvas(Canvas).has_value());
+		BlueprintComponent Blueprint{ UUID{ 23, 19 }, true };
+		PF_CHECK(Tests, Blueprint.SetFloatProperty("health", 42.0f).has_value());
+		PF_CHECK(Tests, Body->SetBlueprint(Blueprint).has_value());
 		const auto CameraEntity = Source.CreateEntity("Orthographic UI camera");
 		PF_CHECK(Tests, CameraEntity.has_value());
 		CameraComponent OrthographicCamera;
@@ -304,7 +307,7 @@ namespace
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 13") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 14") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"projection\": \"orthographic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("runtimeUICanvas") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
@@ -319,18 +322,23 @@ namespace
 			const auto LoadedRigidbody = LoadedBody->GetRigidbody();
 			const auto LoadedCollider = LoadedBody->GetBoxCollider();
 			const auto LoadedCanvas = LoadedBody->GetRuntimeUICanvas();
+			const auto LoadedBlueprint = LoadedBody->GetBlueprint();
 			PF_CHECK(Tests, LoadedRigidbody && LoadedRigidbody->has_value() && LoadedRigidbody->value().Mass == 3.0f &&
 								LoadedRigidbody->value().Friction == 0.6f && LoadedRigidbody->value().Restitution == 0.15f &&
 								!LoadedRigidbody->value().AllowSleeping);
 			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() && LoadedCollider->value().HalfExtents == Collider.HalfExtents);
 			PF_CHECK(Tests, LoadedCanvas && LoadedCanvas->has_value() && LoadedCanvas->value().DocumentAsset == Canvas.DocumentAsset &&
 				!LoadedCanvas->value().Enabled && LoadedCanvas->value().InputPolicy == RuntimeUIInputPolicy::NonModal);
+			PF_CHECK(Tests, LoadedBlueprint && LoadedBlueprint->has_value() &&
+				LoadedBlueprint->value().BlueprintAsset == Blueprint.BlueprintAsset &&
+				LoadedBlueprint->value().FindFloatProperty("health") == 42.0f);
 		}
 		nlohmann::json LegacyCanvasDocument = nlohmann::json::parse(*Serialized);
 		LegacyCanvasDocument["version"] = 11;
 		bool RemovedLegacyInputPolicy = false;
 		for (auto& EntityRecord : LegacyCanvasDocument["entities"])
 		{
+			EntityRecord.erase("blueprint");
 			if (EntityRecord.value("uuid", std::string{}) != Body->GetUUID().ToString()) continue;
 			auto CanvasRecord = EntityRecord.find("runtimeUICanvas");
 			if (CanvasRecord == EntityRecord.end() || !CanvasRecord->is_object()) break;

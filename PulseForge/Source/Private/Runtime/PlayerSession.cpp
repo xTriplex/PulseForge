@@ -1,6 +1,9 @@
 #include "Runtime/PlayerSession.h"
 #include "Runtime/CookedContentProvider.h"
 #include "Audio/AudioSession.h"
+#include "Assets/AssetTypes.h"
+#include "Core/BoundedInput.h"
+#include "Scripting/BlueprintAsset.h"
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
@@ -9,6 +12,9 @@
 #include "Scene/Scene.h"
 
 #include <cmath>
+#include <algorithm>
+#include <fstream>
+#include <unordered_map>
 #include <utility>
 
 namespace PulseForge
@@ -31,6 +37,78 @@ namespace PulseForge
 		{
 			++Generation;
 			if (Generation == 0) ++Generation;
+		}
+
+		void BindSceneBlueprintServices(
+			SceneRuntimeServices& Services,
+			const std::shared_ptr<const CookedContentProvider>& CookedAssets,
+			const Project* SourceProject)
+		{
+			using BlueprintAssetCache = std::unordered_map<AssetID, std::shared_ptr<const VerifiedBlueprintAsset>, UUIDHash>;
+			auto Cache = std::make_shared<BlueprintAssetCache>();
+			const std::shared_ptr<const CookedContentProvider> Provider = CookedAssets;
+			Services.ResolveBlueprintProgram = [Cache, Provider, SourceProject](const Entity& Target, BlueprintEventKind Event)
+				-> std::optional<BlueprintProgramBinding>
+			{
+				const auto Component = Target.GetBlueprint();
+				if (!Component || !Component->has_value() || !(**Component).Enabled) return std::nullopt;
+				const AssetID Asset = (**Component).BlueprintAsset;
+				auto Found = Cache->find(Asset);
+				if (Found == Cache->end())
+				{
+					std::expected<VerifiedBlueprintAsset, std::string> Loaded = std::unexpected("Blueprint asset is unavailable");
+					if (Provider)
+					{
+						auto Cooked = Provider->LoadBlueprintProgram(Asset);
+						if (Cooked) Loaded = std::move(*Cooked);
+						else Loaded = std::unexpected(Cooked.error().Message);
+					}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+					else if (SourceProject)
+					{
+						const auto Record = SourceProject->GetAssetRegistry().Find(Asset);
+						if (Record && HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Blueprint))
+						{
+							std::ifstream Input(SourceProject->GetRootPath() / Record->ProjectRelativePath, std::ios::binary);
+							auto Bytes = Input ? Detail::ReadBoundedInput(Input, BlueprintMaximumAssetBytes)
+								: std::expected<std::string, Detail::BoundedInputError>(std::unexpected(Detail::BoundedInputError{
+									Detail::BoundedInputErrorCode::ReadFailed }));
+							if (Bytes)
+							{
+								std::vector<std::byte> Buffer(Bytes->size());
+								std::transform(Bytes->begin(), Bytes->end(), Buffer.begin(),
+									[](char Value) { return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
+								auto Decoded = DeserializeBlueprintAsset(Buffer);
+								if (Decoded) Loaded = std::move(*Decoded);
+								else Loaded = std::unexpected(Decoded.error().Message);
+							}
+						}
+					}
+#endif
+					if (!Loaded) return std::nullopt;
+					Found = Cache->emplace(Asset, std::make_shared<const VerifiedBlueprintAsset>(std::move(*Loaded))).first;
+				}
+				for (const BlueprintVerifiedEventProgram& Candidate : Found->second->GetEvents())
+				{
+					if (Candidate.Event != Event) continue;
+					return BlueprintProgramBinding{ Asset, 1,
+						std::make_shared<const VerifiedBlueprintProgram>(Candidate.Program) };
+				}
+				return std::nullopt;
+			};
+			if (!Services.GetBlueprintProgramGeneration) Services.GetBlueprintProgramGeneration = [] { return uint64_t{ 1 }; };
+			if (!Services.ApplyBlueprintPropertyWrites)
+			{
+				Services.ApplyBlueprintPropertyWrites = [](const Entity& Target, std::span<const BlueprintScalarPropertyWrite> Writes)
+				{
+					auto Existing = Target.GetBlueprint();
+					if (!Existing || !Existing->has_value()) return false;
+					BlueprintComponent Candidate = **Existing;
+					for (const BlueprintScalarPropertyWrite& Write : Writes)
+						if (!Candidate.SetFloatProperty(Write.PropertyId, Write.Value)) return false;
+					return Target.SetBlueprint(Candidate).has_value();
+				};
+			}
 		}
 	} // namespace
 
@@ -104,6 +182,7 @@ namespace PulseForge
 					"Could not create cooked player audio session: " + CandidateAudioSession.error().Message));
 			auto CandidateServices = m_RuntimeServices;
 			CandidateServices.AudioSessionState = CandidateAudioSession->get();
+			BindSceneBlueprintServices(CandidateServices, m_CookedAssets, nullptr);
 			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, CandidateServices);
 			if (auto Started = CandidateRuntime->Start(**CandidateScene); !Started)
 				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeStartFailed,
@@ -147,6 +226,7 @@ namespace PulseForge
 				"Could not create player audio session: " + CandidateAudioSession.error().Message));
 		auto CandidateServices = m_RuntimeServices;
 		CandidateServices.AudioSessionState = CandidateAudioSession->get();
+		BindSceneBlueprintServices(CandidateServices, {}, CandidateProject.get());
 		auto CandidateRuntime = std::make_unique<SceneRuntime>(*CandidateProject, m_RuntimeDescription, CandidateServices);
 		if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
 			return std::unexpected(

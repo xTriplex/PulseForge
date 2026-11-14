@@ -26,6 +26,7 @@ add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
 	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp
 	PulseForge/Source/Private/Scene/Components/BoxColliderComponent.cpp
+	PulseForge/Source/Private/Scene/Components/BlueprintComponent.cpp
 	PulseForge/Source/Private/Scene/Components/PointLightComponent.cpp
 	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
 	PulseForge/Source/Private/Scene/Components/ScriptComponent.cpp

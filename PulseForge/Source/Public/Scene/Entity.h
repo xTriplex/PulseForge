@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Scene/Components/BlueprintComponent.h"
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
@@ -83,6 +84,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<ScriptComponent>, SceneError> GetScript() const;
 		[[nodiscard]] std::expected<void, SceneError> SetScript(const ScriptComponent& Script) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveScript() const;
+		[[nodiscard]] std::expected<std::optional<BlueprintComponent>, SceneError> GetBlueprint() const;
+		[[nodiscard]] std::expected<void, SceneError> SetBlueprint(const BlueprintComponent& Blueprint) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveBlueprint() const;
 		[[nodiscard]] std::expected<std::optional<PrefabInstanceComponent>, SceneError> GetPrefabInstance() const;
 		[[nodiscard]] std::expected<void, SceneError> SetPrefabInstance(const PrefabInstanceComponent& Instance) const;
 		[[nodiscard]] std::expected<void, SceneError> RemovePrefabInstance() const;
