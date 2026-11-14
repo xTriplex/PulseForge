@@ -72,6 +72,7 @@ namespace PulseForge
 		size_t OutputCount = 0;
 		for (const MaterialGraphNode& Node : Source.Nodes)
 		{
+			if (KindName(Node.Kind).empty()) Add(Node.ID, "Node kind is not supported");
 			if (Node.ID.IsNil() || !Nodes.emplace(Node.ID, &Node).second) Add(Node.ID, "Node identity is nil or duplicated");
 			if (!std::isfinite(Node.X) || !std::isfinite(Node.Y) || std::abs(Node.X) > 1'000'000.0 ||
 				std::abs(Node.Y) > 1'000'000.0)

@@ -860,6 +860,17 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		{ UUID(2, 3), UUID(1, 4), UUID(1, 5), 0 }
 	};
 	PF_CHECK(Tests, ValidateMaterialGraphSource(Source).IsValid());
+	auto UnsupportedNodeKind = Source;
+	UnsupportedNodeKind.Nodes.front().Kind = static_cast<MaterialGraphNodeKind>(0xff);
+	const auto UnsupportedNodeValidation = ValidateMaterialGraphSource(UnsupportedNodeKind);
+	PF_CHECK(Tests, !UnsupportedNodeValidation.IsValid() &&
+		std::any_of(UnsupportedNodeValidation.Diagnostics.begin(), UnsupportedNodeValidation.Diagnostics.end(),
+			[](const MaterialGraphDiagnostic& Diagnostic)
+			{ return Diagnostic.Node == UUID(1, 2) && Diagnostic.Message == "Node kind is not supported"; }));
+	PF_CHECK(Tests, !SerializeMaterialGraphSource(UnsupportedNodeKind));
+	const auto UnsupportedNodeCompile = MaterialGraphCompiler::Compile(MaterialGraphCompileRequest{
+		UnsupportedNodeKind, {}, "diagnostic-fixture" });
+	PF_CHECK(Tests, !UnsupportedNodeCompile && UnsupportedNodeCompile.error().Code == MaterialGraphCompileErrorCode::InvalidGraph);
 	auto MissingOutputInput = Source;
 	std::erase_if(MissingOutputInput.Connections, [](const MaterialGraphConnection& Connection)
 		{ return Connection.ID == UUID(2, 3); });
