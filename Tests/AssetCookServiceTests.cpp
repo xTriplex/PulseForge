@@ -16,6 +16,7 @@
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
+#include "Scripting/BlueprintAsset.h"
 #include "Scripting/ScriptRuntime.h"
 #include "Scene/SceneSerializer.h"
 #include "TestSupport.h"
@@ -61,6 +62,8 @@ namespace
 		AssetID SceneAsset;
 		AssetID AlternateSceneAsset;
 		AssetID ScriptAsset;
+		AssetID BlueprintAsset;
+		std::filesystem::path BlueprintSourcePath;
 		AssetID MaterialAsset;
 		AssetID GraphMaterialAsset;
 		AssetID ColorGraphMaterialAsset;
@@ -104,6 +107,28 @@ namespace
 			auto ScriptMetadata = AssetMetadataSerializer::CreateForNewAsset(ScriptPath);
 			if (!ScriptMetadata) { Root.clear(); return; }
 			ScriptAsset = ScriptMetadata->ID;
+			BlueprintProgramSource OnCreate;
+			OnCreate.Constants = { 2.0f };
+			OnCreate.ScalarPropertyIds = { "health" };
+			OnCreate.Instructions = {
+				{ BlueprintOpcode::PushConstant, 0, 0, UUID(30, 1) },
+				{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(30, 2) },
+				{ BlueprintOpcode::Return, 0, 0, UUID(30, 3) }
+			};
+			const std::array<BlueprintEventProgramSource, 1> BlueprintEvents{
+				BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, std::move(OnCreate) }
+			};
+			auto BlueprintBytes = SerializeBlueprintAsset(BlueprintEvents);
+			if (!BlueprintBytes) { Root.clear(); return; }
+			BlueprintSourcePath = Source / "Assets" / "Behavior.pfblueprint";
+			{
+				std::ofstream Output(BlueprintSourcePath, std::ios::binary | std::ios::trunc);
+				Output.write(reinterpret_cast<const char*>(BlueprintBytes->data()), static_cast<std::streamsize>(BlueprintBytes->size()));
+				if (!Output) { Root.clear(); return; }
+			}
+			auto BlueprintMetadata = AssetMetadataSerializer::CreateForNewAsset(BlueprintSourcePath);
+			if (!BlueprintMetadata) { Root.clear(); return; }
+			BlueprintAsset = BlueprintMetadata->ID;
 			const auto MaterialPath = Source / "Assets" / "Cooked.material";
 			MaterialAssetDesc MaterialDescription;
 			MaterialDescription.BaseColorFactor = { 0.25f, 0.5f, 0.75f, 1.0f };
@@ -758,6 +783,37 @@ namespace
 		PF_CHECK(Tests, !Session.IsPaused());
 		Session.Stop();
 #endif
+	}
+
+	void TestBlueprintCookedProgramProduct(TestRunner& Tests)
+	{
+		CookFixture Fixture;
+		PF_CHECK(Tests, !Fixture.Root.empty() && !Fixture.BlueprintAsset.IsNil() && !Fixture.BlueprintSourcePath.empty());
+		if (Fixture.Root.empty()) return;
+		auto Snapshot = Fixture.Build();
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		auto Request = Fixture.Request(*Snapshot);
+		Request.DynamicRoots = { Fixture.BlueprintAsset };
+		Request.OutputRoot = Fixture.Root / "BlueprintCook";
+		const auto Cooked = AssetCookService::Cook(Request);
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+
+		std::error_code RemoveError;
+		PF_CHECK(Tests, std::filesystem::remove(Fixture.BlueprintSourcePath, RemoveError) && !RemoveError);
+		auto Provider = CookedContentProvider::Open(Request.OutputRoot, Fixture.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		const CookedAssetEntry* Entry = (*Provider)->FindBlueprintProgram(Fixture.BlueprintAsset);
+		PF_CHECK(Tests, Entry != nullptr && Entry->PayloadVersion == BlueprintAssetFormatVersion);
+		auto Program = (*Provider)->LoadBlueprintProgram(Fixture.BlueprintAsset);
+		PF_CHECK(Tests, Program && Program->GetEvents().size() == 1);
+		if (Program && Program->GetEvents().size() == 1)
+		{
+			PF_CHECK(Tests, Program->GetEvents().front().Event == BlueprintEventKind::OnCreate);
+			PF_CHECK(Tests, Program->GetEvents().front().Program.GetSource().Instructions[1].SourceNode == UUID(30, 2));
+		}
 	}
 
 	void TestSavedPbrGraphMaterialCookedProduct(TestRunner& Tests)
@@ -1655,5 +1711,6 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	TestLuaAuthoringSampleCookAndRuntime(Tests);
 	TestPhysicsQueriesSampleCookedPlayer(Tests);
 	TestRuntimeUISampleCookedPlayer(Tests);
+	TestBlueprintCookedProgramProduct(Tests);
 	TestSavedPbrGraphMaterialCookedProduct(Tests);
 }

@@ -45,6 +45,7 @@ namespace PulseForge
 		Material,
 		GraphMaterial,
 		Script,
+		BlueprintProgram,
 		Audio,
 		MeshPrimitive,
 		Texture,
@@ -120,8 +121,9 @@ namespace PulseForge
 	class PULSEFORGE_API CookedAssetCatalog final
 	{
 	public:
-		// v2 adds configuration provenance, v3 script identities, v4 audio defaults, and v5 graph shader products.
-		static constexpr uint32_t ManifestVersion = 5;
+		// v2 adds configuration provenance, v3 script identities, v4 audio defaults, v5 graph shader products,
+		// and v6 versioned Blueprint event programs.
+		static constexpr uint32_t ManifestVersion = 6;
 		static constexpr std::string_view ManifestFileName = "manifest.pfmanifest";
 		static constexpr size_t MaximumManifestBytes = 16u * 1024u * 1024u;
 		static constexpr size_t MaximumEntries = 250'000;

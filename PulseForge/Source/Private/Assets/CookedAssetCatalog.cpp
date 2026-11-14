@@ -89,6 +89,7 @@ namespace PulseForge
 			case CookedAssetProductKind::Material: return "material";
 			case CookedAssetProductKind::GraphMaterial: return "graph-material";
 			case CookedAssetProductKind::Script: return "script";
+			case CookedAssetProductKind::BlueprintProgram: return "blueprint-program";
 			case CookedAssetProductKind::Audio: return "audio";
 			case CookedAssetProductKind::MeshPrimitive: return "mesh-primitive";
 			case CookedAssetProductKind::Texture: return "texture";
@@ -103,7 +104,8 @@ namespace PulseForge
 		std::optional<CookedAssetProductKind> ParseProduct(std::string_view Name) noexcept
 		{
 			for (const CookedAssetProductKind Kind : { CookedAssetProductKind::Scene, CookedAssetProductKind::Prefab,
-				 CookedAssetProductKind::Material, CookedAssetProductKind::GraphMaterial, CookedAssetProductKind::Script, CookedAssetProductKind::Audio,
+				 CookedAssetProductKind::Material, CookedAssetProductKind::GraphMaterial, CookedAssetProductKind::Script,
+				 CookedAssetProductKind::BlueprintProgram, CookedAssetProductKind::Audio,
 				 CookedAssetProductKind::MeshPrimitive, CookedAssetProductKind::Texture,
 				 CookedAssetProductKind::Environment, CookedAssetProductKind::GameplayInput,
 				 CookedAssetProductKind::RuntimeUI, CookedAssetProductKind::Font })

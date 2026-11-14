@@ -16,6 +16,7 @@ namespace PulseForge
 		Mesh,
 		Material,
 		Script,
+		Blueprint,
 		Audio,
 		Environment,
 		Image,
@@ -71,6 +72,8 @@ namespace PulseForge
 			return HasAssetExtension(Path, { ".material" });
 		case AssetFileType::Script:
 			return HasAssetExtension(Path, { ".lua" });
+		case AssetFileType::Blueprint:
+			return HasAssetExtension(Path, { ".pfblueprint" });
 		case AssetFileType::Audio:
 			return HasAssetExtension(Path, { ".wav", ".mp3", ".flac", ".ogg" });
 		case AssetFileType::Environment:

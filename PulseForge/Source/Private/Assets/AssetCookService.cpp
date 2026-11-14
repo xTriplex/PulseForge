@@ -6,6 +6,7 @@
 #include "Assets/AssetPathResolver.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/CookedProductCodec.h"
+#include "Scripting/BlueprintAsset.h"
 #include "Assets/Detail/AssetCpuProducts.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
@@ -325,7 +326,7 @@ namespace PulseForge
 		std::optional<AssetFileType> GetCookAssetType(const std::filesystem::path& Path)
 		{
 			for (const AssetFileType Type : { AssetFileType::Scene, AssetFileType::Prefab, AssetFileType::Mesh, AssetFileType::Material,
-				AssetFileType::Script, AssetFileType::Audio, AssetFileType::Environment, AssetFileType::Image,
+				AssetFileType::Script, AssetFileType::Blueprint, AssetFileType::Audio, AssetFileType::Environment, AssetFileType::Image,
 				AssetFileType::RuntimeUI, AssetFileType::Font })
 				if (HasAssetTypeExtension(Path, Type)) return Type;
 			return std::nullopt;
@@ -340,6 +341,7 @@ namespace PulseForge
 			case AssetFileType::Mesh: return CookedAssetProductKind::MeshPrimitive;
 			case AssetFileType::Material: return CookedAssetProductKind::Material;
 			case AssetFileType::Script: return CookedAssetProductKind::Script;
+			case AssetFileType::Blueprint: return CookedAssetProductKind::BlueprintProgram;
 			case AssetFileType::Audio: return CookedAssetProductKind::Audio;
 			case AssetFileType::Environment: return CookedAssetProductKind::Environment;
 			case AssetFileType::Image: return CookedAssetProductKind::Texture;
@@ -966,6 +968,24 @@ namespace PulseForge
 					auto Parsed = ParseGameplayActionMap(InputText);
 					if (!Parsed)
 						return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Parsed.error().Message, Product.SourcePath, Product.Asset));
+				}
+				else if (Product.Product == CookedAssetProductKind::BlueprintProgram)
+				{
+					auto Parsed = DeserializeBlueprintAsset(Bytes);
+					if (!Parsed)
+						return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+							"Blueprint source is invalid: " + Parsed.error().Message, Product.SourcePath, Product.Asset));
+					std::vector<BlueprintEventProgramSource> Events;
+					Events.reserve(Parsed->GetEvents().size());
+					for (const BlueprintVerifiedEventProgram& Event : Parsed->GetEvents())
+						Events.push_back({ Event.Event, Event.Program.GetSource() });
+					auto Encoded = SerializeBlueprintAsset(Events);
+					if (!Encoded)
+						return std::unexpected(Error(AssetCookErrorCode::SerializationFailed,
+							"Blueprint product serialization failed: " + Encoded.error().Message, Product.SourcePath, Product.Asset));
+					Bytes = std::move(*Encoded);
+					EntryProduct = CookedAssetProductKind::BlueprintProgram;
+					Version = BlueprintAssetFormatVersion;
 				}
 			}
 			if (Request.CancellationToken.stop_requested())

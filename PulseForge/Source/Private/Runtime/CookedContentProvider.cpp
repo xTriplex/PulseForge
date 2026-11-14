@@ -210,6 +210,28 @@ namespace PulseForge
 		return m_Catalog->ReadPayload(*Entry);
 	}
 
+	const CookedAssetEntry* CookedContentProvider::FindBlueprintProgram(const AssetID& Asset) const noexcept
+	{
+		return Find(Asset, CookedAssetProductKind::BlueprintProgram);
+	}
+
+	std::expected<VerifiedBlueprintAsset, CookedAssetCatalogError> CookedContentProvider::LoadBlueprintProgram(
+		const AssetID& Asset) const
+	{
+		const CookedAssetEntry* Entry = FindBlueprintProgram(Asset);
+		if (!Entry)
+			return std::unexpected(CookedAssetCatalogError{ .Code = CookedAssetCatalogErrorCode::AssetNotFound,
+				.Asset = Asset, .Message = "Cooked Blueprint program is not present" });
+		if (Entry->PayloadVersion != BlueprintAssetFormatVersion)
+			return std::unexpected(InvalidProduct(Asset, "Cooked Blueprint program payload version is not supported"));
+		auto Bytes = Read(Asset, CookedAssetProductKind::BlueprintProgram);
+		if (!Bytes) return std::unexpected(std::move(Bytes.error()));
+		auto Program = DeserializeBlueprintAsset(*Bytes);
+		if (!Program)
+			return std::unexpected(InvalidProduct(Asset, "Cooked Blueprint program is invalid: " + Program.error().Message));
+		return std::move(*Program);
+	}
+
 	const CookedAssetEntry* CookedContentProvider::FindAudio(const AssetID& Asset) const noexcept
 	{
 		return Find(Asset, CookedAssetProductKind::Audio);

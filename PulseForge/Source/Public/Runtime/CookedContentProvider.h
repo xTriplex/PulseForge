@@ -4,6 +4,7 @@
 #include "Assets/CookedProductCodec.h"
 #include "Core/Core.h"
 #include "Input/GameplayInput.h"
+#include "Scripting/BlueprintAsset.h"
 
 #include <expected>
 #include <filesystem>
@@ -51,6 +52,9 @@ namespace PulseForge
 		[[nodiscard]] const CookedAssetEntry* FindScriptByProjectPath(std::string_view ProjectRelativePath) const noexcept;
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadScriptByProjectPath(
 			std::string_view ProjectRelativePath) const;
+		[[nodiscard]] const CookedAssetEntry* FindBlueprintProgram(const AssetID& Asset) const noexcept;
+		[[nodiscard]] std::expected<VerifiedBlueprintAsset, CookedAssetCatalogError> LoadBlueprintProgram(
+			const AssetID& Asset) const;
 
 		[[nodiscard]] const CookedAssetEntry* FindAudio(const AssetID& Asset) const noexcept;
 		[[nodiscard]] std::expected<std::vector<std::byte>, CookedAssetCatalogError> ReadAudio(const AssetID& Asset) const;
