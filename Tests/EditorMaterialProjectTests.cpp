@@ -485,8 +485,22 @@ namespace
 		std::filesystem::create_directories(Root / "Assets" / "Materials", Error);
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
+		std::filesystem::create_directories(Root / "Assets" / "Textures", Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const std::filesystem::path GraphTexturePath = Root / "Assets" / "Textures" / "GraphBaseColor.ppm";
+		{
+			std::ofstream Texture(GraphTexturePath, std::ios::binary | std::ios::trunc);
+			Texture << "P3\n1 1\n255\n255 255 255\n";
+			PF_CHECK(Tests, static_cast<bool>(Texture));
+		}
+		const auto GraphTextureMetadata = AssetMetadataSerializer::CreateForNewAsset(GraphTexturePath);
+		PF_CHECK(Tests, GraphTextureMetadata.has_value());
+		if (!GraphTextureMetadata) return;
+		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
 		MaterialAssetDesc Initial;
 		Initial.BaseColorFactor = { 0.2f, 0.3f, 0.4f, 1.0f };
+		Initial.BaseColorTexture = GraphTextureMetadata->ID;
 		MaterialAssetDesc ConversionFixture = Initial;
 		const auto Conversion = PulseForgeEditor::EditorMaterialDraftController::ConvertFixedMaterialToGraph(ConversionFixture);
 		const std::array<float, 3> ExpectedGraphColor{ 0.2f, 0.3f, 0.4f };
@@ -579,15 +593,13 @@ namespace
 		PulseForge::MaterialGraphSource Graph;
 		Graph.GraphID = PulseForge::UUID(20, 1);
 		Graph.Nodes = {
-			{ PulseForge::UUID(20, 2), PulseForge::MaterialGraphNodeKind::FloatConstant, 0.4f, {} },
-			{ PulseForge::UUID(20, 3), PulseForge::MaterialGraphNodeKind::FloatConstant, 0.1f, {} },
-			{ PulseForge::UUID(20, 4), PulseForge::MaterialGraphNodeKind::Add, 0.0f, {} },
+			{ PulseForge::UUID(20, 2), PulseForge::MaterialGraphNodeKind::UV0, 0.0f, {} },
+			{ PulseForge::UUID(20, 3), PulseForge::MaterialGraphNodeKind::BaseColorTextureSample, 0.0f, {} },
 			{ PulseForge::UUID(20, 5), PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
 		};
 		Graph.Connections = {
-			{ PulseForge::UUID(21, 1), PulseForge::UUID(20, 2), PulseForge::UUID(20, 4), 0 },
-			{ PulseForge::UUID(21, 2), PulseForge::UUID(20, 3), PulseForge::UUID(20, 4), 1 },
-			{ PulseForge::UUID(21, 3), PulseForge::UUID(20, 4), PulseForge::UUID(20, 5), 0 }
+			{ PulseForge::UUID(21, 1), PulseForge::UUID(20, 2), PulseForge::UUID(20, 3), 0 },
+			{ PulseForge::UUID(21, 3), PulseForge::UUID(20, 3), PulseForge::UUID(20, 5), 0 }
 		};
 		const auto BeforeGraph = *Drafts.FindDraft(ProjectValue, Material->ID);
 		const bool GraphEditStarted = Drafts.BeginEdit(ProjectValue, Material->ID, BeforeGraph);
@@ -602,7 +614,8 @@ namespace
 		PF_CHECK(Tests, EditorRegistry.Save(*MaterialSession));
 		auto SavedGraphSource = MaterialAssetService::LoadSourceSnapshot(
 			Material->ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
-		PF_CHECK(Tests, SavedGraphSource && SavedGraphSource->Description.Graph == Graph);
+		PF_CHECK(Tests, SavedGraphSource && SavedGraphSource->Description.Graph == Graph &&
+			SavedGraphSource->Description.BaseColorTexture == GraphTextureMetadata->ID);
 		auto SecondMaterial = MaterialAssetService::Create(ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(),
 			"Assets/Materials/Independent.material", Initial);
 		PF_CHECK(Tests, SecondMaterial.has_value());
