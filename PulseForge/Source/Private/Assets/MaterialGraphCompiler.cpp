@@ -146,15 +146,20 @@ namespace PulseForge
 				}
 				Generated.Hlsl += "};\n";
 			}
-		Generated.Hlsl += "float GraphMaterialBaseColor() {\n";
+		Generated.Hlsl += "float3 GraphMaterialBaseColor() {\n";
 			for (size_t Index = 0; Index < Generated.IR.Expressions.size(); ++Index)
 			{
 				const auto& Expression = Generated.IR.Expressions[Index];
-				Generated.Hlsl += "  float e" + std::to_string(Index) + " = ";
+				Generated.Hlsl += Expression.Op == MaterialGraphExpressionOp::ColorConstant ? "  float3 e" : "  float e";
+				Generated.Hlsl += std::to_string(Index) + " = ";
 				switch (Expression.Op)
 				{
 				case MaterialGraphExpressionOp::FloatConstant:
 					Generated.Hlsl += FloatLiteral(Expression.Value);
+					break;
+				case MaterialGraphExpressionOp::ColorConstant:
+					Generated.Hlsl += "float3(" + FloatLiteral(Expression.Color[0]) + ", " +
+						FloatLiteral(Expression.Color[1]) + ", " + FloatLiteral(Expression.Color[2]) + ")";
 					break;
 				case MaterialGraphExpressionOp::FloatParameter:
 					Generated.Hlsl += "g_" + Expression.ParameterName;
@@ -168,7 +173,11 @@ namespace PulseForge
 				}
 				Generated.Hlsl += ";\n";
 			}
-			Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + "); }\n";
+			const auto& Output = Generated.IR.Expressions[Generated.IR.OutputExpression];
+			if (Output.Op == MaterialGraphExpressionOp::ColorConstant)
+				Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + "); }\n";
+			else
+				Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + ").xxx; }\n";
 			return Generated;
 		}
 

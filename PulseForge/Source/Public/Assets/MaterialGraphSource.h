@@ -3,6 +3,7 @@
 #include "Assets/AssetID.h"
 #include "Core/Core.h"
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -15,6 +16,7 @@ namespace PulseForge
 	enum class MaterialGraphNodeKind : uint8_t
 	{
 		FloatConstant,
+		ColorConstant,
 		FloatParameter,
 		Add,
 		Multiply,
@@ -30,6 +32,7 @@ namespace PulseForge
 		std::string ParameterName;
 		double X = 0.0;
 		double Y = 0.0;
+		std::array<float, 3> Color{ 1.0f, 1.0f, 1.0f };
 		friend bool operator==(const MaterialGraphNode&, const MaterialGraphNode&) = default;
 	};
 
@@ -44,7 +47,7 @@ namespace PulseForge
 
 	struct MaterialGraphSource final
 	{
-		static constexpr uint32_t CurrentVersion = 1;
+		static constexpr uint32_t CurrentVersion = 2;
 		uint32_t Version = CurrentVersion;
 		UUID GraphID;
 		std::vector<MaterialGraphNode> Nodes;
@@ -68,6 +71,7 @@ namespace PulseForge
 	enum class MaterialGraphExpressionOp : uint8_t
 	{
 	FloatConstant,
+	ColorConstant,
 	FloatParameter,
 	Add,
 	Multiply
@@ -80,6 +84,7 @@ namespace PulseForge
 		uint32_t Left = 0;
 		uint32_t Right = 0;
 		float Value = 0.0f;
+	std::array<float, 3> Color{ 1.0f, 1.0f, 1.0f };
 		std::string ParameterName;
 	};
 

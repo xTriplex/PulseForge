@@ -61,6 +61,7 @@ namespace PulseForgeEditor
 			switch (Kind)
 			{
 			case PulseForge::MaterialGraphNodeKind::FloatConstant: return "Constant";
+			case PulseForge::MaterialGraphNodeKind::ColorConstant: return "Color";
 			case PulseForge::MaterialGraphNodeKind::FloatParameter: return "Scalar Parameter";
 			case PulseForge::MaterialGraphNodeKind::Add: return "Add";
 			case PulseForge::MaterialGraphNodeKind::Multiply: return "Multiply";
@@ -108,7 +109,7 @@ namespace PulseForgeEditor
 				return Handle;
 			};
 
-			ImGui::TextDisabled("Edit graph nodes and typed scalar links. Node positions are saved with the Material source.");
+			ImGui::TextDisabled("Edit scalar or color graphs. Scalar output links replicate to RGB; color links feed PBR base color.");
 			const auto AddNode = [&](PulseForge::MaterialGraphNodeKind Kind, const char* Label)
 			{
 				if (!ImGui::Button(Label)) return;
@@ -131,6 +132,7 @@ namespace PulseForgeEditor
 				State.Error.clear();
 			};
 			AddNode(PulseForge::MaterialGraphNodeKind::FloatConstant, "Add Constant"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::ColorConstant, "Add Color"); ImGui::SameLine();
 			AddNode(PulseForge::MaterialGraphNodeKind::FloatParameter, "Add Parameter"); ImGui::SameLine();
 			AddNode(PulseForge::MaterialGraphNodeKind::Add, "Add"); ImGui::SameLine();
 			AddNode(PulseForge::MaterialGraphNodeKind::Multiply, "Multiply"); ImGui::SameLine();
@@ -153,6 +155,7 @@ namespace PulseForgeEditor
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::PbrOutput;
 				const bool HasOutput = Node.Kind == PulseForge::MaterialGraphNodeKind::FloatConstant ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::ColorConstant ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::FloatParameter ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ||
@@ -177,6 +180,17 @@ namespace PulseForgeEditor
 					{
 						const auto Before = Draft;
 						Node.Value = Value;
+						if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
+							(void)Documents.MarkEdited(Session.Identity);
+					}
+				}
+				if (Node.Kind == PulseForge::MaterialGraphNodeKind::ColorConstant)
+				{
+					float Color[3]{ Node.Color[0], Node.Color[1], Node.Color[2] };
+					if (ImGui::ColorEdit3("RGB", Color, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
+					{
+						const auto Before = Draft;
+						Node.Color = { Color[0], Color[1], Color[2] };
 						if (Drafts.BeginEdit(Project, Session.Identity.Asset, Before))
 							(void)Documents.MarkEdited(Session.Identity);
 					}

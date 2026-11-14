@@ -22,6 +22,7 @@ namespace PulseForge
 			switch (Kind)
 			{
 			case MaterialGraphNodeKind::FloatConstant: return "floatConstant";
+			case MaterialGraphNodeKind::ColorConstant: return "colorConstant";
 			case MaterialGraphNodeKind::FloatParameter: return "floatParameter";
 			case MaterialGraphNodeKind::Add: return "add";
 			case MaterialGraphNodeKind::Multiply: return "multiply";
@@ -33,7 +34,8 @@ namespace PulseForge
 
 		std::optional<MaterialGraphNodeKind> ParseKind(std::string_view Name)
 		{
-			for (const auto Kind : { MaterialGraphNodeKind::FloatConstant, MaterialGraphNodeKind::FloatParameter,
+			for (const auto Kind : { MaterialGraphNodeKind::FloatConstant, MaterialGraphNodeKind::ColorConstant,
+				MaterialGraphNodeKind::FloatParameter,
 				MaterialGraphNodeKind::Add, MaterialGraphNodeKind::Multiply, MaterialGraphNodeKind::Reroute,
 				MaterialGraphNodeKind::PbrOutput })
 				if (KindName(Kind) == Name) return Kind;
@@ -73,6 +75,9 @@ namespace PulseForge
 			if (Node.Kind == MaterialGraphNodeKind::PbrOutput) ++OutputCount;
 			if ((Node.Kind == MaterialGraphNodeKind::FloatConstant || Node.Kind == MaterialGraphNodeKind::FloatParameter) &&
 				!std::isfinite(Node.Value)) Add(Node.ID, "Float node value must be finite");
+			if (Node.Kind == MaterialGraphNodeKind::ColorConstant &&
+				!std::ranges::all_of(Node.Color, [](float Component) { return std::isfinite(Component); }))
+				Add(Node.ID, "Color node components must be finite");
 			if (Node.Kind == MaterialGraphNodeKind::FloatParameter && !IsValidParameterName(Node.ParameterName))
 				Add(Node.ID, "Parameter name must be a valid identifier of at most 64 characters");
 			if (Node.Kind == MaterialGraphNodeKind::FloatParameter && IsValidParameterName(Node.ParameterName) &&
@@ -139,6 +144,30 @@ namespace PulseForge
 		};
 		for (const auto& Node : Source.Nodes)
 			if (!Visit(Visit, Node.ID)) { Add(Node.ID, "Material graph data cycles are unsupported"); break; }
+
+		const auto IsColorOutput = [&](UUID NodeID)
+		{
+			std::unordered_set<UUID, UUIDHash> Visited;
+			while (Visited.insert(NodeID).second)
+			{
+				const auto Node = Nodes.find(NodeID);
+				if (Node == Nodes.end()) return false;
+				if (Node->second->Kind == MaterialGraphNodeKind::ColorConstant) return true;
+				if (Node->second->Kind != MaterialGraphNodeKind::Reroute) return false;
+				const auto Input = std::find_if(Source.Connections.begin(), Source.Connections.end(), [&](const auto& Connection)
+					{ return Connection.InputNode == NodeID && Connection.InputSlot == 0; });
+				if (Input == Source.Connections.end()) return false;
+				NodeID = Input->OutputNode;
+			}
+			return false;
+		};
+		for (const MaterialGraphConnection& Connection : Source.Connections)
+		{
+			const auto Input = Nodes.find(Connection.InputNode);
+			if (Input != Nodes.end() && (Input->second->Kind == MaterialGraphNodeKind::Add ||
+				Input->second->Kind == MaterialGraphNodeKind::Multiply) && IsColorOutput(Connection.OutputNode))
+				Add(Connection.InputNode, "Color values cannot connect to scalar arithmetic inputs");
+		}
 		return Result;
 	}
 
@@ -168,10 +197,12 @@ namespace PulseForge
 			MaterialGraphExpression Expression;
 			Expression.SourceNode = Node.ID;
 			Expression.Value = Node.Value;
+			Expression.Color = Node.Color;
 			Expression.ParameterName = Node.ParameterName;
 			switch (Node.Kind)
 			{
 			case MaterialGraphNodeKind::FloatConstant: Expression.Op = MaterialGraphExpressionOp::FloatConstant; break;
+			case MaterialGraphNodeKind::ColorConstant: Expression.Op = MaterialGraphExpressionOp::ColorConstant; break;
 			case MaterialGraphNodeKind::FloatParameter: Expression.Op = MaterialGraphExpressionOp::FloatParameter; break;
 			case MaterialGraphNodeKind::Add:
 			case MaterialGraphNodeKind::Multiply:
@@ -209,7 +240,8 @@ namespace PulseForge
 		std::sort(Nodes.begin(), Nodes.end(), [](const auto& A, const auto& B) { return A.ID < B.ID; });
 		for (const auto& Node : Nodes)
 			Document["nodes"].push_back({ { "id", Node.ID.ToString() }, { "kind", KindName(Node.Kind) },
-				{ "value", Node.Value }, { "parameter", Node.ParameterName }, { "x", Node.X }, { "y", Node.Y } });
+				{ "value", Node.Value }, { "color", Node.Color }, { "parameter", Node.ParameterName },
+				{ "x", Node.X }, { "y", Node.Y } });
 		auto Connections = Source.Connections;
 		std::sort(Connections.begin(), Connections.end(), [](const auto& A, const auto& B) { return A.ID < B.ID; });
 		for (const auto& Connection : Connections)
@@ -235,7 +267,10 @@ namespace PulseForge
 		try
 		{
 			MaterialGraphSource Source;
-			Source.Version = Document.at("version").get<uint32_t>();
+			const uint32_t SourceVersion = Document.at("version").get<uint32_t>();
+			if (SourceVersion != 1 && SourceVersion != MaterialGraphSource::CurrentVersion)
+				return std::unexpected("Material graph source version is unsupported");
+			Source.Version = MaterialGraphSource::CurrentVersion;
 			const auto GraphID = UUID::Parse(Document.at("graph").get<std::string>());
 			if (!GraphID) return std::unexpected(GraphID.error().Message);
 			Source.GraphID = *GraphID;
@@ -244,8 +279,10 @@ namespace PulseForge
 				const auto ID = UUID::Parse(Item.at("id").get<std::string>());
 				const auto Kind = ParseKind(Item.at("kind").get<std::string>());
 				if (!ID || !Kind) return std::unexpected("Material graph node identity or kind is invalid");
-				Source.Nodes.push_back({ *ID, *Kind, Item.value("value", 0.0f), Item.value("parameter", std::string{}),
-					Item.value("x", 0.0), Item.value("y", 0.0) });
+				MaterialGraphNode Node{ *ID, *Kind, Item.value("value", 0.0f), Item.value("parameter", std::string{}),
+					Item.value("x", 0.0), Item.value("y", 0.0) };
+				if (Item.contains("color")) Node.Color = Item.at("color").get<std::array<float, 3>>();
+				Source.Nodes.push_back(std::move(Node));
 			}
 			for (const auto& Item : Document["connections"])
 			{

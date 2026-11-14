@@ -61,6 +61,7 @@ namespace
 		AssetID ScriptAsset;
 		AssetID MaterialAsset;
 		AssetID GraphMaterialAsset;
+		AssetID ColorGraphMaterialAsset;
 		CookedAssetCompatibility Compatibility;
 
 		CookFixture()
@@ -131,6 +132,22 @@ namespace
 			auto GraphMetadata = AssetMetadataSerializer::CreateForNewAsset(GraphPath);
 			if (!GraphMetadata) { Root.clear(); return; }
 			GraphMaterialAsset = GraphMetadata->ID;
+			MaterialGraphSource ColorGraph;
+			ColorGraph.GraphID = UUID(10, 6);
+			ColorGraph.Nodes = {
+				{ UUID(10, 7), MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 80.0, 100.0, { 0.2f, 0.4f, 0.6f } },
+				{ UUID(10, 8), MaterialGraphNodeKind::PbrOutput, 0.0f, {}, 360.0, 100.0 }
+			};
+			ColorGraph.Connections = { { UUID(11, 4), UUID(10, 7), UUID(10, 8), 0 } };
+			MaterialAssetDesc ColorGraphDescription;
+			ColorGraphDescription.Graph = std::move(ColorGraph);
+			auto ColorGraphBytes = MaterialAssetSerializer::Serialize(ColorGraphDescription);
+			if (!ColorGraphBytes) { Root.clear(); return; }
+			const auto ColorGraphPath = Source / "Assets" / "GraphColor.material";
+			WriteText(ColorGraphPath, *ColorGraphBytes);
+			auto ColorGraphMetadata = AssetMetadataSerializer::CreateForNewAsset(ColorGraphPath);
+			if (!ColorGraphMetadata) { Root.clear(); return; }
+			ColorGraphMaterialAsset = ColorGraphMetadata->ID;
 			auto OpenedProject = Project::Open(ProjectFile);
 			if (!OpenedProject || !OpenedProject->SetStartScene(SceneAsset)) { Root.clear(); return; }
 			GameplayActionMap ActionMap;
@@ -753,6 +770,38 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	const auto Restored = DeserializeMaterialGraphSource(*Serialized);
 	PF_CHECK(Tests, Restored.has_value());
 	if (Restored) PF_CHECK(Tests, *Restored == Source);
+	auto LegacySourceBytes = *Serialized;
+	const size_t VersionValue = LegacySourceBytes.find("\"version\": 2");
+	PF_CHECK(Tests, VersionValue != std::string::npos);
+	if (VersionValue != std::string::npos) LegacySourceBytes.replace(VersionValue, 12, "\"version\": 1");
+	const auto MigratedSource = DeserializeMaterialGraphSource(LegacySourceBytes);
+	PF_CHECK(Tests, MigratedSource && MigratedSource->Version == MaterialGraphSource::CurrentVersion &&
+		MigratedSource->Nodes.size() == Source.Nodes.size());
+
+	MaterialGraphSource ColorSource;
+	ColorSource.GraphID = UUID(3, 1);
+	ColorSource.Nodes = {
+		{ UUID(3, 2), MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 0.0, 0.0, { 0.2f, 0.4f, 0.6f } },
+		{ UUID(3, 3), MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
+	};
+	ColorSource.Connections = { { UUID(3, 4), UUID(3, 2), UUID(3, 3), 0 } };
+	PF_CHECK(Tests, ValidateMaterialGraphSource(ColorSource).IsValid());
+	const auto ColorIR = LowerMaterialGraphToIR(ColorSource);
+	const std::array<float, 3> ExpectedColor{ 0.2f, 0.4f, 0.6f };
+	PF_CHECK(Tests, ColorIR && ColorIR->Expressions[ColorIR->OutputExpression].Op == MaterialGraphExpressionOp::ColorConstant &&
+		ColorIR->Expressions[ColorIR->OutputExpression].Color == ExpectedColor);
+	const auto ColorSerialized = SerializeMaterialGraphSource(ColorSource);
+	const auto ColorRestored = ColorSerialized ? DeserializeMaterialGraphSource(*ColorSerialized) :
+		std::expected<MaterialGraphSource, std::string>(std::unexpected("serialization failed"));
+	PF_CHECK(Tests, ColorRestored && *ColorRestored == ColorSource);
+	auto ScalarArithmeticGraph = Source;
+	ScalarArithmeticGraph.Nodes.push_back({ UUID(3, 5), MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 0.0, 0.0,
+		{ 0.1f, 0.2f, 0.3f } });
+	ScalarArithmeticGraph.Connections.push_back({ UUID(3, 6), UUID(3, 5), UUID(1, 4), 0 });
+	const auto RejectedColorArithmetic = ValidateMaterialGraphSource(ScalarArithmeticGraph);
+	PF_CHECK(Tests, std::any_of(RejectedColorArithmetic.Diagnostics.begin(), RejectedColorArithmetic.Diagnostics.end(),
+		[](const MaterialGraphDiagnostic& Diagnostic)
+		{ return Diagnostic.Message == "Color values cannot connect to scalar arithmetic inputs"; }));
 	const auto IR = LowerMaterialGraphToIR(Source);
 	PF_CHECK(Tests, IR && IR->Expressions.size() == 3 && IR->OutputNode == UUID(1, 5));
 	if (IR)
@@ -767,6 +816,12 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	const auto CacheID = UUID::Generate();
 	PF_CHECK(Tests, CacheID.has_value());
 	if (!CacheID) return;
+	MaterialGraphCompileRequest ColorCompileRequest;
+	ColorCompileRequest.Source = ColorSource;
+	ColorCompileRequest.ToolchainFingerprint = CompileRequest.ToolchainFingerprint;
+	const auto ColorCompiled = MaterialGraphCompiler::Compile(ColorCompileRequest);
+	PF_CHECK(Tests, ColorCompiled && ColorCompiled->SemanticRecipe.find("float3 GraphMaterialBaseColor()") != std::string::npos &&
+		ColorCompiled->SemanticRecipe.find("float3(") != std::string::npos);
 	const auto CacheRoot = std::filesystem::temp_directory_path() / ("PF-MaterialGraphDDC-" + CacheID->ToString());
 	struct MaterialGraphCacheCleanup final
 	{
@@ -966,7 +1021,7 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	auto InvalidPresentation = Source;
 	InvalidPresentation.Nodes.front().X = std::numeric_limits<double>::infinity();
 	PF_CHECK(Tests, !ValidateMaterialGraphSource(InvalidPresentation).IsValid());
-	const auto UnsupportedVersion = Serialized->find("\"version\": 1");
+	const auto UnsupportedVersion = Serialized->find("\"version\": 2");
 	PF_CHECK(Tests, UnsupportedVersion != std::string::npos);
 	if (UnsupportedVersion != std::string::npos)
 	{
@@ -1083,7 +1138,7 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 		}
 	}
 	auto GraphMaterialRequest = Fixture.Request(*Snapshot);
-	GraphMaterialRequest.DynamicRoots = { Fixture.GraphMaterialAsset };
+	GraphMaterialRequest.DynamicRoots = { Fixture.GraphMaterialAsset, Fixture.ColorGraphMaterialAsset };
 	GraphMaterialRequest.OutputRoot = Fixture.Root / "GraphMaterialCook";
 	const auto GraphMaterialCook = RunCookWithBoundary("saved-graph-material-cook", [&]
 		{ return AssetCookService::Cook(GraphMaterialRequest); });
@@ -1095,8 +1150,12 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 		if (GraphProvider)
 		{
 			PF_CHECK(Tests, (*GraphProvider)->FindGraphMaterial(Fixture.GraphMaterialAsset) != nullptr);
+			PF_CHECK(Tests, (*GraphProvider)->FindGraphMaterial(Fixture.ColorGraphMaterialAsset) != nullptr);
 			auto CookedGraph = (*GraphProvider)->LoadGraphMaterialProduct(Fixture.GraphMaterialAsset);
+			auto CookedColorGraph = (*GraphProvider)->LoadGraphMaterialProduct(Fixture.ColorGraphMaterialAsset);
 			PF_CHECK(Tests, CookedGraph.has_value());
+			PF_CHECK(Tests, CookedColorGraph && CookedColorGraph->RecipeFingerprint.size() == 32 &&
+				CookedColorGraph->SpirV.size() >= 20 && CookedColorGraph->Parameters.empty());
 			if (CookedGraph)
 			{
 				PF_CHECK(Tests, CookedGraph->RecipeFingerprint.size() == 32);
