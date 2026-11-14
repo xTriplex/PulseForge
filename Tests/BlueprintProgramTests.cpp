@@ -1,4 +1,4 @@
-#include "Scripting/BlueprintProgram.h"
+#include "Scripting/BlueprintAsset.h"
 #include "TestSupport.h"
 
 #include <array>
@@ -121,9 +121,62 @@ namespace
 		PF_CHECK(Tests, !StateBudgetResult && StateBudgetResult.error().Code == BlueprintProgramErrorCode::InstructionBudgetExceeded &&
 			StateBeforeFailure[0] == 3.0f);
 	}
+
+	void TestBlueprintAssetCodec(TestRunner& Tests)
+	{
+		const BlueprintProgramSource CreateProgram = MakeScalarWriteProgram();
+		BlueprintProgramSource UpdateProgram = MakeScalarWriteProgram();
+		UpdateProgram.Constants = { 7.0f };
+		UpdateProgram.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(20, 1) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(20, 2) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(20, 3) }
+		};
+		const std::array<BlueprintEventProgramSource, 2> Events{
+			BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, UpdateProgram },
+			BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, CreateProgram }
+		};
+		const auto Encoded = SerializeBlueprintAsset(Events);
+		PF_CHECK(Tests, Encoded.has_value());
+		if (!Encoded) return;
+		const std::array<BlueprintEventProgramSource, 2> ReverseEvents{ Events[1], Events[0] };
+		const auto EncodedReverse = SerializeBlueprintAsset(ReverseEvents);
+		PF_CHECK(Tests, EncodedReverse && *EncodedReverse == *Encoded);
+		const auto Decoded = DeserializeBlueprintAsset(*Encoded);
+		PF_CHECK(Tests, Decoded && Decoded->GetVersion() == BlueprintAssetFormatVersion && Decoded->GetEvents().size() == 2);
+		if (Decoded && Decoded->GetEvents().size() == 2)
+		{
+			PF_CHECK(Tests, Decoded->GetEvents()[0].Event == BlueprintEventKind::OnCreate);
+			PF_CHECK(Tests, Decoded->GetEvents()[1].Event == BlueprintEventKind::OnUpdate);
+			PF_CHECK(Tests, Decoded->GetEvents()[0].Program.GetSource().Instructions[3].SourceNode == UUID(10, 4));
+		}
+
+		std::vector<std::byte> UnsupportedVersion = *Encoded;
+		UnsupportedVersion[4] = std::byte{ 2 };
+		const auto Unsupported = DeserializeBlueprintAsset(UnsupportedVersion);
+		PF_CHECK(Tests, !Unsupported && Unsupported.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
+		const auto Truncated = DeserializeBlueprintAsset(std::span<const std::byte>(*Encoded).first(8));
+		PF_CHECK(Tests, !Truncated && Truncated.error().Code == BlueprintProgramErrorCode::InvalidByteStream);
+		std::vector<std::byte> Trailing = *Encoded;
+		Trailing.push_back(std::byte{ 0 });
+		const auto TrailingResult = DeserializeBlueprintAsset(Trailing);
+		PF_CHECK(Tests, !TrailingResult && TrailingResult.error().Code == BlueprintProgramErrorCode::InvalidByteStream);
+
+		const std::array<BlueprintEventProgramSource, 2> DuplicateEvents{
+			Events[0], BlueprintEventProgramSource{ Events[0].Event, CreateProgram }
+		};
+		const auto Duplicate = SerializeBlueprintAsset(DuplicateEvents);
+		PF_CHECK(Tests, !Duplicate && Duplicate.error().Code == BlueprintProgramErrorCode::InvalidOperand);
+		const std::array<BlueprintEventProgramSource, 1> InvalidEvent{
+			BlueprintEventProgramSource{ static_cast<BlueprintEventKind>(0xff), CreateProgram }
+		};
+		const auto InvalidEventResult = SerializeBlueprintAsset(InvalidEvent);
+		PF_CHECK(Tests, !InvalidEventResult && InvalidEventResult.error().Code == BlueprintProgramErrorCode::InvalidOperand);
+	}
 }
 
 void RunBlueprintProgramTests(TestRunner& Tests)
 {
 	TestBlueprintProgramVerificationAndExecution(Tests);
+	TestBlueprintAssetCodec(Tests);
 }

@@ -164,7 +164,10 @@ add_library(PulseForgePhysics STATIC PulseForge/Source/Private/Physics/PhysicsSc
 target_include_directories(PulseForgePhysics PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgePhysics PRIVATE NOMINMAX)
 target_link_libraries(PulseForgePhysics PUBLIC PulseForgeScene PRIVATE Jolt spdlog::spdlog)
-add_library(PulseForgeBlueprintRuntime STATIC PulseForge/Source/Private/Scripting/BlueprintProgram.cpp)
+add_library(PulseForgeBlueprintRuntime STATIC
+	PulseForge/Source/Private/Scripting/BlueprintAsset.cpp
+	PulseForge/Source/Private/Scripting/BlueprintProgram.cpp
+)
 target_include_directories(PulseForgeBlueprintRuntime PUBLIC PulseForge/Source/Public)
 set_property(TARGET PulseForgeBlueprintRuntime PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeScripting STATIC
