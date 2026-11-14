@@ -21,6 +21,33 @@ namespace PulseForgeEditor
 
 	} // namespace
 
+	std::expected<void, std::string> EditorMaterialDraftController::ConvertFixedMaterialToGraph(
+		PulseForge::MaterialAssetDesc& Description)
+	{
+		const auto GraphID = PulseForge::UUID::Generate();
+		const auto ColorID = PulseForge::UUID::Generate();
+		const auto OutputID = PulseForge::UUID::Generate();
+		const auto ConnectionID = PulseForge::UUID::Generate();
+		if (!GraphID || !ColorID || !OutputID || !ConnectionID)
+			return std::unexpected("Could not allocate material graph identities");
+
+		PulseForge::MaterialGraphSource Graph;
+		Graph.GraphID = *GraphID;
+		Graph.Nodes = {
+			{ *ColorID, PulseForge::MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 80.0, 100.0,
+				{ Description.BaseColorFactor.r, Description.BaseColorFactor.g, Description.BaseColorFactor.b } },
+			{ *OutputID, PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {}, 420.0, 100.0 }
+		};
+		Graph.Connections = { { *ConnectionID, *ColorID, *OutputID, 0 } };
+		const auto Validation = PulseForge::ValidateMaterialGraphSource(Graph);
+		if (!Validation.IsValid()) return std::unexpected(Validation.Diagnostics.front().Message);
+		Description.Graph = std::move(Graph);
+		Description.BaseColorFactor.r = 1.0f;
+		Description.BaseColorFactor.g = 1.0f;
+		Description.BaseColorFactor.b = 1.0f;
+		return {};
+	}
+
 	std::string EditorMaterialDraftController::MakeKey(const PulseForge::Project& Project, const PulseForge::AssetID& Asset)
 	{
 		return MakeMaterialDraftKey(PathToUtf8(Project.GetRootPath().lexically_normal()), Asset.ToString());

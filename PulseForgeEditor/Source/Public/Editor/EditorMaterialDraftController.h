@@ -21,6 +21,9 @@ namespace PulseForgeEditor
 	public:
 		using DraftResult = std::expected<std::reference_wrapper<PulseForge::MaterialAssetDesc>, std::string>;
 
+		[[nodiscard]] static std::expected<void, std::string> ConvertFixedMaterialToGraph(
+			PulseForge::MaterialAssetDesc& Description);
+
 		[[nodiscard]] PulseForge::MaterialAssetDesc* FindDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		[[nodiscard]] bool ContainsDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset) const;
 		[[nodiscard]] DraftResult LoadDraft(const PulseForge::Project& Project, const PulseForge::AssetID& Asset);

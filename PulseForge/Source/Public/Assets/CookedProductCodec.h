@@ -112,10 +112,11 @@ namespace PulseForge
 			friend bool operator==(const Parameter&, const Parameter&) = default;
 		};
 
-		uint32_t ArtifactVersion = 1;
+		uint32_t ArtifactVersion = 2;
 		std::string RecipeFingerprint;
 		std::vector<Parameter> Parameters;
 		std::vector<std::byte> SpirV;
+		CookedMaterialProduct Material;
 	};
 
 	namespace Detail
@@ -124,7 +125,7 @@ namespace PulseForge
 		inline constexpr uint32_t TextureProductSchemaVersion = 1;
 		inline constexpr uint32_t EnvironmentProductSchemaVersion = 1;
 		inline constexpr uint32_t MaterialProductSchemaVersion = 1;
-		inline constexpr uint32_t GraphMaterialProductSchemaVersion = 1;
+		inline constexpr uint32_t GraphMaterialProductSchemaVersion = 2;
 
 		enum class ImageColorSpace : uint8_t
 		{

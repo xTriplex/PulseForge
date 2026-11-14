@@ -440,8 +440,10 @@ namespace PulseForge
 			Material.SpirV[0] != std::byte{ 0x03 } || Material.SpirV[1] != std::byte{ 0x02 } ||
 			Material.SpirV[2] != std::byte{ 0x23 } || Material.SpirV[3] != std::byte{ 0x07 })
 			return std::unexpected("Graph material product has invalid version, recipe, or SPIR-V data");
+		auto MaterialState = Detail::EncodeMaterialProduct(Material.Material);
+		if (!MaterialState) return std::unexpected("Graph material render state is invalid: " + MaterialState.error());
 		std::vector<std::byte> Output;
-		Output.reserve(48 + Material.SpirV.size() + Material.Parameters.size() * 80);
+		Output.reserve(52 + Material.SpirV.size() + Material.Parameters.size() * 80 + MaterialState->size());
 		Output.insert(Output.end(), { std::byte{'P'}, std::byte{'F'}, std::byte{'G'}, std::byte{'M'} });
 		AppendU32(Output, Material.ArtifactVersion);
 		AppendU32(Output, static_cast<uint32_t>(Material.SpirV.size()));
@@ -469,6 +471,8 @@ namespace PulseForge
 			for (const char Character : Parameter.Name) Output.push_back(static_cast<std::byte>(Character));
 			AppendFloat(Output, Parameter.DefaultValue);
 		}
+		AppendU32(Output, static_cast<uint32_t>(MaterialState->size()));
+		Output.insert(Output.end(), MaterialState->begin(), MaterialState->end());
 		Output.insert(Output.end(), Material.SpirV.begin(), Material.SpirV.end());
 		return Output;
 	}
@@ -478,18 +482,21 @@ namespace PulseForge
 	{
 		constexpr size_t HeaderBytes = 48;
 		constexpr size_t MaximumParameterBytes = 256u * (16u + 4u + 64u + 4u);
-		constexpr size_t MaximumPayloadBytes = HeaderBytes + 16u * 1024u * 1024u + MaximumParameterBytes;
+		constexpr size_t MaximumMaterialStateBytes = 1024;
+		constexpr size_t MaximumPayloadBytes = HeaderBytes + 16u * 1024u * 1024u + MaximumParameterBytes +
+			MaximumMaterialStateBytes + sizeof(uint32_t);
 		if (Input.size() < HeaderBytes + 20 || Input.size() > MaximumPayloadBytes ||
 			Input[0] != std::byte{'P'} || Input[1] != std::byte{'F'} || Input[2] != std::byte{'G'} || Input[3] != std::byte{'M'})
 			return std::unexpected("Graph material product has invalid magic or size");
 		size_t Offset = 4;
 		uint32_t Version = 0, ParameterCount = 0;
 		uint32_t SpirVBytes = 0;
-		if (!ReadU32(Input, Offset, Version) || Version != GraphMaterialCodecVersion || !ReadU32(Input, Offset, SpirVBytes) ||
+		if (!ReadU32(Input, Offset, Version) || (Version != 1 && Version != GraphMaterialCodecVersion) ||
+			!ReadU32(Input, Offset, SpirVBytes) ||
 			SpirVBytes < 20 || SpirVBytes % 4 != 0)
 			return std::unexpected("Graph material product schema or SPIR-V length is unsupported");
 		CookedGraphMaterialProduct Product;
-		Product.ArtifactVersion = Version;
+		Product.ArtifactVersion = GraphMaterialCodecVersion;
 		Product.RecipeFingerprint.reserve(32);
 		for (size_t Index = 0; Index < 32; ++Index) Product.RecipeFingerprint.push_back(static_cast<char>(std::to_integer<uint8_t>(Input[Offset++])));
 		if (!ReadU32(Input, Offset, ParameterCount) || ParameterCount > 256)
@@ -509,6 +516,17 @@ namespace PulseForge
 			if (!ReadFloat(Input, Offset, Parameter.DefaultValue) || Parameter.ID.IsNil())
 				return std::unexpected("Graph material parameter identity or default is invalid");
 			Product.Parameters.push_back(std::move(Parameter));
+		}
+		if (Version >= 2)
+		{
+			uint32_t MaterialStateBytes = 0;
+			if (!ReadU32(Input, Offset, MaterialStateBytes) || MaterialStateBytes == 0 ||
+				MaterialStateBytes > MaximumMaterialStateBytes || Offset > Input.size() || MaterialStateBytes > Input.size() - Offset)
+				return std::unexpected("Graph material render-state payload is truncated or exceeds its bound");
+			auto MaterialState = Detail::DecodeMaterialProduct(Input.subspan(Offset, MaterialStateBytes));
+			if (!MaterialState) return std::unexpected("Graph material render-state payload is invalid: " + MaterialState.error());
+			Product.Material = std::move(*MaterialState);
+			Offset += MaterialStateBytes;
 		}
 		if (SpirVBytes != Input.size() - Offset) return std::unexpected("Graph material SPIR-V length does not match the payload");
 		Product.SpirV.assign(Input.begin() + static_cast<std::ptrdiff_t>(Offset), Input.end());

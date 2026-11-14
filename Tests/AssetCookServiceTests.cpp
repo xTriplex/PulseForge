@@ -135,11 +135,17 @@ namespace
 			MaterialGraphSource ColorGraph;
 			ColorGraph.GraphID = UUID(10, 6);
 			ColorGraph.Nodes = {
-				{ UUID(10, 7), MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 80.0, 100.0, { 0.2f, 0.4f, 0.6f } },
+				{ UUID(10, 7), MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 80.0, 100.0, { 0.25f, 0.5f, 0.75f } },
 				{ UUID(10, 8), MaterialGraphNodeKind::PbrOutput, 0.0f, {}, 360.0, 100.0 }
 			};
 			ColorGraph.Connections = { { UUID(11, 4), UUID(10, 7), UUID(10, 8), 0 } };
 			MaterialAssetDesc ColorGraphDescription;
+			ColorGraphDescription.BaseColorFactor = { 0.25f, 0.5f, 0.75f, 0.6f };
+			ColorGraphDescription.MetallicFactor = 0.35f;
+			ColorGraphDescription.RoughnessFactor = 0.42f;
+			ColorGraphDescription.AlphaMode = MaterialAlphaMode::Mask;
+			ColorGraphDescription.AlphaCutoff = 0.31f;
+			ColorGraphDescription.DoubleSided = true;
 			ColorGraphDescription.Graph = std::move(ColorGraph);
 			auto ColorGraphBytes = MaterialAssetSerializer::Serialize(ColorGraphDescription);
 			if (!ColorGraphBytes) { Root.clear(); return; }
@@ -975,6 +981,12 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	{
 		CookedGraphMaterialProduct Product;
 		Product.RecipeFingerprint = Compiled->RecipeFingerprint;
+		Product.Material.BaseColorFactor = { 0.25f, 0.5f, 0.75f, 0.6f };
+		Product.Material.MetallicFactor = 0.35f;
+		Product.Material.RoughnessFactor = 0.42f;
+		Product.Material.AlphaMode = CookedMaterialAlphaMode::Mask;
+		Product.Material.AlphaCutoff = 0.31f;
+		Product.Material.DoubleSided = true;
 		for (const auto& Parameter : Compiled->Parameters)
 			Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
 		Product.SpirV = Compiled->SpirV;
@@ -984,9 +996,35 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		{
 			auto ProductReadBack = Detail::DecodeGraphMaterialProduct(*ProductBytes);
 			PF_CHECK(Tests, ProductReadBack && ProductReadBack->RecipeFingerprint == Product.RecipeFingerprint &&
-				ProductReadBack->SpirV == Product.SpirV && ProductReadBack->Parameters == Product.Parameters);
+				ProductReadBack->SpirV == Product.SpirV && ProductReadBack->Parameters == Product.Parameters &&
+				ProductReadBack->Material.BaseColorFactor == Product.Material.BaseColorFactor &&
+				ProductReadBack->Material.MetallicFactor == Product.Material.MetallicFactor &&
+				ProductReadBack->Material.RoughnessFactor == Product.Material.RoughnessFactor &&
+				ProductReadBack->Material.AlphaMode == Product.Material.AlphaMode &&
+				ProductReadBack->Material.AlphaCutoff == Product.Material.AlphaCutoff &&
+				ProductReadBack->Material.DoubleSided == Product.Material.DoubleSided);
+			if (ProductReadBack)
+			{
+				size_t MaterialStateOffset = 48;
+				for (const auto& Parameter : Product.Parameters)
+					MaterialStateOffset += 16 + sizeof(uint32_t) + Parameter.Name.size() + sizeof(float);
+				uint32_t MaterialStateBytes = 0;
+				if (MaterialStateOffset + sizeof(uint32_t) <= ProductBytes->size())
+					std::memcpy(&MaterialStateBytes, ProductBytes->data() + MaterialStateOffset, sizeof(MaterialStateBytes));
+				auto LegacyGraphProduct = *ProductBytes;
+				if (MaterialStateBytes > 0 && MaterialStateOffset + sizeof(uint32_t) + MaterialStateBytes <= LegacyGraphProduct.size())
+				{
+					LegacyGraphProduct.erase(LegacyGraphProduct.begin() + static_cast<std::ptrdiff_t>(MaterialStateOffset),
+						LegacyGraphProduct.begin() + static_cast<std::ptrdiff_t>(MaterialStateOffset + sizeof(uint32_t) + MaterialStateBytes));
+					LegacyGraphProduct[4] = std::byte{ 1 };
+					const auto LegacyProductReadBack = Detail::DecodeGraphMaterialProduct(LegacyGraphProduct);
+					PF_CHECK(Tests, LegacyProductReadBack && LegacyProductReadBack->ArtifactVersion == Detail::GraphMaterialProductSchemaVersion &&
+						LegacyProductReadBack->Material.BaseColorFactor == CookedMaterialProduct{}.BaseColorFactor);
+				}
+				else PF_CHECK(Tests, false);
+			}
 			auto FutureProduct = *ProductBytes;
-			FutureProduct[4] = std::byte{ 2 };
+			FutureProduct[4] = std::byte{ 3 };
 			PF_CHECK(Tests, !Detail::DecodeGraphMaterialProduct(FutureProduct));
 			ProductBytes->front() ^= std::byte{ 1 };
 			PF_CHECK(Tests, !Detail::DecodeGraphMaterialProduct(*ProductBytes));
@@ -1012,7 +1050,8 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		{
 			const auto MaximumRoundTrip = Detail::DecodeGraphMaterialProduct(*MaximumBytes);
 			PF_CHECK(Tests, MaximumRoundTrip && MaximumRoundTrip->Parameters == MaximumBoundedProduct.Parameters &&
-				MaximumRoundTrip->SpirV == MaximumBoundedProduct.SpirV);
+				MaximumRoundTrip->SpirV == MaximumBoundedProduct.SpirV &&
+				MaximumRoundTrip->Material.BaseColorFactor == MaximumBoundedProduct.Material.BaseColorFactor);
 		}
 	}
 	auto Cyclic = Source;
@@ -1153,9 +1192,15 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 			PF_CHECK(Tests, (*GraphProvider)->FindGraphMaterial(Fixture.ColorGraphMaterialAsset) != nullptr);
 			auto CookedGraph = (*GraphProvider)->LoadGraphMaterialProduct(Fixture.GraphMaterialAsset);
 			auto CookedColorGraph = (*GraphProvider)->LoadGraphMaterialProduct(Fixture.ColorGraphMaterialAsset);
+			auto CookedColorRenderState = (*GraphProvider)->LoadMaterialProduct(Fixture.ColorGraphMaterialAsset);
 			PF_CHECK(Tests, CookedGraph.has_value());
 			PF_CHECK(Tests, CookedColorGraph && CookedColorGraph->RecipeFingerprint.size() == 32 &&
 				CookedColorGraph->SpirV.size() >= 20 && CookedColorGraph->Parameters.empty());
+			const std::array<float, 4> ExpectedColorMaterial{ 0.25f, 0.5f, 0.75f, 0.6f };
+			PF_CHECK(Tests, CookedColorRenderState && CookedColorRenderState->BaseColorFactor == ExpectedColorMaterial &&
+				CookedColorRenderState->MetallicFactor == 0.35f && CookedColorRenderState->RoughnessFactor == 0.42f &&
+				CookedColorRenderState->AlphaMode == CookedMaterialAlphaMode::Mask &&
+				CookedColorRenderState->AlphaCutoff == 0.31f && CookedColorRenderState->DoubleSided);
 			if (CookedGraph)
 			{
 				PF_CHECK(Tests, CookedGraph->RecipeFingerprint.size() == 32);

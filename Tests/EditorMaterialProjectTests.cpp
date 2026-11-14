@@ -7,6 +7,7 @@
 #include "Editor/EditorStyle.h"
 #include "Assets/MaterialAssetService.h"
 
+#include <array>
 #include <fstream>
 #include <iterator>
 
@@ -486,6 +487,15 @@ namespace
 		if (Error) return;
 		MaterialAssetDesc Initial;
 		Initial.BaseColorFactor = { 0.2f, 0.3f, 0.4f, 1.0f };
+		MaterialAssetDesc ConversionFixture = Initial;
+		const auto Conversion = PulseForgeEditor::EditorMaterialDraftController::ConvertFixedMaterialToGraph(ConversionFixture);
+		const std::array<float, 3> ExpectedGraphColor{ 0.2f, 0.3f, 0.4f };
+		PF_CHECK(Tests, Conversion && ConversionFixture.Graph && ValidateMaterialGraphSource(*ConversionFixture.Graph).IsValid() &&
+			ConversionFixture.Graph->Nodes.size() == 2 &&
+			ConversionFixture.Graph->Nodes.front().Kind == MaterialGraphNodeKind::ColorConstant &&
+			ConversionFixture.Graph->Nodes.front().Color == ExpectedGraphColor &&
+			ConversionFixture.BaseColorFactor.r == 1.0f && ConversionFixture.BaseColorFactor.g == 1.0f &&
+			ConversionFixture.BaseColorFactor.b == 1.0f && ConversionFixture.BaseColorFactor.a == Initial.BaseColorFactor.a);
 		auto Material = MaterialAssetService::Create(
 			ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(), "Assets/Materials/draft.material", Initial);
 		PF_CHECK(Tests, Material.has_value());

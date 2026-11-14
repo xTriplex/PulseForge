@@ -860,6 +860,22 @@ namespace PulseForge
 								"Graph material compilation failed: " + Compiled.error().Message, Product.SourcePath, Product.Asset));
 						CookedGraphMaterialProduct GraphProduct;
 						GraphProduct.RecipeFingerprint = Compiled->RecipeFingerprint;
+						GraphProduct.Material.BaseColorTexture = Material->BaseColorTexture;
+						GraphProduct.Material.MetallicRoughnessTexture = Material->MetallicRoughnessTexture;
+						GraphProduct.Material.NormalTexture = Material->NormalTexture;
+						GraphProduct.Material.OcclusionTexture = Material->OcclusionTexture;
+						GraphProduct.Material.EmissiveTexture = Material->EmissiveTexture;
+						for (size_t Component = 0; Component < GraphProduct.Material.BaseColorFactor.size(); ++Component)
+							GraphProduct.Material.BaseColorFactor[Component] = Material->BaseColorFactor[static_cast<int>(Component)];
+						GraphProduct.Material.MetallicFactor = Material->MetallicFactor;
+						GraphProduct.Material.RoughnessFactor = Material->RoughnessFactor;
+						GraphProduct.Material.NormalScale = Material->NormalScale;
+						GraphProduct.Material.OcclusionStrength = Material->OcclusionStrength;
+						for (size_t Component = 0; Component < GraphProduct.Material.EmissiveFactor.size(); ++Component)
+							GraphProduct.Material.EmissiveFactor[Component] = Material->EmissiveFactor[static_cast<int>(Component)];
+						GraphProduct.Material.AlphaMode = static_cast<CookedMaterialAlphaMode>(Material->AlphaMode);
+						GraphProduct.Material.AlphaCutoff = Material->AlphaCutoff;
+						GraphProduct.Material.DoubleSided = Material->DoubleSided;
 						for (const auto& Parameter : Compiled->Parameters)
 							GraphProduct.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
 						GraphProduct.SpirV = std::move(Compiled->SpirV);

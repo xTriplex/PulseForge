@@ -28,6 +28,8 @@ int main(int ArgumentCount, char** Arguments)
 		auto Product = (*Provider)->LoadGraphMaterialProduct(*Asset);
 		if (!Product || Product->RecipeFingerprint.size() != 32 || Product->SpirV.size() < 20 ||
 			Product->Parameters.size() != 1 || Product->Parameters.front().Name != "Accent") return 22;
+		const auto MaterialState = (*Provider)->LoadMaterialProduct(*Asset);
+		if (!MaterialState || MaterialState->BaseColorFactor != std::array<float, 4>{ 1.0f, 1.0f, 1.0f, 1.0f }) return 25;
 		if (Product->SpirV[0] != std::byte{ 0x03 } || Product->SpirV[1] != std::byte{ 0x02 } ||
 			Product->SpirV[2] != std::byte{ 0x23 } || Product->SpirV[3] != std::byte{ 0x07 }) return 23;
 		return 0;
@@ -48,6 +50,8 @@ int main(int ArgumentCount, char** Arguments)
 	CookedGraphMaterialProduct Product;
 	Product.RecipeFingerprint = "0123456789abcdef0123456789abcdef";
 	Product.Parameters.push_back({ UUID(1, 3), "Roughness", 0.4f });
+	Product.Material.BaseColorFactor = { 0.2f, 0.4f, 0.6f, 0.8f };
+	Product.Material.DoubleSided = true;
 	Product.SpirV.resize(20);
 	Product.SpirV[0] = std::byte{ 0x03 };
 	Product.SpirV[1] = std::byte{ 0x02 };
@@ -109,5 +113,7 @@ int main(int ArgumentCount, char** Arguments)
 	auto Loaded = (*Provider)->LoadGraphMaterialProduct(Asset);
 	if (!Loaded || Loaded->RecipeFingerprint != Product.RecipeFingerprint || Loaded->SpirV != Product.SpirV ||
 		Loaded->Parameters != Product.Parameters) return 8;
+	auto MaterialState = (*Provider)->LoadMaterialProduct(Asset);
+	if (!MaterialState || MaterialState->BaseColorFactor != Product.Material.BaseColorFactor || !MaterialState->DoubleSided) return 26;
 	return 0;
 }
