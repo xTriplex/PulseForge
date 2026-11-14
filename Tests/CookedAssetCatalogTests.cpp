@@ -190,9 +190,9 @@ namespace
 		const auto Truncated = Fixture.Open();
 		PF_CHECK(Tests, !Truncated && Truncated.error().Code == CookedAssetCatalogErrorCode::InvalidManifest);
 
-		std::string Unsupported = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 4", "\"version\": 77"));
-		Fixture.WriteManifest(Unsupported);
+		auto Unsupported = nlohmann::ordered_json::parse(*Baseline);
+		Unsupported["version"] = 77;
+		Fixture.WriteManifest(Unsupported.dump(2) + "\n");
 		const auto Version = Fixture.Open();
 		PF_CHECK(Tests, !Version && Version.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
 		auto LegacyVersionTwo = nlohmann::ordered_json::parse(*Baseline);
@@ -213,9 +213,9 @@ namespace
 		PF_CHECK(Tests, LegacyManifestThree.has_value());
 		if (LegacyManifestThree)
 			PF_CHECK(Tests, (*LegacyManifestThree)->GetAudioMixDefaults() == AudioMixGains{});
-		std::string UnsupportedLegacy = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(UnsupportedLegacy, "\"version\": 4", "\"version\": 1"));
-		Fixture.WriteManifest(UnsupportedLegacy);
+		auto UnsupportedLegacy = nlohmann::ordered_json::parse(*Baseline);
+		UnsupportedLegacy["version"] = 1;
+		Fixture.WriteManifest(UnsupportedLegacy.dump(2) + "\n");
 		const auto UnsupportedLegacyManifest = Fixture.Open();
 		PF_CHECK(Tests, !UnsupportedLegacyManifest &&
 			UnsupportedLegacyManifest.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);

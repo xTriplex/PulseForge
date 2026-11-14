@@ -14,6 +14,7 @@
 #include <map>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 #define NOMINMAX
@@ -61,12 +62,25 @@ namespace PulseForge
 		};
 		const std::filesystem::path Executable = PF_HOST_DXC_EXECUTABLE;
 		AssetFingerprintBuilder Toolchain("PulseForge.DXC.Toolchain.v1");
-		for (const std::filesystem::path& Name : { std::filesystem::path("dxc.exe"), std::filesystem::path("dxcompiler.dll"),
-			std::filesystem::path("dxil.dll") })
+		std::vector<std::filesystem::path> ToolFiles{ Executable };
+#if defined(_WIN32)
+		ToolFiles.emplace_back(Executable.parent_path() / "dxcompiler.dll");
+		ToolFiles.emplace_back(Executable.parent_path() / "dxil.dll");
+#elif defined(__APPLE__)
+		ToolFiles.emplace_back(Executable.parent_path() / "libdxcompiler.dylib");
+		ToolFiles.emplace_back(Executable.parent_path() / "libdxil.dylib");
+#else
+		ToolFiles.emplace_back(Executable.parent_path() / "libdxcompiler.so");
+		ToolFiles.emplace_back(Executable.parent_path() / "libdxil.so");
+#endif
+		for (const auto& Path : ToolFiles)
 		{
-			const auto Path = Name == "dxc.exe" ? Executable : Executable.parent_path() / Name;
 			const auto Fingerprint = FingerprintFile(Path);
-			if (!Fingerprint) return {};
+			if (!Fingerprint)
+			{
+				if (Path == Executable || std::filesystem::exists(Path)) return {};
+				continue;
+			}
 			Toolchain.UpdateText(Path.filename().string(), Fingerprint->Algorithm + ":" + Fingerprint->DigestHex);
 		}
 		const auto Fingerprint = Toolchain.Finish();
