@@ -16,6 +16,8 @@ namespace PulseForge
 			const BindingLayoutHandle& Layout, const Sampler& ShadowSampler);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePointLightCubemaps(
 			const BindingLayoutHandle& Layout, const Sampler& ShadowSampler);
+		[[nodiscard]] std::expected<BindingSetHandle, SceneRendererError> CreateGraphMaterialBindings(
+			const BindingLayoutHandle& Layout, const Buffer& Parameters) const;
 
 		[[nodiscard]] const RenderTarget& DirectionalTarget(size_t CascadeIndex) const noexcept;
 		[[nodiscard]] const Texture* DirectionalShadowTexture(size_t CascadeIndex) const noexcept;
@@ -37,6 +39,8 @@ namespace PulseForge
 		std::array<DepthCubemapHandle, MaxPointLightShadowCount> m_PointLightCubemaps;
 		BindingSetHandle m_ShadowBindings;
 		BindingSetHandle m_PointLightBindings;
+		const Sampler* m_ShadowSampler = nullptr;
+		const Texture* m_FallbackPointShadowTexture = nullptr;
 		uint64_t m_SpotlightResourceGeneration = 0;
 		uint64_t m_PointLightResourceGeneration = 0;
 	};

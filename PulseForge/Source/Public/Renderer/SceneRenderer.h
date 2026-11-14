@@ -248,6 +248,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareGraphMaterialBindings();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
 			ColorTargetFormat ColorFormat,

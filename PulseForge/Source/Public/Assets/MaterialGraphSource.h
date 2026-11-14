@@ -64,6 +64,8 @@ namespace PulseForge
 		std::string Message;
 	};
 
+	[[nodiscard]] PULSEFORGE_API UUID GetMaterialGraphPinID(UUID Node, bool Output, uint8_t Slot) noexcept;
+
 	struct MaterialGraphValidation final
 	{
 		std::vector<MaterialGraphDiagnostic> Diagnostics;
@@ -98,6 +100,8 @@ namespace PulseForge
 		UUID SourceGraph;
 		UUID OutputNode;
 		uint32_t OutputExpression = 0;
+		std::optional<uint32_t> MetallicExpression;
+		std::optional<uint32_t> RoughnessExpression;
 		std::vector<MaterialGraphExpression> Expressions;
 	};
 

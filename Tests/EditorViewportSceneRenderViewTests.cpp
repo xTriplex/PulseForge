@@ -418,26 +418,40 @@ namespace
 		PF_CHECK(Tests, FixedPipeline != nullptr && FixedPipeline->GetDescription().BindingLayouts.size() == 4);
 
 		const auto GraphShader = MakeShader(ShaderStage::Fragment, "graph fragment");
-		const auto GraphLayout = MakeLayout(4);
+		const auto GraphLayout = MakeLayout(3);
 		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
 			GraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
 		const size_t OneGraphPipeline = Runtime.PipelineCreations;
 		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
 			GraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
 		PF_CHECK(Tests, Runtime.PipelineCreations == OneGraphPipeline);
+		const auto EquivalentGraphLayout = MakeLayout(3);
+		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
+			EquivalentGraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
+		const size_t TwoGraphPipelines = Runtime.PipelineCreations;
+		PF_CHECK(Tests, TwoGraphPipelines == OneGraphPipeline + 1);
+		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
+			EquivalentGraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
+		PF_CHECK(Tests, Runtime.PipelineCreations == TwoGraphPipelines);
 		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-b", GraphShader,
 			GraphLayout).has_value());
 		const GraphicsPipeline* const GraphPipeline = Cache.FindGraphScenePipeline(
-			ColorTargetFormat::RGBA16_Float, "recipe-a", true, true, WorldTransformOrientation::Mirrored);
-		PF_CHECK(Tests, GraphPipeline && GraphPipeline != FixedPipeline);
+			ColorTargetFormat::RGBA16_Float, "recipe-a", GraphLayout, true, true, WorldTransformOrientation::Mirrored);
+		const GraphicsPipeline* const EquivalentGraphPipeline = Cache.FindGraphScenePipeline(
+			ColorTargetFormat::RGBA16_Float, "recipe-a", EquivalentGraphLayout, true, true, WorldTransformOrientation::Mirrored);
+		PF_CHECK(Tests, GraphPipeline && GraphPipeline != FixedPipeline && EquivalentGraphPipeline &&
+			EquivalentGraphPipeline != GraphPipeline);
 		if (GraphPipeline)
 		{
 			const auto& Description = GraphPipeline->GetDescription();
-			PF_CHECK(Tests, Description.FragmentShader == GraphShader && Description.BindingLayouts.size() == 5);
-			PF_CHECK(Tests, Description.BindingLayouts.back()->GetDescription().ShaderRegisterSpace == 4);
+			PF_CHECK(Tests, Description.FragmentShader == GraphShader && Description.BindingLayouts.size() == 4);
+			PF_CHECK(Tests, Description.BindingLayouts.back().get() == GraphLayout.get() &&
+				Description.BindingLayouts.back()->GetDescription().ShaderRegisterSpace == 3);
 			PF_CHECK(Tests, Description.Blend.Enabled && !Description.Depth.WriteEnabled);
 			PF_CHECK(Tests, Description.Rasterizer.Cull == CullMode::None && !Description.Rasterizer.FrontCounterClockwise);
 		}
+		if (EquivalentGraphPipeline)
+			PF_CHECK(Tests, EquivalentGraphPipeline->GetDescription().BindingLayouts.back().get() == EquivalentGraphLayout.get());
 	}
 
 	class FakeTextureRegistry final : public PulseForgeEditor::EditorTextureRegistry

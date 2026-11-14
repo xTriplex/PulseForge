@@ -199,10 +199,16 @@ namespace
 		PF_CHECK(Tests, ValidateDrawBindingSets(Pipeline, ValidSets).has_value());
 		PF_CHECK(Tests, !ValidateDrawBindingSets(Pipeline, {}).has_value());
 
-		BindingLayoutHandle DifferentLayout = std::make_shared<TestBindingLayout>(LayoutDescription);
+		auto DifferentLayoutDescription = LayoutDescription;
+		DifferentLayoutDescription.DebugName = "Different fragment constants";
+		BindingLayoutHandle DifferentLayout = std::make_shared<TestBindingLayout>(DifferentLayoutDescription);
 		TestBindingSet MismatchedSet(DifferentLayout);
 		const std::array<const BindingSet*, 1> MismatchedSets = { &MismatchedSet };
-		PF_CHECK(Tests, !ValidateDrawBindingSets(Pipeline, MismatchedSets).has_value());
+		const auto MismatchedLayout = ValidateDrawBindingSets(Pipeline, MismatchedSets);
+		PF_CHECK(Tests, !MismatchedLayout.has_value());
+		PF_CHECK(Tests, !MismatchedLayout && MismatchedLayout.error().Message.find("layout slot 0") != std::string::npos &&
+			MismatchedLayout.error().Message.find("Different fragment constants") != std::string::npos &&
+			MismatchedLayout.error().Message.find("Test fragment constants") != std::string::npos);
 	}
 
 	void TestEnvironmentLightingProcessing(TestRunner& Tests)

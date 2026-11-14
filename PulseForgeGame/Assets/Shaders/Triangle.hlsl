@@ -320,7 +320,7 @@ float4 PSMain(VertexOutput Input, bool IsFrontFace : SV_IsFrontFace) : SV_Target
 	const float4 MetallicRoughnessSample = MetallicRoughnessTexture.Sample(DiffuseSampler, Input.TexCoord);
 #if defined(PULSEFORGE_MATERIAL_GRAPH)
 	#if defined(PULSEFORGE_GRAPH_SAMPLES_BASE_COLOR_TEXTURE)
-	const float3 Albedo = max(Input.Color.rgb * BaseColorFactor.rgb * GraphMaterialBaseColor(Input.TexCoord), 0.0f);
+	const float3 Albedo = max(Input.Color.rgb * GraphMaterialBaseColor(Input.TexCoord) * BaseColorFactor.rgb, 0.0f);
 	#else
 	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * BaseColorFactor.rgb *
 		GraphMaterialBaseColor(Input.TexCoord), 0.0f);
@@ -328,8 +328,16 @@ float4 PSMain(VertexOutput Input, bool IsFrontFace : SV_IsFrontFace) : SV_Target
 #else
 	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * BaseColorFactor.rgb, 0.0f);
 #endif
+	#if defined(PULSEFORGE_MATERIAL_GRAPH) && defined(PULSEFORGE_GRAPH_OVERRIDES_METALLIC)
+	const float Metallic = saturate(GraphMaterialMetallic(Input.TexCoord) * MetallicRoughnessSample.b);
+	#else
 	const float Metallic = saturate(SurfaceParameters.x * MetallicRoughnessSample.b);
+	#endif
+	#if defined(PULSEFORGE_MATERIAL_GRAPH) && defined(PULSEFORGE_GRAPH_OVERRIDES_ROUGHNESS)
+	const float Roughness = clamp(GraphMaterialRoughness(Input.TexCoord) * MetallicRoughnessSample.g, 0.045f, 1.0f);
+	#else
 	const float Roughness = clamp(SurfaceParameters.y * MetallicRoughnessSample.g, 0.045f, 1.0f);
+	#endif
 	const float3 GeometricNormal = SafeNormalize(Input.Normal, float3(0.0f, 0.0f, 1.0f));
 	const float3 OrientedGeometricNormal = AlphaParameters.z > 0.5f && !IsFrontFace
 		? -GeometricNormal

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,10 +56,30 @@ namespace PulseForge
 		}
 	}
 
+	UUID GetMaterialGraphPinID(UUID Node, bool Output, uint8_t Slot) noexcept
+	{
+		if (Node.IsNil()) return {};
+		const uint64_t PinKind = (static_cast<uint64_t>(Output) << 63) | Slot;
+		const auto Mix = [](uint64_t Value)
+		{
+			Value ^= Value >> 30;
+			Value *= 0xbf58476d1ce4e5b9ull;
+			Value ^= Value >> 27;
+			Value *= 0x94d049bb133111ebull;
+			return Value ^ (Value >> 31);
+		};
+		uint64_t High = Mix(Node.GetHigh() ^ std::rotl(Node.GetLow(), 23) ^ 0x5046474d41545049ull ^ PinKind);
+		uint64_t Low = Mix(Node.GetLow() ^ std::rotl(Node.GetHigh(), 41) ^ 0x4e47524150485049ull ^
+			(PinKind * 0x9e3779b97f4a7c15ull));
+		if (High == 0 && Low == 0) Low = 1;
+		return UUID(High, Low);
+	}
+
 	MaterialGraphValidation ValidateMaterialGraphSource(const MaterialGraphSource& Source)
 	{
 		MaterialGraphValidation Result;
-		const auto Add = [&](UUID Node, std::string Message) { Result.Diagnostics.push_back({ Node, {}, std::move(Message) }); };
+		const auto Add = [&](UUID Node, std::string Message, UUID Pin = UUID{})
+			{ Result.Diagnostics.push_back({ Node, Pin, std::move(Message) }); };
 		if (Source.Version != MaterialGraphSource::CurrentVersion) Add({}, "Unsupported material graph source version");
 		if (Source.GraphID.IsNil()) Add({}, "Material graph identity must not be nil");
 		if (Source.Nodes.empty() || Source.Nodes.size() > MaximumGraphNodes) Add({}, "Material graph node count is outside the supported range");
@@ -66,7 +87,7 @@ namespace PulseForge
 
 		std::unordered_map<UUID, const MaterialGraphNode*, UUIDHash> Nodes;
 		std::unordered_map<UUID, std::vector<UUID>, UUIDHash> Inputs;
-		std::unordered_map<UUID, std::array<UUID, 2>, UUIDHash> InputSources;
+		std::unordered_map<UUID, std::array<UUID, 3>, UUIDHash> InputSources;
 		std::unordered_set<UUID, UUIDHash> ConnectionIDs;
 		std::unordered_map<std::string, UUID> ParameterNames;
 		size_t OutputCount = 0;
@@ -111,17 +132,20 @@ namespace PulseForge
 				continue;
 			}
 			const uint8_t SlotCount = To->second->Kind == MaterialGraphNodeKind::Add ||
-				To->second->Kind == MaterialGraphNodeKind::Multiply ? 2 : 1;
+				To->second->Kind == MaterialGraphNodeKind::Multiply ? 2 :
+				To->second->Kind == MaterialGraphNodeKind::PbrOutput ? 3 : 1;
 			if (Connection.InputSlot >= SlotCount)
 			{
-				Add(Connection.InputNode, "Connection input slot is not defined by this node");
+				Add(Connection.InputNode, "Connection input slot is not defined by this node",
+					GetMaterialGraphPinID(Connection.InputNode, false, Connection.InputSlot));
 				continue;
 			}
 			auto& Slots = Inputs[Connection.InputNode];
 			if (std::find_if(Source.Connections.begin(), Source.Connections.end(), [&](const auto& Existing)
 				{ return Existing.ID != Connection.ID && Existing.InputNode == Connection.InputNode && Existing.InputSlot == Connection.InputSlot; })
 				!= Source.Connections.end())
-				Add(Connection.InputNode, "An input slot may have only one connection");
+				Add(Connection.InputNode, "An input slot may have only one connection",
+					GetMaterialGraphPinID(Connection.InputNode, false, Connection.InputSlot));
 			Slots.push_back(Connection.OutputNode);
 			InputSources[Connection.InputNode][Connection.InputSlot] = Connection.OutputNode;
 		}
@@ -135,7 +159,8 @@ namespace PulseForge
 			for (uint8_t Slot = 0; Slot < Required; ++Slot)
 				if (std::none_of(Source.Connections.begin(), Source.Connections.end(), [&](const auto& Connection)
 					{ return Connection.InputNode == Node.ID && Connection.InputSlot == Slot; }))
-					Add(Node.ID, "Required material graph input is unconnected");
+					Add(Node.ID, "Required material graph input is unconnected",
+						GetMaterialGraphPinID(Node.ID, false, Slot));
 		}
 
 		std::unordered_map<UUID, uint8_t, UUIDHash> Marks;
@@ -189,11 +214,18 @@ namespace PulseForge
 			const MaterialGraphNodeKind InputKind = Input->second->Kind;
 			if ((InputKind == MaterialGraphNodeKind::Add || InputKind == MaterialGraphNodeKind::Multiply) &&
 				OutputType != ValueType::Scalar)
-				Add(Connection.InputNode, "Scalar arithmetic inputs accept only scalar values");
+				Add(Connection.InputNode, "Scalar arithmetic inputs accept only scalar values",
+					GetMaterialGraphPinID(Connection.InputNode, false, Connection.InputSlot));
 			else if (InputKind == MaterialGraphNodeKind::BaseColorTextureSample && OutputType != ValueType::UV)
-				Add(Connection.InputNode, "Base-color texture sampling requires UV0 coordinates");
-			else if (InputKind == MaterialGraphNodeKind::PbrOutput && OutputType != ValueType::Scalar && OutputType != ValueType::Color)
-				Add(Connection.InputNode, "PBR base color accepts scalar or color values, not UV coordinates");
+				Add(Connection.InputNode, "Base-color texture sampling requires UV0 coordinates",
+					GetMaterialGraphPinID(Connection.InputNode, false, Connection.InputSlot));
+			else if (InputKind == MaterialGraphNodeKind::PbrOutput &&
+				((Connection.InputSlot == 0 && OutputType != ValueType::Scalar && OutputType != ValueType::Color) ||
+				 (Connection.InputSlot > 0 && OutputType != ValueType::Scalar)))
+				Add(Connection.InputNode, Connection.InputSlot == 0
+					? "PBR base color accepts scalar or color values, not UV coordinates"
+					: "PBR metallic and roughness inputs accept only scalar values",
+					GetMaterialGraphPinID(Connection.InputNode, false, Connection.InputSlot));
 		}
 		return Result;
 	}
@@ -204,7 +236,7 @@ namespace PulseForge
 		if (!Validation.IsValid()) return std::unexpected(std::move(Validation));
 
 		std::unordered_map<UUID, const MaterialGraphNode*, UUIDHash> Nodes;
-		std::unordered_map<UUID, std::array<const MaterialGraphConnection*, 2>, UUIDHash> Inputs;
+		std::unordered_map<UUID, std::array<const MaterialGraphConnection*, 3>, UUIDHash> Inputs;
 		for (const auto& Node : Source.Nodes) Nodes.emplace(Node.ID, &Node);
 		for (const auto& Connection : Source.Connections) Inputs[Connection.InputNode][Connection.InputSlot] = &Connection;
 		const auto Output = std::find_if(Source.Nodes.begin(), Source.Nodes.end(), [](const auto& Node)
@@ -257,6 +289,10 @@ namespace PulseForge
 			return Index;
 		};
 		IR.OutputExpression = Lower(Lower, Inputs.at(Output->ID)[0]->OutputNode);
+		if (Inputs.at(Output->ID)[1])
+			IR.MetallicExpression = Lower(Lower, Inputs.at(Output->ID)[1]->OutputNode);
+		if (Inputs.at(Output->ID)[2])
+			IR.RoughnessExpression = Lower(Lower, Inputs.at(Output->ID)[2]->OutputNode);
 		return IR;
 	}
 

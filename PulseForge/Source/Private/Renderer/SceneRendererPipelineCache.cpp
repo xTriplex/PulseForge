@@ -92,7 +92,8 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Cannot create a graph-material pipeline for a singular mesh transform"));
 		if (RecipeFingerprint.empty() || !FragmentShader || !MaterialLayout)
 			return std::unexpected(MakeResourceError("Graph-material pipeline identity or shader resources are incomplete"));
-		const auto Key = std::tuple{ std::string(RecipeFingerprint), ColorFormat, AlphaBlend, DoubleSided, Orientation };
+		const auto Key = std::tuple{ std::string(RecipeFingerprint), MaterialLayout.get(), ColorFormat,
+			AlphaBlend, DoubleSided, Orientation };
 		if (m_GraphScenePipelines.contains(Key)) return {};
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
 		if (!m_VertexLayout)
@@ -103,7 +104,7 @@ namespace PulseForge
 		Description.VertexShader = m_Resources->SceneVertexShader;
 		Description.FragmentShader = std::move(FragmentShader);
 		Description.BindingLayouts = { m_Resources->SceneMaterialLayout, m_Resources->DirectionalShadowLayout,
-			m_Resources->AmbientOcclusionLayout, m_Resources->PointLightShadowLayout, std::move(MaterialLayout) };
+			m_Resources->AmbientOcclusionLayout, std::move(MaterialLayout) };
 		Description.VertexLayout = *m_VertexLayout;
 		Description.ColorFormat = ColorFormat;
 		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
@@ -224,13 +225,14 @@ namespace PulseForge
 	const GraphicsPipeline* SceneRendererPipelineCache::FindGraphScenePipeline(
 		ColorTargetFormat ColorFormat,
 		std::string_view RecipeFingerprint,
+		const BindingLayoutHandle& MaterialLayout,
 		bool AlphaBlend,
 		bool DoubleSided,
 		WorldTransformOrientation Orientation) const noexcept
 	{
 		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
 		const auto Found = m_GraphScenePipelines.find(
-			{ std::string(RecipeFingerprint), ColorFormat, AlphaBlend, DoubleSided, Orientation });
+			{ std::string(RecipeFingerprint), MaterialLayout.get(), ColorFormat, AlphaBlend, DoubleSided, Orientation });
 		return Found != m_GraphScenePipelines.end() ? Found->second.get() : nullptr;
 	}
 

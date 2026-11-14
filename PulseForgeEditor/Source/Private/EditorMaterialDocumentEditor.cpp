@@ -11,6 +11,7 @@
 #include <imgui_node_editor.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <memory>
 #include <unordered_map>
@@ -169,13 +170,17 @@ namespace PulseForgeEditor
 					Node.Kind == PulseForge::MaterialGraphNodeKind::BaseColorTextureSample;
 				if (HasInput)
 				{
-					const uint8_t InputCount = Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
+					const uint8_t InputCount = Node.Kind == PulseForge::MaterialGraphNodeKind::PbrOutput ? 3 :
+						Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
 						Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ? 2 : 1;
 					for (uint8_t Slot = 0; Slot < InputCount; ++Slot)
 					{
 						const uintptr_t Handle = PinHandle(Node.ID, false, Slot);
 						NodeEditor::BeginPin(NodeEditor::PinId(Handle), NodeEditor::PinKind::Input);
-						ImGui::Text("In %u", static_cast<unsigned>(Slot));
+						if (Node.Kind == PulseForge::MaterialGraphNodeKind::PbrOutput)
+							ImGui::TextUnformatted(std::array{ "Base Color", "Metallic", "Roughness" }[Slot]);
+						else
+							ImGui::Text("In %u", static_cast<unsigned>(Slot));
 						NodeEditor::EndPin();
 					}
 				}

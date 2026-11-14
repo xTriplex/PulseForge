@@ -68,7 +68,31 @@ namespace PulseForge
 		m_DirectionalTargets = std::move(DirectionalTargets);
 		m_ShadowBindings = std::move(*ShadowBindings);
 		m_PointLightBindings = std::move(*PointLightBindings);
+		m_ShadowSampler = &ShadowSampler;
+		m_FallbackPointShadowTexture = &FallbackPointShadowTexture;
 		return {};
+	}
+
+	std::expected<BindingSetHandle, SceneRendererError> SceneRenderer::ShadowTargetCache::CreateGraphMaterialBindings(
+		const BindingLayoutHandle& Layout, const Buffer& Parameters) const
+	{
+		if (!Layout || !m_ShadowSampler || !m_FallbackPointShadowTexture)
+			return std::unexpected(MakeShadowTargetResourceError("Graph material point-shadow bindings are not initialized"));
+		BindingSetDesc Description;
+		Description.Layout = Layout;
+		for (uint32_t Slot = 0; Slot < MaxPointLightShadowCount; ++Slot)
+		{
+			const Texture& Shadow = m_PointLightCubemaps[Slot]
+				? m_PointLightCubemaps[Slot]->GetTexture() : *m_FallbackPointShadowTexture;
+			Description.Textures.push_back({ Slot, std::cref(Shadow), BindingResourceType::TextureCube });
+		}
+		Description.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
+		Description.Buffers.push_back({ 0, std::cref(Parameters) });
+		auto Bindings = m_Runtime.CreateBindingSet(Description);
+		if (!Bindings)
+			return std::unexpected(MakeShadowTargetResourceError(
+				"Could not create combined graph-material and point-shadow bindings: " + Bindings.error().Message));
+		return std::move(*Bindings);
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::ShadowTargetCache::EnsureSpotlightMaps(

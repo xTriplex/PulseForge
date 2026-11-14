@@ -152,7 +152,7 @@ namespace PulseForge
 				}
 			if (!Parameters.empty())
 			{
-				Generated.Hlsl = "cbuffer MaterialGraphParameters : register(b0, space4) {\n";
+				Generated.Hlsl = "cbuffer MaterialGraphParameters : register(b0, space3) {\n";
 				for (const auto& [Name, Value] : Parameters)
 				{
 					(void)Value;
@@ -163,62 +163,80 @@ namespace PulseForge
 			const bool SamplesBaseColorTexture = std::ranges::any_of(Generated.IR.Expressions, [](const auto& Expression)
 				{ return Expression.Op == MaterialGraphExpressionOp::BaseColorTextureSample; });
 			if (SamplesBaseColorTexture) Generated.Hlsl += "#define PULSEFORGE_GRAPH_SAMPLES_BASE_COLOR_TEXTURE 1\n";
-			Generated.Hlsl += "float3 GraphMaterialBaseColor(float2 GraphUV0) {\n";
-			for (size_t Index = 0; Index < Generated.IR.Expressions.size(); ++Index)
+			if (Generated.IR.MetallicExpression) Generated.Hlsl += "#define PULSEFORGE_GRAPH_OVERRIDES_METALLIC 1\n";
+			if (Generated.IR.RoughnessExpression) Generated.Hlsl += "#define PULSEFORGE_GRAPH_OVERRIDES_ROUGHNESS 1\n";
+			const auto EmitOutputFunction = [&](std::string_view Name, uint32_t OutputExpression,
+				bool FunctionReturnsColor, bool ExpressionIsColor)
 			{
-				const auto& Expression = Generated.IR.Expressions[Index];
-				if (Expression.Op == MaterialGraphExpressionOp::ColorConstant ||
-					Expression.Op == MaterialGraphExpressionOp::BaseColorTextureSample)
-					Generated.Hlsl += "  float3 e";
-				else if (Expression.Op == MaterialGraphExpressionOp::UV0)
-					Generated.Hlsl += "  float2 e";
-				else Generated.Hlsl += "  float e";
-				Generated.Hlsl += std::to_string(Index) + " = ";
-				switch (Expression.Op)
+				Generated.Hlsl += FunctionReturnsColor ? "float3 " : "float ";
+				Generated.Hlsl += Name;
+				Generated.Hlsl += "(float2 GraphUV0) {\n";
+				for (size_t Index = 0; Index < Generated.IR.Expressions.size(); ++Index)
 				{
-				case MaterialGraphExpressionOp::FloatConstant:
-					Generated.Hlsl += FloatLiteral(Expression.Value);
-					break;
-				case MaterialGraphExpressionOp::ColorConstant:
-					Generated.Hlsl += "float3(" + FloatLiteral(Expression.Color[0]) + ", " +
-						FloatLiteral(Expression.Color[1]) + ", " + FloatLiteral(Expression.Color[2]) + ")";
-					break;
-				case MaterialGraphExpressionOp::FloatParameter:
-					Generated.Hlsl += "g_" + Expression.ParameterName;
-					break;
-				case MaterialGraphExpressionOp::UV0:
-					Generated.Hlsl += "GraphUV0";
-					break;
-				case MaterialGraphExpressionOp::BaseColorTextureSample:
-					Generated.Hlsl += "DiffuseTexture.Sample(DiffuseSampler, e" + std::to_string(Expression.Left) + ").rgb";
-					break;
-				case MaterialGraphExpressionOp::Add:
-					Generated.Hlsl += "e" + std::to_string(Expression.Left) + " + e" + std::to_string(Expression.Right);
-					break;
-				case MaterialGraphExpressionOp::Multiply:
-					Generated.Hlsl += "e" + std::to_string(Expression.Left) + " * e" + std::to_string(Expression.Right);
-					break;
+					const auto& Expression = Generated.IR.Expressions[Index];
+					if (Expression.Op == MaterialGraphExpressionOp::ColorConstant ||
+						Expression.Op == MaterialGraphExpressionOp::BaseColorTextureSample)
+						Generated.Hlsl += "  float3 e";
+					else if (Expression.Op == MaterialGraphExpressionOp::UV0)
+						Generated.Hlsl += "  float2 e";
+					else Generated.Hlsl += "  float e";
+					Generated.Hlsl += std::to_string(Index) + " = ";
+					switch (Expression.Op)
+					{
+					case MaterialGraphExpressionOp::FloatConstant:
+						Generated.Hlsl += FloatLiteral(Expression.Value);
+						break;
+					case MaterialGraphExpressionOp::ColorConstant:
+						Generated.Hlsl += "float3(" + FloatLiteral(Expression.Color[0]) + ", " +
+							FloatLiteral(Expression.Color[1]) + ", " + FloatLiteral(Expression.Color[2]) + ")";
+						break;
+					case MaterialGraphExpressionOp::FloatParameter:
+						Generated.Hlsl += "g_" + Expression.ParameterName;
+						break;
+					case MaterialGraphExpressionOp::UV0:
+						Generated.Hlsl += "GraphUV0";
+						break;
+					case MaterialGraphExpressionOp::BaseColorTextureSample:
+						Generated.Hlsl += "DiffuseTexture.Sample(DiffuseSampler, e" + std::to_string(Expression.Left) + ").rgb";
+						break;
+					case MaterialGraphExpressionOp::Add:
+						Generated.Hlsl += "e" + std::to_string(Expression.Left) + " + e" + std::to_string(Expression.Right);
+						break;
+					case MaterialGraphExpressionOp::Multiply:
+						Generated.Hlsl += "e" + std::to_string(Expression.Left) + " * e" + std::to_string(Expression.Right);
+						break;
+					}
+					Generated.Hlsl += ";\n";
 				}
-				Generated.Hlsl += ";\n";
-			}
-			const auto& Output = Generated.IR.Expressions[Generated.IR.OutputExpression];
-			if (Output.Op == MaterialGraphExpressionOp::ColorConstant ||
-				Output.Op == MaterialGraphExpressionOp::BaseColorTextureSample)
-				Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + "); }\n";
-			else
-				Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + ").xxx; }\n";
+				Generated.Hlsl += "  return saturate(e" + std::to_string(OutputExpression) + ")";
+				if (FunctionReturnsColor && !ExpressionIsColor) Generated.Hlsl += ".xxx";
+				Generated.Hlsl += "; }\n";
+			};
+			const auto& BaseColor = Generated.IR.Expressions[Generated.IR.OutputExpression];
+			const bool ColorOutput = BaseColor.Op == MaterialGraphExpressionOp::ColorConstant ||
+				BaseColor.Op == MaterialGraphExpressionOp::BaseColorTextureSample;
+			EmitOutputFunction("GraphMaterialBaseColor", Generated.IR.OutputExpression, true, ColorOutput);
+			if (Generated.IR.MetallicExpression)
+				EmitOutputFunction("GraphMaterialMetallic", *Generated.IR.MetallicExpression, false, false);
+			if (Generated.IR.RoughnessExpression)
+				EmitOutputFunction("GraphMaterialRoughness", *Generated.IR.RoughnessExpression, false, false);
 			return Generated;
 		}
 
 		AssetContentFingerprint SemanticRecipe(
 			const MaterialGraphSource& Graph, std::string_view Hlsl, std::string_view TemplateFingerprint, std::string_view Toolchain)
 		{
-			AssetFingerprintBuilder Builder("PulseForge.MaterialGraphRecipe.v2");
+			AssetFingerprintBuilder Builder("PulseForge.MaterialGraphRecipe.v3");
 			Builder.UpdateText("semantic-hlsl", Hlsl);
 			Builder.UpdateText("pbr-template", TemplateFingerprint);
 			Builder.UpdateText("backend", "vulkan1.3/spirv");
 			Builder.UpdateText("stage", "ps_6_0:PSMain");
-		Builder.UpdateText("compiler-flags", "-spirv;-T;ps_6_0;-E;PSMain;-D;PULSEFORGE_MATERIAL_GRAPH=1;-fspv-target-env=vulkan1.3;-O3;-WX");
+				Builder.UpdateText("compiler-flags", "-spirv;-T;ps_6_0;-E;PSMain;-D;PULSEFORGE_MATERIAL_GRAPH=1;"
+				"-fvk-b-shift;256;0;-fvk-t-shift;0;0;-fvk-s-shift;128;0;"
+				"-fvk-b-shift;256;1;-fvk-t-shift;0;1;-fvk-s-shift;128;1;"
+				"-fvk-b-shift;256;2;-fvk-t-shift;0;2;-fvk-s-shift;128;2;"
+				"-fvk-b-shift;256;3;-fvk-t-shift;0;3;-fvk-s-shift;128;3;"
+				"-fspv-target-env=vulkan1.3;-O3;-WX");
 			Builder.UpdateText("graph-schema", std::to_string(Graph.Version));
 			Builder.UpdateText("toolchain", Toolchain);
 			return Builder.Finish();
@@ -299,7 +317,7 @@ namespace PulseForge
 			{
 				const auto Variable = StorageClassByID.find(ID);
 				if (Variable != StorageClassByID.end() && Variable->second == StorageClassUniform &&
-					Decorations.first == 0 && Decorations.second == 4)
+					Decorations.first == 256 && Decorations.second == 3)
 					return true;
 			}
 			return false;
@@ -429,6 +447,10 @@ namespace PulseForge
 		Startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 		std::wstring CommandLine = QuoteWindowsArgument(Executable.wstring());
 		for (const auto& Argument : { L"-spirv", L"-T", L"ps_6_0", L"-E", L"PSMain", L"-D", L"PULSEFORGE_MATERIAL_GRAPH=1",
+			L"-fvk-b-shift", L"256", L"0", L"-fvk-t-shift", L"0", L"0", L"-fvk-s-shift", L"128", L"0",
+			L"-fvk-b-shift", L"256", L"1", L"-fvk-t-shift", L"0", L"1", L"-fvk-s-shift", L"128", L"1",
+			L"-fvk-b-shift", L"256", L"2", L"-fvk-t-shift", L"0", L"2", L"-fvk-s-shift", L"128", L"2",
+			L"-fvk-b-shift", L"256", L"3", L"-fvk-t-shift", L"0", L"3", L"-fvk-s-shift", L"128", L"3",
 			L"-I", Temporary.Root.c_str(), L"-fspv-target-env=vulkan1.3", L"-O3", L"-WX", L"-Fo" })
 			CommandLine += L" " + QuoteWindowsArgument(Argument);
 		CommandLine += L" " + QuoteWindowsArgument(OutputPath.wstring()) + L" " + QuoteWindowsArgument(TemplatePath.wstring());
@@ -440,8 +462,19 @@ namespace PulseForge
 		bool TimedOut = false;
 		bool Cancelled = false;
 		bool Stale = false;
-		while (WaitForSingleObject(Process.hProcess, 20) == WAIT_TIMEOUT)
+		for (;;)
 		{
+			const DWORD WaitResult = WaitForSingleObject(Process.hProcess, 20);
+			if (WaitResult == WAIT_OBJECT_0) break;
+			if (WaitResult != WAIT_TIMEOUT)
+			{
+				TerminateProcess(Process.hProcess, 1);
+				WaitForSingleObject(Process.hProcess, INFINITE);
+				CloseHandle(Process.hThread);
+				CloseHandle(Process.hProcess);
+				return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerFailed,
+					"Could not observe DXC process completion; the child was terminated"));
+			}
 			std::error_code SizeError;
 			const auto LogSize = std::filesystem::file_size(LogPath, SizeError);
 			const bool LogOverBudget = !SizeError && LogSize > 1024 * 1024;
@@ -478,6 +511,10 @@ namespace PulseForge
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerUnavailable, "Could not redirect DXC diagnostics"));
 		std::vector<std::string> ArgumentStorage{
 			Executable.string(), "-spirv", "-T", "ps_6_0", "-E", "PSMain", "-D", "PULSEFORGE_MATERIAL_GRAPH=1",
+			"-fvk-b-shift", "256", "0", "-fvk-t-shift", "0", "0", "-fvk-s-shift", "128", "0",
+			"-fvk-b-shift", "256", "1", "-fvk-t-shift", "0", "1", "-fvk-s-shift", "128", "1",
+			"-fvk-b-shift", "256", "2", "-fvk-t-shift", "0", "2", "-fvk-s-shift", "128", "2",
+			"-fvk-b-shift", "256", "3", "-fvk-t-shift", "0", "3", "-fvk-s-shift", "128", "3",
 			"-I", Temporary.Root.string(), "-fspv-target-env=vulkan1.3", "-O3", "-WX", "-Fo", OutputPath.string(),
 			TemplatePath.string()
 		};
@@ -498,7 +535,15 @@ namespace PulseForge
 			const pid_t Waited = waitpid(Child, &Status, WNOHANG);
 			if (Waited == Child) break;
 			if (Waited < 0 && errno != EINTR)
+			{
+				const int WaitError = errno;
+				if (WaitError != ECHILD)
+				{
+					kill(Child, SIGKILL);
+					while (waitpid(Child, &Status, 0) < 0 && errno == EINTR) {}
+				}
 				return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerFailed, "Could not observe DXC process completion"));
+			}
 			std::error_code SizeError;
 			const uintmax_t LogSize = std::filesystem::file_size(LogPath, SizeError);
 			if (!SizeError && LogSize > 1024 * 1024) OverBudget = true;

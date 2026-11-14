@@ -218,7 +218,16 @@ namespace PulseForge
 				return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw contains an invalid binding-set reference");
 
 			if (&BindingSets[Index]->GetLayout() != Pipeline.BindingLayouts[Index].get())
-				return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw binding set was created from a different pipeline layout");
+			{
+				const std::string ExpectedName = Pipeline.BindingLayouts[Index]
+					? Pipeline.BindingLayouts[Index]->GetDescription().DebugName : "<null>";
+				const std::string ActualName = BindingSets[Index]->GetLayout().GetDescription().DebugName;
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::InvalidDrawArguments,
+					"Draw binding set at layout slot " + std::to_string(Index) + " (" + ActualName +
+					") does not match pipeline layout (" + ExpectedName + ")"
+				});
+			}
 		}
 
 		return {};

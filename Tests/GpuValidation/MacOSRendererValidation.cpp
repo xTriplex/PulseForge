@@ -1,4 +1,7 @@
 #include "Assets/Project.h"
+#include "Assets/CookedProductCodec.h"
+#include "Assets/MaterialAssetService.h"
+#include "Assets/MaterialGraphCompiler.h"
 #include "Assets/SceneAssetService.h"
 #include "Core/Application.h"
 #include "Core/Layer.h"
@@ -11,6 +14,8 @@
 #include <GLFW/glfw3.h>
 #include <backends/imgui_impl_glfw.h>
 #include <imgui.h>
+
+#include <glm/gtc/packing.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -33,9 +38,57 @@ namespace
 {
 	using Clock = std::chrono::steady_clock;
 
+	struct HdrDifference final
+	{
+		size_t ChangedComponents = 0;
+		float MaximumAbsolute = 0.0f;
+		float MaximumRelative = 0.0f;
+		bool AllFinite = true;
+	};
+
+	HdrDifference MeasureHdrDifference(
+		const PulseForge::TextureReadback& Left,
+		const PulseForge::TextureReadback& Right)
+	{
+		HdrDifference Difference;
+		if (Left.Format != PulseForge::TextureFormat::RGBA16_Float || Right.Format != Left.Format ||
+			Left.Width != Right.Width || Left.Height != Right.Height || Left.Pixels.size() != Right.Pixels.size() ||
+			Left.Pixels.size() % sizeof(uint16_t) != 0)
+		{
+			Difference.ChangedComponents = std::numeric_limits<size_t>::max();
+			Difference.MaximumAbsolute = std::numeric_limits<float>::infinity();
+			Difference.MaximumRelative = std::numeric_limits<float>::infinity();
+			Difference.AllFinite = false;
+			return Difference;
+		}
+
+		for (size_t Offset = 0; Offset < Left.Pixels.size(); Offset += sizeof(uint16_t))
+		{
+			uint16_t LeftBits = 0;
+			uint16_t RightBits = 0;
+			std::memcpy(&LeftBits, Left.Pixels.data() + Offset, sizeof(LeftBits));
+			std::memcpy(&RightBits, Right.Pixels.data() + Offset, sizeof(RightBits));
+			const float LeftValue = glm::unpackHalf1x16(LeftBits);
+			const float RightValue = glm::unpackHalf1x16(RightBits);
+			if (!std::isfinite(LeftValue) || !std::isfinite(RightValue))
+			{
+				Difference.AllFinite = false;
+				++Difference.ChangedComponents;
+				continue;
+			}
+			const float Absolute = std::abs(LeftValue - RightValue);
+			if (Absolute != 0.0f) ++Difference.ChangedComponents;
+			Difference.MaximumAbsolute = std::max(Difference.MaximumAbsolute, Absolute);
+			const float Relative = Absolute / std::max({ std::abs(LeftValue), std::abs(RightValue), 1.0e-6f });
+			Difference.MaximumRelative = std::max(Difference.MaximumRelative, Relative);
+		}
+		return Difference;
+	}
+
 	enum class ValidationPhase
 	{
 		InitialFrame,
+		GraphMaterialFrame,
 		WaitForResize,
 		ResizedFrame,
 		ExposureFrame,
@@ -78,7 +131,9 @@ namespace
 				const auto Loaded = PulseForge::SceneAssetService::Load(
 					*m_Project->GetDescription().StartScene, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), m_Scene);
 				if (!Loaded) throw std::runtime_error("Could not load the PBR startup scene: " + Loaded.error().Message);
-				if (const char* TestMode = std::getenv("PULSEFORGE_MACOS_RENDERER_TEST_MODE"))
+				const char* TestMode = std::getenv("PULSEFORGE_MACOS_RENDERER_TEST_MODE");
+				if (!TestMode || std::string_view(TestMode) == "normal") PrepareGraphMaterialEquivalence();
+				if (TestMode)
 				{
 					if (std::string_view(TestMode) == "suppress-geometry")
 					{
@@ -146,9 +201,35 @@ namespace
 				{
 					m_InitialHdrGeneration = m_CapturedHdrGeneration;
 					m_InitialExtent = App.GetWindow().GetFramebufferSize();
+					m_FixedMaterialBaseline = m_CapturedColor;
 					PF_INFO("MACOS_RENDERER_INITIAL_OUTPUT=PASS; extent={}x{}; geometry_draws={}; written_depth_pixels={}; shadow_depth_pixels={}",
 						m_InitialExtent.first, m_InitialExtent.second, m_CapturedGeometryDraws, m_CapturedSceneDepthPixels,
 						m_CapturedShadowDepthPixels);
+					if (!m_GraphValidationMaterial || !m_GraphValidationProduct)
+					{
+						Fail("The fixed-PBR baseline completed without a prepared graph-material equivalence fixture");
+						return;
+					}
+					if (auto Override = m_SceneRenderer->SetTransientGraphMaterialOverride(*m_GraphValidationMaterial,
+							m_GraphValidationDescription, *m_GraphValidationProduct, 1); !Override)
+					{
+						Fail("Could not install the graph-material readback equivalence fixture: " + Override.error().Message);
+						return;
+					}
+					m_Phase = ValidationPhase::GraphMaterialFrame;
+					return;
+				}
+				if (m_Phase == ValidationPhase::GraphMaterialFrame)
+				{
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_FixedMaterialBaseline, m_CapturedColor);
+					if (ChangedPixels != 0)
+					{
+						Fail("The base-color texture and UV graph changed the fixed PBR color readback");
+						return;
+					}
+					PF_INFO("MACOS_GRAPH_MATERIAL_FIXED_PBR_EQUIVALENCE=PASS; changed_pixels={}; extent={}x{}",
+						ChangedPixels, m_CapturedColor.Width, m_CapturedColor.Height);
 					glfwSetWindowSize(m_NativeWindow, 960, 640);
 					m_Phase = ValidationPhase::WaitForResize;
 					return;
@@ -219,7 +300,8 @@ namespace
 				m_Phase = ValidationPhase::ResizedFrame;
 			}
 
-			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::ResizedFrame ||
+			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
+				m_Phase == ValidationPhase::ResizedFrame ||
 				m_Phase == ValidationPhase::ExposureFrame)
 			{
 				const auto Extent = App.GetWindow().GetFramebufferSize();
@@ -379,6 +461,59 @@ namespace
 			m_OutputTarget = std::move(*Created);
 		}
 
+		void PrepareGraphMaterialEquivalence()
+		{
+			for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+			{
+				auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer)
+					throw std::runtime_error("Could not inspect a mesh while preparing graph-material readback equivalence");
+				if (!MeshRenderer->has_value() || !(**MeshRenderer).MaterialAsset) continue;
+				const PulseForge::AssetID MaterialID = *(**MeshRenderer).MaterialAsset;
+				auto Description = PulseForge::MaterialAssetService::Load(
+					MaterialID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+				if (!Description)
+					throw std::runtime_error("Could not load the fixed PBR material for graph equivalence: " + Description.error().Message);
+				if (Description->BaseColorTexture.IsNil()) continue;
+				m_GraphValidationMaterial = MaterialID;
+				m_GraphValidationDescription = std::move(*Description);
+				break;
+			}
+			if (!m_GraphValidationMaterial)
+				throw std::runtime_error("The PBR scene has no textured mesh material for graph equivalence");
+
+			PulseForge::MaterialGraphSource Source;
+			Source.GraphID = PulseForge::UUID(0x475055, 1);
+			Source.Nodes = {
+				{ PulseForge::UUID(0x475055, 2), PulseForge::MaterialGraphNodeKind::UV0, 0.0f, {} },
+				{ PulseForge::UUID(0x475055, 3), PulseForge::MaterialGraphNodeKind::BaseColorTextureSample, 0.0f, {} },
+				{ PulseForge::UUID(0x475055, 4), PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {} },
+				{ PulseForge::UUID(0x475055, 7), PulseForge::MaterialGraphNodeKind::FloatConstant,
+					m_GraphValidationDescription.MetallicFactor },
+				{ PulseForge::UUID(0x475055, 8), PulseForge::MaterialGraphNodeKind::FloatConstant,
+					m_GraphValidationDescription.RoughnessFactor }
+			};
+			Source.Connections = {
+				{ PulseForge::UUID(0x475055, 5), PulseForge::UUID(0x475055, 2), PulseForge::UUID(0x475055, 3), 0 },
+				{ PulseForge::UUID(0x475055, 6), PulseForge::UUID(0x475055, 3), PulseForge::UUID(0x475055, 4), 0 },
+				{ PulseForge::UUID(0x475055, 9), PulseForge::UUID(0x475055, 7), PulseForge::UUID(0x475055, 4), 1 },
+				{ PulseForge::UUID(0x475055, 10), PulseForge::UUID(0x475055, 8), PulseForge::UUID(0x475055, 4), 2 }
+			};
+			PulseForge::MaterialGraphCompileRequest Request;
+			Request.Source = std::move(Source);
+			Request.ToolchainFingerprint = PulseForge::GetMaterialGraphCompilerToolchainFingerprint();
+			auto Compiled = PulseForge::MaterialGraphCompiler::Compile(Request);
+			if (!Compiled)
+				throw std::runtime_error("Could not compile the fixed-PBR graph equivalence fixture: " + Compiled.error().Message);
+			PulseForge::CookedGraphMaterialProduct Product;
+			Product.RecipeFingerprint = Compiled->RecipeFingerprint;
+			Product.Parameters.reserve(Compiled->Parameters.size());
+			for (const auto& Parameter : Compiled->Parameters)
+				Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
+			Product.SpirV = std::move(Compiled->SpirV);
+			m_GraphValidationProduct.emplace(std::move(Product));
+		}
+
 		bool CaptureRenderedOutput()
 		{
 			auto& App = PulseForge::Application::Get();
@@ -456,6 +591,37 @@ namespace
 				Fail("Rendered shadow depth contained too few written caster pixels");
 				return false;
 			}
+			if (m_Phase == ValidationPhase::InitialFrame)
+			{
+				m_FixedMaterialBaseline = *ColorReadback;
+				m_FixedMaterialHdrBaseline = *HdrReadback;
+				m_FixedMaterialDepthBaseline = *SceneDepth;
+				m_FixedMaterialShadowBaseline = *ShadowDepth;
+			}
+			else if (m_Phase == ValidationPhase::GraphMaterialFrame)
+			{
+				const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+					m_FixedMaterialBaseline, *ColorReadback);
+				const bool HdrMatches = m_FixedMaterialHdrBaseline.Pixels == HdrReadback->Pixels;
+				const HdrDifference HdrDelta = MeasureHdrDifference(m_FixedMaterialHdrBaseline, *HdrReadback);
+				const bool HdrWithinTolerance = HdrMatches || (HdrDelta.AllFinite &&
+					(HdrDelta.MaximumAbsolute <= 5.0e-4f && HdrDelta.MaximumRelative <= 1.0e-3f));
+				const bool DepthMatches = m_FixedMaterialDepthBaseline.Pixels == SceneDepth->Pixels;
+				const bool ShadowMatches = m_FixedMaterialShadowBaseline.Pixels == ShadowDepth->Pixels;
+				if (ChangedPixels != 0 || !HdrWithinTolerance || !DepthMatches || !ShadowMatches)
+				{
+					Fail("The graph texture/UV and metallic/roughness path changed equivalent fixed-PBR readback "
+						"(changed color pixels=" + std::to_string(ChangedPixels) + ", HDR exact=" +
+						(HdrMatches ? "true" : "false") + ", scene depth exact=" +
+						(DepthMatches ? "true" : "false") + ", shadow depth exact=" +
+						(ShadowMatches ? "true" : "false") + ", HDR within tolerance=" +
+						(HdrWithinTolerance ? "true" : "false") + ", HDR changed components=" +
+						std::to_string(HdrDelta.ChangedComponents) + ", HDR max abs=" +
+						std::to_string(HdrDelta.MaximumAbsolute) + ", HDR max relative=" +
+						std::to_string(HdrDelta.MaximumRelative) + ")");
+					return false;
+				}
+			}
 
 			// Prove the positive-image predicate rejects a known all-clear readback.
 			PulseForge::TextureReadback ClearedColor = *ColorReadback;
@@ -504,11 +670,18 @@ namespace
 		std::optional<PulseForge::Project> m_Project;
 		PulseForge::Scene m_Scene;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
+		std::optional<PulseForge::AssetID> m_GraphValidationMaterial;
+		PulseForge::MaterialAssetDesc m_GraphValidationDescription;
+		std::optional<PulseForge::CookedGraphMaterialProduct> m_GraphValidationProduct;
 		PulseForge::RenderTargetHandle m_OutputTarget;
 		const PulseForge::Texture* m_CapturedHdrColor = nullptr;
 		const PulseForge::Texture* m_CapturedHdrDepth = nullptr;
 		const PulseForge::Texture* m_CapturedShadowDepth = nullptr;
 		PulseForge::TextureReadback m_CapturedColor;
+		PulseForge::TextureReadback m_FixedMaterialBaseline;
+		PulseForge::TextureReadback m_FixedMaterialHdrBaseline;
+		PulseForge::TextureReadback m_FixedMaterialDepthBaseline;
+		PulseForge::TextureReadback m_FixedMaterialShadowBaseline;
 		PulseForge::TextureReadback m_ResizedColorReadback;
 		std::pair<unsigned int, unsigned int> m_InitialExtent{};
 		std::pair<unsigned int, unsigned int> m_InitialLogicalExtent{};

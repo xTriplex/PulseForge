@@ -811,7 +811,7 @@ namespace
 		auto Plan = AssetCookService::Plan(Request);
 		PF_CHECK(Tests, Plan.has_value());
 		if (!Plan) return;
-		const auto GraphProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [](const AssetCookPlannedProduct& Product)
+		const auto GraphProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [FloorMaterial](const AssetCookPlannedProduct& Product)
 			{ return Product.Asset == FloorMaterial && Product.Product == CookedAssetProductKind::GraphMaterial; });
 		PF_CHECK(Tests, GraphProduct != Plan->Products.end());
 		const auto SceneProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [StartupScene](const AssetCookPlannedProduct& Product)
@@ -879,7 +879,8 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	PF_CHECK(Tests, !InvalidGraphCompile && InvalidGraphCompile.error().Code == MaterialGraphCompileErrorCode::InvalidGraph &&
 		std::any_of(InvalidGraphCompile.error().Diagnostics.begin(), InvalidGraphCompile.error().Diagnostics.end(),
 			[](const MaterialGraphDiagnostic& Diagnostic)
-			{ return Diagnostic.Node == UUID(1, 5) && !Diagnostic.Message.empty(); }));
+			{ return Diagnostic.Node == UUID(1, 5) &&
+				Diagnostic.Pin == GetMaterialGraphPinID(UUID(1, 5), false, 0) && !Diagnostic.Message.empty(); }));
 	const auto Serialized = SerializeMaterialGraphSource(Source);
 	PF_CHECK(Tests, Serialized.has_value());
 	if (!Serialized) return;
@@ -935,12 +936,33 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	const auto TextureRestored = TextureSerialized ? DeserializeMaterialGraphSource(*TextureSerialized) :
 		std::expected<MaterialGraphSource, std::string>(std::unexpected("serialization failed"));
 	PF_CHECK(Tests, TextureRestored && *TextureRestored == TextureSource);
+	auto PbrOutputs = Source;
+	PbrOutputs.Connections.push_back({ UUID(2, 4), UUID(1, 2), UUID(1, 5), 1 });
+	PbrOutputs.Connections.push_back({ UUID(2, 5), UUID(1, 3), UUID(1, 5), 2 });
+	PF_CHECK(Tests, ValidateMaterialGraphSource(PbrOutputs).IsValid());
+	const auto PbrOutputsSerialized = SerializeMaterialGraphSource(PbrOutputs);
+	const auto PbrOutputsRestored = PbrOutputsSerialized ? DeserializeMaterialGraphSource(*PbrOutputsSerialized) :
+		std::expected<MaterialGraphSource, std::string>(std::unexpected("serialization failed"));
+	PF_CHECK(Tests, PbrOutputsRestored && *PbrOutputsRestored == PbrOutputs);
+	const auto PbrOutputIR = LowerMaterialGraphToIR(PbrOutputs);
+	PF_CHECK(Tests, PbrOutputIR && PbrOutputIR->MetallicExpression && PbrOutputIR->RoughnessExpression &&
+		PbrOutputIR->Expressions[*PbrOutputIR->MetallicExpression].SourceNode == UUID(1, 2) &&
+		PbrOutputIR->Expressions[*PbrOutputIR->RoughnessExpression].SourceNode == UUID(1, 3));
+	auto InvalidMetallicType = PbrOutputs;
+	InvalidMetallicType.Nodes.push_back({ UUID(1, 6), MaterialGraphNodeKind::ColorConstant, 0.0f, {} });
+	InvalidMetallicType.Connections[3].OutputNode = UUID(1, 6);
+	const auto InvalidPbrTypes = ValidateMaterialGraphSource(InvalidMetallicType);
+	PF_CHECK(Tests, std::any_of(InvalidPbrTypes.Diagnostics.begin(), InvalidPbrTypes.Diagnostics.end(),
+		[](const MaterialGraphDiagnostic& Diagnostic)
+		{ return Diagnostic.Message == "PBR metallic and roughness inputs accept only scalar values" &&
+			Diagnostic.Node == UUID(1, 5) && Diagnostic.Pin == GetMaterialGraphPinID(UUID(1, 5), false, 1); }));
 	auto InvalidTextureCoordinates = TextureSource;
 	InvalidTextureCoordinates.Nodes.front().Kind = MaterialGraphNodeKind::ColorConstant;
 	const auto InvalidTextureTypes = ValidateMaterialGraphSource(InvalidTextureCoordinates);
 	PF_CHECK(Tests, std::any_of(InvalidTextureTypes.Diagnostics.begin(), InvalidTextureTypes.Diagnostics.end(),
 		[](const MaterialGraphDiagnostic& Diagnostic)
-		{ return Diagnostic.Message == "Base-color texture sampling requires UV0 coordinates"; }));
+		{ return Diagnostic.Message == "Base-color texture sampling requires UV0 coordinates" &&
+			Diagnostic.Node == UUID(4, 3) && Diagnostic.Pin == GetMaterialGraphPinID(UUID(4, 3), false, 0); }));
 	auto InvalidUVOutput = TextureSource;
 	InvalidUVOutput.Connections.back().OutputNode = UUID(4, 2);
 	const auto InvalidUVTypes = ValidateMaterialGraphSource(InvalidUVOutput);
@@ -982,6 +1004,15 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	PF_CHECK(Tests, TextureCompiled && TextureCompiled->SemanticRecipe.find("PULSEFORGE_GRAPH_SAMPLES_BASE_COLOR_TEXTURE") != std::string::npos &&
 		TextureCompiled->SemanticRecipe.find("DiffuseTexture.Sample(DiffuseSampler, e0).rgb") != std::string::npos &&
 		TextureCompiled->SemanticRecipe.find("float3 GraphMaterialBaseColor(float2 GraphUV0)") != std::string::npos);
+	MaterialGraphCompileRequest PbrOutputsCompileRequest;
+	PbrOutputsCompileRequest.Source = PbrOutputs;
+	PbrOutputsCompileRequest.ToolchainFingerprint = CompileRequest.ToolchainFingerprint;
+	const auto PbrOutputsCompiled = MaterialGraphCompiler::Compile(PbrOutputsCompileRequest);
+	PF_CHECK(Tests, PbrOutputsCompiled &&
+		PbrOutputsCompiled->SemanticRecipe.find("PULSEFORGE_GRAPH_OVERRIDES_METALLIC") != std::string::npos &&
+		PbrOutputsCompiled->SemanticRecipe.find("PULSEFORGE_GRAPH_OVERRIDES_ROUGHNESS") != std::string::npos &&
+		PbrOutputsCompiled->SemanticRecipe.find("GraphMaterialMetallic(float2 GraphUV0)") != std::string::npos &&
+		PbrOutputsCompiled->SemanticRecipe.find("GraphMaterialRoughness(float2 GraphUV0)") != std::string::npos);
 	std::error_code CacheRootError;
 	const auto CacheRoot = std::filesystem::canonical(std::filesystem::temp_directory_path(CacheRootError), CacheRootError) /
 		("PF-MaterialGraphDDC-" + CacheID->ToString());
@@ -1086,6 +1117,13 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	const auto Cancelled = MaterialGraphCompiler::Compile(CancelledCompile);
 	PF_CHECK(Tests, !Cancelled && Cancelled.error().Code == MaterialGraphCompileErrorCode::Cancelled);
 #if defined(PF_MATERIAL_GRAPH_COMPILER_FIXTURE)
+	MaterialGraphCompileRequest VulkanBindingFlags;
+	VulkanBindingFlags.Source = Source;
+	VulkanBindingFlags.Source.Nodes[0].Value = 779.0f;
+	VulkanBindingFlags.CompilerExecutable = PF_MATERIAL_GRAPH_COMPILER_FIXTURE;
+	VulkanBindingFlags.ToolchainFingerprint = "process-fixture";
+	const auto VerifiedVulkanBindingFlags = MaterialGraphCompiler::Compile(VulkanBindingFlags);
+	PF_CHECK(Tests, VerifiedVulkanBindingFlags.has_value());
 	MaterialGraphCompileRequest ProcessFailure;
 	ProcessFailure.Source = Source;
 	ProcessFailure.Source.Nodes[0].Value = 777.0f;

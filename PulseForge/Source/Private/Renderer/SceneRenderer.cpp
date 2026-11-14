@@ -48,6 +48,7 @@ namespace PulseForge
 		BindingLayoutHandle MaterialLayout;
 		BufferHandle ParameterBuffer;
 		BindingSetHandle MaterialBindings;
+		uint64_t PointShadowResourceGeneration = (std::numeric_limits<uint64_t>::max)();
 	};
 
 	struct SceneRenderer::TransientMaterialOverride final
@@ -1003,9 +1004,12 @@ namespace PulseForge
 
 					BindingLayoutDesc GraphLayoutDescription;
 					GraphLayoutDescription.Visibility = ShaderVisibility::Fragment;
-					GraphLayoutDescription.ShaderRegisterSpace = 4;
-					GraphLayoutDescription.Items.push_back({ BindingResourceType::ConstantBuffer, 0 });
-					GraphLayoutDescription.DebugName = "PulseForge graph material parameters";
+					GraphLayoutDescription.ShaderRegisterSpace = 3;
+					GraphLayoutDescription.Items = {
+						{ BindingResourceType::TextureCube, 0 }, { BindingResourceType::TextureCube, 1 },
+						{ BindingResourceType::Sampler, 0 }, { BindingResourceType::ConstantBuffer, 0 }
+					};
+					GraphLayoutDescription.DebugName = "PulseForge graph material and point-shadow resources (space3)";
 					auto GraphLayout = m_Runtime.CreateBindingLayout(GraphLayoutDescription);
 					if (!GraphLayout)
 						return std::unexpected(MakeResourceError("Could not create graph-material binding layout: " + GraphLayout.error().Message));
@@ -1024,20 +1028,11 @@ namespace PulseForge
 					if (!ParameterBuffer)
 						return std::unexpected(MakeResourceError("Could not create graph-material parameter data: " +
 							ParameterBuffer.error().Message));
-					BindingSetDesc GraphBindingsDescription;
-					GraphBindingsDescription.Layout = *GraphLayout;
-					GraphBindingsDescription.Buffers.push_back({ 0, std::cref(**ParameterBuffer) });
-					auto GraphBindings = m_Runtime.CreateBindingSet(GraphBindingsDescription);
-					if (!GraphBindings)
-						return std::unexpected(MakeResourceError("Could not create graph-material parameter bindings: " +
-							GraphBindings.error().Message));
-
 					auto RuntimeMaterial = std::make_unique<GraphMaterialRuntime>();
 					RuntimeMaterial->RecipeFingerprint = Product->RecipeFingerprint;
 					RuntimeMaterial->FragmentShader = std::move(*Shader);
 					RuntimeMaterial->MaterialLayout = std::move(*GraphLayout);
 					RuntimeMaterial->ParameterBuffer = std::move(*ParameterBuffer);
-					RuntimeMaterial->MaterialBindings = std::move(*GraphBindings);
 					GraphMaterial = RuntimeMaterial.get();
 					m_GraphMaterialResources.emplace(*Instance.MaterialAsset, std::move(RuntimeMaterial));
 				}
@@ -1123,6 +1118,22 @@ namespace PulseForge
 			m_PointShadowObjectBindingSet };
 		return m_ShadowPass->Render(Resources);
 	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareGraphMaterialBindings()
+	{
+		const uint64_t PointShadowGeneration = m_ShadowTargetCache->PointLightResourceGeneration();
+		for (auto& [Material, Graph] : m_GraphMaterialResources)
+		{
+			(void)Material;
+			if (Graph->MaterialBindings && Graph->PointShadowResourceGeneration == PointShadowGeneration) continue;
+			auto Bindings = m_ShadowTargetCache->CreateGraphMaterialBindings(Graph->MaterialLayout, *Graph->ParameterBuffer);
+			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
+			Graph->MaterialBindings = std::move(*Bindings);
+			Graph->PointShadowResourceGeneration = PointShadowGeneration;
+		}
+		return {};
+	}
+
 	std::expected<void, SceneRendererError> SceneRenderer::RenderAmbientOcclusion(uint32_t Width, uint32_t Height)
 	{
 		if (!m_PreparedSnapshot)
@@ -1477,6 +1488,8 @@ namespace PulseForge
 		const auto [Width, Height] = m_Runtime.GetOutputFramebufferSize();
 		if (auto AmbientOcclusion = RenderAmbientOcclusion(Width, Height); !AmbientOcclusion)
 			return std::unexpected(std::move(AmbientOcclusion.error()));
+		if (auto GraphBindings = PrepareGraphMaterialBindings(); !GraphBindings)
+			return std::unexpected(std::move(GraphBindings.error()));
 		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain, Width, Height);
 	}
 
@@ -1500,6 +1513,8 @@ namespace PulseForge
 		if (auto AmbientOcclusion = RenderAmbientOcclusion(
 			Target.GetDescription().Width, Target.GetDescription().Height); !AmbientOcclusion)
 			return std::unexpected(std::move(AmbientOcclusion.error()));
+		if (auto GraphBindings = PrepareGraphMaterialBindings(); !GraphBindings)
+			return std::unexpected(std::move(GraphBindings.error()));
 
 		const GraphicsResult BeginResult = m_Runtime.BeginRenderTarget(Target, ClearValue);
 		if (!BeginResult)
@@ -1627,19 +1642,13 @@ namespace PulseForge
 				!PipelineResult)
 				return std::unexpected(std::move(PipelineResult.error()));
 			const GraphicsPipeline* Pipeline = Graph
-				? m_PipelineCache->FindGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint, AlphaBlend, Material.DoubleSided,
-					Instance.Orientation)
+				? m_PipelineCache->FindGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint, Graph->MaterialLayout,
+					AlphaBlend, Material.DoubleSided, Instance.Orientation)
 				: m_PipelineCache->FindScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
 			if (!Pipeline) return std::unexpected(MakeResourceError("Prepared material graphics pipeline is unavailable"));
-			const BindingSet* MaterialBinding = nullptr;
-			if (Graph)
-				MaterialBinding = Graph->MaterialBindings.get();
-			else
-			{
-				auto ResolvedMaterialBinding = ResolveMaterialBinding(Instance);
-				if (!ResolvedMaterialBinding) return std::unexpected(std::move(ResolvedMaterialBinding.error()));
-				MaterialBinding = *ResolvedMaterialBinding;
-			}
+			auto ResolvedMaterialBinding = ResolveMaterialBinding(Instance);
+			if (!ResolvedMaterialBinding) return std::unexpected(std::move(ResolvedMaterialBinding.error()));
+			const BindingSet* const MaterialBinding = *ResolvedMaterialBinding;
 			const Mesh* MeshResource = FindPreparedMesh(m_PreparedMeshResources, Instance.MeshAsset);
 			if (!MeshResource)
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, Instance.MeshAsset,
@@ -1669,8 +1678,8 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ MeshResource->GetIndexCount(), 1, 0, 0 };
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionPass->GetSceneBindingSet();
-			const std::array<const BindingSet*, 5> GraphBindingSets = { MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
-				AmbientOcclusionBindings, &m_ShadowTargetCache->PointLightBindings(), Graph ? Graph->MaterialBindings.get() : nullptr };
+			const std::array<const BindingSet*, 4> GraphBindingSets = { MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
+				AmbientOcclusionBindings, Graph ? Graph->MaterialBindings.get() : nullptr };
 			const std::array<const BindingSet*, 4> FixedBindingSets = { MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
 				AmbientOcclusionBindings, &m_ShadowTargetCache->PointLightBindings() };
 			const GraphicsResult Draw = Graph
