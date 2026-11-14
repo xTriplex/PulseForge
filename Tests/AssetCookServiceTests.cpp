@@ -10,6 +10,7 @@
 #include "Assets/Detail/AssetCpuProducts.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
+#include "Assets/MaterialAssetCache.h"
 #include "Assets/MaterialGraphSource.h"
 #include "Assets/MaterialGraphCompiler.h"
 #include "Assets/DerivedDataArtifactStore.h"
@@ -1201,6 +1202,15 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 				CookedColorRenderState->MetallicFactor == 0.35f && CookedColorRenderState->RoughnessFactor == 0.42f &&
 				CookedColorRenderState->AlphaMode == CookedMaterialAlphaMode::Mask &&
 				CookedColorRenderState->AlphaCutoff == 0.31f && CookedColorRenderState->DoubleSided);
+			MaterialAssetCache RuntimeMaterials(*GraphProvider);
+			const auto CachedGraphMaterial = RuntimeMaterials.GetOrLoad(Fixture.ColorGraphMaterialAsset);
+			PF_CHECK(Tests, CachedGraphMaterial && CachedGraphMaterial->get().BaseColorFactor.r == ExpectedColorMaterial[0] &&
+				CachedGraphMaterial->get().BaseColorFactor.g == ExpectedColorMaterial[1] &&
+				CachedGraphMaterial->get().BaseColorFactor.b == ExpectedColorMaterial[2] &&
+				CachedGraphMaterial->get().BaseColorFactor.a == ExpectedColorMaterial[3] &&
+				CachedGraphMaterial->get().MetallicFactor == 0.35f && CachedGraphMaterial->get().RoughnessFactor == 0.42f &&
+				CachedGraphMaterial->get().AlphaMode == MaterialAlphaMode::Mask &&
+				CachedGraphMaterial->get().AlphaCutoff == 0.31f && CachedGraphMaterial->get().DoubleSided);
 			if (CookedGraph)
 			{
 				PF_CHECK(Tests, CookedGraph->RecipeFingerprint.size() == 32);

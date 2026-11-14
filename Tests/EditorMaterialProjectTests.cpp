@@ -556,6 +556,26 @@ namespace
 		PF_CHECK(Tests, UnchangedSave.has_value());
 		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, Material->ID) != nullptr);
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
+		{
+			auto* FixedDraft = Drafts.FindDraft(ProjectValue, Material->ID);
+			const MaterialAssetDesc BeforeConversion = *FixedDraft;
+			const auto Converted = PulseForgeEditor::EditorMaterialDraftController::ConvertFixedMaterialToGraph(*FixedDraft);
+			PF_CHECK(Tests, Converted && FixedDraft->Graph && FixedDraft->Graph->Nodes.front().Color == ExpectedGraphColor &&
+				FixedDraft->BaseColorFactor.r == 1.0f && FixedDraft->BaseColorFactor.g == 1.0f &&
+				FixedDraft->BaseColorFactor.b == 1.0f && FixedDraft->BaseColorFactor.a == BeforeConversion.BaseColorFactor.a);
+			if (Converted)
+			{
+				PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, Material->ID, BeforeConversion));
+				PF_CHECK(Tests, Documents.MarkEdited(Identity));
+				Drafts.FinalizePendingEdits(false);
+				PF_CHECK(Tests, EditorRegistry.DispatchFocusedCommand(*MaterialSession, PulseForgeEditor::EditorDocumentCommand::Undo));
+				PF_CHECK(Tests, !FixedDraft->Graph && FixedDraft->BaseColorFactor == BeforeConversion.BaseColorFactor);
+				PF_CHECK(Tests, EditorRegistry.DispatchFocusedCommand(*MaterialSession, PulseForgeEditor::EditorDocumentCommand::Redo));
+				PF_CHECK(Tests, FixedDraft->Graph && FixedDraft->BaseColorFactor.r == 1.0f &&
+					FixedDraft->BaseColorFactor.g == 1.0f && FixedDraft->BaseColorFactor.b == 1.0f);
+				PF_CHECK(Tests, EditorRegistry.DispatchFocusedCommand(*MaterialSession, PulseForgeEditor::EditorDocumentCommand::Undo));
+			}
+		}
 		PulseForge::MaterialGraphSource Graph;
 		Graph.GraphID = PulseForge::UUID(20, 1);
 		Graph.Nodes = {
