@@ -1143,6 +1143,8 @@ namespace PulseForge
 	{
 		m_PreparedSnapshot.reset();
 		m_PreparedMaterialBindings.clear();
+		m_PreparedGraphMaterials.clear();
+		m_GraphMaterialResources.clear();
 		m_MaterialBindingCache->RefreshMaterialAssets();
 	}
 
@@ -1150,6 +1152,8 @@ namespace PulseForge
 	{
 		m_PreparedSnapshot.reset();
 		m_PreparedMaterialBindings.clear();
+		m_PreparedGraphMaterials.clear();
+		m_GraphMaterialResources.erase(Material);
 		m_MaterialBindingCache->RefreshMaterialAsset(Material);
 	}
 
@@ -1191,6 +1195,8 @@ namespace PulseForge
 		m_PreparedMeshResources.clear();
 		m_PreparedRuntimeUITextures.clear();
 		m_PreparedMaterialBindings.clear();
+		m_PreparedGraphMaterials.clear();
+		m_GraphMaterialResources.clear();
 		m_PreparedCascades.reset();
 		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
 		m_PreparedEnvironmentBinding = nullptr;
