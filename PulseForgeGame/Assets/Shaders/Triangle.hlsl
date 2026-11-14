@@ -319,7 +319,12 @@ float4 PSMain(VertexOutput Input, bool IsFrontFace : SV_IsFrontFace) : SV_Target
 		discard;
 	const float4 MetallicRoughnessSample = MetallicRoughnessTexture.Sample(DiffuseSampler, Input.TexCoord);
 #if defined(PULSEFORGE_MATERIAL_GRAPH)
-	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * GraphMaterialBaseColor(), 0.0f);
+	#if defined(PULSEFORGE_GRAPH_SAMPLES_BASE_COLOR_TEXTURE)
+	const float3 Albedo = max(Input.Color.rgb * BaseColorFactor.rgb * GraphMaterialBaseColor(Input.TexCoord), 0.0f);
+	#else
+	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * BaseColorFactor.rgb *
+		GraphMaterialBaseColor(Input.TexCoord), 0.0f);
+	#endif
 #else
 	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * BaseColorFactor.rgb, 0.0f);
 #endif

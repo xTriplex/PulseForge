@@ -66,6 +66,8 @@ namespace PulseForgeEditor
 			case PulseForge::MaterialGraphNodeKind::Add: return "Add";
 			case PulseForge::MaterialGraphNodeKind::Multiply: return "Multiply";
 			case PulseForge::MaterialGraphNodeKind::Reroute: return "Reroute";
+			case PulseForge::MaterialGraphNodeKind::UV0: return "UV0";
+			case PulseForge::MaterialGraphNodeKind::BaseColorTextureSample: return "Base Color Sample";
 			case PulseForge::MaterialGraphNodeKind::PbrOutput: return "PBR Output";
 			}
 			return "Unknown";
@@ -109,7 +111,7 @@ namespace PulseForgeEditor
 				return Handle;
 			};
 
-			ImGui::TextDisabled("Edit scalar or color graphs. Scalar output links replicate to RGB; color links feed PBR base color.");
+			ImGui::TextDisabled("Scalar output links replicate to RGB. RGB and base-color texture samples feed PBR base color; UV0 samples the material's sRGB base-color slot.");
 			const auto AddNode = [&](PulseForge::MaterialGraphNodeKind Kind, const char* Label)
 			{
 				if (!ImGui::Button(Label)) return;
@@ -136,7 +138,9 @@ namespace PulseForgeEditor
 			AddNode(PulseForge::MaterialGraphNodeKind::FloatParameter, "Add Parameter"); ImGui::SameLine();
 			AddNode(PulseForge::MaterialGraphNodeKind::Add, "Add"); ImGui::SameLine();
 			AddNode(PulseForge::MaterialGraphNodeKind::Multiply, "Multiply"); ImGui::SameLine();
-			AddNode(PulseForge::MaterialGraphNodeKind::Reroute, "Reroute");
+			AddNode(PulseForge::MaterialGraphNodeKind::Reroute, "Reroute"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::UV0, "UV0"); ImGui::SameLine();
+			AddNode(PulseForge::MaterialGraphNodeKind::BaseColorTextureSample, "Base Color Sample");
 
 			const auto Available = ImGui::GetContentRegionAvail();
 			NodeEditor::Begin("##MaterialGraphCanvas", ImVec2(Available.x, 360.0f));
@@ -153,13 +157,16 @@ namespace PulseForgeEditor
 				const bool HasInput = Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::BaseColorTextureSample ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::PbrOutput;
 				const bool HasOutput = Node.Kind == PulseForge::MaterialGraphNodeKind::FloatConstant ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::ColorConstant ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::FloatParameter ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
 					Node.Kind == PulseForge::MaterialGraphNodeKind::Multiply ||
-					Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute;
+					Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::UV0 ||
+					Node.Kind == PulseForge::MaterialGraphNodeKind::BaseColorTextureSample;
 				if (HasInput)
 				{
 					const uint8_t InputCount = Node.Kind == PulseForge::MaterialGraphNodeKind::Add ||
@@ -199,7 +206,8 @@ namespace PulseForgeEditor
 				{
 					const uintptr_t Handle = PinHandle(Node.ID, true, 0);
 					NodeEditor::BeginPin(NodeEditor::PinId(Handle), NodeEditor::PinKind::Output);
-					ImGui::Text("%s", Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ? "Out" : "Value");
+					ImGui::Text("%s", Node.Kind == PulseForge::MaterialGraphNodeKind::Reroute ? "Out" :
+						Node.Kind == PulseForge::MaterialGraphNodeKind::UV0 ? "UV0" : "Value");
 					NodeEditor::EndPin();
 				}
 				NodeEditor::EndNode();

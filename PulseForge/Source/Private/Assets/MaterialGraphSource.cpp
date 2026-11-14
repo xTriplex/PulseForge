@@ -27,6 +27,8 @@ namespace PulseForge
 			case MaterialGraphNodeKind::Add: return "add";
 			case MaterialGraphNodeKind::Multiply: return "multiply";
 			case MaterialGraphNodeKind::Reroute: return "reroute";
+			case MaterialGraphNodeKind::UV0: return "uv0";
+			case MaterialGraphNodeKind::BaseColorTextureSample: return "baseColorTextureSample";
 			case MaterialGraphNodeKind::PbrOutput: return "pbrOutput";
 			}
 			return {};
@@ -37,6 +39,7 @@ namespace PulseForge
 			for (const auto Kind : { MaterialGraphNodeKind::FloatConstant, MaterialGraphNodeKind::ColorConstant,
 				MaterialGraphNodeKind::FloatParameter,
 				MaterialGraphNodeKind::Add, MaterialGraphNodeKind::Multiply, MaterialGraphNodeKind::Reroute,
+				MaterialGraphNodeKind::UV0, MaterialGraphNodeKind::BaseColorTextureSample,
 				MaterialGraphNodeKind::PbrOutput })
 				if (KindName(Kind) == Name) return Kind;
 			return std::nullopt;
@@ -63,6 +66,7 @@ namespace PulseForge
 
 		std::unordered_map<UUID, const MaterialGraphNode*, UUIDHash> Nodes;
 		std::unordered_map<UUID, std::vector<UUID>, UUIDHash> Inputs;
+		std::unordered_map<UUID, std::array<UUID, 2>, UUIDHash> InputSources;
 		std::unordered_set<UUID, UUIDHash> ConnectionIDs;
 		std::unordered_map<std::string, UUID> ParameterNames;
 		size_t OutputCount = 0;
@@ -99,13 +103,14 @@ namespace PulseForge
 			}
 			if (From->second->Kind == MaterialGraphNodeKind::PbrOutput ||
 				To->second->Kind == MaterialGraphNodeKind::FloatConstant ||
-				To->second->Kind == MaterialGraphNodeKind::FloatParameter)
+				To->second->Kind == MaterialGraphNodeKind::FloatParameter ||
+				To->second->Kind == MaterialGraphNodeKind::UV0)
 			{
 				Add(Connection.InputNode, "Connection direction is incompatible with node kinds");
 				continue;
 			}
-			const uint8_t SlotCount = To->second->Kind == MaterialGraphNodeKind::PbrOutput ||
-				To->second->Kind == MaterialGraphNodeKind::Reroute ? 1 : 2;
+			const uint8_t SlotCount = To->second->Kind == MaterialGraphNodeKind::Add ||
+				To->second->Kind == MaterialGraphNodeKind::Multiply ? 2 : 1;
 			if (Connection.InputSlot >= SlotCount)
 			{
 				Add(Connection.InputNode, "Connection input slot is not defined by this node");
@@ -117,12 +122,14 @@ namespace PulseForge
 				!= Source.Connections.end())
 				Add(Connection.InputNode, "An input slot may have only one connection");
 			Slots.push_back(Connection.OutputNode);
+			InputSources[Connection.InputNode][Connection.InputSlot] = Connection.OutputNode;
 		}
 
 		for (const MaterialGraphNode& Node : Source.Nodes)
 		{
 			if (Node.Kind != MaterialGraphNodeKind::Add && Node.Kind != MaterialGraphNodeKind::Multiply &&
-				Node.Kind != MaterialGraphNodeKind::Reroute && Node.Kind != MaterialGraphNodeKind::PbrOutput) continue;
+				Node.Kind != MaterialGraphNodeKind::Reroute && Node.Kind != MaterialGraphNodeKind::BaseColorTextureSample &&
+				Node.Kind != MaterialGraphNodeKind::PbrOutput) continue;
 			const uint8_t Required = Node.Kind == MaterialGraphNodeKind::Add || Node.Kind == MaterialGraphNodeKind::Multiply ? 2 : 1;
 			for (uint8_t Slot = 0; Slot < Required; ++Slot)
 				if (std::none_of(Source.Connections.begin(), Source.Connections.end(), [&](const auto& Connection)
@@ -145,28 +152,47 @@ namespace PulseForge
 		for (const auto& Node : Source.Nodes)
 			if (!Visit(Visit, Node.ID)) { Add(Node.ID, "Material graph data cycles are unsupported"); break; }
 
-		const auto IsColorOutput = [&](UUID NodeID)
+		enum class ValueType : uint8_t { Invalid, Scalar, Color, UV };
+		std::unordered_map<UUID, ValueType, UUIDHash> ResolvedTypes;
+		std::unordered_set<UUID, UUIDHash> ResolvingTypes;
+		const auto ResolveType = [&](auto&& Self, UUID NodeID) -> ValueType
 		{
-			std::unordered_set<UUID, UUIDHash> Visited;
-			while (Visited.insert(NodeID).second)
+			if (const auto Cached = ResolvedTypes.find(NodeID); Cached != ResolvedTypes.end()) return Cached->second;
+			const auto Node = Nodes.find(NodeID);
+			if (Node == Nodes.end() || !ResolvingTypes.insert(NodeID).second) return ValueType::Invalid;
+			ValueType Type = ValueType::Invalid;
+			switch (Node->second->Kind)
 			{
-				const auto Node = Nodes.find(NodeID);
-				if (Node == Nodes.end()) return false;
-				if (Node->second->Kind == MaterialGraphNodeKind::ColorConstant) return true;
-				if (Node->second->Kind != MaterialGraphNodeKind::Reroute) return false;
-				const auto Input = std::find_if(Source.Connections.begin(), Source.Connections.end(), [&](const auto& Connection)
-					{ return Connection.InputNode == NodeID && Connection.InputSlot == 0; });
-				if (Input == Source.Connections.end()) return false;
-				NodeID = Input->OutputNode;
+			case MaterialGraphNodeKind::FloatConstant:
+			case MaterialGraphNodeKind::FloatParameter:
+			case MaterialGraphNodeKind::Add:
+			case MaterialGraphNodeKind::Multiply: Type = ValueType::Scalar; break;
+			case MaterialGraphNodeKind::ColorConstant:
+			case MaterialGraphNodeKind::BaseColorTextureSample: Type = ValueType::Color; break;
+			case MaterialGraphNodeKind::UV0: Type = ValueType::UV; break;
+			case MaterialGraphNodeKind::Reroute:
+				if (InputSources.contains(NodeID) && !InputSources.at(NodeID)[0].IsNil())
+					Type = Self(Self, InputSources.at(NodeID)[0]);
+				break;
+			case MaterialGraphNodeKind::PbrOutput: break;
 			}
-			return false;
+			ResolvingTypes.erase(NodeID);
+			ResolvedTypes.emplace(NodeID, Type);
+			return Type;
 		};
 		for (const MaterialGraphConnection& Connection : Source.Connections)
 		{
 			const auto Input = Nodes.find(Connection.InputNode);
-			if (Input != Nodes.end() && (Input->second->Kind == MaterialGraphNodeKind::Add ||
-				Input->second->Kind == MaterialGraphNodeKind::Multiply) && IsColorOutput(Connection.OutputNode))
-				Add(Connection.InputNode, "Color values cannot connect to scalar arithmetic inputs");
+			if (Input == Nodes.end()) continue;
+			const ValueType OutputType = ResolveType(ResolveType, Connection.OutputNode);
+			const MaterialGraphNodeKind InputKind = Input->second->Kind;
+			if ((InputKind == MaterialGraphNodeKind::Add || InputKind == MaterialGraphNodeKind::Multiply) &&
+				OutputType != ValueType::Scalar)
+				Add(Connection.InputNode, "Scalar arithmetic inputs accept only scalar values");
+			else if (InputKind == MaterialGraphNodeKind::BaseColorTextureSample && OutputType != ValueType::UV)
+				Add(Connection.InputNode, "Base-color texture sampling requires UV0 coordinates");
+			else if (InputKind == MaterialGraphNodeKind::PbrOutput && OutputType != ValueType::Scalar && OutputType != ValueType::Color)
+				Add(Connection.InputNode, "PBR base color accepts scalar or color values, not UV coordinates");
 		}
 		return Result;
 	}
@@ -204,6 +230,11 @@ namespace PulseForge
 			case MaterialGraphNodeKind::FloatConstant: Expression.Op = MaterialGraphExpressionOp::FloatConstant; break;
 			case MaterialGraphNodeKind::ColorConstant: Expression.Op = MaterialGraphExpressionOp::ColorConstant; break;
 			case MaterialGraphNodeKind::FloatParameter: Expression.Op = MaterialGraphExpressionOp::FloatParameter; break;
+			case MaterialGraphNodeKind::UV0: Expression.Op = MaterialGraphExpressionOp::UV0; break;
+			case MaterialGraphNodeKind::BaseColorTextureSample:
+				Expression.Op = MaterialGraphExpressionOp::BaseColorTextureSample;
+				Expression.Left = Self(Self, Inputs.at(Node.ID)[0]->OutputNode);
+				break;
 			case MaterialGraphNodeKind::Add:
 			case MaterialGraphNodeKind::Multiply:
 			{
@@ -268,7 +299,7 @@ namespace PulseForge
 		{
 			MaterialGraphSource Source;
 			const uint32_t SourceVersion = Document.at("version").get<uint32_t>();
-			if (SourceVersion != 1 && SourceVersion != MaterialGraphSource::CurrentVersion)
+			if (SourceVersion < 1 || SourceVersion > MaterialGraphSource::CurrentVersion)
 				return std::unexpected("Material graph source version is unsupported");
 			Source.Version = MaterialGraphSource::CurrentVersion;
 			const auto GraphID = UUID::Parse(Document.at("graph").get<std::string>());

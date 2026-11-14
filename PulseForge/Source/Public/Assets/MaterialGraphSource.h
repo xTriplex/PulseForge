@@ -21,6 +21,8 @@ namespace PulseForge
 		Add,
 		Multiply,
 		Reroute,
+		UV0,
+		BaseColorTextureSample,
 		PbrOutput
 	};
 
@@ -47,7 +49,7 @@ namespace PulseForge
 
 	struct MaterialGraphSource final
 	{
-		static constexpr uint32_t CurrentVersion = 2;
+		static constexpr uint32_t CurrentVersion = 3;
 		uint32_t Version = CurrentVersion;
 		UUID GraphID;
 		std::vector<MaterialGraphNode> Nodes;
@@ -70,11 +72,13 @@ namespace PulseForge
 
 	enum class MaterialGraphExpressionOp : uint8_t
 	{
-	FloatConstant,
-	ColorConstant,
-	FloatParameter,
-	Add,
-	Multiply
+		FloatConstant,
+		ColorConstant,
+		FloatParameter,
+		Add,
+		Multiply,
+		UV0,
+		BaseColorTextureSample
 	};
 
 	struct MaterialGraphExpression final
@@ -84,7 +88,7 @@ namespace PulseForge
 		uint32_t Left = 0;
 		uint32_t Right = 0;
 		float Value = 0.0f;
-	std::array<float, 3> Color{ 1.0f, 1.0f, 1.0f };
+		std::array<float, 3> Color{ 1.0f, 1.0f, 1.0f };
 		std::string ParameterName;
 	};
 

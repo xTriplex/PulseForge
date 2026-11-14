@@ -146,11 +146,19 @@ namespace PulseForge
 				}
 				Generated.Hlsl += "};\n";
 			}
-		Generated.Hlsl += "float3 GraphMaterialBaseColor() {\n";
+			const bool SamplesBaseColorTexture = std::ranges::any_of(Generated.IR.Expressions, [](const auto& Expression)
+				{ return Expression.Op == MaterialGraphExpressionOp::BaseColorTextureSample; });
+			if (SamplesBaseColorTexture) Generated.Hlsl += "#define PULSEFORGE_GRAPH_SAMPLES_BASE_COLOR_TEXTURE 1\n";
+			Generated.Hlsl += "float3 GraphMaterialBaseColor(float2 GraphUV0) {\n";
 			for (size_t Index = 0; Index < Generated.IR.Expressions.size(); ++Index)
 			{
 				const auto& Expression = Generated.IR.Expressions[Index];
-				Generated.Hlsl += Expression.Op == MaterialGraphExpressionOp::ColorConstant ? "  float3 e" : "  float e";
+				if (Expression.Op == MaterialGraphExpressionOp::ColorConstant ||
+					Expression.Op == MaterialGraphExpressionOp::BaseColorTextureSample)
+					Generated.Hlsl += "  float3 e";
+				else if (Expression.Op == MaterialGraphExpressionOp::UV0)
+					Generated.Hlsl += "  float2 e";
+				else Generated.Hlsl += "  float e";
 				Generated.Hlsl += std::to_string(Index) + " = ";
 				switch (Expression.Op)
 				{
@@ -164,6 +172,12 @@ namespace PulseForge
 				case MaterialGraphExpressionOp::FloatParameter:
 					Generated.Hlsl += "g_" + Expression.ParameterName;
 					break;
+				case MaterialGraphExpressionOp::UV0:
+					Generated.Hlsl += "GraphUV0";
+					break;
+				case MaterialGraphExpressionOp::BaseColorTextureSample:
+					Generated.Hlsl += "DiffuseTexture.Sample(DiffuseSampler, e" + std::to_string(Expression.Left) + ").rgb";
+					break;
 				case MaterialGraphExpressionOp::Add:
 					Generated.Hlsl += "e" + std::to_string(Expression.Left) + " + e" + std::to_string(Expression.Right);
 					break;
@@ -174,7 +188,8 @@ namespace PulseForge
 				Generated.Hlsl += ";\n";
 			}
 			const auto& Output = Generated.IR.Expressions[Generated.IR.OutputExpression];
-			if (Output.Op == MaterialGraphExpressionOp::ColorConstant)
+			if (Output.Op == MaterialGraphExpressionOp::ColorConstant ||
+				Output.Op == MaterialGraphExpressionOp::BaseColorTextureSample)
 				Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + "); }\n";
 			else
 				Generated.Hlsl += "  return saturate(e" + std::to_string(Generated.IR.OutputExpression) + ").xxx; }\n";
@@ -339,7 +354,7 @@ namespace PulseForge
 		std::string TemplateBytes(static_cast<size_t>(TemplateSize), '\0');
 		TemplateStream.read(TemplateBytes.data(), static_cast<std::streamsize>(TemplateBytes.size()));
 		if (!TemplateStream || TemplateBytes.find("PULSEFORGE_MATERIAL_GRAPH") == std::string::npos ||
-			TemplateBytes.find("GraphMaterialBaseColor()") == std::string::npos)
+			TemplateBytes.find("GraphMaterialBaseColor(Input.TexCoord)") == std::string::npos)
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
 				"PBR material shader template is unreadable or lacks the graph material hook"));
 		AssetFingerprintBuilder TemplateFingerprintBuilder("PulseForge.MaterialGraphPbrTemplate.v1");
