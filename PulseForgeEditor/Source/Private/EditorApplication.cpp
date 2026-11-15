@@ -1154,6 +1154,9 @@ namespace
 			case EditorContentBrowserAssetAction::OpenMaterialEditor:
 				OpenMaterialEditor(Identifier);
 				break;
+			case EditorContentBrowserAssetAction::OpenBlueprint:
+				OpenBlueprint(Identifier);
+				break;
 			case EditorContentBrowserAssetAction::ShowMaterialDetails:
 				ShowMaterialDetails(Identifier);
 				break;
@@ -4335,8 +4338,18 @@ namespace
 					}
 					else if (Identity.Kind == PulseForgeEditor::EditorDocumentKind::Graph && m_GraphDocumentEditor)
 					{
-						RelativePath = PulseForgeEditor::EditorGraphDocumentEditor::GetFixturePath(Identity.Asset);
-						DisplayName = "Graph Fixture — authoring only";
+						const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset);
+						if (Asset && PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath,
+							PulseForge::AssetFileType::Blueprint))
+						{
+							RelativePath = Asset->ProjectRelativePath;
+							DisplayName = "Blueprint — " + RelativePath.stem().string();
+						}
+						else
+						{
+							RelativePath = PulseForgeEditor::EditorGraphDocumentEditor::GetFixturePath(Identity.Asset);
+							DisplayName = "Graph Fixture — authoring only";
+						}
 					}
 					else if (const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset))
 					{
@@ -5330,7 +5343,104 @@ namespace
 				return;
 			}
 			MarkDocumentWorkspaceDirty();
-			SetStatus("Opened " + Fixture->DisplayName + ". Graph authoring does not compile or execute this fixture.");
+			SetStatus(Kind == PulseForgeEditor::EditorGraphFixtureKind::BlueprintEvent
+				? "Opened a Blueprint authoring preview; Save compiles the graph into a managed runtime asset."
+				: "Opened " + Fixture->DisplayName + ". Graph authoring does not compile or execute this fixture.");
+		}
+
+		void CreateBlueprintAsset()
+		{
+			if (!m_Project || !m_GraphDocumentEditor)
+			{
+				SetError("Open a project before creating a Blueprint asset.");
+				return;
+			}
+			auto NameID = PulseForge::UUID::Generate();
+			if (!NameID)
+			{
+				SetError("Could not generate a unique Blueprint asset name: " + NameID.error().Message);
+				return;
+			}
+			const std::filesystem::path RelativePath = std::filesystem::path("Assets") /
+				("Blueprint-" + NameID->ToString() + ".pfblueprint");
+			auto Created = m_GraphDocumentEditor->CreateBlueprintAsset(
+				m_Project->GetAssetRegistry(), m_Project->GetRootPath(), RelativePath);
+			if (!Created)
+			{
+				SetError("Blueprint creation failed: " + Created.error());
+				return;
+			}
+			m_ContentBrowser.SetAssets(m_Project->GetAssetRegistry().GetAssets());
+			m_ContentBrowser.SelectAsset(Created->GraphID);
+			const PulseForgeEditor::EditorDocumentIdentity Identity{ m_Project->GetDescription().ID, Created->GraphID,
+				PulseForgeEditor::EditorDocumentKind::Graph };
+			auto Opened = m_Documents.Open(Identity, Created->ProjectRelativePath, Created->DisplayName,
+				m_Documents.GetOpeningPreference());
+			if (!Opened)
+			{
+				SetError("Blueprint was created but its document could not be opened: " + Opened.error());
+				return;
+			}
+			auto* Session = m_Documents.Find(Identity);
+			const auto Context = MakeDocumentEditorContext(Identity, Created->ProjectRelativePath, Created->DisplayName);
+			if (!Session || (!Session->EditorState && !m_GraphDocumentEditor->Open(*Session, Context)))
+			{
+				SetError("Blueprint was created but its graph source could not be loaded.");
+				if (Opened->Created)
+					(void)m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard, {}, {});
+				return;
+			}
+			(void)m_Documents.Activate(Identity);
+			MarkDocumentWorkspaceDirty();
+			SetStatus("Created and opened Blueprint asset " + PathToUtf8(Created->ProjectRelativePath) + ".");
+		}
+
+		void OpenBlueprint(const PulseForge::AssetID& Identifier)
+		{
+			QueueAssetOperation([this, Identifier] { OpenBlueprintNow(Identifier); });
+		}
+
+		void OpenBlueprintNow(const PulseForge::AssetID& Identifier, PulseForge::UUID SelectedNode = {})
+		{
+			if (!m_Project || !m_GraphDocumentEditor) return;
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Blueprint))
+			{
+				SetError("The selected asset is not a managed Blueprint program.");
+				return;
+			}
+			const PulseForgeEditor::EditorDocumentIdentity Identity{ m_Project->GetDescription().ID, Identifier,
+				PulseForgeEditor::EditorDocumentKind::Graph };
+			const std::string DisplayName = "Blueprint — " + Asset->ProjectRelativePath.stem().string();
+			auto Opened = m_Documents.Open(Identity, Asset->ProjectRelativePath, DisplayName,
+				m_Documents.GetOpeningPreference());
+			if (!Opened)
+			{
+				SetError("Could not open Blueprint document: " + Opened.error());
+				return;
+			}
+			auto* Session = m_Documents.Find(Identity);
+			const auto Context = MakeDocumentEditorContext(Identity, Asset->ProjectRelativePath, DisplayName);
+			if (!Session || (!Session->EditorState && !m_GraphDocumentEditor->Open(*Session, Context)))
+			{
+				SetError("The selected Blueprint has no valid editable graph source or compiled program.");
+				if (Opened->Created)
+					(void)m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard, {}, {});
+				return;
+			}
+			if (!SelectedNode.IsNil() && !m_GraphDocumentEditor->RequestNodeSelection(*Session, SelectedNode))
+			{
+				SetError("The Blueprint node from this runtime trace is no longer present in its authored revision.");
+				return;
+			}
+			(void)m_Documents.Activate(Identity);
+			MarkDocumentWorkspaceDirty();
+			SetStatus("Opened Blueprint " + PathToUtf8(Asset->ProjectRelativePath) + ".");
+		}
+
+		void OpenBlueprintNode(const PulseForge::AssetID& Identifier, PulseForge::UUID NodeID)
+		{
+			QueueAssetOperation([this, Identifier, NodeID] { OpenBlueprintNow(Identifier, NodeID); });
 		}
 
 		bool OpenMaterialEditorNow(const PulseForge::AssetID& Identifier)
@@ -6432,8 +6542,8 @@ namespace
 			case EditorMainMenuActionKind::OpenGameplayGraphFixture:
 				OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind::GameplayEvent);
 				break;
-			case EditorMainMenuActionKind::OpenBlueprintGraphFixture:
-				OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind::BlueprintEvent);
+			case EditorMainMenuActionKind::CreateBlueprintAsset:
+				CreateBlueprintAsset();
 				break;
 			case EditorMainMenuActionKind::SetPanelVisible:
 				(void)SetEditorPanelVisible(Action.Panel, Action.PanelVisible);
@@ -9123,9 +9233,112 @@ namespace
 					m_SceneEditController.IsActive(), m_SceneEditController.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0);
 				m_InspectorPanel.DrawContents(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, m_AssetSelector, m_ContentBrowser.Assets(),
 					m_Project.has_value(), FinishCurrentEdit, *this);
-			m_PrefabInstancePanel.Draw(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, *m_PrefabInstanceController);
+				DrawBlueprintRuntimeInspector();
+				m_PrefabInstancePanel.Draw(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, *m_PrefabInstanceController);
 			}
 			ImGui::End();
+		}
+
+		void DrawBlueprintRuntimeInspector()
+		{
+			if (!m_SceneRuntime) return;
+			ImGui::Separator();
+			ImGui::TextUnformatted("Blueprint Runtime Debugger");
+			const auto Traces = m_SceneRuntime->GetBlueprintTraces();
+			const auto Diagnostics = m_SceneRuntime->GetBlueprintDiagnostics();
+			constexpr size_t VisibleTraceLimit = 32;
+			if (Traces.empty() && Diagnostics.empty())
+				ImGui::TextDisabled("No Blueprint events have executed in this Play session.");
+			else if (Traces.size() > VisibleTraceLimit)
+				ImGui::TextDisabled("Showing the newest %zu of %zu retained traces.", VisibleTraceLimit, Traces.size());
+
+			const size_t TraceCount = std::min(Traces.size(), VisibleTraceLimit);
+			for (size_t TraceIndex = 0; TraceIndex < TraceCount; ++TraceIndex)
+			{
+				auto TraceIt = Traces.rbegin() + static_cast<std::ptrdiff_t>(TraceIndex);
+				auto Trace = m_SceneRuntime->ReadBlueprintTrace(TraceIt->Handle);
+				if (!Trace) continue;
+				const std::string EntityID = Trace->Handle.Target.GetUUID().ToString();
+				const std::string AssetID = Trace->Handle.Asset.ToString();
+				const char* EventName = "Blueprint Event";
+				switch (Trace->Event)
+				{
+					case PulseForge::BlueprintEventKind::OnCreate: EventName = "On Create"; break;
+					case PulseForge::BlueprintEventKind::OnUpdate: EventName = "On Update"; break;
+					case PulseForge::BlueprintEventKind::OnDestroy: EventName = "On Destroy"; break;
+					case PulseForge::BlueprintEventKind::OnTriggerEnter: EventName = "On Trigger Enter"; break;
+					case PulseForge::BlueprintEventKind::OnActionPressed: EventName = "On Action Pressed"; break;
+					case PulseForge::BlueprintEventKind::OnActionReleased: EventName = "On Action Released"; break;
+					case PulseForge::BlueprintEventKind::OnActionCancelled: EventName = "On Action Cancelled"; break;
+					case PulseForge::BlueprintEventKind::OnTimer: EventName = "On Timer"; break;
+				}
+
+				ImGui::PushID(AssetID.c_str());
+				ImGui::PushID(EntityID.c_str());
+				ImGui::PushID(static_cast<int>(Trace->Handle.Revision & 0x7fffffff));
+				ImGui::PushID(static_cast<int>(Trace->Handle.SessionGeneration & 0x7fffffff));
+				ImGui::PushID(static_cast<int>(TraceIndex));
+				const bool Open = ImGui::TreeNode(EventName);
+				if (ImGui::IsItemClicked())
+				{
+					m_SceneWorkspace.Selection().SelectSingle(Trace->Handle.Target.GetUUID());
+					SetStatus("Selected the Blueprint runtime target in the scene hierarchy.");
+				}
+				if (Open)
+				{
+					ImGui::Text("Entity: %s", EntityID.c_str());
+					ImGui::Text("Asset: %s", AssetID.c_str());
+					ImGui::Text("Revision: %llu", static_cast<unsigned long long>(Trace->Handle.Revision));
+					if (Trace->ExecutedNodesTruncated)
+						ImGui::TextDisabled("Node trace reached its %zu-node limit.", PulseForge::BlueprintMaximumTraceNodesPerEvent);
+					for (size_t Index = 0; Index < Trace->ExecutedNodes.size(); ++Index)
+					{
+						const std::string NodeID = Trace->ExecutedNodes[Index].ToString();
+						ImGui::PushID(NodeID.c_str());
+						ImGui::Text("Node %zu: %s", Index + 1, NodeID.c_str());
+						ImGui::SameLine();
+						if (ImGui::SmallButton("Open source"))
+							OpenBlueprintNode(Trace->Handle.Asset, Trace->ExecutedNodes[Index]);
+						ImGui::PopID();
+					}
+					ImGui::TextUnformatted("Scalar values");
+					const size_t ScalarCount = std::min(Trace->ScalarPropertyIds.size(), Trace->ScalarValues.size());
+					for (size_t Index = 0; Index < ScalarCount; ++Index)
+						ImGui::Text("%s = %.6g", Trace->ScalarPropertyIds[Index].c_str(),
+							static_cast<double>(Trace->ScalarValues[Index]));
+					ImGui::TreePop();
+				}
+				ImGui::PopID();
+				ImGui::PopID();
+				ImGui::PopID();
+				ImGui::PopID();
+				ImGui::PopID();
+			}
+
+			if (!Diagnostics.empty() && ImGui::TreeNode("Blueprint diagnostics"))
+			{
+				for (const PulseForge::BlueprintRuntimeDiagnostic& Diagnostic : Diagnostics)
+				{
+					const std::string EntityID = Diagnostic.Entity.ToString();
+					const std::string AssetID = Diagnostic.Asset.ToString();
+					ImGui::PushID(AssetID.c_str());
+					ImGui::PushID(EntityID.c_str());
+					ImGui::Text("Entity %s · event %u · error %u", EntityID.c_str(),
+						static_cast<unsigned>(Diagnostic.Event), static_cast<unsigned>(Diagnostic.Code));
+					if (!Diagnostic.SourceNode.IsNil())
+					{
+						const std::string NodeID = Diagnostic.SourceNode.ToString();
+						ImGui::Text("Source node: %s", NodeID.c_str());
+						ImGui::SameLine();
+						if (ImGui::SmallButton("Open source"))
+							OpenBlueprintNode(Diagnostic.Asset, Diagnostic.SourceNode);
+					}
+					ImGui::TextWrapped("%s", Diagnostic.Message.c_str());
+					ImGui::PopID();
+					ImGui::PopID();
+				}
+				ImGui::TreePop();
+			}
 		}
 
 		void ResetContentBrowserNavigation() { m_ContentBrowser.ResetNavigation(); }

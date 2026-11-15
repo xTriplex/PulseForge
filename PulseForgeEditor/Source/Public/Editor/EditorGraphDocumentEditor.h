@@ -468,9 +468,14 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> RegisterSchema(EditorGraphSchema Schema);
 		[[nodiscard]] std::expected<EditorGraphFixtureLocation, std::string> CreateFixture(
 			const std::filesystem::path& ProjectRoot, EditorGraphFixtureKind Kind) const;
+		[[nodiscard]] std::expected<EditorGraphFixtureLocation, std::string> CreateBlueprintAsset(
+			PulseForge::AssetRegistry& Registry, const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& ProjectRelativePath) const;
 		[[nodiscard]] static std::filesystem::path GetFixturePath(const PulseForge::UUID& GraphID);
+		[[nodiscard]] static std::filesystem::path GetBlueprintGraphPath(const PulseForge::AssetID& Asset);
 		[[nodiscard]] bool Open(EditorDocumentSession& Session, const EditorDocumentEditorContext& Context) const;
 		[[nodiscard]] bool Save(EditorDocumentSession& Session) const;
+		[[nodiscard]] bool RequestNodeSelection(EditorDocumentSession& Session, PulseForge::UUID NodeID) const;
 		[[nodiscard]] std::expected<PulseForge::UUID, std::string> AddNode(
 			EditorDocumentSession& Session, std::string_view NodeTypeKey, double CanvasX, double CanvasY) const;
 		[[nodiscard]] std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> CapturePinVisibility(

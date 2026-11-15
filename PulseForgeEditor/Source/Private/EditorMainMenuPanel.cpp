@@ -118,8 +118,8 @@ namespace PulseForgeEditor
 					Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::OpenMaterialGraphFixture, State.FocusedCommandTarget);
 				if (ImGui::MenuItem("Gameplay Event Fixture — authoring only") && !Result.Action)
 					Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::OpenGameplayGraphFixture, State.FocusedCommandTarget);
-				if (ImGui::MenuItem("Blueprint Event Graph — authoring preview") && !Result.Action)
-					Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::OpenBlueprintGraphFixture, State.FocusedCommandTarget);
+				if (ImGui::MenuItem("New Blueprint Asset") && !Result.Action)
+					Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::CreateBlueprintAsset, State.FocusedCommandTarget);
 				ImGui::EndMenu();
 			}
 			ImGui::Separator();

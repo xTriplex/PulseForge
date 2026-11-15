@@ -44,6 +44,13 @@ namespace PulseForgeEditor
 				DeferredAction = [Handler, Identifier] { Handler(EditorContentBrowserAssetAction::OpenMaterialEditor, Identifier); };
 				break;
 			}
+			case AssetBrowserOpenAction::OpenBlueprint:
+			{
+				const auto Handler = ActionHandler;
+				const PulseForge::AssetID Identifier = Asset.ID;
+				DeferredAction = [Handler, Identifier] { Handler(EditorContentBrowserAssetAction::OpenBlueprint, Identifier); };
+				break;
+			}
 			case AssetBrowserOpenAction::ShowMaterialDetails:
 				break;
 			case AssetBrowserOpenAction::None:

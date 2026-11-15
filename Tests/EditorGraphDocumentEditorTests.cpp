@@ -3,6 +3,12 @@
 #include "Editor/EditorGraphDocumentEditor.h"
 #include "Editor/BlueprintGraphCompiler.h"
 #include "Editor/EditorGraphModel.h"
+#include "Assets/AssetCookService.h"
+#include "Assets/AssetDependencyCatalog.h"
+#include "Assets/AssetMetadata.h"
+#include "Runtime/CookedContentProvider.h"
+#include "Runtime/PlayerSession.h"
+#include "Scene/SceneSerializer.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -200,10 +206,16 @@ namespace
 	struct TemporaryGraphProject final
 	{
 		std::filesystem::path Path;
+		std::vector<std::filesystem::path> ExtraPaths;
 		~TemporaryGraphProject()
 		{
 			std::error_code Error;
 			if (!Path.empty()) std::filesystem::remove_all(Path, Error);
+			for (const auto& ExtraPath : ExtraPaths)
+			{
+				Error.clear();
+				std::filesystem::remove_all(ExtraPath, Error);
+			}
 		}
 	};
 
@@ -365,6 +377,148 @@ namespace
 			const auto Reopened = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *BlueprintSession);
 			const auto Recompiled = CompileBlueprintGraph(Reopened, MakeBlueprintAuthoringSchema());
 			PF_CHECK(Tests, Recompiled && Recompiled->GetEvents().size() == 1 && Reopened.ID == Blueprint->GraphID);
+		}
+		const std::filesystem::path BlueprintAssetPath = std::filesystem::path("Assets") / "Health.pfblueprint";
+		auto ManagedBlueprint = GraphEditor.CreateBlueprintAsset(
+			Project->GetAssetRegistry(), Project->GetRootPath(), BlueprintAssetPath);
+		PF_CHECK(Tests, ManagedBlueprint.has_value());
+		if (ManagedBlueprint)
+		{
+			const auto ProgramPath = Project->GetRootPath() / ManagedBlueprint->ProjectRelativePath;
+			const auto GraphPath = Project->GetRootPath() / EditorGraphDocumentEditor::GetBlueprintGraphPath(ManagedBlueprint->GraphID);
+			const auto InitialProgram = ReadBytes(ProgramPath);
+			const auto InitialGraph = ReadBytes(GraphPath);
+			PF_CHECK(Tests, InitialProgram.has_value() && InitialGraph.has_value());
+			if (InitialProgram && InitialGraph)
+			{
+				const auto Program = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+					std::span<const char>(InitialProgram->data(), InitialProgram->size())));
+				PF_CHECK(Tests, Program && Program->GetEvents().size() == 1);
+				if (Program)
+				{
+					std::array<float, 1> RuntimeState{};
+					const auto Executed = PulseForge::ExecuteBlueprintProgram(Program->GetEvents().front().Program,
+						RuntimeState, PulseForge::BlueprintDefaultInstructionBudget);
+					PF_CHECK(Tests, Executed && RuntimeState[0] == 10.0f && Executed->PropertyWrites.size() == 1);
+				}
+				const EditorDocumentIdentity ManagedIdentity{ Project->GetDescription().ID, ManagedBlueprint->GraphID,
+					EditorDocumentKind::Graph };
+				auto ManagedOpen = Documents.Open(ManagedIdentity, ManagedBlueprint->ProjectRelativePath,
+					ManagedBlueprint->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+				auto* ManagedSession = Documents.Find(ManagedIdentity);
+				const EditorDocumentEditorContext ManagedContext{ ManagedIdentity, Project->GetRootPath(),
+					ManagedBlueprint->ProjectRelativePath, ManagedBlueprint->DisplayName, &Project->GetAssetRegistry() };
+				PF_CHECK(Tests, ManagedOpen && ManagedSession && GraphEditor.Open(*ManagedSession, ManagedContext));
+				if (ManagedSession)
+				{
+					PF_CHECK(Tests, !ManagedSession->IsDirty());
+					const auto AuthoredGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *ManagedSession);
+				if (!AuthoredGraph.Nodes.empty())
+					PF_CHECK(Tests, GraphEditor.RequestNodeSelection(*ManagedSession, AuthoredGraph.Nodes.front().ID));
+					const auto* PropertyPin = FindPin(AuthoredGraph, "blueprint.action.write_scalar", "property");
+					PF_CHECK(Tests, PropertyPin != nullptr);
+					if (PropertyPin)
+					{
+					const UUID PropertyPinID = PropertyPin->ID;
+					(void)EditorGraphDocumentEditorTestAccess::Process(GraphEditor, *ManagedSession,
+						{ { PropertyPinID, std::string{}, true, true, false },
+							{ PropertyPinID, std::string{}, false, true, true } });
+					PF_CHECK(Tests, ManagedSession->IsDirty());
+					PF_CHECK(Tests, !GraphEditor.Save(*ManagedSession) && ManagedSession->IsDirty());
+					PF_CHECK(Tests, ReadBytes(ProgramPath) == InitialProgram && ReadBytes(GraphPath) == InitialGraph);
+					(void)EditorGraphDocumentEditorTestAccess::Process(GraphEditor, *ManagedSession,
+						{ { PropertyPinID, std::string("health"), true, true, false },
+							{ PropertyPinID, std::string("health"), false, true, true } });
+					PF_CHECK(Tests, GraphEditor.Save(*ManagedSession) && !ManagedSession->IsDirty());
+					PF_CHECK(Tests, Editors.Discard(*ManagedSession) && !ManagedSession->IsDirty());
+					const auto ReopenedProgram = ReadBytes(ProgramPath);
+					const auto ReopenedGraph = ReadBytes(GraphPath);
+					PF_CHECK(Tests, ReopenedProgram && ReopenedGraph);
+					if (ReopenedProgram && ReopenedGraph)
+					{
+						const auto ReopenedVerified = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+							std::span<const char>(ReopenedProgram->data(), ReopenedProgram->size())));
+						const auto ReopenedSource = DeserializeEditorGraph(*ReopenedGraph, MakeBlueprintAuthoringSchema());
+						PF_CHECK(Tests, ReopenedVerified && ReopenedVerified->GetEvents().size() == 1 &&
+							ReopenedSource && ReopenedSource->ID == ManagedBlueprint->GraphID);
+
+						Scene CookScene;
+						auto CookEntity = CookScene.CreateEntity("Cooked Blueprint document fixture");
+						PF_CHECK(Tests, CookEntity.has_value());
+						BlueprintComponent CookBlueprint{ ManagedBlueprint->GraphID, true };
+						if (CookEntity)
+							PF_CHECK(Tests, CookBlueprint.SetFloatProperty("health", 0.0f) && CookEntity->SetBlueprint(CookBlueprint));
+						const auto SceneBytes = SceneSerializer::Serialize(CookScene);
+						PF_CHECK(Tests, SceneBytes.has_value());
+						const auto ScenePath = Project->GetRootPath() / "Assets" / "BlueprintCook.scene";
+						if (SceneBytes)
+						{
+							PF_CHECK(Tests, WriteBytes(ScenePath, *SceneBytes));
+							const auto SceneRecord = AssetMetadataSerializer::CreateForNewAsset(ScenePath);
+							PF_CHECK(Tests, SceneRecord.has_value());
+							if (SceneRecord)
+							{
+								auto Snapshot = AssetDependencyCatalogBuilder::Build(
+									Project->GetRootPath(), Project->GetDescription().ID, 1);
+								PF_CHECK(Tests, Snapshot.has_value());
+								if (Snapshot)
+								{
+									const auto CookRoot = Temporary.Path.parent_path() /
+										(Temporary.Path.filename().string() + "-cooked-blueprint");
+									Temporary.ExtraPaths.push_back(CookRoot);
+									AssetCookRequest Request{
+										*Snapshot, Project->GetFilePath(), SceneRecord->ID, {},
+#if defined(_WIN32)
+										{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+										{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+										{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+										CookRoot };
+									const auto Cooked = AssetCookService::Cook(Request);
+									PF_CHECK(Tests, Cooked.has_value());
+									if (Cooked)
+									{
+										std::error_code RemoveProgramError;
+										PF_CHECK(Tests, std::filesystem::remove(ProgramPath, RemoveProgramError) && !RemoveProgramError);
+										std::error_code RemoveGraphError;
+										PF_CHECK(Tests, std::filesystem::remove(GraphPath, RemoveGraphError) && !RemoveGraphError);
+										auto Provider = CookedContentProvider::Open(CookRoot, Request.Compatibility);
+										PF_CHECK(Tests, Provider.has_value());
+										if (Provider)
+										{
+											auto CookedProgram = (*Provider)->LoadBlueprintProgram(ManagedBlueprint->GraphID);
+											PF_CHECK(Tests, CookedProgram && CookedProgram->GetEvents().size() == 1);
+							if (CookedProgram && !CookedProgram->GetEvents().empty())
+							{
+								std::array<float, 1> CookedState{};
+								const auto Executed = ExecuteBlueprintProgram(
+									CookedProgram->GetEvents().front().Program, CookedState,
+									BlueprintDefaultInstructionBudget);
+								PF_CHECK(Tests, Executed && CookedState[0] == 10.0f &&
+									Executed->PropertyWrites.size() == 1);
+							}
+											SceneRuntimeDesc RuntimeDescription;
+											RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+											PlayerSession Player(*Provider, RuntimeDescription);
+											PF_CHECK(Tests, Player.Start().has_value() && Player.IsCookedSession());
+											if (Player.GetActiveScene() && !Player.GetActiveScene()->GetEntities().empty())
+											{
+												const auto RuntimeBlueprint = Player.GetActiveScene()->GetEntities().front().GetBlueprint();
+												PF_CHECK(Tests, RuntimeBlueprint && RuntimeBlueprint->has_value() &&
+													RuntimeBlueprint->value().FindFloatProperty("health") == 10.0f);
+											}
+											Player.Stop();
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		}
 		if (FutureFixture)
 		{
@@ -1169,6 +1323,12 @@ namespace
 			ImVec2(1000.0f, 700.0f), false);
 		const UUID SourceNodeID = TestOnlyGraphForTest.Nodes[0].ID;
 		const UUID ConsumerNodeID = TestOnlyGraphForTest.Nodes[1].ID;
+		PF_CHECK(Tests, !GraphEditor.RequestNodeSelection(*GameplaySession, UUID{}));
+		PF_CHECK(Tests, GraphEditor.RequestNodeSelection(*GameplaySession, SourceNodeID));
+		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),
+			ImVec2(1000.0f, 700.0f), false);
+		const auto FocusedTraceNode = EditorGraphDocumentEditorTestAccess::GetSelectedNodes(GraphEditor, *GameplaySession);
+		PF_CHECK(Tests, FocusedTraceNode.size() == 1 && FocusedTraceNode.front() == SourceNodeID);
 		EditorGraphDocumentEditorTestAccess::SetSelectedNodes(GraphEditor, *GameplaySession,
 			{ SourceNodeID, ConsumerNodeID });
 		(void)DrawInputFrame(*GameplaySession, "GraphShortcutHost", 1440.0f, ImVec2(29.0f, 41.0f),

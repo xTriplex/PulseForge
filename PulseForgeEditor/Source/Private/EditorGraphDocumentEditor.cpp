@@ -3,6 +3,9 @@
 #include "Editor/EditorGraphLayout.h"
 #include "Editor/EditorGraphModel.h"
 #include "Editor/BlueprintGraphCompiler.h"
+#include "Assets/AssetOperations.h"
+#include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -237,9 +240,11 @@ namespace
 	struct GraphDocumentState final : EditorDocumentEditorState
 	{
 		GraphDocumentState(EditorGraph SourceGraph, EditorGraphSchema SourceSchema, std::filesystem::path Path,
-			std::string SourceBytes)
+			std::string SourceBytes, std::filesystem::path Root, std::filesystem::path CompiledPath = {},
+			std::string CompiledBytes = {})
 			: History(std::move(SourceGraph)), Schema(std::move(SourceSchema)), SourcePath(std::move(Path)),
-			  SavedBytes(std::move(SourceBytes))
+			  SavedBytes(std::move(SourceBytes)), ProjectRoot(std::move(Root)), ProgramPath(std::move(CompiledPath)),
+			  SavedProgramBytes(std::move(CompiledBytes))
 		{
 			Canvas = CreateCanvas();
 		}
@@ -267,6 +272,9 @@ namespace
 		uint64_t SchemaRevision = 0;
 		std::filesystem::path SourcePath;
 		std::string SavedBytes;
+		std::filesystem::path ProjectRoot;
+		std::filesystem::path ProgramPath;
+		std::string SavedProgramBytes;
 		std::string Error;
 		std::string CanvasSettings;
 		NodeEditor::EditorContext* Canvas = nullptr;
@@ -687,6 +695,160 @@ namespace PulseForgeEditor
 		return std::filesystem::path(".pulseforge") / "graphs" / (GraphID.ToString() + ".pfg");
 	}
 
+	std::filesystem::path EditorGraphDocumentEditor::GetBlueprintGraphPath(const PulseForge::AssetID& Asset)
+	{
+		return std::filesystem::path(".pulseforge") / "blueprint-graphs" / (Asset.ToString() + ".pfg");
+	}
+
+	std::expected<EditorGraphFixtureLocation, std::string> EditorGraphDocumentEditor::CreateBlueprintAsset(
+		PulseForge::AssetRegistry& Registry, const std::filesystem::path& ProjectRoot,
+		const std::filesystem::path& ProjectRelativePath) const
+	{
+		if (ProjectRoot.empty()) return std::unexpected("Open a project before creating a Blueprint asset");
+		if (!PulseForge::HasAssetTypeExtension(ProjectRelativePath, PulseForge::AssetFileType::Blueprint))
+			return std::unexpected("Blueprint assets must use the .pfblueprint extension");
+
+		PulseForge::BlueprintProgramSource InitialProgram;
+		InitialProgram.Instructions.push_back({ PulseForge::BlueprintOpcode::Return, 0, 0, {} });
+		const std::array<PulseForge::BlueprintEventProgramSource, 1> InitialEvents{{
+			{ PulseForge::BlueprintEventKind::OnCreate, std::move(InitialProgram) } }};
+		auto InitialBytes = PulseForge::SerializeBlueprintAsset(InitialEvents);
+		if (!InitialBytes) return std::unexpected("Could not initialize the Blueprint runtime program: " + InitialBytes.error().Message);
+		const auto InitialCharacters = std::span<const char>(
+			reinterpret_cast<const char*>(InitialBytes->data()), InitialBytes->size());
+		auto Created = PulseForge::AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot,
+			std::as_bytes(InitialCharacters), ProjectRelativePath);
+		std::optional<PulseForge::AssetRecord> CreatedRecord;
+		if (Created) CreatedRecord = *Created;
+		else if (Created.error().CommittedAsset) CreatedRecord = Created.error().CommittedAsset;
+		else return std::unexpected("Could not create Blueprint asset: " + Created.error().Message);
+
+		const EditorGraphSchema Schema = MakeBlueprintAuthoringSchema();
+		auto Graph = CreateEditorGraph(Schema, CreatedRecord->ID);
+		if (!Graph)
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not initialize the Blueprint graph: " + Graph.error());
+		}
+		EditorGraphCommandHistory History(std::move(*Graph));
+		const auto Add = [&History, &Schema](std::string_view Type, double X)
+			{ return AddEditorGraphNode(History, Schema, Type, X, 100.0); };
+		if (!Add("blueprint.event.on_create", 80.0) || !Add("blueprint.action.write_scalar", 600.0) ||
+			!Add("blueprint.value.constant_float", 220.0) || !Add("blueprint.value.constant_float", 220.0) ||
+			!Add("blueprint.math.add", 400.0))
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not initialize the Blueprint event graph nodes");
+		}
+		std::string DefaultsError;
+		if (!History.Execute(Schema, [](EditorGraph& Candidate) -> std::expected<void, std::string>
+			{
+				const auto SetDefault = [](EditorGraphNode& Node, std::string_view Key, EditorGraphValue Value)
+				{
+					const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+						[Key](const EditorGraphPin& CandidatePin) { return CandidatePin.Key == Key; });
+					if (Pin == Node.Pins.end()) return false;
+					Pin->DefaultValue = std::move(Value);
+					return true;
+				};
+				auto FindNode = [&Candidate](std::string_view Type, size_t Index = 0) -> EditorGraphNode*
+				{
+					for (EditorGraphNode& Node : Candidate.Nodes)
+						if (Node.TypeKey == Type && Index-- == 0) return &Node;
+					return nullptr;
+				};
+				EditorGraphNode* Event = FindNode("blueprint.event.on_create");
+				EditorGraphNode* Write = FindNode("blueprint.action.write_scalar");
+				EditorGraphNode* A = FindNode("blueprint.value.constant_float");
+				EditorGraphNode* B = FindNode("blueprint.value.constant_float", 1);
+				if (!Event || !Write || !A || !B || !SetDefault(*Write, "property", std::string("health")) ||
+					!SetDefault(*A, "value", 3.0) ||
+					!SetDefault(*B, "value", 7.0))
+					return std::unexpected("Could not set Blueprint graph defaults");
+				return {};
+			}, DefaultsError))
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not initialize Blueprint graph defaults: " + DefaultsError);
+		}
+		const auto FindNode = [&History](std::string_view Type, size_t Index = 0) -> const EditorGraphNode*
+		{
+			for (const EditorGraphNode& Node : History.Graph().Nodes)
+				if (Node.TypeKey == Type && Index-- == 0) return &Node;
+			return nullptr;
+		};
+		const auto FindPin = [](const EditorGraphNode& Node, std::string_view Key) -> const EditorGraphPin*
+		{
+			const auto Found = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+				[Key](const EditorGraphPin& Pin) { return Pin.Key == Key; });
+			return Found == Node.Pins.end() ? nullptr : &*Found;
+		};
+		const EditorGraphNode* Event = FindNode("blueprint.event.on_create");
+		const EditorGraphNode* Write = FindNode("blueprint.action.write_scalar");
+		const EditorGraphNode* A = FindNode("blueprint.value.constant_float");
+		const EditorGraphNode* B = FindNode("blueprint.value.constant_float", 1);
+		const EditorGraphNode* AddNode = FindNode("blueprint.math.add");
+		if (!Event || !Write || !A || !B || !AddNode)
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("The initialized Blueprint graph is incomplete");
+		}
+		const auto Link = [&](const EditorGraphNode& Source, std::string_view SourceKey,
+			const EditorGraphNode& Target, std::string_view TargetKey)
+		{
+			const auto* Output = FindPin(Source, SourceKey);
+			const auto* Input = FindPin(Target, TargetKey);
+			return Output && Input && ConnectEditorGraphPins(History, Schema, Output->ID, Input->ID).has_value();
+		};
+		if (!Link(*Event, "exec", *Write, "exec-in") || !Link(*A, "value", *AddNode, "a") ||
+			!Link(*B, "value", *AddNode, "b") || !Link(*AddNode, "value", *Write, "value"))
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not connect the Blueprint graph source");
+		}
+		auto GraphBytes = SerializeEditorGraph(History.Graph(), Schema);
+		if (!GraphBytes)
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not serialize Blueprint graph source: " + GraphBytes.error());
+		}
+		auto Compiled = CompileBlueprintGraph(History.Graph(), Schema);
+		if (!Compiled)
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not compile the initial Blueprint graph: " + Compiled.error().Message);
+		}
+		std::vector<PulseForge::BlueprintEventProgramSource> EventSources;
+		EventSources.reserve(Compiled->GetEvents().size());
+		for (const PulseForge::BlueprintVerifiedEventProgram& Event : Compiled->GetEvents())
+			EventSources.push_back({ Event.Event, Event.Program.GetSource() });
+		auto ProgramBytes = PulseForge::SerializeBlueprintAsset(EventSources);
+		if (!ProgramBytes)
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not serialize the initial Blueprint program: " + ProgramBytes.error().Message);
+		}
+		const std::string InitialProgramSource(reinterpret_cast<const char*>(InitialBytes->data()), InitialBytes->size());
+		const std::string CompiledProgramSource(reinterpret_cast<const char*>(ProgramBytes->data()), ProgramBytes->size());
+		const auto ProgramPath = ProjectRoot / CreatedRecord->ProjectRelativePath;
+		auto ProgramPublished = PublishGraphSource(ProgramPath, InitialProgramSource, CompiledProgramSource, false);
+		if (!ProgramPublished)
+		{
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not publish the initial Blueprint program: " + ProgramPublished.error());
+		}
+		const auto GraphRelativePath = GetBlueprintGraphPath(CreatedRecord->ID);
+		auto Published = PublishGraphSource(ProjectRoot / GraphRelativePath, {}, *GraphBytes, true);
+		if (!Published)
+		{
+			(void)PublishGraphSource(ProgramPath, CompiledProgramSource, InitialProgramSource, false);
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not publish Blueprint graph source: " + Published.error());
+		}
+		return EditorGraphFixtureLocation{ CreatedRecord->ID, CreatedRecord->ProjectRelativePath,
+			"Blueprint — " + CreatedRecord->ProjectRelativePath.stem().string() };
+	}
+
 	std::expected<EditorGraphFixtureLocation, std::string> EditorGraphDocumentEditor::CreateFixture(
 		const std::filesystem::path& ProjectRoot, EditorGraphFixtureKind Kind) const
 	{
@@ -842,15 +1004,45 @@ namespace PulseForgeEditor
 
 	bool EditorGraphDocumentEditor::IsEligible(const EditorDocumentEditorContext& Context) const
 	{
-		return m_Registered && Context.Identity.Kind == EditorDocumentKind::Graph && !Context.Identity.Asset.IsNil() &&
-			!Context.Identity.Project.IsNil() && !Context.ProjectRoot.empty() && Context.ProjectRelativePath == GetFixturePath(Context.Identity.Asset);
+		if (!m_Registered || Context.Identity.Kind != EditorDocumentKind::Graph || Context.Identity.Asset.IsNil() ||
+			Context.Identity.Project.IsNil() || Context.ProjectRoot.empty())
+			return false;
+		if (Context.ProjectRelativePath == GetFixturePath(Context.Identity.Asset)) return true;
+		if (!Context.Registry) return false;
+		const auto Asset = Context.Registry->Find(Context.Identity.Asset);
+		std::error_code Error;
+		const bool HasAuthoredGraph = Asset && std::filesystem::is_regular_file(
+			Context.ProjectRoot / GetBlueprintGraphPath(Asset->ID), Error) && !Error;
+		return Asset && Asset->ProjectRelativePath == Context.ProjectRelativePath &&
+			PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Blueprint) &&
+			HasAuthoredGraph;
 	}
 
 	std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string> EditorGraphDocumentEditor::LoadSession(
 		const EditorDocumentEditorContext& Context) const
 	{
 		if (!IsEligible(Context)) return std::unexpected("The graph document does not identify a supported project fixture");
-		const auto SourcePath = Context.ProjectRoot / Context.ProjectRelativePath;
+		std::filesystem::path SourcePath = Context.ProjectRoot / Context.ProjectRelativePath;
+		std::filesystem::path ProgramPath;
+		std::string ProgramBytes;
+		if (Context.Registry)
+		{
+			const auto Asset = Context.Registry->Find(Context.Identity.Asset);
+			if (Asset && PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Blueprint))
+			{
+				auto Resolved = PulseForge::AssetPathResolver::ResolveManagedSourcePath(
+					Context.ProjectRoot, Asset->ProjectRelativePath);
+				if (!Resolved) return std::unexpected("Could not resolve Blueprint asset source: " + Resolved.error().Message);
+				ProgramPath = *Resolved;
+				SourcePath = Context.ProjectRoot / GetBlueprintGraphPath(Asset->ID);
+				auto Program = ReadFile(ProgramPath);
+				if (!Program) return std::unexpected("Could not read compiled Blueprint asset source: " + Program.error());
+				ProgramBytes = std::move(*Program);
+				const auto Verified = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+					std::span<const char>(ProgramBytes.data(), ProgramBytes.size())));
+				if (!Verified) return std::unexpected("The Blueprint asset has an invalid runtime program: " + Verified.error().Message);
+			}
+		}
 		auto Source = ReadFile(SourcePath);
 		if (!Source) return std::unexpected(Source.error());
 		auto Schema = ReadSchema(*Source, m_SchemaRegistry);
@@ -858,7 +1050,8 @@ namespace PulseForgeEditor
 		auto Graph = DeserializeEditorGraph(*Source, *Schema);
 		if (!Graph) return std::unexpected(Graph.error());
 		if (Graph->ID != Context.Identity.Asset) return std::unexpected("Graph source identity does not match the document identity");
-		auto State = std::make_unique<GraphDocumentState>(std::move(*Graph), std::move(*Schema), SourcePath, std::move(*Source));
+		auto State = std::make_unique<GraphDocumentState>(std::move(*Graph), std::move(*Schema), SourcePath,
+			std::move(*Source), Context.ProjectRoot, std::move(ProgramPath), std::move(ProgramBytes));
 		if (!State->Canvas) return std::unexpected("Could not create an isolated graph canvas context");
 		return std::unique_ptr<EditorDocumentEditorState>(std::move(State));
 	}
@@ -871,6 +1064,16 @@ namespace PulseForgeEditor
 	bool EditorGraphDocumentEditor::Save(EditorDocumentSession& Session) const
 	{
 		return m_Registered && Session.Identity.Kind == EditorDocumentKind::Graph && m_Editors.Save(Session);
+	}
+
+	bool EditorGraphDocumentEditor::RequestNodeSelection(EditorDocumentSession& Session, PulseForge::UUID NodeID) const
+	{
+		auto* State = GetState(Session);
+		if (!m_Registered || Session.Identity.Kind != EditorDocumentKind::Graph || !State || NodeID.IsNil() ||
+			std::none_of(State->History.Graph().Nodes.begin(), State->History.Graph().Nodes.end(),
+				[NodeID](const EditorGraphNode& Node) { return Node.ID == NodeID; })) return false;
+		State->PendingSelectionNodeIDs = { NodeID };
+		return true;
 	}
 
 	std::expected<PulseForge::UUID, std::string> EditorGraphDocumentEditor::AddNode(
@@ -966,9 +1169,44 @@ namespace PulseForgeEditor
 		if (!Finished.Error.empty() || State->History.HasOpenTransaction()) return false;
 		auto Source = SerializeEditorGraph(State->History.Graph(), State->Schema);
 		if (!Source) { State->Error = Source.error(); return false; }
+		std::string CompiledProgramBytes;
+		if (!State->ProgramPath.empty())
+		{
+			const auto Compiled = CompileBlueprintGraph(State->History.Graph(), State->Schema);
+			if (!Compiled)
+			{
+				State->Error = Compiled.error().Message;
+				return false;
+			}
+			std::vector<PulseForge::BlueprintEventProgramSource> EventSources;
+			EventSources.reserve(Compiled->GetEvents().size());
+			for (const PulseForge::BlueprintVerifiedEventProgram& Event : Compiled->GetEvents())
+				EventSources.push_back({ Event.Event, Event.Program.GetSource() });
+			auto Program = PulseForge::SerializeBlueprintAsset(EventSources);
+			if (!Program)
+			{
+				State->Error = "Could not serialize the compiled Blueprint: " + Program.error().Message;
+				return false;
+			}
+			CompiledProgramBytes.assign(reinterpret_cast<const char*>(Program->data()), Program->size());
+			auto ProgramPublished = PublishGraphSource(State->ProgramPath, State->SavedProgramBytes,
+				CompiledProgramBytes, false);
+			if (!ProgramPublished) { State->Error = ProgramPublished.error(); return false; }
+		}
 		auto Published = PublishGraphSource(State->SourcePath, State->SavedBytes, *Source, false);
-		if (!Published) { State->Error = Published.error(); return false; }
+		if (!Published)
+		{
+			if (!State->ProgramPath.empty())
+			{
+				auto Rollback = PublishGraphSource(State->ProgramPath, CompiledProgramBytes, State->SavedProgramBytes, false);
+				State->Error = Published.error();
+				if (!Rollback) State->Error += "; compiled program rollback failed: " + Rollback.error();
+			}
+			else State->Error = Published.error();
+			return false;
+		}
 		State->SavedBytes = std::move(*Source);
+		if (!State->ProgramPath.empty()) State->SavedProgramBytes = std::move(CompiledProgramBytes);
 		State->History.MarkSaved();
 		State->Error.clear();
 		(void)SavedRevision;
@@ -989,12 +1227,23 @@ namespace PulseForgeEditor
 			State->Error = Graph ? "Graph source identity does not match the open document" : Graph.error();
 			return false;
 		}
+		std::string ProgramBytes;
+		if (!State->ProgramPath.empty())
+		{
+			auto Program = ReadFile(State->ProgramPath);
+			if (!Program) { State->Error = "Could not reload compiled Blueprint: " + Program.error(); return false; }
+			const auto Verified = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+				std::span<const char>(Program->data(), Program->size())));
+			if (!Verified) { State->Error = "The compiled Blueprint is invalid: " + Verified.error().Message; return false; }
+			ProgramBytes = std::move(*Program);
+		}
 		State->History.Reset(std::move(*Graph));
 		State->Schema = std::move(*Schema);
 		++State->SchemaRevision;
 		State->PropertyEdits.Reset();
 		State->NodeMoveTransaction = false;
 		State->SavedBytes = std::move(*Source);
+		if (!State->ProgramPath.empty()) State->SavedProgramBytes = std::move(ProgramBytes);
 		State->Error.clear();
 		State->NeedsCanvasSync = true;
 		(void)m_Documents.MarkSaved(Session.Identity, Session.Revision);
@@ -1238,7 +1487,17 @@ namespace PulseForgeEditor
 		const std::filesystem::path& Path, std::string_view DisplayName) const
 	{
 		auto* State = GetState(Session);
-		if (!State || Path != GetFixturePath(Session.Identity.Asset)) return false;
+		if (!State) return false;
+		if (State->ProgramPath.empty())
+		{
+			if (Path != GetFixturePath(Session.Identity.Asset)) return false;
+		}
+		else
+		{
+			if (!PulseForge::HasAssetTypeExtension(Path, PulseForge::AssetFileType::Blueprint)) return false;
+			State->ProgramPath = State->ProjectRoot / Path;
+			Session.ProjectRelativePath = Path;
+		}
 		Session.DisplayName = std::string(DisplayName);
 		return true;
 	}
