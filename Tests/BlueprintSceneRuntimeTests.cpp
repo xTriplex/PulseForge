@@ -292,6 +292,22 @@ namespace
 		++UpdateRevision;
 		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Values[ActorA] == 10.0f && Values[ActorB] == 10.0f);
+		BlueprintRuntimeTraceHandle ActorBTraceHandle;
+		{
+			const auto Traces = Runtime.GetBlueprintTraces();
+			const auto Trace = std::find_if(Traces.begin(), Traces.end(), [&](const BlueprintRuntimeTrace& Candidate)
+				{ return Candidate.Handle.Target == ActorEntities[1]; });
+			PF_CHECK(Tests, Trace != Traces.end());
+			if (Trace != Traces.end())
+			{
+				ActorBTraceHandle = Trace->Handle;
+				const auto ReadTrace = Runtime.ReadBlueprintTrace(ActorBTraceHandle);
+				PF_CHECK(Tests, ReadTrace && ReadTrace->Event == BlueprintEventKind::OnUpdate &&
+					ReadTrace->ExecutedNodes.size() == 7 && ReadTrace->ScalarPropertyIds.size() == 1 &&
+					ReadTrace->ScalarPropertyIds.front() == "health" && ReadTrace->ScalarValues.size() == 1 &&
+					ReadTrace->ScalarValues.front() == 10.0f);
+			}
+		}
 		RejectSecondActor = true;
 		const auto RejectedWriteFrame = Runtime.Advance(TestScene, Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, RejectedWriteFrame.has_value());
@@ -306,6 +322,7 @@ namespace
 		PF_CHECK(Tests, Values[ActorA] == 30.0f && RejectedActorWrites == 1);
 
 		PF_CHECK(Tests, TestScene.DestroyEntity(ActorEntities[1]).has_value());
+		PF_CHECK(Tests, !Runtime.ReadBlueprintTrace(ActorBTraceHandle));
 		const auto Recreated = TestScene.CreateEntityWithUUID(ActorB, "Recreated Blueprint actor B");
 		PF_CHECK(Tests, Recreated.has_value());
 		RejectSecondActor = false;

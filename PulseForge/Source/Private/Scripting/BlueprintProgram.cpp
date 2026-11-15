@@ -291,6 +291,7 @@ namespace PulseForge
 		uint32_t ProgramCounter = 0;
 		BlueprintExecutionResult Result;
 		Result.PropertyWrites.reserve((std::min)(Source.Instructions.size(), size_t{ 32 }));
+		Result.ExecutedNodes.reserve((std::min)(Source.Instructions.size(), BlueprintMaximumTraceNodesPerEvent));
 		while (ProgramCounter < Source.Instructions.size())
 		{
 			if (Result.InstructionsExecuted >= InstructionBudget)
@@ -298,6 +299,13 @@ namespace PulseForge
 					Source.Instructions[ProgramCounter].SourceNode, "Blueprint event exceeded its instruction budget"));
 			++Result.InstructionsExecuted;
 			const BlueprintInstruction& Instruction = Source.Instructions[ProgramCounter];
+			if (!Instruction.SourceNode.IsNil())
+			{
+				if (Result.ExecutedNodes.size() < BlueprintMaximumTraceNodesPerEvent)
+					Result.ExecutedNodes.push_back(Instruction.SourceNode);
+				else
+					Result.ExecutedNodeTraceTruncated = true;
+			}
 			switch (Instruction.Opcode)
 			{
 			case BlueprintOpcode::PushConstant: Stack.push_back(Source.Constants[Instruction.Operand]); ++ProgramCounter; break;

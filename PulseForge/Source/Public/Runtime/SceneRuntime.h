@@ -8,6 +8,7 @@
 #include "Scripting/ScriptRuntime.h"
 #include "Scripting/BlueprintProgram.h"
 #include "Scene/Components/RuntimeUICanvasComponent.h"
+#include "Scene/Entity.h"
 #include "UI/RuntimeUI.h"
 
 #include "Assets/AssetID.h"
@@ -53,6 +54,29 @@ namespace PulseForge
 		UUID SourceNode;
 		std::string Message;
 	};
+
+	// An in-memory debugger token for one entity incarnation and immutable Blueprint revision.
+	// The weak Entity handle never keeps the runtime target alive and becomes invalid on destruction.
+	struct BlueprintRuntimeTraceHandle
+	{
+		Entity Target;
+		AssetID Asset;
+		uint64_t SessionGeneration = 0;
+		uint64_t ProgramGeneration = 0;
+		uint64_t Revision = 0;
+	};
+
+	struct BlueprintRuntimeTrace
+	{
+		BlueprintRuntimeTraceHandle Handle;
+		BlueprintEventKind Event = BlueprintEventKind::OnCreate;
+		std::vector<UUID> ExecutedNodes;
+		bool ExecutedNodesTruncated = false;
+		std::vector<std::string> ScalarPropertyIds;
+		std::vector<float> ScalarValues;
+	};
+
+	inline constexpr size_t BlueprintMaximumRuntimeTraces = 128;
 
 	// Non-owning host services supplied by the application to the scene runtime.
 	struct SceneRuntimeServices
@@ -173,6 +197,11 @@ namespace PulseForge
 		[[nodiscard]] std::expected<uint64_t, SceneRuntimeError> RequestScriptReload(const Entity& Target);
 		[[nodiscard]] std::span<const ScriptDiagnostic> GetScriptDiagnostics() const noexcept;
 		[[nodiscard]] std::span<const BlueprintRuntimeDiagnostic> GetBlueprintDiagnostics() const noexcept;
+		// Returns bounded recent traces. Copy a trace handle and use ReadBlueprintTrace before acting on it;
+		// the read rejects stopped sessions, changed program generations, and destroyed/replaced entities.
+		[[nodiscard]] std::span<const BlueprintRuntimeTrace> GetBlueprintTraces() const noexcept;
+		[[nodiscard]] std::optional<BlueprintRuntimeTrace> ReadBlueprintTrace(
+			const BlueprintRuntimeTraceHandle& Handle) const;
 		// Owners inspect requests only after Advance returns, then acknowledge the matching session/request token.
 		[[nodiscard]] std::optional<SceneRuntimeBoundaryRequest> GetPendingBoundaryRequest() const noexcept;
 		[[nodiscard]] bool ResolveBoundaryRequest(

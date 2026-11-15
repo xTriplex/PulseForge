@@ -35,6 +35,7 @@ namespace PulseForge
 	inline constexpr size_t BlueprintMaximumTimerNameLength = 64;
 	inline constexpr uint32_t BlueprintDefaultInstructionBudget = 10000;
 	inline constexpr uint32_t BlueprintMaximumEventDispatchesPerFrame = 4096;
+	inline constexpr size_t BlueprintMaximumTraceNodesPerEvent = 256;
 	inline constexpr size_t BlueprintMaximumDeferredPhysicsCallsPerEvent = 256;
 	inline constexpr size_t BlueprintMaximumEntitySpawnsPerEvent = 64;
 	inline constexpr size_t BlueprintMaximumScheduledTimers = 1024;
@@ -188,6 +189,8 @@ namespace PulseForge
 	struct BlueprintExecutionResult
 	{
 		uint32_t InstructionsExecuted = 0;
+		std::vector<UUID> ExecutedNodes;
+		bool ExecutedNodeTraceTruncated = false;
 		std::vector<BlueprintScalarPropertyWrite> PropertyWrites;
 		bool RequestsStop = false;
 		UUID StopRequestSourceNode;

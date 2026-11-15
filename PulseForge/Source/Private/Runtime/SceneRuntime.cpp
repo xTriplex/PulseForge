@@ -171,6 +171,7 @@ namespace PulseForge
 		std::deque<PendingBlueprintEntitySpawn> PendingBlueprintEntitySpawns;
 		std::deque<PhysicsContactEvent> PendingContactEvents;
 		std::vector<BlueprintRuntimeDiagnostic> BlueprintDiagnostics;
+		std::vector<BlueprintRuntimeTrace> BlueprintTraces;
 		RuntimeUIViewport RuntimeUIView{};
 		std::vector<RuntimeUIInputEvent> RuntimeUIEvents;
 		std::vector<RuntimeUIDrawCommand> RuntimeUIDrawCommands;
@@ -536,6 +537,8 @@ namespace PulseForge
 				if (ProgramInstance.BoundEntity != Target || ProgramInstance.Asset != Instance.Asset ||
 					ProgramInstance.Revision != Instance.Revision)
 				{
+					std::erase_if(BlueprintTraces, [&](const BlueprintRuntimeTrace& Trace)
+						{ return Trace.Handle.Target == Target && Trace.Handle.Asset == Instance.Asset; });
 					ProgramInstance = {};
 					ProgramInstance.BoundEntity = Target;
 					ProgramInstance.Asset = Instance.Asset;
@@ -689,6 +692,25 @@ namespace PulseForge
 					return;
 				}
 				ProgramInstance.ScalarState = std::move(CandidateState);
+				BlueprintRuntimeTrace Trace;
+				Trace.Handle = { Target, Instance.Asset, SessionGeneration, BlueprintProgramGeneration, Instance.Revision };
+				Trace.Event = Event;
+				Trace.ExecutedNodes = std::move(Result->ExecutedNodes);
+				Trace.ExecutedNodesTruncated = Result->ExecutedNodeTraceTruncated;
+				Trace.ScalarPropertyIds = ProgramInstance.PropertyIds;
+				Trace.ScalarValues = ProgramInstance.ScalarState;
+				const auto PreviousTrace = std::find_if(BlueprintTraces.begin(), BlueprintTraces.end(),
+					[&](const BlueprintRuntimeTrace& Existing)
+					{
+						return Existing.Handle.Target == Target && Existing.Handle.Asset == Instance.Asset;
+					});
+				if (PreviousTrace != BlueprintTraces.end())
+					*PreviousTrace = std::move(Trace);
+				else
+				{
+					if (BlueprintTraces.size() == BlueprintMaximumRuntimeTraces) BlueprintTraces.erase(BlueprintTraces.begin());
+					BlueprintTraces.push_back(std::move(Trace));
+				}
 			}
 			catch (const std::exception& Exception)
 			{
@@ -719,6 +741,8 @@ namespace PulseForge
 				{
 					BlueprintEvents.erase(Iterator->first);
 					BlueprintInstances.erase(Iterator->first);
+					std::erase_if(BlueprintTraces,
+						[&](const BlueprintRuntimeTrace& Trace) { return Trace.Handle.Target == Iterator->second; });
 					std::erase_if(PendingBlueprintTimers,
 						[&](const PendingBlueprintTimer& Timer) { return Timer.Target == Iterator->second; });
 					Iterator = BlueprintKnownEntities.erase(Iterator);
@@ -1197,6 +1221,30 @@ namespace PulseForge
 			std::span<const BlueprintRuntimeDiagnostic>{};
 	}
 
+	std::span<const BlueprintRuntimeTrace> SceneRuntime::GetBlueprintTraces() const noexcept
+	{
+		return m_Impl ? std::span<const BlueprintRuntimeTrace>(m_Impl->BlueprintTraces) :
+			std::span<const BlueprintRuntimeTrace>{};
+	}
+
+	std::optional<BlueprintRuntimeTrace> SceneRuntime::ReadBlueprintTrace(
+		const BlueprintRuntimeTraceHandle& Handle) const
+	{
+		if (!m_Impl || m_Impl->State != Impl::Lifecycle::Active || !Handle.Target.IsValid() ||
+			Handle.SessionGeneration != m_Impl->SessionGeneration ||
+			Handle.ProgramGeneration != m_Impl->BlueprintProgramGeneration)
+			return std::nullopt;
+		const auto Trace = std::find_if(m_Impl->BlueprintTraces.begin(), m_Impl->BlueprintTraces.end(),
+			[&](const BlueprintRuntimeTrace& Candidate)
+			{
+				return Candidate.Handle.Target == Handle.Target && Candidate.Handle.Asset == Handle.Asset &&
+					Candidate.Handle.SessionGeneration == Handle.SessionGeneration &&
+					Candidate.Handle.ProgramGeneration == Handle.ProgramGeneration &&
+					Candidate.Handle.Revision == Handle.Revision;
+			});
+		return Trace == m_Impl->BlueprintTraces.end() ? std::nullopt : std::optional<BlueprintRuntimeTrace>(*Trace);
+	}
+
 	std::optional<SceneRuntimeBoundaryRequest> SceneRuntime::GetPendingBoundaryRequest() const noexcept
 	{
 		if (!m_Impl || m_Impl->BoundaryRequestStatus != Impl::RequestStatus::Pending) return std::nullopt;
@@ -1272,6 +1320,7 @@ namespace PulseForge
 			{
 				m_Impl->BlueprintEvents.clear();
 				m_Impl->BlueprintInstances.clear();
+				m_Impl->BlueprintTraces.clear();
 				m_Impl->PendingBlueprintPhysicsForces.clear();
 				m_Impl->PendingBlueprintTimers.clear();
 				m_Impl->PendingBlueprintEntitySpawns.clear();

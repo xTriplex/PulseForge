@@ -52,6 +52,29 @@ namespace
 		std::array<float, 1> State{ 0.0f };
 		const auto Executed = ExecuteBlueprintProgram(*Verified, State);
 		PF_CHECK(Tests, Executed && Executed->InstructionsExecuted == 5);
+		PF_CHECK(Tests, Executed && Executed->ExecutedNodes.size() == 5 &&
+			!Executed->ExecutedNodeTraceTruncated);
+		if (Executed)
+			for (size_t Index = 0; Index < 5; ++Index)
+				PF_CHECK(Tests, Executed->ExecutedNodes[Index] == UUID(10, Index + 1));
+		BlueprintProgramSource LongTraceSource;
+		LongTraceSource.ActionNames = { "Trace" };
+		for (size_t Index = 0; Index < BlueprintMaximumTraceNodesPerEvent; ++Index)
+			LongTraceSource.Instructions.push_back({ BlueprintOpcode::JumpIfAction, 0,
+				static_cast<uint32_t>(Index + 1), UUID(12, Index + 1) });
+		LongTraceSource.Instructions.push_back({ BlueprintOpcode::Return, 0, 0,
+			UUID(12, BlueprintMaximumTraceNodesPerEvent + 1) });
+		const auto LongTraceProgram = VerifyBlueprintProgram(std::move(LongTraceSource));
+		PF_CHECK(Tests, LongTraceProgram.has_value());
+		if (LongTraceProgram)
+		{
+			std::array<float, 0> EmptyState{};
+			const auto LongTrace = ExecuteBlueprintProgram(*LongTraceProgram, EmptyState,
+				BlueprintDefaultInstructionBudget, "Trace");
+			PF_CHECK(Tests, LongTrace && LongTrace->InstructionsExecuted == BlueprintMaximumTraceNodesPerEvent + 1 &&
+				LongTrace->ExecutedNodes.size() == BlueprintMaximumTraceNodesPerEvent &&
+				LongTrace->ExecutedNodeTraceTruncated);
+		}
 		PF_CHECK(Tests, Executed->PropertyWrites.size() == 1 && Executed->PropertyWrites[0].PropertyId == "health" &&
 			Executed->PropertyWrites[0].Value == 6.0f);
 		std::vector<std::byte> LegacyProgramBytes = *Encoded;
