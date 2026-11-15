@@ -4,7 +4,17 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
+
+namespace
+{
+	int Fail(int Code, const char* Stage)
+	{
+		std::cerr << "Cooked graph material consumer failed at " << Stage << " (code " << Code << ")\n";
+		return Code;
+	}
+}
 
 int main(int ArgumentCount, char** Arguments)
 {
@@ -19,31 +29,35 @@ int main(int ArgumentCount, char** Arguments)
 		CookedAssetCompatibility Compatibility{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) };
 	#endif
 		auto Provider = CookedContentProvider::Open(std::filesystem::u8path(Arguments[1]), Compatibility);
-		if (!Provider) return 20;
+		if (!Provider) return Fail(20, "open cooked provider");
 		const std::filesystem::path ContentRoot = std::filesystem::u8path(Arguments[1]);
 		std::ifstream IdentityFile(ContentRoot / "graph-material-asset-id.txt", std::ios::binary);
 		const std::string IdentityText{ std::istreambuf_iterator<char>(IdentityFile), std::istreambuf_iterator<char>() };
 		const auto Asset = UUID::Parse(IdentityText);
-		if (!IdentityFile.is_open() || !Asset || Asset->IsNil()) return 21;
+		if (!IdentityFile.is_open() || !Asset || Asset->IsNil()) return Fail(21, "read graph material asset identity");
 		auto Product = (*Provider)->LoadGraphMaterialProduct(*Asset);
 		if (!Product || Product->RecipeFingerprint.size() != 32 || Product->SpirV.size() < 20 ||
-			Product->Parameters.size() != 1 || Product->Parameters.front().Name != "Accent") return 22;
+			Product->Parameters.size() != 1 || Product->Parameters.front().Name != "Accent")
+			return Fail(22, "load graph material product");
 		const auto MaterialState = (*Provider)->LoadMaterialProduct(*Asset);
-		if (!MaterialState || MaterialState->BaseColorFactor != std::array<float, 4>{ 1.0f, 1.0f, 1.0f, 1.0f }) return 25;
+		if (!MaterialState || MaterialState->BaseColorFactor != std::array<float, 4>{ 1.0f, 1.0f, 1.0f, 1.0f })
+			return Fail(25, "load fixed material state");
 		if (Product->SpirV[0] != std::byte{ 0x03 } || Product->SpirV[1] != std::byte{ 0x02 } ||
-			Product->SpirV[2] != std::byte{ 0x23 } || Product->SpirV[3] != std::byte{ 0x07 }) return 23;
+			Product->SpirV[2] != std::byte{ 0x23 } || Product->SpirV[3] != std::byte{ 0x07 })
+			return Fail(23, "verify SPIR-V magic");
 		return 0;
 	}
-	if (ArgumentCount != 1) return 24;
+	if (ArgumentCount != 1) return Fail(24, "validate synthetic invocation arguments");
 	std::error_code Error;
 	const auto Unique = UUID::Generate();
-	if (!Unique) return 1;
+	if (!Unique) return Fail(1, "generate synthetic project identity");
 	const auto SystemTemporaryRoot = std::filesystem::temp_directory_path(Error);
-	if (Error) return 1;
+	if (Error) return Fail(1, "resolve system temporary directory");
 	const auto TemporaryRoot = std::filesystem::weakly_canonical(SystemTemporaryRoot, Error);
-	if (Error) return 1;
+	if (Error) return Fail(1, "canonicalize temporary directory");
 	const auto Temporary = TemporaryRoot / ("PF-CookedGraphMaterial-" + Unique->ToString());
-	if (Error || !std::filesystem::create_directories(Temporary, Error) || Error) return 1;
+	if (Error || !std::filesystem::create_directories(Temporary, Error) || Error)
+		return Fail(1, "create synthetic cooked root");
 	struct Cleanup final
 	{
 		std::filesystem::path Root;
@@ -62,7 +76,7 @@ int main(int ArgumentCount, char** Arguments)
 	Product.SpirV[2] = std::byte{ 0x23 };
 	Product.SpirV[3] = std::byte{ 0x07 };
 	auto Payload = Detail::EncodeGraphMaterialProduct(Product);
-	if (!Payload) return 2;
+	if (!Payload) return Fail(2, "encode synthetic graph product");
 	CookedAssetEntry Entry;
 	Entry.Asset = Asset;
 	Entry.Product = CookedAssetProductKind::GraphMaterial;
@@ -74,11 +88,11 @@ int main(int ArgumentCount, char** Arguments)
 	Entry.RelativePayloadPath = "g/fixture/graph.pfgm";
 	const auto PayloadPath = Temporary / std::filesystem::u8path(Entry.RelativePayloadPath);
 	std::filesystem::create_directories(PayloadPath.parent_path(), Error);
-	if (Error) return 3;
+	if (Error) return Fail(3, "create graph payload directory");
 	{
 		std::ofstream Output(PayloadPath, std::ios::binary | std::ios::trunc);
 		Output.write(reinterpret_cast<const char*>(Payload->data()), static_cast<std::streamsize>(Payload->size()));
-		if (!Output) return 4;
+		if (!Output) return Fail(4, "write graph payload");
 	}
 #if defined(_WIN32)
 	CookedAssetCompatibility Compatibility{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) };
@@ -99,25 +113,26 @@ int main(int ArgumentCount, char** Arguments)
 	SceneEntry.RelativePayloadPath = "g/fixture/startup.scene";
 	const auto ScenePath = Temporary / std::filesystem::u8path(SceneEntry.RelativePayloadPath);
 	std::filesystem::create_directories(ScenePath.parent_path(), Error);
-	if (Error) return 9;
+	if (Error) return Fail(9, "create scene payload directory");
 	{
 		std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
 		Output.write(reinterpret_cast<const char*>(ScenePayload.data()), static_cast<std::streamsize>(ScenePayload.size()));
-		if (!Output) return 10;
+		if (!Output) return Fail(10, "write scene payload");
 	}
 	const auto Manifest = CookedAssetCatalog::SerializeManifest(UUID(3, 4), StartupScene, Compatibility, {}, { Entry, SceneEntry });
-	if (!Manifest) return 5;
+	if (!Manifest) return Fail(5, "serialize synthetic manifest");
 	{
 		std::ofstream Output(Temporary / CookedAssetCatalog::ManifestFileName, std::ios::binary | std::ios::trunc);
 		Output.write(Manifest->data(), static_cast<std::streamsize>(Manifest->size()));
-		if (!Output) return 6;
+		if (!Output) return Fail(6, "write synthetic manifest");
 	}
 	auto Provider = CookedContentProvider::Open(Temporary, Compatibility);
-	if (!Provider) return 7;
+	if (!Provider) return Fail(7, "open synthetic cooked provider");
 	auto Loaded = (*Provider)->LoadGraphMaterialProduct(Asset);
 	if (!Loaded || Loaded->RecipeFingerprint != Product.RecipeFingerprint || Loaded->SpirV != Product.SpirV ||
-		Loaded->Parameters != Product.Parameters) return 8;
+		Loaded->Parameters != Product.Parameters) return Fail(8, "round-trip synthetic graph product");
 	auto MaterialState = (*Provider)->LoadMaterialProduct(Asset);
-	if (!MaterialState || MaterialState->BaseColorFactor != Product.Material.BaseColorFactor || !MaterialState->DoubleSided) return 26;
+	if (!MaterialState || MaterialState->BaseColorFactor != Product.Material.BaseColorFactor || !MaterialState->DoubleSided)
+		return Fail(26, "round-trip synthetic material render state");
 	return 0;
 }

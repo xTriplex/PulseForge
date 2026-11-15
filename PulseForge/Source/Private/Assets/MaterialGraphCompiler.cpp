@@ -402,11 +402,12 @@ namespace PulseForge
 		std::vector<UUID> SourceNodes;
 		SourceNodes.reserve(Generated->IR.Expressions.size());
 		for (const auto& Expression : Generated->IR.Expressions) SourceNodes.push_back(Expression.SourceNode);
+		DerivedDataArtifactReadResult CachedArtifact;
 		if (Request.ArtifactStore)
 		{
-			auto Cached = Request.ArtifactStore->Read(ArtifactKey);
-			if (Cached.Status == DerivedDataArtifactReadStatus::Hit &&
-				IsSpirV(Cached.Payload, Request.MaximumOutputBytes, !Generated->Parameters.empty()))
+			CachedArtifact = Request.ArtifactStore->Read(ArtifactKey);
+			if (CachedArtifact.Status == DerivedDataArtifactReadStatus::Hit &&
+				IsSpirV(CachedArtifact.Payload, Request.MaximumOutputBytes, !Generated->Parameters.empty()))
 			{
 				if (Request.CancellationToken.stop_requested())
 					return std::unexpected(Failure(MaterialGraphCompileErrorCode::Cancelled,
@@ -414,13 +415,21 @@ namespace PulseForge
 				if (Request.IsGenerationCurrent && !Request.IsGenerationCurrent(Request.Generation))
 					return std::unexpected(Failure(MaterialGraphCompileErrorCode::StaleGeneration,
 						"Cached material artifact belongs to a stale generation"));
-				return MaterialGraphCompiledArtifact{ std::move(Cached.Payload), Generated->Hlsl, Recipe.DigestHex, {},
+				return MaterialGraphCompiledArtifact{ std::move(CachedArtifact.Payload), Generated->Hlsl, Recipe.DigestHex, {},
 					std::move(SourceNodes), std::move(Generated->Parameters), Request.Generation };
 			}
 		}
 		const auto Executable = std::filesystem::weakly_canonical(ConfiguredExecutable, PathError);
 		if (PathError || !Executable.is_absolute() || !std::filesystem::is_regular_file(Executable, PathError))
-			return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerUnavailable, "Configured DXC executable is unavailable"));
+		{
+			std::string Message = "Configured DXC executable is unavailable";
+			if (Request.ArtifactStore)
+			{
+				Message += "; material artifact cache status=" + std::to_string(static_cast<uint32_t>(CachedArtifact.Status));
+				if (!CachedArtifact.Message.empty()) Message += ": " + CachedArtifact.Message;
+			}
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerUnavailable, std::move(Message)));
+		}
 		TempFiles Temporary{ std::filesystem::temp_directory_path() / ("PulseForgeMaterialGraph-" + UUID().ToString()) };
 		if (!std::filesystem::create_directory(Temporary.Root, PathError) || PathError)
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest, "Could not create isolated compiler workspace"));
@@ -578,7 +587,16 @@ namespace PulseForge
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::StaleGeneration, "DXC completed for a stale material generation"));
 		auto SpirV = ReadBoundedFile(OutputPath, Request.MaximumOutputBytes, !Generated->Parameters.empty());
 		if (!SpirV) return std::unexpected(SpirV.error());
-		if (Request.ArtifactStore) (void)Request.ArtifactStore->Write(ArtifactKey, *SpirV);
+		if (Request.ArtifactStore)
+		{
+			const auto Stored = Request.ArtifactStore->Write(ArtifactKey, *SpirV);
+			if (Stored.Status != DerivedDataArtifactWriteStatus::Written &&
+				Stored.Status != DerivedDataArtifactWriteStatus::ExistingValid)
+			{
+				if (!Diagnostics.empty() && Diagnostics.back() != '\n') Diagnostics.push_back('\n');
+				Diagnostics += "Material graph artifact cache write failed: " + Stored.Message;
+			}
+		}
 		return MaterialGraphCompiledArtifact{ std::move(*SpirV), Generated->Hlsl, Recipe.DigestHex, std::move(Diagnostics),
 			std::move(SourceNodes), std::move(Generated->Parameters), Request.Generation };
 	}
