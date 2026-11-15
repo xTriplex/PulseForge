@@ -66,7 +66,7 @@ namespace PulseForge
 				"Blueprint program version is not supported"));
 		if (Source.Instructions.empty() || Source.Instructions.size() > BlueprintMaximumInstructionCount ||
 			Source.Constants.size() > BlueprintMaximumInstructionCount || Source.ScalarPropertyIds.size() > BlueprintMaximumScalarCount ||
-			Source.UIActionNames.size() > BlueprintMaximumUIActionNameCount)
+			Source.ActionNames.size() > BlueprintMaximumActionNameCount)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, 0, {},
 				"Blueprint program exceeds a structural limit or has no instructions"));
 
@@ -84,9 +84,9 @@ namespace PulseForge
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidPropertyIdentifier, 0, {},
 					"Blueprint property identifiers must be unique and bounded"));
 		}
-		std::unordered_set<std::string> UIActionNames;
-		for (const std::string& Name : Source.UIActionNames)
-			if (Name.empty() || Name.size() > BlueprintMaximumUIActionNameLength || !UIActionNames.emplace(Name).second)
+		std::unordered_set<std::string> ActionNames;
+		for (const std::string& Name : Source.ActionNames)
+			if (Name.empty() || Name.size() > BlueprintMaximumActionNameLength || !ActionNames.emplace(Name).second)
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
 					"Blueprint UI action names must be unique, non-empty, and bounded"));
 
@@ -160,10 +160,10 @@ namespace PulseForge
 				--Depth;
 				if (const auto Error = Enqueue(Instruction.Target, Depth, Index)) return std::unexpected(*Error);
 				break;
-			case BlueprintOpcode::JumpIfUIAction:
-				if (Instruction.Operand >= Source.UIActionNames.size())
+			case BlueprintOpcode::JumpIfAction:
+				if (Instruction.Operand >= Source.ActionNames.size())
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
-						"Blueprint UI action name index is out of range"));
+						"Blueprint action name index is out of range"));
 				if (const auto Error = Enqueue(Instruction.Target, Depth, Index)) return std::unexpected(*Error);
 				break;
 			case BlueprintOpcode::Return:
@@ -198,7 +198,7 @@ namespace PulseForge
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
 		uint32_t InstructionBudget,
-		std::string_view UIActionName)
+		std::string_view ActionName)
 	{
 		const BlueprintProgramSource& Source = Program.GetSource();
 		if (ScalarState.size() != Source.ScalarPropertyIds.size() || ScalarState.size() > BlueprintMaximumScalarCount)
@@ -253,8 +253,8 @@ namespace PulseForge
 				ProgramCounter = Condition == 0.0f ? Instruction.Target : ProgramCounter + 1;
 				break;
 			}
-			case BlueprintOpcode::JumpIfUIAction:
-				ProgramCounter = UIActionName == Source.UIActionNames[Instruction.Operand]
+			case BlueprintOpcode::JumpIfAction:
+				ProgramCounter = ActionName == Source.ActionNames[Instruction.Operand]
 					? Instruction.Target : ProgramCounter + 1;
 				break;
 			case BlueprintOpcode::WriteScalarProperty:
@@ -285,7 +285,7 @@ namespace PulseForge
 		AppendInteger(Bytes, Source.Version);
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.Constants.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.ScalarPropertyIds.size()));
-		AppendInteger(Bytes, static_cast<uint32_t>(Source.UIActionNames.size()));
+		AppendInteger(Bytes, static_cast<uint32_t>(Source.ActionNames.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.Instructions.size()));
 		for (const float Constant : Source.Constants) AppendInteger(Bytes, std::bit_cast<uint32_t>(Constant));
 		for (const std::string& PropertyId : Source.ScalarPropertyIds)
@@ -293,7 +293,7 @@ namespace PulseForge
 			AppendInteger(Bytes, static_cast<uint16_t>(PropertyId.size()));
 			for (const char Character : PropertyId) Bytes.push_back(static_cast<std::byte>(static_cast<uint8_t>(Character)));
 		}
-		for (const std::string& ActionName : Source.UIActionNames)
+		for (const std::string& ActionName : Source.ActionNames)
 		{
 			AppendInteger(Bytes, static_cast<uint16_t>(ActionName.size()));
 			for (const char Character : ActionName) Bytes.push_back(static_cast<std::byte>(static_cast<uint8_t>(Character)));
@@ -331,20 +331,20 @@ namespace PulseForge
 		if (EncodedVersion != BlueprintLegacyProgramFormatVersion && EncodedVersion != BlueprintProgramFormatVersion)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, 0, {},
 				"Blueprint program version is not supported"));
-		uint32_t UIActionNameCount = 0;
+		uint32_t ActionNameCount = 0;
 		if ((EncodedVersion == BlueprintProgramFormatVersion &&
-			(!ReadInteger(Bytes, Offset, UIActionNameCount) || !ReadInteger(Bytes, Offset, InstructionCount))) ||
+			(!ReadInteger(Bytes, Offset, ActionNameCount) || !ReadInteger(Bytes, Offset, InstructionCount))) ||
 			(EncodedVersion == BlueprintLegacyProgramFormatVersion && !ReadInteger(Bytes, Offset, InstructionCount)))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
 		if (ConstantCount > BlueprintMaximumInstructionCount || PropertyCount > BlueprintMaximumScalarCount ||
-			UIActionNameCount > BlueprintMaximumUIActionNameCount ||
+			ActionNameCount > BlueprintMaximumActionNameCount ||
 			InstructionCount == 0 || InstructionCount > BlueprintMaximumInstructionCount)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, 0, {},
 				"Blueprint program counts exceed structural limits"));
 		Source.Constants.reserve(ConstantCount);
 		Source.ScalarPropertyIds.reserve(PropertyCount);
-		Source.UIActionNames.reserve(UIActionNameCount);
+		Source.ActionNames.reserve(ActionNameCount);
 		Source.Instructions.reserve(InstructionCount);
 		for (uint32_t Index = 0; Index < ConstantCount; ++Index)
 		{
@@ -366,17 +366,17 @@ namespace PulseForge
 			for (char& Character : PropertyId) Character = static_cast<char>(std::to_integer<uint8_t>(Bytes[Offset++]));
 			Source.ScalarPropertyIds.push_back(std::move(PropertyId));
 		}
-		for (uint32_t Index = 0; Index < UIActionNameCount; ++Index)
+		for (uint32_t Index = 0; Index < ActionNameCount; ++Index)
 		{
 			uint16_t Length = 0;
-			if (!ReadInteger(Bytes, Offset, Length) || Length == 0 || Length > BlueprintMaximumUIActionNameLength ||
+			if (!ReadInteger(Bytes, Offset, Length) || Length == 0 || Length > BlueprintMaximumActionNameLength ||
 				Offset > Bytes.size() || Bytes.size() - Offset < Length)
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
-					"Blueprint UI action table is truncated or invalid"));
+					"Blueprint action name table is truncated or invalid"));
 			std::string ActionName;
 			ActionName.resize(Length);
 			for (char& Character : ActionName) Character = static_cast<char>(std::to_integer<uint8_t>(Bytes[Offset++]));
-			Source.UIActionNames.push_back(std::move(ActionName));
+			Source.ActionNames.push_back(std::move(ActionName));
 		}
 		for (uint32_t Index = 0; Index < InstructionCount; ++Index)
 		{

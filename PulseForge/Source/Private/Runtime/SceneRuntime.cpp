@@ -19,6 +19,7 @@
 #include <array>
 #include <exception>
 #include <atomic>
+#include <deque>
 #include <fstream>
 #include <iterator>
 #include <unordered_map>
@@ -110,7 +111,7 @@ namespace PulseForge
 			std::vector<std::string> PropertyIds;
 			std::vector<float> ScalarState;
 		};
-		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnDestroy) + 1;
+		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnActionCancelled) + 1;
 		using BlueprintEventStates = std::array<BoundBlueprintEvent, BlueprintEventCount>;
 
 		struct RuntimeUICanvasState final
@@ -134,6 +135,7 @@ namespace PulseForge
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
 		std::unordered_map<UUID, Entity, UUIDHash> BlueprintKnownEntities;
+		std::deque<PhysicsContactEvent> PendingContactEvents;
 		std::vector<BlueprintRuntimeDiagnostic> BlueprintDiagnostics;
 		RuntimeUIViewport RuntimeUIView{};
 		std::vector<RuntimeUIInputEvent> RuntimeUIEvents;
@@ -152,6 +154,8 @@ namespace PulseForge
 		uint64_t NextBoundaryRequestGeneration = 0;
 		uint32_t BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 		uint32_t BlueprintInstructionsExecuted = 0;
+		uint32_t BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
+		bool BlueprintDispatchLimitReported = false;
 
 		void RecordBlueprintDiagnostic(
 			const Entity& Target,
@@ -185,6 +189,17 @@ namespace PulseForge
 						"Blueprint event binding uses an unknown event");
 					return;
 				}
+				if (BlueprintDispatchesRemaining == 0)
+				{
+					if (!BlueprintDispatchLimitReported)
+					{
+						BlueprintDispatchLimitReported = true;
+						RecordBlueprintDiagnostic(Target, nullptr, Event, BlueprintProgramErrorCode::EventBudgetExceeded, {},
+							"Scene Blueprint event dispatch budget was exhausted for this frame");
+					}
+					return;
+				}
+				--BlueprintDispatchesRemaining;
 
 				BoundBlueprintEvent& Instance = BlueprintEvents[Target.GetUUID()][EventIndex];
 				if (Instance.BoundEntity != Target)
@@ -587,6 +602,8 @@ namespace PulseForge
 			Candidate->State = Impl::Lifecycle::Active;
 			Candidate->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 			Candidate->BlueprintInstructionsExecuted = 0;
+			Candidate->BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
+			Candidate->BlueprintDispatchLimitReported = false;
 			if (m_Services.GetBlueprintProgramGeneration)
 				Candidate->BlueprintProgramGeneration = m_Services.GetBlueprintProgramGeneration();
 			for (const Entity& EntityValue : Source.GetEntities())
@@ -648,9 +665,12 @@ namespace PulseForge
 		{
 			m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 			m_Impl->BlueprintInstructionsExecuted = 0;
+			m_Impl->BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
+			m_Impl->BlueprintDispatchLimitReported = false;
 			if (m_Impl->Source)
 				for (const Entity& EntityValue : m_Impl->Source->GetEntities())
 					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Services);
+			m_Impl->PendingContactEvents.clear();
 			m_Impl->State = Impl::Lifecycle::Stopping;
 			m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
 			m_Impl->BoundaryRequest.reset();
@@ -838,6 +858,8 @@ namespace PulseForge
 		}
 		m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 		m_Impl->BlueprintInstructionsExecuted = 0;
+		m_Impl->BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
+		m_Impl->BlueprintDispatchLimitReported = false;
 		const auto MakeFrameResult = [&](uint32_t PhysicsSteps = 0)
 		{
 			return SceneRuntimeFrameResult{ PhysicsSteps, m_Impl->Physics->GetStats(), m_Impl->BlueprintInstructionsExecuted };
@@ -906,8 +928,43 @@ namespace PulseForge
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return MakeFrameResult();
+		// Lua has read the current action snapshot; deliver its edges before Blueprint OnUpdate and physics contacts.
+		if (m_Services.GameplayInput)
+		{
+			const GameplayActionMap& ActionMap = m_Services.GameplayInput->GetActionMap();
+			const ActionSnapshot& Actions = m_Services.GameplayInput->GetSnapshot();
+			for (const GameplayActionDefinition& Definition : ActionMap.Actions)
+			{
+				if (m_Impl->BlueprintDispatchesRemaining == 0) break;
+				if (Definition.Context != InputContext::Gameplay) continue;
+				const ActionValue* Value = Actions.Find(Definition.Id);
+				if (!Value) continue;
+				std::optional<BlueprintEventKind> Event;
+				if (Value->Canceled) Event = BlueprintEventKind::OnActionCancelled;
+				else if (Value->Released) Event = BlueprintEventKind::OnActionReleased;
+				else if (Value->Pressed) Event = BlueprintEventKind::OnActionPressed;
+				if (!Event) continue;
+				for (const Entity& EntityValue : Source.GetEntities())
+				{
+					if (m_Impl->BlueprintDispatchesRemaining == 0) break;
+					m_Impl->DispatchBlueprintEvent(Source, EntityValue, *Event, m_Services, Definition.Id);
+					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+						return MakeFrameResult();
+				}
+				if (m_Impl->BlueprintDispatchesRemaining == 0 && !m_Impl->BlueprintDispatchLimitReported)
+				{
+					m_Impl->BlueprintDispatchLimitReported = true;
+					m_Impl->RecordBlueprintDiagnostic({}, nullptr, *Event, BlueprintProgramErrorCode::EventBudgetExceeded, {},
+						"Scene Blueprint event dispatch budget was exhausted for this frame");
+				}
+			}
+		}
 		for (const Entity& EntityValue : Source.GetEntities())
+		{
+			if (m_Impl->BlueprintDispatchesRemaining == 0) break;
 			m_Impl->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnUpdate, m_Services);
+		}
 		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
 				"Could not apply queued audio controls: " + Result.error().Message));
@@ -930,8 +987,29 @@ namespace PulseForge
 				SceneRuntimeSubsystem::Physics,
 				"Could not advance scene physics: " + PhysicsResult.error().Message));
 
-		for (const PhysicsContactEvent& Event : m_Impl->Physics->TakeContactEvents())
+		const std::vector<PhysicsContactEvent> ContactEvents = m_Impl->Physics->TakeContactEvents();
+		constexpr size_t MaximumQueuedContactEvents = 65536;
+		bool ContactQueueOverflowed = false;
+		for (const PhysicsContactEvent& Event : ContactEvents)
 		{
+			if (m_Impl->PendingContactEvents.size() == MaximumQueuedContactEvents)
+			{
+				ContactQueueOverflowed = true;
+				break;
+			}
+			m_Impl->PendingContactEvents.push_back(Event);
+		}
+		if (ContactQueueOverflowed)
+			m_Impl->RecordBlueprintDiagnostic({}, nullptr, BlueprintEventKind::OnCollisionBegin,
+				BlueprintProgramErrorCode::EventBudgetExceeded, {},
+				"Scene contact event queue reached its limit; excess events were discarded");
+		const size_t ContactEventsToDispatch = std::min(m_Impl->PendingContactEvents.size(),
+			static_cast<size_t>(BlueprintMaximumEventDispatchesPerFrame));
+		for (size_t ContactIndex = 0; ContactIndex < ContactEventsToDispatch; ++ContactIndex)
+		{
+			if (m_Impl->BlueprintDispatchesRemaining < 2) break;
+			const PhysicsContactEvent Event = m_Impl->PendingContactEvents.front();
+			m_Impl->PendingContactEvents.pop_front();
 			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
 				return MakeFrameResult(*PhysicsResult);
 			const BlueprintEventKind BlueprintEvent = Event.IsSensorPair

@@ -97,9 +97,9 @@ namespace
 		BlueprintProgramSource UIActionProgram;
 		UIActionProgram.Constants = { 1.0f };
 		UIActionProgram.ScalarPropertyIds = { "activated" };
-		UIActionProgram.UIActionNames = { "Open" };
+		UIActionProgram.ActionNames = { "Open" };
 		UIActionProgram.Instructions = {
-			{ BlueprintOpcode::JumpIfUIAction, 0, 2, UUID(16, 1) },
+			{ BlueprintOpcode::JumpIfAction, 0, 2, UUID(16, 1) },
 			{ BlueprintOpcode::Return, 0, 0, UUID(16, 2) },
 			{ BlueprintOpcode::PushConstant, 0, 0, UUID(16, 3) },
 			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(16, 4) },
@@ -184,7 +184,7 @@ namespace
 		PF_CHECK(Tests, LegacyDecoded && LegacyDecoded->GetEvents().size() == 2);
 
 		std::vector<std::byte> UnsupportedVersion = *Encoded;
-		UnsupportedVersion[4] = std::byte{ 3 };
+		UnsupportedVersion[4] = std::byte{ 4 };
 		const auto Unsupported = DeserializeBlueprintAsset(UnsupportedVersion);
 		PF_CHECK(Tests, !Unsupported && Unsupported.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
 		const auto Truncated = DeserializeBlueprintAsset(std::span<const std::byte>(*Encoded).first(8));
@@ -219,6 +219,23 @@ namespace
 			const auto LegacyDestroyDecoded = DeserializeBlueprintAsset(LegacyDestroy);
 			PF_CHECK(Tests, !LegacyDestroyDecoded &&
 				LegacyDestroyDecoded.error().Code == BlueprintProgramErrorCode::InvalidOperand);
+			std::vector<std::byte> PreviousDestroy = *DestroyEncoded;
+			PreviousDestroy[4] = std::byte{ 2 };
+			PF_CHECK(Tests, DeserializeBlueprintAsset(PreviousDestroy).has_value());
+		}
+		const std::array<BlueprintEventProgramSource, 1> ActionEvent{
+			BlueprintEventProgramSource{ BlueprintEventKind::OnActionPressed, CreateProgram }
+		};
+		const auto ActionEncoded = SerializeBlueprintAsset(ActionEvent);
+		PF_CHECK(Tests, ActionEncoded.has_value());
+		if (ActionEncoded)
+		{
+			const auto ActionDecoded = DeserializeBlueprintAsset(*ActionEncoded);
+			PF_CHECK(Tests, ActionDecoded && ActionDecoded->GetEvents().size() == 1 &&
+				ActionDecoded->GetEvents()[0].Event == BlueprintEventKind::OnActionPressed);
+			std::vector<std::byte> PreviousAction = *ActionEncoded;
+			PreviousAction[4] = std::byte{ 2 };
+			PF_CHECK(Tests, !DeserializeBlueprintAsset(PreviousAction).has_value());
 		}
 	}
 }

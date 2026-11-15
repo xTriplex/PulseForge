@@ -19,9 +19,10 @@ namespace PulseForge
 	inline constexpr size_t BlueprintMaximumInstructionCount = 4096;
 	inline constexpr size_t BlueprintMaximumScalarCount = 64;
 	inline constexpr size_t BlueprintMaximumPropertyIdentifierLength = 64;
-	inline constexpr size_t BlueprintMaximumUIActionNameCount = 64;
-	inline constexpr size_t BlueprintMaximumUIActionNameLength = 128;
+	inline constexpr size_t BlueprintMaximumActionNameCount = 64;
+	inline constexpr size_t BlueprintMaximumActionNameLength = 128;
 	inline constexpr uint32_t BlueprintDefaultInstructionBudget = 10000;
+	inline constexpr uint32_t BlueprintMaximumEventDispatchesPerFrame = 4096;
 
 	enum class BlueprintEventKind : uint8_t
 	{
@@ -34,7 +35,10 @@ namespace PulseForge
 		OnTriggerStay,
 		OnTriggerExit,
 		OnUIAction,
-		OnDestroy
+		OnDestroy,
+		OnActionPressed,
+		OnActionReleased,
+		OnActionCancelled
 	};
 
 	enum class BlueprintOpcode : uint8_t
@@ -48,7 +52,7 @@ namespace PulseForge
 		JumpIfZero,
 		WriteScalarProperty,
 		Return,
-		JumpIfUIAction
+		JumpIfAction
 	};
 
 	struct BlueprintInstruction
@@ -64,7 +68,7 @@ namespace PulseForge
 		uint32_t Version = BlueprintProgramFormatVersion;
 		std::vector<float> Constants;
 		std::vector<std::string> ScalarPropertyIds;
-		std::vector<std::string> UIActionNames;
+		std::vector<std::string> ActionNames;
 		std::vector<BlueprintInstruction> Instructions;
 	};
 
@@ -83,7 +87,8 @@ namespace PulseForge
 		MissingReturn,
 		InstructionBudgetExceeded,
 		HostRejectedPropertyWrite,
-		HostFailure
+		HostFailure,
+		EventBudgetExceeded
 	};
 
 	struct BlueprintProgramError
@@ -124,7 +129,7 @@ namespace PulseForge
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
 		uint32_t InstructionBudget = BlueprintDefaultInstructionBudget,
-		std::string_view UIActionName = {});
+		std::string_view ActionName = {});
 	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, BlueprintProgramError>
 		SerializeBlueprintProgram(const BlueprintProgramSource& Source);
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>
