@@ -1033,6 +1033,9 @@ namespace PulseForge
 				: Event.Phase == PhysicsContactPhase::Begin ? BlueprintEventKind::OnCollisionBegin
 					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnCollisionStay : BlueprintEventKind::OnCollisionEnd;
 			m_Impl->DispatchBlueprintEvent(Source, Event.First, BlueprintEvent, m_Impl->Services);
+			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+				return MakeFrameResult(*PhysicsResult);
 			m_Impl->DispatchBlueprintEvent(Source, Event.Second, BlueprintEvent, m_Impl->Services);
 			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)

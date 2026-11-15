@@ -495,6 +495,41 @@ namespace
 		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Phases[TriggerId] == 3.0f && Phases[BodyId] == 3.0f);
 		Runtime.Stop();
+
+		TransformComponent OverlapAgain;
+		PF_CHECK(Tests, Body->SetTransform(OverlapAgain).has_value());
+		BlueprintProgramSource StopSource;
+		StopSource.Instructions = {
+			{ BlueprintOpcode::RequestStop, 0, 0, UUID(59, 10) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(59, 11) }
+		};
+		const auto VerifiedStop = VerifyBlueprintProgram(std::move(StopSource));
+		PF_CHECK(Tests, VerifiedStop.has_value());
+		if (!VerifiedStop) return;
+		const auto StopProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedStop));
+		uint32_t StopBindings = 0;
+		uint32_t StopQueueCalls = 0;
+		SceneRuntimeServices StopServices;
+		StopServices.ResolveBlueprintProgram = [&](const Entity&, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Event != BlueprintEventKind::OnTriggerEnter) return std::nullopt;
+			++StopBindings;
+			return BlueprintProgramBinding{ ProgramAsset, 2, StopProgram };
+		};
+		StopServices.QueueStop = [&]
+		{
+			++StopQueueCalls;
+			return true;
+		};
+		SceneRuntime StopRuntime(*ProjectResult, Description, StopServices);
+		PF_CHECK(Tests, StopRuntime.Start(TestScene).has_value());
+		const auto StopFrame = StopRuntime.Advance(TestScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, StopFrame && StopFrame->BlueprintInstructionsExecuted == 2 &&
+			StopBindings == 1 && StopQueueCalls == 1);
+		const auto StopRequest = StopRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, StopRequest && StopRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop);
+		StopRuntime.Stop();
 	}
 
 	void TestSceneRuntimeBlueprintDeferredStop(TestRunner& Tests)
