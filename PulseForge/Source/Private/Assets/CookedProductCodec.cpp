@@ -41,6 +41,22 @@ namespace PulseForge
 			return true;
 		}
 
+		void AppendString(std::vector<std::byte>& Output, std::string_view Value)
+		{
+			AppendU32(Output, static_cast<uint32_t>(Value.size()));
+			for (const unsigned char Character : Value) Output.push_back(static_cast<std::byte>(Character));
+		}
+
+		bool ReadString(std::span<const std::byte> Input, size_t& Offset, std::string& Value, size_t MaximumLength)
+		{
+			uint32_t Length = 0;
+			if (!ReadU32(Input, Offset, Length) || Length > MaximumLength || Offset > Input.size() || Length > Input.size() - Offset)
+				return false;
+			Value.assign(reinterpret_cast<const char*>(Input.data() + Offset), Length);
+			Offset += Length;
+			return true;
+		}
+
 		void AppendFloat(std::vector<std::byte>& Output, float Value)
 		{
 			AppendU32(Output, std::bit_cast<uint32_t>(Value));
@@ -261,6 +277,337 @@ namespace PulseForge
 		for (uint32_t& Index : Mesh.Indices)
 			if (!ReadU32(Input, Offset, Index) || Index >= VertexCount) return std::unexpected("Mesh index is out of range");
 		return Mesh;
+	}
+
+	std::expected<std::vector<std::byte>, std::string> Detail::EncodeSkeletalMeshProduct(
+		const ImportedGltfSkeletalMesh& Mesh, std::stop_token CancellationToken)
+	{
+		constexpr size_t MaximumSkeletonNodes = 4096;
+		constexpr size_t MaximumJoints = 256;
+		constexpr size_t MaximumClips = 256;
+		constexpr size_t MaximumChannels = 4096;
+		constexpr size_t MaximumKeys = 1'000'000;
+		if (CancellationToken.stop_requested()) return std::unexpected("Skeletal mesh encoding cancelled");
+		auto Geometry = EncodeMeshProduct(Mesh.Geometry, CancellationToken);
+		if (!Geometry) return std::unexpected("Skeletal geometry is invalid: " + Geometry.error());
+		if (Mesh.SkeletonNodes.empty() || Mesh.SkeletonNodes.size() > MaximumSkeletonNodes ||
+			Mesh.JointNodeIndices.empty() || Mesh.JointNodeIndices.size() > MaximumJoints ||
+			Mesh.InverseBindMatrices.size() != Mesh.JointNodeIndices.size() ||
+			Mesh.VertexInfluences.size() != Mesh.Geometry.Vertices.size() || Mesh.Animations.size() > MaximumClips)
+			return std::unexpected("Skeletal mesh structure exceeds schema bounds");
+
+		std::vector<uint8_t> JointFlags(Mesh.SkeletonNodes.size(), 0);
+		std::vector<std::string_view> StableKeys;
+		StableKeys.reserve(Mesh.SkeletonNodes.size());
+		for (size_t Index = 0; Index < Mesh.SkeletonNodes.size(); ++Index)
+		{
+			const ImportedGltfSkeletonNode& Node = Mesh.SkeletonNodes[Index];
+			if (Node.StableKey.empty() || Node.StableKey.size() > 256 || Node.Name.empty() || Node.Name.size() > 4096 ||
+				Node.ParentNodeIndex < -1 || Node.ParentNodeIndex >= static_cast<int32_t>(Index) ||
+				std::find(StableKeys.begin(), StableKeys.end(), Node.StableKey) != StableKeys.end() ||
+				!std::ranges::all_of(Node.LocalBindMatrix, [](float Value) { return std::isfinite(Value); }) ||
+				std::abs(Node.LocalBindMatrix[3]) > 1.0e-5f || std::abs(Node.LocalBindMatrix[7]) > 1.0e-5f ||
+				std::abs(Node.LocalBindMatrix[11]) > 1.0e-5f || std::abs(Node.LocalBindMatrix[15] - 1.0f) > 1.0e-5f)
+				return std::unexpected("Skeleton node identity, hierarchy, or bind transform is invalid");
+			StableKeys.push_back(Node.StableKey);
+			if (Node.IsJoint) JointFlags[Index] = 1;
+		}
+		for (const uint16_t NodeIndex : Mesh.JointNodeIndices)
+		{
+			if (NodeIndex >= Mesh.SkeletonNodes.size() || !Mesh.SkeletonNodes[NodeIndex].IsJoint || JointFlags[NodeIndex] != 1)
+				return std::unexpected("Skin joint mapping is invalid or duplicated");
+			JointFlags[NodeIndex] = 2;
+		}
+		if (std::ranges::any_of(JointFlags, [](uint8_t Flag) { return Flag == 1; }))
+			return std::unexpected("Skeleton joint flags do not match the skin joint mapping");
+		for (const auto& Matrix : Mesh.InverseBindMatrices)
+			if (!std::ranges::all_of(Matrix, [](float Value) { return std::isfinite(Value); }) ||
+				std::abs(Matrix[3]) > 1.0e-5f || std::abs(Matrix[7]) > 1.0e-5f ||
+				std::abs(Matrix[11]) > 1.0e-5f || std::abs(Matrix[15] - 1.0f) > 1.0e-5f)
+				return std::unexpected("Inverse bind matrix is non-finite or non-affine");
+		for (const GltfVertexInfluences& Influence : Mesh.VertexInfluences)
+		{
+			float WeightSum = 0.0f;
+			for (size_t Component = 0; Component < 4; ++Component)
+			{
+				if (Influence.JointIndices[Component] >= Mesh.JointNodeIndices.size() ||
+					!std::isfinite(Influence.Weights[Component]) || Influence.Weights[Component] < 0.0f ||
+					Influence.Weights[Component] > 1.0f)
+					return std::unexpected("Vertex joint influence is outside the skin or weight bounds");
+				WeightSum += Influence.Weights[Component];
+			}
+			if (!std::isfinite(WeightSum) || std::abs(WeightSum - 1.0f) > 1.0e-4f)
+				return std::unexpected("Vertex influence weights must be normalized");
+		}
+		uint64_t RequiredBytes = 16ull + Geometry->size();
+		const auto AddRequiredBytes = [&](uint64_t Count)
+		{
+			if (Count > MaximumProductBytes || RequiredBytes > MaximumProductBytes - Count) return false;
+			RequiredBytes += Count;
+			return true;
+		};
+		for (const ImportedGltfSkeletonNode& Node : Mesh.SkeletonNodes)
+			if (!AddRequiredBytes(4ull + Node.StableKey.size() + 4ull + Node.Name.size() + 4ull + 4ull + 64ull))
+				return std::unexpected("Skeletal mesh product exceeds artifact byte limit");
+		if (!AddRequiredBytes(4ull + Mesh.JointNodeIndices.size() * 68ull) ||
+			!AddRequiredBytes(4ull + Mesh.VertexInfluences.size() * 32ull) || !AddRequiredBytes(4ull))
+			return std::unexpected("Skeletal mesh product exceeds artifact byte limit");
+		for (const ImportedGltfAnimationClip& Clip : Mesh.Animations)
+		{
+			if (Clip.Channels.size() > MaximumChannels || !AddRequiredBytes(4ull + Clip.StableKey.size() +
+				4ull + Clip.Name.size() + 4ull + 4ull))
+				return std::unexpected("Skeletal animation product exceeds artifact byte limit");
+			for (const ImportedGltfAnimationChannel& Channel : Clip.Channels)
+				if (Channel.Times.size() > MaximumKeys ||
+					!AddRequiredBytes(4ull + Channel.TargetNodeKey.size() + 4ull + 4ull + 4ull + Channel.Times.size() * 20ull))
+					return std::unexpected("Skeletal animation product exceeds artifact byte limit");
+		}
+
+		std::vector<std::byte> Output;
+		Output.reserve(static_cast<size_t>(RequiredBytes));
+		Output.insert(Output.end(), { std::byte{'P'}, std::byte{'F'}, std::byte{'S'}, std::byte{'K'} });
+		AppendU32(Output, SkeletalMeshProductSchemaVersion);
+		AppendU32(Output, static_cast<uint32_t>(Geometry->size()));
+		Output.insert(Output.end(), Geometry->begin(), Geometry->end());
+		AppendU32(Output, static_cast<uint32_t>(Mesh.SkeletonNodes.size()));
+		for (const ImportedGltfSkeletonNode& Node : Mesh.SkeletonNodes)
+		{
+			if (CancellationToken.stop_requested()) return std::unexpected("Skeletal mesh encoding cancelled");
+			AppendString(Output, Node.StableKey);
+			AppendString(Output, Node.Name);
+			AppendU32(Output, std::bit_cast<uint32_t>(Node.ParentNodeIndex));
+			AppendU32(Output, Node.IsJoint ? 1u : 0u);
+			for (const float Value : Node.LocalBindMatrix) AppendFloat(Output, Value);
+		}
+		AppendU32(Output, static_cast<uint32_t>(Mesh.JointNodeIndices.size()));
+		for (const uint16_t Index : Mesh.JointNodeIndices) AppendU32(Output, Index);
+		for (const auto& Matrix : Mesh.InverseBindMatrices)
+			for (const float Value : Matrix) AppendFloat(Output, Value);
+		AppendU32(Output, static_cast<uint32_t>(Mesh.VertexInfluences.size()));
+		for (const GltfVertexInfluences& Influence : Mesh.VertexInfluences)
+		{
+			for (const uint16_t Index : Influence.JointIndices) AppendU32(Output, Index);
+			for (const float Weight : Influence.Weights) AppendFloat(Output, Weight);
+		}
+		AppendU32(Output, static_cast<uint32_t>(Mesh.Animations.size()));
+		size_t TotalChannels = 0;
+		size_t TotalKeys = 0;
+		for (const ImportedGltfAnimationClip& Clip : Mesh.Animations)
+		{
+			if (Clip.StableKey.empty() || Clip.StableKey.size() > 256 || Clip.Name.empty() || Clip.Name.size() > 4096 ||
+				!std::isfinite(Clip.Duration) || Clip.Duration < 0.0f || Clip.Channels.empty() ||
+				Clip.Channels.size() > MaximumChannels - TotalChannels)
+				return std::unexpected("Animation clip identity or channel bounds are invalid");
+			TotalChannels += Clip.Channels.size();
+			AppendString(Output, Clip.StableKey);
+			AppendString(Output, Clip.Name);
+			AppendFloat(Output, Clip.Duration);
+			AppendU32(Output, static_cast<uint32_t>(Clip.Channels.size()));
+			std::vector<std::pair<std::string_view, GltfAnimationPath>> ChannelKeys;
+			for (const ImportedGltfAnimationChannel& Channel : Clip.Channels)
+			{
+				const size_t Components = Channel.Path == GltfAnimationPath::Rotation ? 4 : 3;
+				if (std::find(StableKeys.begin(), StableKeys.end(), Channel.TargetNodeKey) == StableKeys.end() ||
+					(Channel.Path != GltfAnimationPath::Translation && Channel.Path != GltfAnimationPath::Rotation &&
+						Channel.Path != GltfAnimationPath::Scale) ||
+					(Channel.Interpolation != GltfAnimationInterpolation::Step && Channel.Interpolation != GltfAnimationInterpolation::Linear) ||
+					Channel.Times.empty() || Channel.Times.size() != Channel.Values.size() ||
+					Channel.Times.size() > MaximumKeys - TotalKeys ||
+					std::find(ChannelKeys.begin(), ChannelKeys.end(), std::pair{ std::string_view(Channel.TargetNodeKey), Channel.Path }) != ChannelKeys.end())
+					return std::unexpected("Animation channel identity, type, or key bounds are invalid");
+				ChannelKeys.emplace_back(Channel.TargetNodeKey, Channel.Path);
+				TotalKeys += Channel.Times.size();
+				AppendString(Output, Channel.TargetNodeKey);
+				AppendU32(Output, static_cast<uint32_t>(Channel.Path));
+				AppendU32(Output, static_cast<uint32_t>(Channel.Interpolation));
+				AppendU32(Output, static_cast<uint32_t>(Channel.Times.size()));
+				float PreviousTime = -1.0f;
+				for (size_t Key = 0; Key < Channel.Times.size(); ++Key)
+				{
+					const float Time = Channel.Times[Key];
+					if (!std::isfinite(Time) || Time < 0.0f || Time <= PreviousTime || Time > Clip.Duration ||
+						!std::ranges::all_of(Channel.Values[Key], [](float Value) { return std::isfinite(Value); }))
+						return std::unexpected("Animation key is non-finite, unordered, or outside the clip duration");
+					if (Components == 4)
+					{
+						const auto& Rotation = Channel.Values[Key];
+						const float Length = std::sqrt(Rotation[0] * Rotation[0] + Rotation[1] * Rotation[1] +
+							Rotation[2] * Rotation[2] + Rotation[3] * Rotation[3]);
+						if (!std::isfinite(Length) || std::abs(Length - 1.0f) > 1.0e-3f)
+							return std::unexpected("Animation rotation keys must be normalized quaternions");
+					}
+					AppendFloat(Output, Time);
+					for (const float Value : Channel.Values[Key]) AppendFloat(Output, Value);
+					PreviousTime = Time;
+				}
+			}
+		}
+		if (Output.size() > MaximumProductBytes) return std::unexpected("Skeletal mesh product exceeds artifact byte limit");
+		return Output;
+	}
+
+	std::expected<ImportedGltfSkeletalMesh, std::string> Detail::DecodeSkeletalMeshProduct(std::span<const std::byte> Input)
+	{
+		constexpr size_t MaximumSkeletonNodes = 4096;
+		constexpr size_t MaximumJoints = 256;
+		constexpr size_t MaximumClips = 256;
+		constexpr size_t MaximumChannels = 4096;
+		constexpr size_t MaximumKeys = 1'000'000;
+		if (Input.size() < 16 || Input.size() > MaximumProductBytes || Input[0] != std::byte{'P'} ||
+			Input[1] != std::byte{'F'} || Input[2] != std::byte{'S'} || Input[3] != std::byte{'K'})
+			return std::unexpected("Skeletal mesh artifact has invalid magic or size");
+		try
+		{
+		size_t Offset = 4;
+		uint32_t Version = 0, GeometrySize = 0;
+		if (!ReadU32(Input, Offset, Version) || Version != SkeletalMeshProductSchemaVersion ||
+			!ReadU32(Input, Offset, GeometrySize) || GeometrySize > Input.size() - Offset)
+			return std::unexpected("Skeletal mesh artifact schema or geometry length is invalid");
+		auto Geometry = DecodeMeshProduct(Input.subspan(Offset, GeometrySize));
+		if (!Geometry) return std::unexpected("Skeletal geometry is invalid: " + Geometry.error());
+		Offset += GeometrySize;
+		ImportedGltfSkeletalMesh Mesh;
+		Mesh.Geometry = std::move(*Geometry);
+		uint32_t NodeCount = 0;
+		if (!ReadU32(Input, Offset, NodeCount) || NodeCount == 0 || NodeCount > MaximumSkeletonNodes ||
+			NodeCount > (Input.size() - Offset) / 80)
+			return std::unexpected("Skeleton node count exceeds schema bounds");
+		try { Mesh.SkeletonNodes.resize(NodeCount); }
+		catch (const std::bad_alloc&) { return std::unexpected("Insufficient memory decoding skeleton nodes"); }
+		std::vector<std::string_view> StableKeys;
+		StableKeys.reserve(NodeCount);
+		for (size_t Index = 0; Index < NodeCount; ++Index)
+		{
+			ImportedGltfSkeletonNode& Node = Mesh.SkeletonNodes[Index];
+			uint32_t ParentBits = 0, IsJoint = 0;
+			if (!ReadString(Input, Offset, Node.StableKey, 256) || Node.StableKey.empty() ||
+				!ReadString(Input, Offset, Node.Name, 4096) || Node.Name.empty() ||
+				std::find(StableKeys.begin(), StableKeys.end(), Node.StableKey) != StableKeys.end() ||
+				!ReadU32(Input, Offset, ParentBits) || !ReadU32(Input, Offset, IsJoint) || IsJoint > 1)
+				return std::unexpected("Skeleton node identity or fields are invalid");
+			Node.ParentNodeIndex = std::bit_cast<int32_t>(ParentBits);
+			Node.IsJoint = IsJoint != 0;
+			if (Node.ParentNodeIndex < -1 || Node.ParentNodeIndex >= static_cast<int32_t>(Index))
+				return std::unexpected("Skeleton parent indices are invalid");
+			for (float& Value : Node.LocalBindMatrix)
+				if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Skeleton bind transform is non-finite or truncated");
+			if (std::abs(Node.LocalBindMatrix[3]) > 1.0e-5f || std::abs(Node.LocalBindMatrix[7]) > 1.0e-5f ||
+				std::abs(Node.LocalBindMatrix[11]) > 1.0e-5f || std::abs(Node.LocalBindMatrix[15] - 1.0f) > 1.0e-5f)
+				return std::unexpected("Skeleton bind transform is non-affine");
+			StableKeys.push_back(Node.StableKey);
+		}
+		uint32_t JointCount = 0;
+		if (!ReadU32(Input, Offset, JointCount) || JointCount == 0 || JointCount > MaximumJoints ||
+			JointCount > (Input.size() - Offset) / 68)
+			return std::unexpected("Skin joint count exceeds schema bounds");
+		std::vector<uint8_t> JointFlags(NodeCount, 0);
+		Mesh.JointNodeIndices.resize(JointCount);
+		for (uint16_t& Index : Mesh.JointNodeIndices)
+		{
+			uint32_t Value = 0;
+			if (!ReadU32(Input, Offset, Value) || Value >= NodeCount || !Mesh.SkeletonNodes[Value].IsJoint || JointFlags[Value] != 0)
+				return std::unexpected("Skin joint mapping is invalid");
+			Index = static_cast<uint16_t>(Value);
+			JointFlags[Value] = 1;
+		}
+		for (size_t Index = 0; Index < NodeCount; ++Index)
+			if (Mesh.SkeletonNodes[Index].IsJoint != (JointFlags[Index] != 0))
+				return std::unexpected("Skeleton joint flags do not match the skin mapping");
+		Mesh.InverseBindMatrices.resize(JointCount);
+		for (auto& Matrix : Mesh.InverseBindMatrices)
+		{
+			for (float& Value : Matrix)
+				if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Inverse bind matrix is non-finite or truncated");
+			if (std::abs(Matrix[3]) > 1.0e-5f || std::abs(Matrix[7]) > 1.0e-5f ||
+				std::abs(Matrix[11]) > 1.0e-5f || std::abs(Matrix[15] - 1.0f) > 1.0e-5f)
+				return std::unexpected("Inverse bind matrix is non-affine");
+		}
+		uint32_t InfluenceCount = 0;
+		if (!ReadU32(Input, Offset, InfluenceCount) || InfluenceCount != Mesh.Geometry.Vertices.size() ||
+			InfluenceCount > (Input.size() - Offset) / 32)
+			return std::unexpected("Skeletal influence count does not match geometry");
+		Mesh.VertexInfluences.resize(InfluenceCount);
+		for (GltfVertexInfluences& Influence : Mesh.VertexInfluences)
+		{
+			float Sum = 0.0f;
+			for (uint16_t& Index : Influence.JointIndices)
+			{
+				uint32_t Value = 0;
+				if (!ReadU32(Input, Offset, Value) || Value >= JointCount)
+					return std::unexpected("Skeletal vertex joint index is invalid");
+				Index = static_cast<uint16_t>(Value);
+			}
+			for (float& Weight : Influence.Weights)
+			{
+				if (!ReadFloat(Input, Offset, Weight) || Weight < 0.0f || Weight > 1.0f)
+					return std::unexpected("Skeletal vertex weight is invalid");
+				Sum += Weight;
+			}
+			if (!std::isfinite(Sum) || std::abs(Sum - 1.0f) > 1.0e-4f)
+				return std::unexpected("Skeletal vertex weights are not normalized");
+		}
+		uint32_t ClipCount = 0;
+		if (!ReadU32(Input, Offset, ClipCount) || ClipCount > MaximumClips)
+			return std::unexpected("Animation clip count exceeds schema bounds");
+		Mesh.Animations.resize(ClipCount);
+		size_t TotalChannels = 0, TotalKeys = 0;
+		for (ImportedGltfAnimationClip& Clip : Mesh.Animations)
+		{
+			uint32_t ChannelCount = 0;
+			if (!ReadString(Input, Offset, Clip.StableKey, 256) || Clip.StableKey.empty() ||
+				!ReadString(Input, Offset, Clip.Name, 4096) || Clip.Name.empty() ||
+				!ReadFloat(Input, Offset, Clip.Duration) || Clip.Duration < 0.0f || !ReadU32(Input, Offset, ChannelCount) ||
+				ChannelCount == 0 || ChannelCount > MaximumChannels - TotalChannels ||
+				ChannelCount > (Input.size() - Offset) / 20)
+				return std::unexpected("Animation clip fields or channel count are invalid");
+			TotalChannels += ChannelCount;
+			Clip.Channels.resize(ChannelCount);
+			std::vector<std::pair<std::string_view, GltfAnimationPath>> ChannelKeys;
+			for (ImportedGltfAnimationChannel& Channel : Clip.Channels)
+			{
+				uint32_t Path = 0, Interpolation = 0, KeyCount = 0;
+				if (!ReadString(Input, Offset, Channel.TargetNodeKey, 256) || Channel.TargetNodeKey.empty() ||
+					std::find(StableKeys.begin(), StableKeys.end(), Channel.TargetNodeKey) == StableKeys.end() ||
+					!ReadU32(Input, Offset, Path) || Path > static_cast<uint32_t>(GltfAnimationPath::Scale) ||
+					!ReadU32(Input, Offset, Interpolation) || Interpolation > static_cast<uint32_t>(GltfAnimationInterpolation::Linear) ||
+					!ReadU32(Input, Offset, KeyCount) || KeyCount == 0 || KeyCount > MaximumKeys - TotalKeys ||
+					KeyCount > (Input.size() - Offset) / 20)
+					return std::unexpected("Animation channel fields or key count are invalid");
+				Channel.Path = static_cast<GltfAnimationPath>(Path);
+				Channel.Interpolation = static_cast<GltfAnimationInterpolation>(Interpolation);
+				if (std::find(ChannelKeys.begin(), ChannelKeys.end(), std::pair{ std::string_view(Channel.TargetNodeKey), Channel.Path }) != ChannelKeys.end())
+					return std::unexpected("Animation channel target is duplicated");
+				ChannelKeys.emplace_back(Channel.TargetNodeKey, Channel.Path);
+				TotalKeys += KeyCount;
+				Channel.Times.resize(KeyCount);
+				Channel.Values.resize(KeyCount);
+				float PreviousTime = -1.0f;
+				for (size_t Key = 0; Key < KeyCount; ++Key)
+				{
+					float& Time = Channel.Times[Key];
+					if (!ReadFloat(Input, Offset, Time) || Time < 0.0f || Time <= PreviousTime || Time > Clip.Duration)
+						return std::unexpected("Animation key times are invalid");
+					for (float& Value : Channel.Values[Key])
+						if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Animation key value is non-finite or truncated");
+					if (Channel.Path == GltfAnimationPath::Rotation)
+					{
+						const auto& Rotation = Channel.Values[Key];
+						const float Length = std::sqrt(Rotation[0] * Rotation[0] + Rotation[1] * Rotation[1] +
+							Rotation[2] * Rotation[2] + Rotation[3] * Rotation[3]);
+						if (!std::isfinite(Length) || std::abs(Length - 1.0f) > 1.0e-3f)
+							return std::unexpected("Animation rotation key is not normalized");
+					}
+					PreviousTime = Time;
+				}
+			}
+		}
+		if (Offset != Input.size()) return std::unexpected("Skeletal mesh artifact has trailing data");
+		return Mesh;
+		}
+		catch (const std::bad_alloc&)
+		{
+			return std::unexpected("Insufficient memory decoding skeletal mesh artifact");
+		}
 	}
 
 	std::expected<std::vector<std::byte>, std::string> Detail::EncodeTextureProduct(

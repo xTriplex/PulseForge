@@ -61,6 +61,50 @@ int main()
 	const CookedAssetDigest MeshDigest = CookedAssetCatalog::ComputePayloadDigest(*MeshBytes);
 	CookedAssetEntry MeshEntry{ MeshID, CookedAssetProductKind::MeshPrimitive, "mesh/0/primitive/0",
 		"Payloads/Triangle.mesh.bin", 1, MeshBytes->size(), MeshDigest.Algorithm, MeshDigest.Value, {} };
+	const AssetID SkeletalMeshID{ 0x110, 0x210 };
+	ImportedGltfSkeletalMesh SkeletalMesh;
+	SkeletalMesh.Geometry = Mesh;
+	ImportedGltfSkeletonNode RootNode;
+	RootNode.StableKey = "node/root";
+	RootNode.Name = "root";
+	RootNode.LocalBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+	ImportedGltfSkeletonNode JointNode;
+	JointNode.StableKey = "node/root/joint";
+	JointNode.Name = "joint";
+	JointNode.ParentNodeIndex = 0;
+	JointNode.IsJoint = true;
+	JointNode.LocalBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+	SkeletalMesh.SkeletonNodes = { RootNode, JointNode };
+	SkeletalMesh.JointNodeIndices = { 1 };
+	SkeletalMesh.InverseBindMatrices = { { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 } };
+	SkeletalMesh.VertexInfluences.resize(3);
+	for (auto& Influence : SkeletalMesh.VertexInfluences)
+	{
+		Influence.JointIndices = { 0, 0, 0, 0 };
+		Influence.Weights = { 1, 0, 0, 0 };
+	}
+	ImportedGltfAnimationClip Clip;
+	Clip.StableKey = "animation/idle";
+	Clip.Name = "idle";
+	Clip.Duration = 1.0f;
+	ImportedGltfAnimationChannel Channel;
+	Channel.TargetNodeKey = JointNode.StableKey;
+	Channel.Path = GltfAnimationPath::Translation;
+	Channel.Times = { 0.0f, 1.0f };
+	Channel.Values = { { 0,0,0,0 }, { 0,1,0,0 } };
+	Clip.Channels.push_back(Channel);
+	SkeletalMesh.Animations.push_back(Clip);
+	const auto SkeletalMeshBytes = Detail::EncodeSkeletalMeshProduct(SkeletalMesh);
+	if (!SkeletalMeshBytes) return 20;
+	{
+		std::ofstream Output(Root / "Payloads" / "Triangle.skeletal.bin", std::ios::binary);
+		Output.write(reinterpret_cast<const char*>(SkeletalMeshBytes->data()), static_cast<std::streamsize>(SkeletalMeshBytes->size()));
+		if (!Output) return 21;
+	}
+	const CookedAssetDigest SkeletalMeshDigest = CookedAssetCatalog::ComputePayloadDigest(*SkeletalMeshBytes);
+	CookedAssetEntry SkeletalMeshEntry{ SkeletalMeshID, CookedAssetProductKind::SkeletalMesh, "skeletal/test-id",
+		"Payloads/Triangle.skeletal.bin", Detail::SkeletalMeshProductSchemaVersion, SkeletalMeshBytes->size(),
+		SkeletalMeshDigest.Algorithm, SkeletalMeshDigest.Value, {} };
 	const AssetID TextureID{ 0x300, 0x400 };
 	Detail::PreparedTextureCpuProduct Texture{ 1, 1, Detail::ImageColorSpace::Srgb, { { 1, 1, { 20, 40, 60, 255 } } } };
 	const auto TextureBytes = Detail::EncodeTextureProduct(Texture);
@@ -90,7 +134,7 @@ int main()
 		{ { TextureID, CookedAssetProductKind::Texture, "srgb" } } };
 	const CookedAssetCompatibility Compatibility{ "test-target", "test-renderer", "test-runtime-abi" };
 	const auto Manifest = CookedAssetCatalog::SerializeManifest(*Project, *SceneID, Compatibility, {},
-		{ std::move(Entry), std::move(MeshEntry), std::move(TextureEntry), std::move(MaterialEntry) });
+		{ std::move(Entry), std::move(MeshEntry), std::move(SkeletalMeshEntry), std::move(TextureEntry), std::move(MaterialEntry) });
 	if (!Manifest) return 5;
 	{
 		std::ofstream Output(Root / CookedAssetCatalog::ManifestFileName, std::ios::binary);
@@ -107,6 +151,15 @@ int main()
 	if (!Loaded || !(*Loaded)->GetEntities().empty()) return 10;
 	const auto LoadedMesh = (*Provider)->LoadMeshPrimitive(MeshID, "mesh/0/primitive/0");
 	if (!LoadedMesh || LoadedMesh->Vertices.size() != 3 || LoadedMesh->Indices != std::vector<uint32_t>{ 0, 1, 2 }) return 15;
+	const auto LoadedSkeletalMesh = (*Provider)->LoadSkeletalMesh(SkeletalMeshID, "skeletal/test-id");
+	if (!LoadedSkeletalMesh || LoadedSkeletalMesh->SkeletonNodes.size() != 2 ||
+		LoadedSkeletalMesh->JointNodeIndices != std::vector<uint16_t>{ 1 } ||
+		LoadedSkeletalMesh->VertexInfluences.size() != 3 || LoadedSkeletalMesh->Animations.size() != 1 ||
+		LoadedSkeletalMesh->Animations.front().Channels.front().Values.back()[1] != 1.0f)
+		return 22;
+	auto FutureSkeletalBytes = *SkeletalMeshBytes;
+	FutureSkeletalBytes[4] = std::byte{ 2 };
+	if (Detail::DecodeSkeletalMeshProduct(FutureSkeletalBytes)) return 23;
 	const auto LoadedTexture = (*Provider)->LoadTextureProduct(TextureID, "srgb");
 	if (!LoadedTexture || LoadedTexture->Width != 1 || LoadedTexture->MipLevels.size() != 1 ||
 		LoadedTexture->MipLevels.front().Pixels != std::vector<uint8_t>{ 20, 40, 60, 255 }) return 16;

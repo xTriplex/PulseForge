@@ -92,6 +92,7 @@ namespace PulseForge
 			case CookedAssetProductKind::BlueprintProgram: return "blueprint-program";
 			case CookedAssetProductKind::Audio: return "audio";
 			case CookedAssetProductKind::MeshPrimitive: return "mesh-primitive";
+			case CookedAssetProductKind::SkeletalMesh: return "skeletal-mesh";
 			case CookedAssetProductKind::Texture: return "texture";
 			case CookedAssetProductKind::Environment: return "environment";
 			case CookedAssetProductKind::GameplayInput: return "gameplay-input";
@@ -106,7 +107,7 @@ namespace PulseForge
 			for (const CookedAssetProductKind Kind : { CookedAssetProductKind::Scene, CookedAssetProductKind::Prefab,
 				 CookedAssetProductKind::Material, CookedAssetProductKind::GraphMaterial, CookedAssetProductKind::Script,
 				 CookedAssetProductKind::BlueprintProgram, CookedAssetProductKind::Audio,
-				 CookedAssetProductKind::MeshPrimitive, CookedAssetProductKind::Texture,
+				 CookedAssetProductKind::MeshPrimitive, CookedAssetProductKind::SkeletalMesh, CookedAssetProductKind::Texture,
 				 CookedAssetProductKind::Environment, CookedAssetProductKind::GameplayInput,
 				 CookedAssetProductKind::RuntimeUI, CookedAssetProductKind::Font })
 				if (ProductName(Kind) == Name) return Kind;

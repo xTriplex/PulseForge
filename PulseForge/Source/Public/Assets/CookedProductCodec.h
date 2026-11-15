@@ -180,6 +180,7 @@ namespace PulseForge
 	namespace Detail
 	{
 		inline constexpr uint32_t MeshProductSchemaVersion = 1;
+		inline constexpr uint32_t SkeletalMeshProductSchemaVersion = 1;
 		inline constexpr uint32_t TextureProductSchemaVersion = 1;
 		inline constexpr uint32_t EnvironmentProductSchemaVersion = 1;
 		inline constexpr uint32_t MaterialProductSchemaVersion = 1;
@@ -209,6 +210,10 @@ namespace PulseForge
 		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeMeshProduct(
 			const ImportedGltfMesh& Mesh, std::stop_token CancellationToken = {});
 		[[nodiscard]] PULSEFORGE_API std::expected<ImportedGltfMesh, std::string> DecodeMeshProduct(
+			std::span<const std::byte> Bytes);
+		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeSkeletalMeshProduct(
+			const ImportedGltfSkeletalMesh& Mesh, std::stop_token CancellationToken = {});
+		[[nodiscard]] PULSEFORGE_API std::expected<ImportedGltfSkeletalMesh, std::string> DecodeSkeletalMeshProduct(
 			std::span<const std::byte> Bytes);
 		[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, std::string> EncodeTextureProduct(
 			const PreparedTextureCpuProduct& Texture, std::stop_token CancellationToken = {});

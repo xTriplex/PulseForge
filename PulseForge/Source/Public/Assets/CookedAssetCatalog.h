@@ -48,6 +48,7 @@ namespace PulseForge
 		BlueprintProgram,
 		Audio,
 		MeshPrimitive,
+		SkeletalMesh,
 		Texture,
 		Environment,
 		GameplayInput,

@@ -264,6 +264,22 @@ namespace PulseForge
 		return std::move(*Product);
 	}
 
+	const CookedAssetEntry* CookedContentProvider::FindSkeletalMesh(
+		const AssetID& Asset, std::string_view Subresource) const noexcept
+	{
+		return Find(Asset, CookedAssetProductKind::SkeletalMesh, Subresource);
+	}
+
+	std::expected<ImportedGltfSkeletalMesh, CookedAssetCatalogError> CookedContentProvider::LoadSkeletalMesh(
+		const AssetID& Asset, std::string_view Subresource) const
+	{
+		auto Bytes = Read(Asset, CookedAssetProductKind::SkeletalMesh, Subresource);
+		if (!Bytes) return std::unexpected(std::move(Bytes.error()));
+		auto Product = Detail::DecodeSkeletalMeshProduct(*Bytes);
+		if (!Product) return std::unexpected(InvalidProduct(Asset, "Cooked skeletal mesh product is invalid: " + Product.error()));
+		return std::move(*Product);
+	}
+
 	const CookedAssetEntry* CookedContentProvider::FindTexture(const AssetID& Asset, std::string_view Subresource) const noexcept
 	{
 		return Find(Asset, CookedAssetProductKind::Texture, Subresource);
