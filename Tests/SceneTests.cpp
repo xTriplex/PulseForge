@@ -339,16 +339,19 @@ namespace
 		for (auto& EntityRecord : LegacyCanvasDocument["entities"])
 		{
 			EntityRecord.erase("blueprint");
+			PF_CHECK(Tests, !EntityRecord.contains("blueprint"));
 			if (EntityRecord.value("uuid", std::string{}) != Body->GetUUID().ToString()) continue;
 			auto CanvasRecord = EntityRecord.find("runtimeUICanvas");
-			if (CanvasRecord == EntityRecord.end() || !CanvasRecord->is_object()) break;
+			if (CanvasRecord == EntityRecord.end() || !CanvasRecord->is_object()) continue;
 			RemovedLegacyInputPolicy = CanvasRecord->erase("inputPolicy") == 1;
-			break;
 		}
 		PF_CHECK(Tests, RemovedLegacyInputPolicy);
 		std::string LegacyCanvas = LegacyCanvasDocument.dump(2);
 		Scene LegacyDestination;
-		PF_CHECK(Tests, SceneSerializer::Deserialize(LegacyCanvas, LegacyDestination).has_value());
+		const auto LegacyCanvasRestore = SceneSerializer::Deserialize(LegacyCanvas, LegacyDestination);
+		if (!LegacyCanvasRestore)
+			std::cerr << "Legacy canvas migration deserialize failed: " << LegacyCanvasRestore.error().Message << '\n';
+		PF_CHECK(Tests, LegacyCanvasRestore.has_value());
 		const auto LegacyCanvasEntity = LegacyDestination.FindEntity(Body->GetUUID());
 		PF_CHECK(Tests, LegacyCanvasEntity.has_value());
 		if (LegacyCanvasEntity)

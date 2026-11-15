@@ -67,7 +67,8 @@ namespace PulseForge
 		if (Source.Instructions.empty() || Source.Instructions.size() > BlueprintMaximumInstructionCount ||
 			Source.Constants.size() > BlueprintMaximumInstructionCount || Source.ScalarPropertyIds.size() > BlueprintMaximumScalarCount ||
 			Source.ActionNames.size() > BlueprintMaximumActionNameCount ||
-			Source.SceneTransitionAssets.size() > BlueprintMaximumSceneTransitionAssetCount)
+			Source.SceneTransitionAssets.size() > BlueprintMaximumSceneTransitionAssetCount ||
+			Source.TimerNames.size() > BlueprintMaximumTimerNameCount)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, 0, {},
 				"Blueprint program exceeds a structural limit or has no instructions"));
 
@@ -90,6 +91,11 @@ namespace PulseForge
 			if (Name.empty() || Name.size() > BlueprintMaximumActionNameLength || !ActionNames.emplace(Name).second)
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
 					"Blueprint UI action names must be unique, non-empty, and bounded"));
+		std::unordered_set<std::string> TimerNames;
+		for (const std::string& Name : Source.TimerNames)
+			if (Name.empty() || Name.size() > BlueprintMaximumTimerNameLength || !TimerNames.emplace(Name).second)
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
+					"Blueprint timer names must be unique, non-empty, and bounded"));
 		std::vector<AssetID> SceneTransitionAssets;
 		SceneTransitionAssets.reserve(Source.SceneTransitionAssets.size());
 		for (const AssetID& Asset : Source.SceneTransitionAssets)
@@ -103,6 +109,10 @@ namespace PulseForge
 
 		std::vector<std::optional<size_t>> StackDepth(Source.Instructions.size());
 		std::deque<uint32_t> Pending;
+		size_t DeferredPhysicsCallCount = 0;
+		size_t DeferredTimerCount = 0;
+		size_t EntitySpawnCount = 0;
+		bool HasAudioControlCall = false;
 		StackDepth[0] = 0;
 		Pending.push_back(0);
 		bool HasReachableReturn = false;
@@ -177,6 +187,12 @@ namespace PulseForge
 						"Blueprint action name index is out of range"));
 				if (const auto Error = Enqueue(Instruction.Target, Depth, Index)) return std::unexpected(*Error);
 				break;
+			case BlueprintOpcode::JumpIfTimer:
+				if (Instruction.Operand >= Source.TimerNames.size())
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
+						"Blueprint timer name index is out of range"));
+				if (const auto Error = Enqueue(Instruction.Target, Depth, Index)) return std::unexpected(*Error);
+				break;
 			case BlueprintOpcode::RequestStop:
 				break;
 			case BlueprintOpcode::RequestPause:
@@ -190,6 +206,43 @@ namespace PulseForge
 						"Blueprint scene transition asset index is out of range"));
 				break;
 			case BlueprintOpcode::RequestDestroySelf:
+				break;
+			case BlueprintOpcode::RequestApplyForceSelf:
+				if (Depth < 3)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackUnderflow, Index, Instruction.SourceNode,
+						"Blueprint physics force request requires three vector components"));
+				Depth -= 3;
+				if (++DeferredPhysicsCallCount > BlueprintMaximumDeferredPhysicsCallsPerEvent)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, Index, Instruction.SourceNode,
+						"Blueprint deferred physics calls exceed the per-event limit"));
+				break;
+			case BlueprintOpcode::RequestAudioControlSelf:
+				if (Instruction.Operand > static_cast<uint32_t>(BlueprintAudioControl::Stop))
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
+						"Blueprint audio control operation is invalid"));
+				if (HasAudioControlCall)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, Index, Instruction.SourceNode,
+						"A Blueprint event may request at most one audio control operation"));
+				HasAudioControlCall = true;
+				break;
+			case BlueprintOpcode::RequestTimerSelf:
+				if (Instruction.Operand >= Source.TimerNames.size() || Instruction.Target >= Source.Constants.size() ||
+					Source.Constants[Instruction.Target] < BlueprintMinimumTimerDelaySeconds ||
+					Source.Constants[Instruction.Target] > BlueprintMaximumTimerDelaySeconds)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
+						"Blueprint timer requires a known name and a bounded positive delay"));
+				if (++DeferredTimerCount > BlueprintMaximumTimersPerEvent)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, Index, Instruction.SourceNode,
+						"Blueprint timer requests exceed the per-event limit"));
+				break;
+			case BlueprintOpcode::RequestSpawnEntity:
+				if (Depth < 3)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackUnderflow, Index, Instruction.SourceNode,
+						"Blueprint entity spawn requires three position components"));
+				Depth -= 3;
+				if (++EntitySpawnCount > BlueprintMaximumEntitySpawnsPerEvent)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, Index, Instruction.SourceNode,
+						"Blueprint entity spawn requests exceed the per-event limit"));
 				break;
 			case BlueprintOpcode::Return:
 				if (Depth != 0)
@@ -223,7 +276,7 @@ namespace PulseForge
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
 		uint32_t InstructionBudget,
-		std::string_view ActionName)
+		std::string_view EventName)
 	{
 		const BlueprintProgramSource& Source = Program.GetSource();
 		if (ScalarState.size() != Source.ScalarPropertyIds.size() || ScalarState.size() > BlueprintMaximumScalarCount)
@@ -279,7 +332,11 @@ namespace PulseForge
 				break;
 			}
 			case BlueprintOpcode::JumpIfAction:
-				ProgramCounter = ActionName == Source.ActionNames[Instruction.Operand]
+				ProgramCounter = EventName == Source.ActionNames[Instruction.Operand]
+					? Instruction.Target : ProgramCounter + 1;
+				break;
+			case BlueprintOpcode::JumpIfTimer:
+				ProgramCounter = EventName == Source.TimerNames[Instruction.Operand]
 					? Instruction.Target : ProgramCounter + 1;
 				break;
 			case BlueprintOpcode::WriteScalarProperty:
@@ -309,6 +366,34 @@ namespace PulseForge
 				Result.EntityDestroySourceNode = Instruction.SourceNode;
 				++ProgramCounter;
 				break;
+			case BlueprintOpcode::RequestApplyForceSelf:
+			{
+				const float Z = Stack.back(); Stack.pop_back();
+				const float Y = Stack.back(); Stack.pop_back();
+				const float X = Stack.back(); Stack.pop_back();
+				Result.PhysicsForceRequests.push_back({ X, Y, Z, Instruction.SourceNode });
+				++ProgramCounter;
+				break;
+			}
+			case BlueprintOpcode::RequestAudioControlSelf:
+				Result.AudioControlRequest = BlueprintAudioControlRequest{
+					static_cast<BlueprintAudioControl>(Instruction.Operand), Instruction.SourceNode };
+				++ProgramCounter;
+				break;
+			case BlueprintOpcode::RequestTimerSelf:
+				Result.TimerRequests.push_back({ Source.TimerNames[Instruction.Operand],
+					Source.Constants[Instruction.Target], Instruction.SourceNode });
+				++ProgramCounter;
+				break;
+			case BlueprintOpcode::RequestSpawnEntity:
+			{
+				const float Z = Stack.back(); Stack.pop_back();
+				const float Y = Stack.back(); Stack.pop_back();
+				const float X = Stack.back(); Stack.pop_back();
+				Result.EntitySpawnRequests.push_back({ X, Y, Z, Instruction.SourceNode });
+				++ProgramCounter;
+				break;
+			}
 			case BlueprintOpcode::Return:
 				std::copy(CandidateState.begin(), CandidateState.end(), ScalarState.begin());
 				return Result;
@@ -333,6 +418,7 @@ namespace PulseForge
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.ScalarPropertyIds.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.ActionNames.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.SceneTransitionAssets.size()));
+		AppendInteger(Bytes, static_cast<uint32_t>(Source.TimerNames.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.Instructions.size()));
 		for (const float Constant : Source.Constants) AppendInteger(Bytes, std::bit_cast<uint32_t>(Constant));
 		for (const std::string& PropertyId : Source.ScalarPropertyIds)
@@ -349,6 +435,11 @@ namespace PulseForge
 		{
 			AppendInteger(Bytes, Asset.GetHigh());
 			AppendInteger(Bytes, Asset.GetLow());
+		}
+		for (const std::string& TimerName : Source.TimerNames)
+		{
+			AppendInteger(Bytes, static_cast<uint16_t>(TimerName.size()));
+			for (const char Character : TimerName) Bytes.push_back(static_cast<std::byte>(static_cast<uint8_t>(Character)));
 		}
 		for (const BlueprintInstruction& Instruction : Source.Instructions)
 		{
@@ -376,6 +467,7 @@ namespace PulseForge
 		uint32_t PropertyCount = 0;
 		uint32_t InstructionCount = 0;
 		uint32_t SceneTransitionAssetCount = 0;
+		uint32_t TimerNameCount = 0;
 		if (!ReadInteger(Bytes, Offset, Source.Version) || !ReadInteger(Bytes, Offset, ConstantCount) ||
 			!ReadInteger(Bytes, Offset, PropertyCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
@@ -392,12 +484,16 @@ namespace PulseForge
 			!ReadInteger(Bytes, Offset, SceneTransitionAssetCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
+		if (EncodedVersion >= BlueprintTimerProgramFormatVersion && !ReadInteger(Bytes, Offset, TimerNameCount))
+			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
+				"Blueprint program header is truncated"));
 		if (!ReadInteger(Bytes, Offset, InstructionCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
 		if (ConstantCount > BlueprintMaximumInstructionCount || PropertyCount > BlueprintMaximumScalarCount ||
 			ActionNameCount > BlueprintMaximumActionNameCount ||
 			SceneTransitionAssetCount > BlueprintMaximumSceneTransitionAssetCount ||
+			TimerNameCount > BlueprintMaximumTimerNameCount ||
 			InstructionCount == 0 || InstructionCount > BlueprintMaximumInstructionCount)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, 0, {},
 				"Blueprint program counts exceed structural limits"));
@@ -405,6 +501,7 @@ namespace PulseForge
 		Source.ScalarPropertyIds.reserve(PropertyCount);
 		Source.ActionNames.reserve(ActionNameCount);
 		Source.SceneTransitionAssets.reserve(SceneTransitionAssetCount);
+		Source.TimerNames.reserve(TimerNameCount);
 		Source.Instructions.reserve(InstructionCount);
 		for (uint32_t Index = 0; Index < ConstantCount; ++Index)
 		{
@@ -447,6 +544,18 @@ namespace PulseForge
 					"Blueprint scene transition asset table is truncated"));
 			Source.SceneTransitionAssets.emplace_back(High, Low);
 		}
+		for (uint32_t Index = 0; Index < TimerNameCount; ++Index)
+		{
+			uint16_t Length = 0;
+			if (!ReadInteger(Bytes, Offset, Length) || Length == 0 || Length > BlueprintMaximumTimerNameLength ||
+				Offset > Bytes.size() || Bytes.size() - Offset < Length)
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
+					"Blueprint timer name table is truncated or invalid"));
+			std::string TimerName;
+			TimerName.resize(Length);
+			for (char& Character : TimerName) Character = static_cast<char>(std::to_integer<uint8_t>(Bytes[Offset++]));
+			Source.TimerNames.push_back(std::move(TimerName));
+		}
 		for (uint32_t Index = 0; Index < InstructionCount; ++Index)
 		{
 			if (Bytes.size() - Offset < 25)
@@ -461,6 +570,18 @@ namespace PulseForge
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, Index, {},
 					"Blueprint instruction stream is truncated"));
 			Instruction.SourceNode = UUID(NodeHigh, NodeLow);
+			if (EncodedVersion < BlueprintDeferredServiceProgramFormatVersion &&
+				(Instruction.Opcode == BlueprintOpcode::RequestApplyForceSelf ||
+					Instruction.Opcode == BlueprintOpcode::RequestAudioControlSelf))
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, Index,
+					Instruction.SourceNode, "Blueprint deferred service opcode requires a newer program version"));
+			if (EncodedVersion < BlueprintTimerProgramFormatVersion &&
+				(Instruction.Opcode == BlueprintOpcode::RequestTimerSelf || Instruction.Opcode == BlueprintOpcode::JumpIfTimer))
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, Index,
+					Instruction.SourceNode, "Blueprint timer opcode requires a newer program version"));
+			if (EncodedVersion < BlueprintSpawnProgramFormatVersion && Instruction.Opcode == BlueprintOpcode::RequestSpawnEntity)
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, Index,
+					Instruction.SourceNode, "Blueprint entity spawn opcode requires a newer program version"));
 			Source.Instructions.push_back(Instruction);
 		}
 		if (Offset != Bytes.size())

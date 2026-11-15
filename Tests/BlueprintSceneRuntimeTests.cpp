@@ -1,6 +1,10 @@
 #include "TestEngineSupport.h"
 
 #include "Assets/AssetOperations.h"
+#include "Scene/Components/AudioListenerComponent.h"
+#include "Scene/Components/AudioSourceComponent.h"
+#include "Scene/Components/BoxColliderComponent.h"
+#include "Scene/Components/RigidbodyComponent.h"
 #include "Scene/Components/RuntimeUICanvasComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "UI/RuntimeUI.h"
@@ -13,6 +17,42 @@ using namespace PulseForge;
 
 namespace
 {
+	std::vector<std::byte> MakeBlueprintTestWave()
+	{
+		constexpr uint32_t SampleCount = 4410;
+		constexpr uint32_t DataSize = SampleCount * 2;
+		std::vector<std::byte> Data(44 + DataSize);
+		const auto WriteFourCC = [&Data](size_t Offset, std::string_view Value)
+		{
+			for (size_t Index = 0; Index < Value.size(); ++Index)
+				Data[Offset + Index] = static_cast<std::byte>(static_cast<unsigned char>(Value[Index]));
+		};
+		const auto Write16 = [&Data](size_t Offset, uint16_t Value)
+		{
+			Data[Offset] = static_cast<std::byte>(Value & 0xff);
+			Data[Offset + 1] = static_cast<std::byte>((Value >> 8) & 0xff);
+		};
+		const auto Write32 = [&Data](size_t Offset, uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Data[Offset + Byte] = static_cast<std::byte>((Value >> (Byte * 8)) & 0xff);
+		};
+		WriteFourCC(0, "RIFF");
+		Write32(4, static_cast<uint32_t>(Data.size() - 8));
+		WriteFourCC(8, "WAVE");
+		WriteFourCC(12, "fmt ");
+		Write32(16, 16);
+		Write16(20, 1);
+		Write16(22, 1);
+		Write32(24, 44100);
+		Write32(28, 88200);
+		Write16(32, 2);
+		Write16(34, 16);
+		WriteFourCC(36, "data");
+		Write32(40, DataSize);
+		return Data;
+	}
+
 	std::shared_ptr<const VerifiedBlueprintProgram> MakeBlueprintProgram(
 		float Value,
 		bool Initialize,
@@ -564,6 +604,58 @@ namespace
 		const auto StopRequest = StopRuntime.GetPendingBoundaryRequest();
 		PF_CHECK(Tests, StopRequest && StopRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop);
 		StopRuntime.Stop();
+
+		Scene StaleContactScene;
+		const auto StaleTrigger = StaleContactScene.CreateEntityWithUUID(TriggerId, "Stale Blueprint trigger");
+		const auto StaleBody = StaleContactScene.CreateEntityWithUUID(BodyId, "Stale Blueprint body");
+		PF_CHECK(Tests, StaleTrigger && StaleBody);
+		if (!StaleTrigger || !StaleBody) return;
+		PF_CHECK(Tests, StaleTrigger->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, StaleTrigger->SetCollider(TriggerCollider).has_value());
+		PF_CHECK(Tests, StaleBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
+		PF_CHECK(Tests, StaleBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		std::vector<Entity> DispatchBudgetEntities;
+		DispatchBudgetEntities.reserve(BlueprintMaximumEventDispatchesPerFrame - 2);
+		for (uint64_t Index = 0; Index < BlueprintMaximumEventDispatchesPerFrame - 2; ++Index)
+		{
+			const UUID Identifier{ 0x5d00000000004000ull, 0x8000000000000001ull + Index };
+			const auto Created = StaleContactScene.CreateEntityWithUUID(Identifier, "Contact dispatch budget filler");
+			PF_CHECK(Tests, Created.has_value());
+			if (!Created) return;
+			DispatchBudgetEntities.push_back(*Created);
+		}
+		uint32_t StaleContactUpdateResolutions = 0;
+		SceneRuntimeServices StaleContactServices;
+		StaleContactServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Event == BlueprintEventKind::OnUpdate) ++StaleContactUpdateResolutions;
+			if ((Target.GetUUID() != TriggerId && Target.GetUUID() != BodyId) ||
+				(Event != BlueprintEventKind::OnTriggerEnter && Event != BlueprintEventKind::OnTriggerStay &&
+					Event != BlueprintEventKind::OnTriggerExit)) return std::nullopt;
+			const auto Program = Event == BlueprintEventKind::OnTriggerEnter ? EnterProgram
+				: Event == BlueprintEventKind::OnTriggerStay ? StayProgram : ExitProgram;
+			return BlueprintProgramBinding{ ProgramAsset, 1, Program };
+		};
+		StaleContactServices.ApplyBlueprintPropertyWrites = Services.ApplyBlueprintPropertyWrites;
+		SceneRuntime StaleContactRuntime(*ProjectResult, Description, StaleContactServices);
+		PF_CHECK(Tests, StaleContactRuntime.Start(StaleContactScene).has_value());
+		StaleContactUpdateResolutions = 0;
+		Phases.clear();
+		const auto BackloggedContactFrame = StaleContactRuntime.Advance(StaleContactScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, BackloggedContactFrame && BackloggedContactFrame->PhysicsSteps > 0 &&
+			BackloggedContactFrame->BlueprintInstructionsExecuted == 0 &&
+			StaleContactUpdateResolutions == BlueprintMaximumEventDispatchesPerFrame && Phases.empty());
+		PF_CHECK(Tests, StaleContactScene.DestroyEntity(*StaleTrigger).has_value());
+		const auto ReplacementTrigger = StaleContactScene.CreateEntityWithUUID(TriggerId, "Replacement trigger without physics");
+		PF_CHECK(Tests, ReplacementTrigger && *ReplacementTrigger != *StaleTrigger);
+		for (const Entity& Filler : DispatchBudgetEntities)
+			PF_CHECK(Tests, StaleContactScene.DestroyEntity(Filler).has_value());
+		StaleContactUpdateResolutions = 0;
+		const auto StaleContactDrainFrame = StaleContactRuntime.Advance(StaleContactScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, StaleContactDrainFrame.has_value() && ReplacementTrigger->IsValid() && StaleBody->IsValid());
+		PF_CHECK(Tests, StaleContactUpdateResolutions < BlueprintMaximumEventDispatchesPerFrame && Phases.empty());
+		StaleContactRuntime.Stop();
 	}
 
 	void TestSceneRuntimeBlueprintDeferredStop(TestRunner& Tests)
@@ -751,6 +843,423 @@ namespace
 		PF_CHECK(Tests, DestroyFrame && DestroyFrame->BlueprintInstructionsExecuted == 5 && DestroyCallbacks == 1 &&
 			!DestroyEntity->IsValid());
 		DestroyRuntime.Stop();
+
+		BlueprintProgramSource ForceSource;
+		ForceSource.Constants = { 0.0f, 120.0f, 0.0f };
+		ForceSource.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(65, 1) },
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(65, 2) },
+			{ BlueprintOpcode::PushConstant, 2, 0, UUID(65, 3) },
+			{ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(65, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(65, 5) }
+		};
+		const auto VerifiedForce = VerifyBlueprintProgram(std::move(ForceSource));
+		PF_CHECK(Tests, VerifiedForce.has_value());
+		if (!VerifiedForce) return;
+		const auto ForceProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedForce));
+		SceneRuntimeDesc ForceDescription = Description;
+		ForceDescription.Physics.Gravity = glm::vec3(0.0f);
+		constexpr UUID ForceTarget{ 0x5d00000000004000ull, 0x8000000000000001ull };
+		const auto AddPhysicsBody = [&](Scene& TargetScene, UUID Identifier, float X = 0.0f)
+		{
+			const auto Created = TargetScene.CreateEntityWithUUID(Identifier, "Blueprint force target");
+			PF_CHECK(Tests, Created.has_value());
+			if (!Created) return Entity{};
+			PF_CHECK(Tests, Created->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f }).has_value());
+			PF_CHECK(Tests, Created->SetBoxCollider(BoxColliderComponent{}).has_value());
+			if (X != 0.0f)
+			{
+				TransformComponent Transform;
+				Transform.Translation.x = X;
+				PF_CHECK(Tests, Created->SetTransform(Transform).has_value());
+			}
+			return *Created;
+		};
+		Scene ForceScene;
+		const Entity ForceEntity = AddPhysicsBody(ForceScene, ForceTarget);
+		if (!ForceEntity.IsValid()) return;
+		SceneRuntimeServices ForceServices;
+		ForceServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target != ForceEntity || Event != BlueprintEventKind::OnCreate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 7, ForceProgram };
+		};
+		SceneRuntime ForceRuntime(*ProjectResult, ForceDescription, ForceServices);
+		PF_CHECK(Tests, ForceRuntime.Start(ForceScene).has_value());
+		const auto ForceFrame = ForceRuntime.Advance(ForceScene, Timestep(1.0 / 60.0));
+		const auto ForcePosition = ForceEntity.GetTransform();
+		PF_CHECK(Tests, ForceFrame.has_value());
+		if (ForceFrame) PF_CHECK(Tests, ForceFrame->BlueprintInstructionsExecuted == 0);
+		PF_CHECK(Tests, ForcePosition.has_value());
+		if (ForcePosition) PF_CHECK(Tests, ForcePosition->Translation.y > 0.0f);
+		PF_CHECK(Tests, ForceRuntime.GetBlueprintDiagnostics().empty());
+		ForceRuntime.Stop();
+
+		Scene StaleForceScene;
+		const Entity StaleForceEntity = AddPhysicsBody(StaleForceScene, ForceTarget);
+		if (!StaleForceEntity.IsValid()) return;
+		SceneRuntimeServices StaleForceServices;
+		StaleForceServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target != StaleForceEntity || Event != BlueprintEventKind::OnCreate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 8, ForceProgram };
+		};
+		SceneRuntime StaleForceRuntime(*ProjectResult, ForceDescription, StaleForceServices);
+		PF_CHECK(Tests, StaleForceRuntime.Start(StaleForceScene).has_value());
+		PF_CHECK(Tests, StaleForceScene.DestroyEntity(StaleForceEntity).has_value());
+		const Entity ReplacementForceEntity = AddPhysicsBody(StaleForceScene, ForceTarget);
+		PF_CHECK(Tests, ReplacementForceEntity.IsValid() && ReplacementForceEntity != StaleForceEntity);
+		const auto StaleForceFrame = StaleForceRuntime.Advance(StaleForceScene, Timestep(1.0 / 60.0));
+		const auto ReplacementPosition = ReplacementForceEntity.GetTransform();
+		PF_CHECK(Tests, StaleForceFrame.has_value());
+		PF_CHECK(Tests, ReplacementPosition.has_value());
+		if (ReplacementPosition) PF_CHECK(Tests, ReplacementPosition->Translation.y == 0.0f);
+		PF_CHECK(Tests, StaleForceRuntime.GetBlueprintDiagnostics().empty());
+		StaleForceRuntime.Stop();
+
+		BlueprintProgramSource BulkForceSource;
+		BulkForceSource.Constants = { 0.0f, 1.0f, 0.0f };
+		for (size_t Index = 0; Index < BlueprintMaximumDeferredPhysicsCallsPerEvent - 1; ++Index)
+		{
+			BulkForceSource.Instructions.push_back({ BlueprintOpcode::PushConstant, 0, 0, UUID(66, Index * 4 + 1) });
+			BulkForceSource.Instructions.push_back({ BlueprintOpcode::PushConstant, 1, 0, UUID(66, Index * 4 + 2) });
+			BulkForceSource.Instructions.push_back({ BlueprintOpcode::PushConstant, 2, 0, UUID(66, Index * 4 + 3) });
+			BulkForceSource.Instructions.push_back({ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(66, Index * 4 + 4) });
+		}
+		BulkForceSource.Instructions.push_back({ BlueprintOpcode::Return, 0, 0, UUID(66, 2000) });
+		const auto VerifiedBulkForce = VerifyBlueprintProgram(std::move(BulkForceSource));
+		PF_CHECK(Tests, VerifiedBulkForce.has_value());
+		if (!VerifiedBulkForce) return;
+		const auto BulkForceProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedBulkForce));
+		BlueprintProgramSource OverflowForceSource;
+		OverflowForceSource.Constants = { 0.0f, 1.0f, 0.0f };
+		OverflowForceSource.ScalarPropertyIds = { "health" };
+		OverflowForceSource.Instructions = {
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(67, 10) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(67, 11) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(67, 12) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(67, 13) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(67, 1) },
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(67, 2) },
+			{ BlueprintOpcode::PushConstant, 2, 0, UUID(67, 3) },
+			{ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(67, 4) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(67, 5) },
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(67, 6) },
+			{ BlueprintOpcode::PushConstant, 2, 0, UUID(67, 7) },
+			{ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(67, 8) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(67, 9) }
+		};
+		const auto VerifiedOverflowForce = VerifyBlueprintProgram(std::move(OverflowForceSource));
+		PF_CHECK(Tests, VerifiedOverflowForce.has_value());
+		if (!VerifiedOverflowForce) return;
+		const auto OverflowForceProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedOverflowForce));
+		constexpr UUID BulkForceTarget{ 0x5e00000000004000ull, 0x8000000000000001ull };
+		constexpr UUID OverflowForceTarget{ 0x5e00000000004000ull, 0x8000000000000002ull };
+		Scene OverflowForceScene;
+		const Entity BulkForceEntity = AddPhysicsBody(OverflowForceScene, BulkForceTarget);
+		const Entity OverflowForceEntity = AddPhysicsBody(OverflowForceScene, OverflowForceTarget, 4.0f);
+		uint32_t OverflowPropertyTransactions = 0;
+		SceneRuntimeServices OverflowForceServices;
+		OverflowForceServices.ApplyBlueprintPropertyWrites = [&](const Entity& Target,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Target == OverflowForceEntity && Writes.size() == 1 && Writes.front().Value == 1.0f)
+				++OverflowPropertyTransactions;
+			return true;
+		};
+		OverflowForceServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Event != BlueprintEventKind::OnCreate) return std::nullopt;
+			if (Target == BulkForceEntity) return BlueprintProgramBinding{ ProgramAsset, 9, BulkForceProgram };
+			if (Target == OverflowForceEntity) return BlueprintProgramBinding{ ProgramAsset, 10, OverflowForceProgram };
+			return std::nullopt;
+		};
+		SceneRuntime OverflowForceRuntime(*ProjectResult, ForceDescription, OverflowForceServices);
+		PF_CHECK(Tests, OverflowForceRuntime.Start(OverflowForceScene).has_value());
+		const auto OverflowForceFrame = OverflowForceRuntime.Advance(OverflowForceScene, Timestep(1.0 / 60.0));
+		const auto BulkPosition = BulkForceEntity.GetTransform();
+		const auto OverflowPosition = OverflowForceEntity.GetTransform();
+		PF_CHECK(Tests, OverflowForceFrame && BulkPosition && BulkPosition->Translation.y > 0.0f && OverflowPosition &&
+			OverflowPosition->Translation.y == 0.0f);
+		const auto OverflowDiagnostics = OverflowForceRuntime.GetBlueprintDiagnostics();
+		PF_CHECK(Tests, OverflowDiagnostics.size() == 1 && OverflowDiagnostics.front().Entity == OverflowForceTarget &&
+			OverflowDiagnostics.front().Code == BlueprintProgramErrorCode::HostRejectedDeferredCall &&
+			OverflowDiagnostics.front().SourceNode == UUID(67, 4));
+		PF_CHECK(Tests, OverflowPropertyTransactions == 0);
+		OverflowForceRuntime.Stop();
+
+		constexpr UUID SpawnTarget{ 0x5f00000000004000ull, 0x8000000000000013ull };
+		constexpr AssetID SpawnProgramAsset{ 0x5f00000000004000ull, 0x8000000000000014ull };
+		BlueprintProgramSource SpawnSource;
+		SpawnSource.Constants = { 3.0f, 4.0f, 5.0f };
+		SpawnSource.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(68, 1) },
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(68, 2) },
+			{ BlueprintOpcode::PushConstant, 2, 0, UUID(68, 3) },
+			{ BlueprintOpcode::RequestSpawnEntity, 0, 0, UUID(68, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(68, 5) }
+		};
+		const auto VerifiedSpawn = VerifyBlueprintProgram(std::move(SpawnSource));
+		PF_CHECK(Tests, VerifiedSpawn.has_value());
+		if (!VerifiedSpawn) return;
+		const auto SpawnProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedSpawn));
+		Scene SpawnScene;
+		const auto SpawnEntity = SpawnScene.CreateEntityWithUUID(SpawnTarget, "Blueprint spawn request owner");
+		PF_CHECK(Tests, SpawnEntity.has_value());
+		if (!SpawnEntity) return;
+		Entity CurrentSpawnTarget = *SpawnEntity;
+		SceneRuntimeServices SpawnServices;
+		SpawnServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target == CurrentSpawnTarget && Event == BlueprintEventKind::OnCreate)
+				return BlueprintProgramBinding{ SpawnProgramAsset, 1, SpawnProgram };
+			return std::nullopt;
+		};
+		SceneRuntime SpawnRuntime(*ProjectResult, {}, SpawnServices);
+		PF_CHECK(Tests, SpawnRuntime.Start(SpawnScene).has_value());
+		PF_CHECK(Tests, SpawnScene.GetEntityCount() == 1);
+		PF_CHECK(Tests, SpawnRuntime.Advance(SpawnScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, SpawnScene.GetEntityCount() == 2);
+		for (const Entity& Spawned : SpawnScene.GetEntities())
+		{
+			if (Spawned == *SpawnEntity) continue;
+			const auto Tag = Spawned.GetTag();
+			const auto Transform = Spawned.GetTransform();
+			PF_CHECK(Tests, Tag && Tag->Name == "Blueprint Spawned Entity" && Transform &&
+				Transform->Translation == glm::vec3(3.0f, 4.0f, 5.0f));
+		}
+		SpawnRuntime.Stop();
+		Scene CancelledSpawnScene;
+		const auto CancelledSpawnEntity = CancelledSpawnScene.CreateEntityWithUUID(SpawnTarget, "Cancelled Blueprint spawn owner");
+		PF_CHECK(Tests, CancelledSpawnEntity.has_value());
+		if (!CancelledSpawnEntity) return;
+		CurrentSpawnTarget = *CancelledSpawnEntity;
+		SceneRuntime CancelledSpawnRuntime(*ProjectResult, {}, SpawnServices);
+		PF_CHECK(Tests, CancelledSpawnRuntime.Start(CancelledSpawnScene).has_value());
+		PF_CHECK(Tests, CancelledSpawnScene.GetEntityCount() == 1);
+		CancelledSpawnRuntime.Stop();
+		PF_CHECK(Tests, CancelledSpawnScene.GetEntityCount() == 1);
+
+		Scene StaleSpawnScene;
+		const auto StaleSpawnEntity = StaleSpawnScene.CreateEntityWithUUID(SpawnTarget, "Stale Blueprint spawn owner");
+		PF_CHECK(Tests, StaleSpawnEntity.has_value());
+		if (!StaleSpawnEntity) return;
+		CurrentSpawnTarget = *StaleSpawnEntity;
+		SceneRuntime StaleSpawnRuntime(*ProjectResult, {}, SpawnServices);
+		PF_CHECK(Tests, StaleSpawnRuntime.Start(StaleSpawnScene).has_value());
+		PF_CHECK(Tests, StaleSpawnScene.DestroyEntity(*StaleSpawnEntity).has_value());
+		PF_CHECK(Tests, StaleSpawnRuntime.Advance(StaleSpawnScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, StaleSpawnScene.GetEntityCount() == 0);
+		StaleSpawnRuntime.Stop();
+
+		BlueprintProgramSource FullSpawnBatchSource;
+		FullSpawnBatchSource.Constants = { 8.0f, 9.0f, 10.0f };
+		for (size_t SpawnIndex = 0; SpawnIndex < BlueprintMaximumEntitySpawnsPerEvent; ++SpawnIndex)
+		{
+			const size_t Instruction = SpawnIndex * 4;
+			FullSpawnBatchSource.Instructions.push_back({ BlueprintOpcode::PushConstant, 0, 0, UUID(74, Instruction + 1) });
+			FullSpawnBatchSource.Instructions.push_back({ BlueprintOpcode::PushConstant, 1, 0, UUID(74, Instruction + 2) });
+			FullSpawnBatchSource.Instructions.push_back({ BlueprintOpcode::PushConstant, 2, 0, UUID(74, Instruction + 3) });
+			FullSpawnBatchSource.Instructions.push_back({ BlueprintOpcode::RequestSpawnEntity, 0, 0, UUID(74, Instruction + 4) });
+		}
+		FullSpawnBatchSource.Instructions.push_back({ BlueprintOpcode::Return, 0, 0, UUID(74, 257) });
+		const auto VerifiedFullSpawnBatch = VerifyBlueprintProgram(std::move(FullSpawnBatchSource));
+		PF_CHECK(Tests, VerifiedFullSpawnBatch.has_value());
+		if (!VerifiedFullSpawnBatch) return;
+		const auto FullSpawnBatchProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedFullSpawnBatch));
+		constexpr AssetID SpawnBatchAsset{ 0x5f00000000004000ull, 0x8000000000000005ull };
+		std::array<Entity, 5> SpawnBatchOwners;
+		Scene SpawnBatchScene;
+		for (size_t OwnerIndex = 0; OwnerIndex < SpawnBatchOwners.size(); ++OwnerIndex)
+		{
+			auto Owner = SpawnBatchScene.CreateEntityWithUUID(UUID(0x5f00000000004000ull, 0x8000000000000100ull + OwnerIndex),
+				"Blueprint spawn budget owner");
+			PF_CHECK(Tests, Owner.has_value());
+			if (!Owner) return;
+			SpawnBatchOwners[OwnerIndex] = *Owner;
+		}
+		SceneRuntimeServices SpawnBatchServices;
+		SpawnBatchServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Event != BlueprintEventKind::OnCreate ||
+				std::find(SpawnBatchOwners.begin(), SpawnBatchOwners.end(), Target) == SpawnBatchOwners.end()) return std::nullopt;
+			return BlueprintProgramBinding{ SpawnBatchAsset, 1, FullSpawnBatchProgram };
+		};
+		SceneRuntime SpawnBatchRuntime(*ProjectResult, {}, SpawnBatchServices);
+		PF_CHECK(Tests, SpawnBatchRuntime.Start(SpawnBatchScene).has_value());
+		PF_CHECK(Tests, SpawnBatchRuntime.Advance(SpawnBatchScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, SpawnBatchScene.GetEntityCount() == SpawnBatchOwners.size() + 4 * BlueprintMaximumEntitySpawnsPerEvent);
+		const auto SpawnBatchDiagnostics = SpawnBatchRuntime.GetBlueprintDiagnostics();
+		PF_CHECK(Tests, SpawnBatchDiagnostics.size() == 1 &&
+			SpawnBatchDiagnostics.front().Entity == SpawnBatchOwners.back().GetUUID() &&
+			SpawnBatchDiagnostics.front().Code == BlueprintProgramErrorCode::HostRejectedDeferredCall &&
+			SpawnBatchDiagnostics.front().SourceNode == UUID(74, 4));
+		SpawnBatchRuntime.Stop();
+
+		constexpr UUID TimerTarget{ 0x5f00000000004000ull, 0x8000000000000003ull };
+		constexpr AssetID TimerProgramAsset{ 0x5f00000000004000ull, 0x8000000000000004ull };
+		BlueprintProgramSource ScheduleTimerSource;
+		ScheduleTimerSource.Constants = { 0.05f };
+		ScheduleTimerSource.ScalarPropertyIds = { "health" };
+		ScheduleTimerSource.TimerNames = { "cooldown" };
+		ScheduleTimerSource.Instructions = {
+			{ BlueprintOpcode::RequestTimerSelf, 0, 0, UUID(69, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(69, 2) }
+		};
+		const auto VerifiedScheduleTimer = VerifyBlueprintProgram(std::move(ScheduleTimerSource));
+		PF_CHECK(Tests, VerifiedScheduleTimer.has_value());
+		if (!VerifiedScheduleTimer) return;
+		const auto ScheduleTimerProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedScheduleTimer));
+		BlueprintProgramSource TimerCallbackSource;
+		TimerCallbackSource.Constants = { 1.0f };
+		TimerCallbackSource.ScalarPropertyIds = { "health" };
+		TimerCallbackSource.TimerNames = { "cooldown" };
+		TimerCallbackSource.Instructions = {
+			{ BlueprintOpcode::JumpIfTimer, 0, 2, UUID(70, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(70, 2) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(70, 3) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(70, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(70, 5) }
+		};
+		const auto VerifiedTimerCallback = VerifyBlueprintProgram(std::move(TimerCallbackSource));
+		PF_CHECK(Tests, VerifiedTimerCallback.has_value());
+		if (!VerifiedTimerCallback) return;
+		const auto TimerCallbackProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedTimerCallback));
+		Scene TimerScene;
+		const auto TimerEntity = TimerScene.CreateEntityWithUUID(TimerTarget, "Blueprint timer target");
+		PF_CHECK(Tests, TimerEntity.has_value());
+		if (!TimerEntity) return;
+		uint64_t TimerCatalogGeneration = 1;
+		uint32_t TimerPropertyTransactions = 0;
+		SceneRuntimeServices TimerServices;
+		TimerServices.GetBlueprintProgramGeneration = [&] { return TimerCatalogGeneration; };
+		TimerServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target != *TimerEntity) return std::nullopt;
+			if (Event == BlueprintEventKind::OnCreate)
+				return BlueprintProgramBinding{ TimerProgramAsset, 1, ScheduleTimerProgram };
+			if (Event == BlueprintEventKind::OnTimer)
+				return BlueprintProgramBinding{ TimerProgramAsset, 1, TimerCallbackProgram };
+			return std::nullopt;
+		};
+		TimerServices.ApplyBlueprintPropertyWrites = [&](const Entity& Target,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Target == *TimerEntity && Writes.size() == 1 && Writes.front().PropertyId == "health" &&
+				Writes.front().Value == 1.0f)
+				++TimerPropertyTransactions;
+			return true;
+		};
+		SceneRuntime TimerRuntime(*ProjectResult, {}, TimerServices);
+		PF_CHECK(Tests, TimerRuntime.Start(TimerScene).has_value());
+		PF_CHECK(Tests, TimerRuntime.Advance(TimerScene, Timestep(0.02)).has_value());
+		PF_CHECK(Tests, TimerPropertyTransactions == 0);
+		PF_CHECK(Tests, TimerRuntime.Advance(TimerScene, Timestep(0.04)).has_value());
+		PF_CHECK(Tests, TimerPropertyTransactions == 1 && TimerRuntime.GetBlueprintDiagnostics().empty());
+		TimerRuntime.Stop();
+
+		Scene CancelledTimerScene;
+		const auto CancelledTimerEntity = CancelledTimerScene.CreateEntityWithUUID(TimerTarget, "Cancelled timer target");
+		PF_CHECK(Tests, CancelledTimerEntity.has_value());
+		if (!CancelledTimerEntity) return;
+		TimerServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target != *CancelledTimerEntity) return std::nullopt;
+			if (Event == BlueprintEventKind::OnCreate)
+				return BlueprintProgramBinding{ TimerProgramAsset, 1, ScheduleTimerProgram };
+			if (Event == BlueprintEventKind::OnTimer)
+				return BlueprintProgramBinding{ TimerProgramAsset, 1, TimerCallbackProgram };
+			return std::nullopt;
+		};
+		SceneRuntime CancelledTimerRuntime(*ProjectResult, {}, TimerServices);
+		PF_CHECK(Tests, CancelledTimerRuntime.Start(CancelledTimerScene).has_value());
+		PF_CHECK(Tests, CancelledTimerRuntime.Advance(CancelledTimerScene, Timestep(0.01)).has_value());
+		const uint32_t TransactionsBeforeGenerationChange = TimerPropertyTransactions;
+		++TimerCatalogGeneration;
+		PF_CHECK(Tests, CancelledTimerRuntime.Advance(CancelledTimerScene, Timestep(0.1)).has_value());
+		PF_CHECK(Tests, TimerPropertyTransactions == TransactionsBeforeGenerationChange);
+		CancelledTimerRuntime.Stop();
+
+		Scene ReplacedTimerScene;
+		const auto OriginalTimerEntity = ReplacedTimerScene.CreateEntityWithUUID(TimerTarget, "Original timer incarnation");
+		PF_CHECK(Tests, OriginalTimerEntity.has_value());
+		if (!OriginalTimerEntity) return;
+		Entity CurrentTimerEntity = *OriginalTimerEntity;
+		uint32_t ReplacementTimerTransactions = 0;
+		TimerServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target != CurrentTimerEntity) return std::nullopt;
+			if (Event == BlueprintEventKind::OnCreate)
+				return BlueprintProgramBinding{ TimerProgramAsset, 1, ScheduleTimerProgram };
+			if (Event == BlueprintEventKind::OnTimer)
+				return BlueprintProgramBinding{ TimerProgramAsset, 1, TimerCallbackProgram };
+			return std::nullopt;
+		};
+		TimerServices.ApplyBlueprintPropertyWrites = [&](const Entity& Target,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Target == CurrentTimerEntity && Writes.size() == 1 && Writes.front().PropertyId == "health" &&
+				Writes.front().Value == 1.0f)
+				++ReplacementTimerTransactions;
+			return true;
+		};
+		SceneRuntime ReplacedTimerRuntime(*ProjectResult, {}, TimerServices);
+		PF_CHECK(Tests, ReplacedTimerRuntime.Start(ReplacedTimerScene).has_value());
+		PF_CHECK(Tests, ReplacedTimerRuntime.Advance(ReplacedTimerScene, Timestep(0.01)).has_value());
+		PF_CHECK(Tests, ReplacedTimerScene.DestroyEntity(CurrentTimerEntity).has_value());
+		const auto ReplacementTimerEntity = ReplacedTimerScene.CreateEntityWithUUID(TimerTarget, "Replacement timer incarnation");
+		PF_CHECK(Tests, ReplacementTimerEntity.has_value() && *ReplacementTimerEntity != CurrentTimerEntity);
+		if (!ReplacementTimerEntity) return;
+		CurrentTimerEntity = *ReplacementTimerEntity;
+		PF_CHECK(Tests, ReplacedTimerRuntime.Advance(ReplacedTimerScene, Timestep(0.04)).has_value());
+		PF_CHECK(Tests, ReplacementTimerTransactions == 0);
+		PF_CHECK(Tests, ReplacedTimerRuntime.Advance(ReplacedTimerScene, Timestep(0.02)).has_value());
+		PF_CHECK(Tests, ReplacementTimerTransactions == 1 && ReplacedTimerRuntime.GetBlueprintDiagnostics().empty());
+		ReplacedTimerRuntime.Stop();
+
+		const std::vector<std::byte> WaveBytes = MakeBlueprintTestWave();
+		const auto AudioAsset = AssetOperations::CreateAssetFromBytes(ProjectResult->GetAssetRegistry(),
+			ProjectResult->GetRootPath(), WaveBytes, "Assets/BlueprintAudio.wav");
+		PF_CHECK(Tests, AudioAsset.has_value());
+		if (!AudioAsset) return;
+		constexpr UUID AudioTarget{ 0x5f00000000004000ull, 0x8000000000000001ull };
+		Scene AudioControlScene;
+		const auto AudioEntity = AudioControlScene.CreateEntityWithUUID(AudioTarget, "Blueprint audio control target");
+		PF_CHECK(Tests, AudioEntity.has_value());
+		if (!AudioEntity) return;
+		PF_CHECK(Tests, AudioEntity->SetAudioSource(AudioSourceComponent{ AudioAsset->ID, 1.0f, true, true, false }).has_value());
+		PF_CHECK(Tests, AudioEntity->SetAudioListener(AudioListenerComponent{}).has_value());
+		BlueprintProgramSource AudioControlSource;
+		AudioControlSource.Instructions = {
+			{ BlueprintOpcode::RequestAudioControlSelf,
+				static_cast<uint32_t>(BlueprintAudioControl::Pause), 0, UUID(68, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(68, 2) }
+		};
+		const auto VerifiedAudioControl = VerifyBlueprintProgram(std::move(AudioControlSource));
+		PF_CHECK(Tests, VerifiedAudioControl.has_value());
+		if (!VerifiedAudioControl) return;
+		const auto AudioControlProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedAudioControl));
+		SceneRuntimeServices AudioControlServices;
+		AudioControlServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target.GetUUID() != AudioTarget || Event != BlueprintEventKind::OnCreate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 11, AudioControlProgram };
+		};
+		SceneRuntime AudioControlRuntime(*ProjectResult, ForceDescription, AudioControlServices);
+		PF_CHECK(Tests, AudioControlRuntime.Start(AudioControlScene).has_value());
+		const auto AudioControlFrame = AudioControlRuntime.Advance(AudioControlScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, AudioControlFrame.has_value());
+		PF_CHECK(Tests, AudioControlRuntime.GetBlueprintDiagnostics().empty());
+		AudioControlRuntime.Stop();
 	}
 }
 

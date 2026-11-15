@@ -13,6 +13,7 @@
 #include "Scene/SceneSerializer.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Scene.h"
+#include "Scripting/BlueprintAsset.h"
 #include "Scripting/ScriptRuntime.h"
 
 #include <array>
@@ -526,10 +527,14 @@ namespace
 		const auto ScriptIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ScriptIdentifier.has_value());
 		if (!ScriptIdentifier) return;
+		const auto BlueprintIdentifier = UUID::Generate();
+		PF_CHECK(Tests, BlueprintIdentifier.has_value());
+		if (!BlueprintIdentifier) return;
 		auto AuthoredEntity = AuthoredScene.CreateEntity("Cooked Runtime Entity");
 		PF_CHECK(Tests, AuthoredEntity.has_value());
 		if (!AuthoredEntity) return;
 		PF_CHECK(Tests, AuthoredEntity->SetScript(ScriptComponent{ *ScriptIdentifier }).has_value());
+		PF_CHECK(Tests, AuthoredEntity->SetBlueprint(BlueprintComponent{ *BlueprintIdentifier, true, {} }).has_value());
 		PF_CHECK(Tests, AuthoredEntity->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.2f, 0.0f, false }).has_value());
 		PF_CHECK(Tests, AuthoredEntity->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
 		const auto AudioIdentifier = UUID::Generate();
@@ -562,6 +567,27 @@ namespace
 		}
 		CookedAssetEntry ScriptEntry{ *ScriptIdentifier, CookedAssetProductKind::Script, {}, "products/script.lua", 1,
 			ScriptBytes.size(), ScriptDigest.Algorithm, ScriptDigest.Value, {} };
+		BlueprintProgramSource BlueprintOnCreate;
+		BlueprintOnCreate.Constants = { 42.0f };
+		BlueprintOnCreate.ScalarPropertyIds = { "runtime_value" };
+		BlueprintOnCreate.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(0x50, 1) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(0x50, 2) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(0x50, 3) }
+		};
+		const std::array BlueprintEvents{ BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, BlueprintOnCreate } };
+		auto BlueprintBytes = SerializeBlueprintAsset(BlueprintEvents);
+		PF_CHECK(Tests, BlueprintBytes.has_value());
+		if (!BlueprintBytes) return;
+		{
+			std::ofstream Output(Root / "products" / "behavior.pfbp", std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(BlueprintBytes->data()), static_cast<std::streamsize>(BlueprintBytes->size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const CookedAssetDigest BlueprintDigest = CookedAssetCatalog::ComputePayloadDigest(*BlueprintBytes);
+		CookedAssetEntry BlueprintEntry{ *BlueprintIdentifier, CookedAssetProductKind::BlueprintProgram, {},
+			"products/behavior.pfbp", BlueprintAssetFormatVersion, BlueprintBytes->size(),
+			BlueprintDigest.Algorithm, BlueprintDigest.Value, {} };
 		const std::vector<std::byte> WaveBytes = MakeCookedSilentWave();
 		{
 			std::ofstream Output(Root / "products" / "sound.wav", std::ios::binary | std::ios::trunc);
@@ -574,7 +600,7 @@ namespace
 		const CookedAssetCompatibility Compatibility{ "test-target", "test-renderer", "test-runtime-abi" };
 		auto Manifest = CookedAssetCatalog::SerializeManifest(
 			*ProjectIdentifier, *SceneIdentifier, Compatibility, {},
-			{ std::move(Entry), std::move(ScriptEntry), std::move(AudioEntry) });
+			{ std::move(Entry), std::move(ScriptEntry), std::move(AudioEntry), std::move(BlueprintEntry) });
 		PF_CHECK(Tests, Manifest.has_value());
 		if (!Manifest) return;
 		{
@@ -599,6 +625,14 @@ namespace
 		PF_CHECK(Tests, !std::filesystem::exists(Root / "Assets"));
 		PF_CHECK(Tests, Session.GetActiveSceneAsset() == *SceneIdentifier);
 		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 1);
+		const auto CookedEntityAtStart = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());
+		PF_CHECK(Tests, CookedEntityAtStart.has_value());
+		if (CookedEntityAtStart)
+		{
+			const auto CookedBlueprint = CookedEntityAtStart->GetBlueprint();
+			PF_CHECK(Tests, CookedBlueprint && CookedBlueprint->has_value() &&
+				(**CookedBlueprint).FindFloatProperty("runtime_value") == 42.0f);
+		}
 		auto Advanced = Session.Advance(Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, Advanced.has_value());
 		PF_CHECK(Tests, Advanced && Advanced->PhysicsSteps > 0);

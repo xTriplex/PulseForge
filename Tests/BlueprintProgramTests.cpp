@@ -45,7 +45,7 @@ namespace
 		const auto TrailingEncoded = DeserializeBlueprintProgram(TrailingBytes);
 		PF_CHECK(Tests, !TrailingEncoded && TrailingEncoded.error().Code == BlueprintProgramErrorCode::InvalidByteStream);
 		std::vector<std::byte> InvalidOpcodeBytes = *Encoded;
-		InvalidOpcodeBytes[28 + 2 * sizeof(uint32_t) + sizeof(uint16_t) + std::string("health").size() + 3 * 25] = std::byte{ 0xff };
+		InvalidOpcodeBytes[32 + 2 * sizeof(uint32_t) + sizeof(uint16_t) + std::string("health").size() + 3 * 25] = std::byte{ 0xff };
 		const auto InvalidOpcodeEncoded = DeserializeBlueprintProgram(InvalidOpcodeBytes);
 		PF_CHECK(Tests, !InvalidOpcodeEncoded && InvalidOpcodeEncoded.error().Code == BlueprintProgramErrorCode::InvalidOpcode &&
 			InvalidOpcodeEncoded.error().Instruction == 3 && InvalidOpcodeEncoded.error().SourceNode == UUID(10, 4));
@@ -56,6 +56,7 @@ namespace
 			Executed->PropertyWrites[0].Value == 6.0f);
 		std::vector<std::byte> LegacyProgramBytes = *Encoded;
 		LegacyProgramBytes[4] = std::byte{ 1 };
+		LegacyProgramBytes.erase(LegacyProgramBytes.begin() + 24, LegacyProgramBytes.begin() + 28);
 		LegacyProgramBytes.erase(LegacyProgramBytes.begin() + 20, LegacyProgramBytes.begin() + 24);
 		LegacyProgramBytes.erase(LegacyProgramBytes.begin() + 16, LegacyProgramBytes.begin() + 20);
 		const auto LegacyProgram = DeserializeBlueprintProgram(LegacyProgramBytes);
@@ -68,6 +69,7 @@ namespace
 			PreviousProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
 		std::vector<std::byte> IntermediateProgramBytes = *Encoded;
 		IntermediateProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintIntermediateProgramFormatVersion) };
+		IntermediateProgramBytes.erase(IntermediateProgramBytes.begin() + 24, IntermediateProgramBytes.begin() + 28);
 		IntermediateProgramBytes.erase(IntermediateProgramBytes.begin() + 20, IntermediateProgramBytes.begin() + 24);
 		const auto IntermediateProgram = DeserializeBlueprintProgram(IntermediateProgramBytes);
 		PF_CHECK(Tests, IntermediateProgram && IntermediateProgram->GetSource().Version == BlueprintProgramFormatVersion &&
@@ -77,6 +79,219 @@ namespace
 		const auto ActionProgram = DeserializeBlueprintProgram(ActionProgramBytes);
 		PF_CHECK(Tests, ActionProgram && ActionProgram->GetSource().Version == BlueprintProgramFormatVersion &&
 			ActionProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
+
+		BlueprintProgramSource ForceProgram;
+		ForceProgram.Constants = { 2.0f, 12.0f, -3.0f };
+		ForceProgram.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(17, 1) },
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(17, 2) },
+			{ BlueprintOpcode::PushConstant, 2, 0, UUID(17, 3) },
+			{ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(17, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(17, 5) }
+		};
+		const auto VerifiedForce = VerifyBlueprintProgram(ForceProgram);
+		PF_CHECK(Tests, VerifiedForce.has_value());
+		if (VerifiedForce)
+		{
+			std::array<float, 0> EmptyState{};
+			const auto ForceResult = ExecuteBlueprintProgram(*VerifiedForce, EmptyState);
+			PF_CHECK(Tests, ForceResult && ForceResult->InstructionsExecuted == 5 &&
+				ForceResult->PhysicsForceRequests.size() == 1 && ForceResult->PhysicsForceRequests.front().X == 2.0f &&
+				ForceResult->PhysicsForceRequests.front().Y == 12.0f && ForceResult->PhysicsForceRequests.front().Z == -3.0f &&
+				ForceResult->PhysicsForceRequests.front().SourceNode == UUID(17, 4));
+			const auto ForceBytes = SerializeBlueprintProgram(ForceProgram);
+			PF_CHECK(Tests, ForceBytes.has_value());
+			if (ForceBytes)
+			{
+				const auto DecodedForce = DeserializeBlueprintProgram(*ForceBytes);
+				PF_CHECK(Tests, DecodedForce && DecodedForce->GetSource().Instructions[3].Opcode ==
+					BlueprintOpcode::RequestApplyForceSelf);
+				std::vector<std::byte> LegacyForceBytes = *ForceBytes;
+				LegacyForceBytes[4] = std::byte{ 5 };
+				LegacyForceBytes.erase(LegacyForceBytes.begin() + 24, LegacyForceBytes.begin() + 28);
+				const auto LegacyForce = DeserializeBlueprintProgram(LegacyForceBytes);
+				PF_CHECK(Tests, !LegacyForce && LegacyForce.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
+			}
+		}
+		BlueprintProgramSource ForceUnderflow;
+		ForceUnderflow.Instructions = {
+			{ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(18, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(18, 2) }
+		};
+		const auto ForceUnderflowResult = VerifyBlueprintProgram(std::move(ForceUnderflow));
+		PF_CHECK(Tests, !ForceUnderflowResult && ForceUnderflowResult.error().Code ==
+			BlueprintProgramErrorCode::StackUnderflow && ForceUnderflowResult.error().SourceNode == UUID(18, 1));
+		BlueprintProgramSource ExcessiveForceCalls;
+		ExcessiveForceCalls.Constants = { 0.0f };
+		for (size_t Index = 0; Index <= BlueprintMaximumDeferredPhysicsCallsPerEvent; ++Index)
+		{
+			ExcessiveForceCalls.Instructions.push_back({ BlueprintOpcode::PushConstant, 0, 0, UUID(19, Index * 4 + 1) });
+			ExcessiveForceCalls.Instructions.push_back({ BlueprintOpcode::PushConstant, 0, 0, UUID(19, Index * 4 + 2) });
+			ExcessiveForceCalls.Instructions.push_back({ BlueprintOpcode::PushConstant, 0, 0, UUID(19, Index * 4 + 3) });
+			ExcessiveForceCalls.Instructions.push_back({ BlueprintOpcode::RequestApplyForceSelf, 0, 0, UUID(19, Index * 4 + 4) });
+		}
+		ExcessiveForceCalls.Instructions.push_back({ BlueprintOpcode::Return, 0, 0, UUID(19, 2000) });
+		const auto ExcessiveForceResult = VerifyBlueprintProgram(std::move(ExcessiveForceCalls));
+		PF_CHECK(Tests, !ExcessiveForceResult && ExcessiveForceResult.error().Code ==
+			BlueprintProgramErrorCode::ProgramTooLarge && ExcessiveForceResult.error().SourceNode ==
+			UUID(19, BlueprintMaximumDeferredPhysicsCallsPerEvent * 4 + 4));
+		BlueprintProgramSource AudioControlProgram;
+		AudioControlProgram.Instructions = {
+			{ BlueprintOpcode::RequestAudioControlSelf, static_cast<uint32_t>(BlueprintAudioControl::Pause), 0, UUID(20, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(20, 2) }
+		};
+		const auto VerifiedAudioControl = VerifyBlueprintProgram(AudioControlProgram);
+		PF_CHECK(Tests, VerifiedAudioControl.has_value());
+		if (VerifiedAudioControl)
+		{
+			std::array<float, 0> EmptyAudioState{};
+			const auto AudioControlResult = ExecuteBlueprintProgram(*VerifiedAudioControl, EmptyAudioState);
+			PF_CHECK(Tests, AudioControlResult && AudioControlResult->AudioControlRequest &&
+				AudioControlResult->AudioControlRequest->Operation == BlueprintAudioControl::Pause &&
+				AudioControlResult->AudioControlRequest->SourceNode == UUID(20, 1));
+			const auto AudioBytes = SerializeBlueprintProgram(AudioControlProgram);
+			PF_CHECK(Tests, AudioBytes.has_value());
+			if (AudioBytes)
+			{
+				const auto DecodedAudio = DeserializeBlueprintProgram(*AudioBytes);
+				PF_CHECK(Tests, DecodedAudio && DecodedAudio->GetSource().Instructions[0].Opcode ==
+					BlueprintOpcode::RequestAudioControlSelf);
+				std::vector<std::byte> PreviousAudioBytes = *AudioBytes;
+				PreviousAudioBytes[4] = std::byte{ 5 };
+				PreviousAudioBytes.erase(PreviousAudioBytes.begin() + 24, PreviousAudioBytes.begin() + 28);
+				const auto PreviousAudio = DeserializeBlueprintProgram(PreviousAudioBytes);
+				PF_CHECK(Tests, !PreviousAudio && PreviousAudio.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
+			}
+		}
+		AudioControlProgram.Instructions[0].Operand = static_cast<uint32_t>(BlueprintAudioControl::Stop) + 1;
+		const auto InvalidAudioControl = VerifyBlueprintProgram(std::move(AudioControlProgram));
+		PF_CHECK(Tests, !InvalidAudioControl && InvalidAudioControl.error().Code == BlueprintProgramErrorCode::InvalidOperand &&
+			InvalidAudioControl.error().SourceNode == UUID(20, 1));
+
+		BlueprintProgramSource TimerProgram;
+		TimerProgram.Constants = { 0.25f };
+		TimerProgram.TimerNames = { "cooldown" };
+		TimerProgram.Instructions = {
+			{ BlueprintOpcode::RequestTimerSelf, 0, 0, UUID(20, 3) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(20, 4) }
+		};
+		const auto VerifiedTimer = VerifyBlueprintProgram(TimerProgram);
+		PF_CHECK(Tests, VerifiedTimer.has_value());
+		if (VerifiedTimer)
+		{
+			std::vector<float> TimerState;
+			const auto TimerResult = ExecuteBlueprintProgram(*VerifiedTimer, TimerState);
+			PF_CHECK(Tests, TimerResult && TimerResult->TimerRequests.size() == 1 &&
+				TimerResult->TimerRequests.front().Name == "cooldown" &&
+				TimerResult->TimerRequests.front().DelaySeconds == 0.25f &&
+				TimerResult->TimerRequests.front().SourceNode == UUID(20, 3));
+			const auto TimerBytes = SerializeBlueprintProgram(TimerProgram);
+			PF_CHECK(Tests, TimerBytes.has_value());
+			if (TimerBytes)
+			{
+				const auto TimerDecoded = DeserializeBlueprintProgram(*TimerBytes);
+				PF_CHECK(Tests, TimerDecoded && TimerDecoded->GetSource().TimerNames == std::vector<std::string>{ "cooldown" });
+			}
+			BlueprintProgramSource TimerBranchProgram;
+			TimerBranchProgram.Constants = { 1.0f };
+			TimerBranchProgram.ScalarPropertyIds = { "health" };
+			TimerBranchProgram.TimerNames = { "cooldown" };
+			TimerBranchProgram.Instructions = {
+				{ BlueprintOpcode::JumpIfTimer, 0, 2, UUID(20, 5) },
+				{ BlueprintOpcode::Return, 0, 0, UUID(20, 6) },
+				{ BlueprintOpcode::PushConstant, 0, 0, UUID(20, 7) },
+				{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(20, 8) },
+				{ BlueprintOpcode::Return, 0, 0, UUID(20, 9) }
+			};
+			const auto VerifiedTimerBranch = VerifyBlueprintProgram(std::move(TimerBranchProgram));
+			PF_CHECK(Tests, VerifiedTimerBranch.has_value());
+			if (VerifiedTimerBranch)
+			{
+				std::array<float, 1> TimerBranchState{};
+				const auto MatchedTimer = ExecuteBlueprintProgram(*VerifiedTimerBranch, TimerBranchState,
+					BlueprintDefaultInstructionBudget, "cooldown");
+				PF_CHECK(Tests, MatchedTimer && MatchedTimer->PropertyWrites.size() == 1 &&
+					MatchedTimer->PropertyWrites.front().Value == 1.0f);
+				const auto OtherTimer = ExecuteBlueprintProgram(*VerifiedTimerBranch, TimerBranchState,
+					BlueprintDefaultInstructionBudget, "other");
+				PF_CHECK(Tests, OtherTimer && OtherTimer->PropertyWrites.empty());
+			}
+		}
+		BlueprintProgramSource TimerAssetHandler;
+		TimerAssetHandler.TimerNames = { "cooldown" };
+		TimerAssetHandler.Instructions = {
+			{ BlueprintOpcode::JumpIfTimer, 0, 1, UUID(20, 10) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(20, 11) }
+		};
+		const std::array<BlueprintEventProgramSource, 2> TimerAssetEvents{
+			BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, TimerProgram },
+			BlueprintEventProgramSource{ BlueprintEventKind::OnTimer, TimerAssetHandler }
+		};
+		PF_CHECK(Tests, VerifyBlueprintAsset(
+			std::vector<BlueprintEventProgramSource>(TimerAssetEvents.begin(), TimerAssetEvents.end())).has_value());
+		const std::array<BlueprintEventProgramSource, 1> MissingTimerHandler{
+			BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, TimerProgram }
+		};
+		const auto RejectedTimerAsset = VerifyBlueprintAsset(
+			std::vector<BlueprintEventProgramSource>(MissingTimerHandler.begin(), MissingTimerHandler.end()));
+		PF_CHECK(Tests, !RejectedTimerAsset && RejectedTimerAsset.error().Code == BlueprintProgramErrorCode::InvalidOperand &&
+			RejectedTimerAsset.error().SourceNode == UUID(20, 3));
+		TimerProgram.Constants[0] = BlueprintMaximumTimerDelaySeconds + 1.0f;
+		const auto InvalidTimer = VerifyBlueprintProgram(std::move(TimerProgram));
+		PF_CHECK(Tests, !InvalidTimer && InvalidTimer.error().Code == BlueprintProgramErrorCode::InvalidOperand &&
+			InvalidTimer.error().SourceNode == UUID(20, 3));
+
+		BlueprintProgramSource SpawnProgram;
+		SpawnProgram.Constants = { 4.0f, 5.0f, 6.0f };
+		SpawnProgram.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(21, 1) },
+			{ BlueprintOpcode::PushConstant, 1, 0, UUID(21, 2) },
+			{ BlueprintOpcode::PushConstant, 2, 0, UUID(21, 3) },
+			{ BlueprintOpcode::RequestSpawnEntity, 0, 0, UUID(21, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(21, 5) }
+		};
+		const auto VerifiedSpawn = VerifyBlueprintProgram(SpawnProgram);
+		PF_CHECK(Tests, VerifiedSpawn.has_value());
+		if (VerifiedSpawn)
+		{
+			std::array<float, 0> EmptySpawnState{};
+			const auto SpawnResult = ExecuteBlueprintProgram(*VerifiedSpawn, EmptySpawnState);
+			PF_CHECK(Tests, SpawnResult && SpawnResult->EntitySpawnRequests.size() == 1 &&
+				SpawnResult->EntitySpawnRequests.front().X == 4.0f &&
+				SpawnResult->EntitySpawnRequests.front().Y == 5.0f &&
+				SpawnResult->EntitySpawnRequests.front().Z == 6.0f &&
+				SpawnResult->EntitySpawnRequests.front().SourceNode == UUID(21, 4));
+			const auto SpawnBytes = SerializeBlueprintProgram(SpawnProgram);
+			PF_CHECK(Tests, SpawnBytes.has_value());
+			if (SpawnBytes)
+			{
+				const auto SpawnDecoded = DeserializeBlueprintProgram(*SpawnBytes);
+				PF_CHECK(Tests, SpawnDecoded && SpawnDecoded->GetSource().Instructions[3].Opcode ==
+					BlueprintOpcode::RequestSpawnEntity);
+				std::vector<std::byte> PreviousSpawnBytes = *SpawnBytes;
+				PreviousSpawnBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintTimerProgramFormatVersion) };
+				const auto PreviousSpawn = DeserializeBlueprintProgram(PreviousSpawnBytes);
+				PF_CHECK(Tests, !PreviousSpawn && PreviousSpawn.error().Code == BlueprintProgramErrorCode::UnsupportedVersion &&
+					PreviousSpawn.error().SourceNode == UUID(21, 4));
+			}
+		}
+		BlueprintProgramSource ExcessiveSpawnProgram;
+		for (size_t Index = 0; Index < BlueprintMaximumEntitySpawnsPerEvent + 1; ++Index)
+		{
+			ExcessiveSpawnProgram.Constants.insert(ExcessiveSpawnProgram.Constants.end(), { 0.0f, 0.0f, 0.0f });
+			ExcessiveSpawnProgram.Instructions.push_back({ BlueprintOpcode::PushConstant,
+				static_cast<uint32_t>(Index * 3), 0, UUID(22, Index * 4 + 1) });
+			ExcessiveSpawnProgram.Instructions.push_back({ BlueprintOpcode::PushConstant,
+				static_cast<uint32_t>(Index * 3 + 1), 0, UUID(22, Index * 4 + 2) });
+			ExcessiveSpawnProgram.Instructions.push_back({ BlueprintOpcode::PushConstant,
+				static_cast<uint32_t>(Index * 3 + 2), 0, UUID(22, Index * 4 + 3) });
+			ExcessiveSpawnProgram.Instructions.push_back({ BlueprintOpcode::RequestSpawnEntity, 0, 0,
+				UUID(22, Index * 4 + 4) });
+		}
+		ExcessiveSpawnProgram.Instructions.push_back({ BlueprintOpcode::Return, 0, 0, UUID(22, 999) });
+		const auto ExcessiveSpawn = VerifyBlueprintProgram(std::move(ExcessiveSpawnProgram));
+		PF_CHECK(Tests, !ExcessiveSpawn && ExcessiveSpawn.error().Code == BlueprintProgramErrorCode::ProgramTooLarge &&
+			ExcessiveSpawn.error().SourceNode == UUID(22, BlueprintMaximumEntitySpawnsPerEvent * 4 + 4));
 
 		BlueprintProgramSource Unsupported = MakeScalarWriteProgram();
 		Unsupported.Version++;
@@ -285,7 +500,7 @@ namespace
 		PF_CHECK(Tests, LegacyDecoded && LegacyDecoded->GetEvents().size() == 2);
 
 		std::vector<std::byte> UnsupportedVersion = *Encoded;
-		UnsupportedVersion[4] = std::byte{ 4 };
+		UnsupportedVersion[4] = std::byte{ static_cast<uint8_t>(BlueprintAssetFormatVersion + 1) };
 		const auto Unsupported = DeserializeBlueprintAsset(UnsupportedVersion);
 		PF_CHECK(Tests, !Unsupported && Unsupported.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
 		const auto Truncated = DeserializeBlueprintAsset(std::span<const std::byte>(*Encoded).first(8));

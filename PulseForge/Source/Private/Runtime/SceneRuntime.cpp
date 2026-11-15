@@ -112,7 +112,35 @@ namespace PulseForge
 			std::vector<std::string> PropertyIds;
 			std::vector<float> ScalarState;
 		};
-		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnActionCancelled) + 1;
+		struct PendingBlueprintPhysicsForce final
+		{
+			Entity Target;
+			AssetID Asset;
+			BlueprintEventKind Event = BlueprintEventKind::OnCreate;
+			BlueprintPhysicsForceRequest Request;
+			uint64_t SessionGeneration = 0;
+			uint64_t ProgramGeneration = 0;
+		};
+		struct PendingBlueprintTimer final
+		{
+			Entity Target;
+			AssetID Asset;
+			std::string Name;
+			double DueTimeSeconds = 0.0;
+			UUID SourceNode;
+			uint64_t SessionGeneration = 0;
+			uint64_t ProgramGeneration = 0;
+		};
+		struct PendingBlueprintEntitySpawn final
+		{
+			Entity Target;
+			AssetID Asset;
+			BlueprintEventKind Event = BlueprintEventKind::OnCreate;
+			BlueprintEntitySpawnRequest Request;
+			uint64_t SessionGeneration = 0;
+			uint64_t ProgramGeneration = 0;
+		};
+		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnTimer) + 1;
 		using BlueprintEventStates = std::array<BoundBlueprintEvent, BlueprintEventCount>;
 
 		struct RuntimeUICanvasState final
@@ -138,6 +166,9 @@ namespace PulseForge
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
 		std::unordered_map<UUID, Entity, UUIDHash> BlueprintKnownEntities;
 		std::deque<Entity> PendingEntityDestructions;
+		std::deque<PendingBlueprintPhysicsForce> PendingBlueprintPhysicsForces;
+		std::vector<PendingBlueprintTimer> PendingBlueprintTimers;
+		std::deque<PendingBlueprintEntitySpawn> PendingBlueprintEntitySpawns;
 		std::deque<PhysicsContactEvent> PendingContactEvents;
 		std::vector<BlueprintRuntimeDiagnostic> BlueprintDiagnostics;
 		RuntimeUIViewport RuntimeUIView{};
@@ -154,6 +185,7 @@ namespace PulseForge
 		std::optional<bool> RequestedPause;
 		uint64_t SessionGeneration = 0;
 		uint64_t BlueprintProgramGeneration = 0;
+		double BlueprintClockSeconds = 0.0;
 		uint64_t NextBoundaryRequestGeneration = 0;
 		uint32_t BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 		uint32_t BlueprintInstructionsExecuted = 0;
@@ -185,6 +217,232 @@ namespace PulseForge
 			return true;
 		}
 
+		bool QueueBlueprintPhysicsForces(
+			const Entity& Target,
+			const BlueprintProgramBinding& Binding,
+			BlueprintEventKind Event,
+			std::span<const BlueprintPhysicsForceRequest> Requests)
+		{
+			if (Requests.empty()) return true;
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid() ||
+				Requests.size() > BlueprintMaximumDeferredPhysicsCallsPerEvent - PendingBlueprintPhysicsForces.size())
+				return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			if (!Current || *Current != Target) return false;
+			for (const BlueprintPhysicsForceRequest& Request : Requests)
+				PendingBlueprintPhysicsForces.push_back({ Target, Binding.Asset, Event, Request, SessionGeneration,
+					BlueprintProgramGeneration });
+			return true;
+		}
+
+		bool CanQueueBlueprintPhysicsForces(
+			const Entity& Target,
+			std::span<const BlueprintPhysicsForceRequest> Requests) const
+		{
+			if (Requests.empty()) return true;
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid() ||
+				Requests.size() > BlueprintMaximumDeferredPhysicsCallsPerEvent - PendingBlueprintPhysicsForces.size())
+				return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			return Current && *Current == Target;
+		}
+
+		bool QueueBlueprintTimers(
+			const Entity& Target,
+			const BlueprintProgramBinding& Binding,
+			std::span<const BlueprintTimerRequest> Requests)
+		{
+			if (Requests.empty()) return true;
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid() ||
+				Requests.size() > BlueprintMaximumTimersPerEvent)
+				return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			if (!Current || *Current != Target) return false;
+			size_t AdditionalTimers = 0;
+			for (size_t RequestIndex = 0; RequestIndex < Requests.size(); ++RequestIndex)
+			{
+				const BlueprintTimerRequest& Request = Requests[RequestIndex];
+				const auto Existing = std::find_if(PendingBlueprintTimers.begin(), PendingBlueprintTimers.end(),
+					[&](const PendingBlueprintTimer& Timer)
+					{
+						return Timer.Target == Target && Timer.Asset == Binding.Asset && Timer.Name == Request.Name;
+					});
+				const bool AlreadyCounted = std::any_of(Requests.begin(), Requests.begin() + RequestIndex,
+					[&](const BlueprintTimerRequest& Earlier) { return Earlier.Name == Request.Name; });
+				if (Existing == PendingBlueprintTimers.end() && !AlreadyCounted) ++AdditionalTimers;
+			}
+			if (AdditionalTimers > BlueprintMaximumScheduledTimers - PendingBlueprintTimers.size()) return false;
+			for (const BlueprintTimerRequest& Request : Requests)
+			{
+				const double DueTime = BlueprintClockSeconds + Request.DelaySeconds;
+				const auto Existing = std::find_if(PendingBlueprintTimers.begin(), PendingBlueprintTimers.end(),
+					[&](const PendingBlueprintTimer& Timer)
+					{
+						return Timer.Target == Target && Timer.Asset == Binding.Asset && Timer.Name == Request.Name;
+					});
+				if (Existing != PendingBlueprintTimers.end())
+					*Existing = { Target, Binding.Asset, Request.Name, DueTime, Request.SourceNode, SessionGeneration,
+						BlueprintProgramGeneration };
+				else
+					PendingBlueprintTimers.push_back({ Target, Binding.Asset, Request.Name, DueTime, Request.SourceNode,
+						SessionGeneration, BlueprintProgramGeneration });
+			}
+			return true;
+		}
+
+		bool CanQueueBlueprintTimers(
+			const Entity& Target,
+			const BlueprintProgramBinding& Binding,
+			std::span<const BlueprintTimerRequest> Requests) const
+		{
+			if (Requests.empty()) return true;
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid() ||
+				Requests.size() > BlueprintMaximumTimersPerEvent)
+				return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			if (!Current || *Current != Target) return false;
+			size_t AdditionalTimers = 0;
+			for (size_t RequestIndex = 0; RequestIndex < Requests.size(); ++RequestIndex)
+			{
+				const BlueprintTimerRequest& Request = Requests[RequestIndex];
+				const auto Existing = std::find_if(PendingBlueprintTimers.begin(), PendingBlueprintTimers.end(),
+					[&](const PendingBlueprintTimer& Timer)
+					{
+						return Timer.Target == Target && Timer.Asset == Binding.Asset && Timer.Name == Request.Name;
+					});
+				const bool AlreadyCounted = std::any_of(Requests.begin(), Requests.begin() + RequestIndex,
+					[&](const BlueprintTimerRequest& Earlier) { return Earlier.Name == Request.Name; });
+				if (Existing == PendingBlueprintTimers.end() && !AlreadyCounted) ++AdditionalTimers;
+			}
+			return AdditionalTimers <= BlueprintMaximumScheduledTimers - PendingBlueprintTimers.size();
+		}
+
+		bool QueueBlueprintEntitySpawns(
+			const Entity& Target,
+			const BlueprintProgramBinding& Binding,
+			BlueprintEventKind Event,
+			std::span<const BlueprintEntitySpawnRequest> Requests)
+		{
+			constexpr size_t MaximumPendingSpawns = 256;
+			if (Requests.empty()) return true;
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid() ||
+				Requests.size() > BlueprintMaximumEntitySpawnsPerEvent ||
+				Requests.size() > MaximumPendingSpawns - PendingBlueprintEntitySpawns.size())
+				return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			if (!Current || *Current != Target) return false;
+			for (const BlueprintEntitySpawnRequest& Request : Requests)
+			{
+				if (!std::isfinite(Request.X) || !std::isfinite(Request.Y) || !std::isfinite(Request.Z)) return false;
+				PendingBlueprintEntitySpawns.push_back({ Target, Binding.Asset, Event, Request, SessionGeneration,
+					BlueprintProgramGeneration });
+			}
+			return true;
+		}
+
+		bool CanQueueBlueprintEntitySpawns(
+			const Entity& Target,
+			std::span<const BlueprintEntitySpawnRequest> Requests) const
+		{
+			constexpr size_t MaximumPendingSpawns = 256;
+			if (Requests.empty()) return true;
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid() ||
+				Requests.size() > BlueprintMaximumEntitySpawnsPerEvent ||
+				Requests.size() > MaximumPendingSpawns - PendingBlueprintEntitySpawns.size())
+				return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			return Current && *Current == Target && std::all_of(Requests.begin(), Requests.end(), [](const auto& Request)
+			{
+				return std::isfinite(Request.X) && std::isfinite(Request.Y) && std::isfinite(Request.Z);
+			});
+		}
+
+		void ApplyQueuedBlueprintEntitySpawns(Scene& SceneValue)
+		{
+			while (!PendingBlueprintEntitySpawns.empty())
+			{
+				const PendingBlueprintEntitySpawn Pending = PendingBlueprintEntitySpawns.front();
+				PendingBlueprintEntitySpawns.pop_front();
+				const auto Current = SceneValue.FindEntity(Pending.Target.GetUUID());
+				if (Pending.SessionGeneration != SessionGeneration || Pending.ProgramGeneration != BlueprintProgramGeneration ||
+					!Current || *Current != Pending.Target)
+					continue;
+				auto Spawned = SceneValue.CreateEntity("Blueprint Spawned Entity");
+				TransformComponent Transform;
+				Transform.Translation = { Pending.Request.X, Pending.Request.Y, Pending.Request.Z };
+				if (!Spawned || !Spawned->SetTransform(Transform))
+				{
+					if (Spawned) (void)SceneValue.DestroyEntity(*Spawned);
+					const BlueprintProgramBinding Binding{ Pending.Asset, 0, {} };
+					RecordBlueprintDiagnostic(Pending.Target, &Binding, Pending.Event,
+						BlueprintProgramErrorCode::HostRejectedDeferredCall, Pending.Request.SourceNode,
+						"Scene runtime could not apply a deferred Blueprint entity spawn");
+				}
+			}
+		}
+
+		void DispatchDueBlueprintTimers(Scene& SceneValue)
+		{
+			const auto DueEnd = std::stable_partition(PendingBlueprintTimers.begin(), PendingBlueprintTimers.end(),
+				[&](const PendingBlueprintTimer& Timer) { return Timer.DueTimeSeconds <= BlueprintClockSeconds; });
+			std::vector<PendingBlueprintTimer> DueTimers(
+				std::make_move_iterator(PendingBlueprintTimers.begin()), std::make_move_iterator(DueEnd));
+			PendingBlueprintTimers.erase(PendingBlueprintTimers.begin(), DueEnd);
+			std::stable_sort(DueTimers.begin(), DueTimers.end(), [](const auto& Left, const auto& Right)
+			{
+				return Left.DueTimeSeconds < Right.DueTimeSeconds;
+			});
+			for (size_t TimerIndex = 0; TimerIndex < DueTimers.size(); ++TimerIndex)
+			{
+				if (BlueprintDispatchesRemaining == 0)
+				{
+					PendingBlueprintTimers.insert(PendingBlueprintTimers.end(),
+						std::make_move_iterator(DueTimers.begin() + TimerIndex), std::make_move_iterator(DueTimers.end()));
+					if (!BlueprintDispatchLimitReported)
+					{
+						BlueprintDispatchLimitReported = true;
+						RecordBlueprintDiagnostic({}, nullptr, BlueprintEventKind::OnTimer,
+							BlueprintProgramErrorCode::EventBudgetExceeded, {},
+							"Scene Blueprint event dispatch budget was exhausted before all due timers could run");
+					}
+					break;
+				}
+				const PendingBlueprintTimer& Timer = DueTimers[TimerIndex];
+				if (Timer.SessionGeneration != SessionGeneration || Timer.ProgramGeneration != BlueprintProgramGeneration)
+					continue;
+				const auto Current = SceneValue.FindEntity(Timer.Target.GetUUID());
+				if (!Current || *Current != Timer.Target) continue;
+				const auto Instance = BlueprintInstances.find(Timer.Target.GetUUID());
+				if (Instance == BlueprintInstances.end() || !Instance->second.contains(Timer.Asset)) continue;
+				DispatchBlueprintEvent(SceneValue, Timer.Target, BlueprintEventKind::OnTimer, Services, Timer.Name);
+				ApplyQueuedEntityDestructions(SceneValue);
+				if (BoundaryRequestStatus == RequestStatus::Pending || BoundaryRequestStatus == RequestStatus::Committed)
+					break;
+			}
+		}
+
+		void ApplyQueuedBlueprintPhysicsForces(Scene& SceneValue)
+		{
+			while (!PendingBlueprintPhysicsForces.empty())
+			{
+				const PendingBlueprintPhysicsForce Pending = PendingBlueprintPhysicsForces.front();
+				PendingBlueprintPhysicsForces.pop_front();
+				const auto Current = SceneValue.FindEntity(Pending.Target.GetUUID());
+				if (Pending.SessionGeneration != SessionGeneration || Pending.ProgramGeneration != BlueprintProgramGeneration ||
+					!Current || *Current != Pending.Target)
+					continue;
+				const auto Applied = Physics->ApplyForce(Pending.Target.GetUUID(),
+					glm::vec3(Pending.Request.X, Pending.Request.Y, Pending.Request.Z));
+				if (!Applied)
+				{
+					const BlueprintProgramBinding Binding{ Pending.Asset, 0, {} };
+					RecordBlueprintDiagnostic(Pending.Target, &Binding, Pending.Event,
+						BlueprintProgramErrorCode::HostRejectedDeferredCall, Pending.Request.SourceNode,
+						"Scene runtime rejected the Blueprint physics force request: " + Applied.error().Message);
+				}
+			}
+		}
+
 		void ApplyQueuedEntityDestructions(Scene& SceneValue)
 		{
 			while (!PendingEntityDestructions.empty())
@@ -205,6 +463,8 @@ namespace PulseForge
 				BlueprintEvents.erase(Target.GetUUID());
 				BlueprintInstances.erase(Target.GetUUID());
 				BlueprintKnownEntities.erase(Target.GetUUID());
+				std::erase_if(PendingBlueprintTimers,
+					[&](const PendingBlueprintTimer& Timer) { return Timer.Target == Target; });
 			}
 		}
 
@@ -314,12 +574,47 @@ namespace PulseForge
 				}
 				BlueprintInstructionsRemaining -= std::min(BlueprintInstructionsRemaining, Result->InstructionsExecuted);
 				BlueprintInstructionsExecuted += Result->InstructionsExecuted;
+				if (!CanQueueBlueprintTimers(Target, Binding, Result->TimerRequests))
+				{
+					const UUID SourceNode = Result->TimerRequests.empty() ? UUID{} : Result->TimerRequests.front().SourceNode;
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						SourceNode, "Scene runtime rejected the Blueprint timer request batch");
+					Instance.Faulted = true;
+					return;
+				}
+				if (!CanQueueBlueprintPhysicsForces(Target, Result->PhysicsForceRequests))
+				{
+					const UUID SourceNode = Result->PhysicsForceRequests.empty()
+						? UUID{} : Result->PhysicsForceRequests.front().SourceNode;
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						SourceNode, "Scene runtime rejected the Blueprint physics force request batch");
+					Instance.Faulted = true;
+					return;
+				}
+				if (!CanQueueBlueprintEntitySpawns(Target, Result->EntitySpawnRequests))
+				{
+					const UUID SourceNode = Result->EntitySpawnRequests.empty()
+						? UUID{} : Result->EntitySpawnRequests.front().SourceNode;
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						SourceNode, "Scene runtime rejected the Blueprint entity spawn batch");
+					Instance.Faulted = true;
+					return;
+				}
 				if (!Result->PropertyWrites.empty() &&
 					(!Services.ApplyBlueprintPropertyWrites || !Services.ApplyBlueprintPropertyWrites(Target, Result->PropertyWrites)))
 				{
 					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedPropertyWrite,
 						Result->PropertyWrites.front().SourceNode,
 						"Scene runtime host rejected the Blueprint property transaction");
+					Instance.Faulted = true;
+					return;
+				}
+				if (!QueueBlueprintPhysicsForces(Target, Binding, Event, Result->PhysicsForceRequests))
+				{
+					const UUID SourceNode = Result->PhysicsForceRequests.empty()
+						? UUID{} : Result->PhysicsForceRequests.front().SourceNode;
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						SourceNode, "Scene runtime rejected the Blueprint physics force request batch");
 					Instance.Faulted = true;
 					return;
 				}
@@ -354,6 +649,45 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
+				if (Result->AudioControlRequest)
+				{
+					std::optional<AudioControlOperation> Operation;
+					switch (Result->AudioControlRequest->Operation)
+					{
+					case BlueprintAudioControl::Play: Operation = AudioControlOperation::Play; break;
+					case BlueprintAudioControl::Pause: Operation = AudioControlOperation::Pause; break;
+					case BlueprintAudioControl::Resume: Operation = AudioControlOperation::Resume; break;
+					case BlueprintAudioControl::Stop: Operation = AudioControlOperation::Stop; break;
+					}
+					const auto Queued = Operation ? Audio->QueueControl(Target, *Operation)
+						: std::expected<void, AudioSceneRuntimeError>(std::unexpected(AudioSceneRuntimeError{
+							AudioSceneRuntimeErrorCode::InvalidCommand, "Unknown Blueprint audio control operation" }));
+					if (!Queued)
+					{
+						RecordBlueprintDiagnostic(Target, &Binding, Event,
+							BlueprintProgramErrorCode::HostRejectedDeferredCall, Result->AudioControlRequest->SourceNode,
+							"Scene runtime rejected the Blueprint audio control request: " + Queued.error().Message);
+						Instance.Faulted = true;
+						return;
+					}
+				}
+				if (!QueueBlueprintTimers(Target, Binding, Result->TimerRequests))
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						Result->TimerRequests.empty() ? UUID{} : Result->TimerRequests.front().SourceNode,
+						"Scene runtime could not queue the Blueprint timer request batch");
+					Instance.Faulted = true;
+					return;
+				}
+				if (!QueueBlueprintEntitySpawns(Target, Binding, Event, Result->EntitySpawnRequests))
+				{
+					const UUID SourceNode = Result->EntitySpawnRequests.empty()
+						? UUID{} : Result->EntitySpawnRequests.front().SourceNode;
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						SourceNode, "Scene runtime could not queue the Blueprint entity spawn batch");
+					Instance.Faulted = true;
+					return;
+				}
 				ProgramInstance.ScalarState = std::move(CandidateState);
 			}
 			catch (const std::exception& Exception)
@@ -385,6 +719,8 @@ namespace PulseForge
 				{
 					BlueprintEvents.erase(Iterator->first);
 					BlueprintInstances.erase(Iterator->first);
+					std::erase_if(PendingBlueprintTimers,
+						[&](const PendingBlueprintTimer& Timer) { return Timer.Target == Iterator->second; });
 					Iterator = BlueprintKnownEntities.erase(Iterator);
 				}
 				else ++Iterator;
@@ -752,6 +1088,9 @@ namespace PulseForge
 				for (const Entity& EntityValue : m_Impl->Source->GetEntities())
 					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Impl->Services);
 			m_Impl->PendingContactEvents.clear();
+			m_Impl->PendingBlueprintPhysicsForces.clear();
+			m_Impl->PendingBlueprintTimers.clear();
+			m_Impl->PendingBlueprintEntitySpawns.clear();
 			m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
 			m_Impl->BoundaryRequest.reset();
 		}
@@ -933,6 +1272,9 @@ namespace PulseForge
 			{
 				m_Impl->BlueprintEvents.clear();
 				m_Impl->BlueprintInstances.clear();
+				m_Impl->PendingBlueprintPhysicsForces.clear();
+				m_Impl->PendingBlueprintTimers.clear();
+				m_Impl->PendingBlueprintEntitySpawns.clear();
 				m_Impl->BlueprintProgramGeneration = CurrentProgramGeneration;
 			}
 		}
@@ -1001,6 +1343,7 @@ namespace PulseForge
 		}
 
 		if (m_Impl->Paused) return MakeFrameResult();
+		m_Impl->BlueprintClockSeconds += DeltaSeconds;
 
 		{
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "ScriptRuntime::Advance", "ScriptRuntime");
@@ -1011,6 +1354,11 @@ namespace PulseForge
 					"Could not update scene scripts: " + Result.error().Message));
 		}
 		m_Impl->ApplyQueuedEntityDestructions(Source);
+		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+			return MakeFrameResult();
+		// Timer callbacks run after Lua's frame update and before Blueprint input edges, update, and physics contacts.
+		m_Impl->DispatchDueBlueprintTimers(Source);
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return MakeFrameResult();
@@ -1069,6 +1417,8 @@ namespace PulseForge
 
 		auto PhysicsResult = [&]
 		{
+			m_Impl->ApplyQueuedBlueprintPhysicsForces(Source);
+			m_Impl->ApplyQueuedBlueprintEntitySpawns(Source);
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "PhysicsSceneRuntime::Advance", "PhysicsSceneRuntime");
 			return m_Impl->Physics->Advance(Source, FrameDelta);
 		}();
@@ -1096,11 +1446,21 @@ namespace PulseForge
 				"Scene contact event queue reached its limit; excess events were discarded");
 		const size_t ContactEventsToDispatch = std::min(m_Impl->PendingContactEvents.size(),
 			static_cast<size_t>(BlueprintMaximumEventDispatchesPerFrame));
+		const auto IsCurrentContactEndpoint = [&](const Entity& Target, UUID Identifier)
+		{
+			if (!Target.IsValid() || Target.GetUUID() != Identifier) return false;
+			const auto Current = Source.FindEntity(Identifier);
+			return Current && *Current == Target;
+		};
 		for (size_t ContactIndex = 0; ContactIndex < ContactEventsToDispatch; ++ContactIndex)
 		{
 			if (m_Impl->BlueprintDispatchesRemaining < 2) break;
 			const PhysicsContactEvent Event = m_Impl->PendingContactEvents.front();
 			m_Impl->PendingContactEvents.pop_front();
+			if (Event.SessionGeneration != m_Impl->SessionGeneration ||
+				!IsCurrentContactEndpoint(Event.First, Event.FirstIdentifier) ||
+				!IsCurrentContactEndpoint(Event.Second, Event.SecondIdentifier))
+				continue;
 			const bool ContinueFrame = m_Impl->Scripting->DispatchPhysicsContact(Source, Event);
 			if (!ContinueFrame)
 			{

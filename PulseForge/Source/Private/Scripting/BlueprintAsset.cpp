@@ -59,6 +59,28 @@ namespace PulseForge
 			if (!Program) return std::unexpected(Program.error());
 			Verified.push_back({ Event.Event, std::move(*Program) });
 		}
+		const auto TimerHandler = std::find_if(Verified.begin(), Verified.end(), [](const BlueprintVerifiedEventProgram& Event)
+		{
+			return Event.Event == BlueprintEventKind::OnTimer;
+		});
+		for (const BlueprintVerifiedEventProgram& Event : Verified)
+		{
+			const BlueprintProgramSource& Program = Event.Program.GetSource();
+			for (size_t InstructionIndex = 0; InstructionIndex < Program.Instructions.size(); ++InstructionIndex)
+			{
+				const BlueprintInstruction& Instruction = Program.Instructions[InstructionIndex];
+				if (Instruction.Opcode != BlueprintOpcode::RequestTimerSelf) continue;
+				const std::string& TimerName = Program.TimerNames[Instruction.Operand];
+				const bool HasHandler = TimerHandler != Verified.end() &&
+					std::find(TimerHandler->Program.GetSource().TimerNames.begin(),
+						TimerHandler->Program.GetSource().TimerNames.end(), TimerName) !=
+						TimerHandler->Program.GetSource().TimerNames.end();
+				if (!HasHandler)
+					return std::unexpected(BlueprintProgramError{ BlueprintProgramErrorCode::InvalidOperand,
+						static_cast<uint32_t>(InstructionIndex), Instruction.SourceNode,
+						"Blueprint timer request has no matching OnTimer handler" });
+			}
+		}
 		return VerifiedBlueprintAsset(BlueprintAssetFormatVersion, std::move(Verified));
 	}
 
@@ -110,8 +132,8 @@ namespace PulseForge
 		if (!ReadInteger(Bytes, Offset, Version))
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint asset header is truncated"));
-		if (Version != BlueprintLegacyAssetFormatVersion && Version != BlueprintPreviousAssetFormatVersion &&
-			Version != BlueprintAssetFormatVersion)
+		if (Version != BlueprintLegacyAssetFormatVersion && Version != BlueprintLegacyActionAssetFormatVersion &&
+			Version != BlueprintPreviousAssetFormatVersion && Version != BlueprintAssetFormatVersion)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::UnsupportedVersion,
 				"Blueprint asset version is not supported"));
 		const size_t EventCount = std::to_integer<uint8_t>(Bytes[Offset++]);
@@ -130,8 +152,10 @@ namespace PulseForge
 			const size_t EventIndex = static_cast<size_t>(Event);
 			const size_t SupportedEventCount = Version == BlueprintLegacyAssetFormatVersion
 				? static_cast<size_t>(BlueprintEventKind::OnUIAction) + 1
-				: Version == BlueprintPreviousAssetFormatVersion
-					? static_cast<size_t>(BlueprintEventKind::OnDestroy) + 1 : BlueprintMaximumEventPrograms;
+				: Version == BlueprintLegacyActionAssetFormatVersion
+					? static_cast<size_t>(BlueprintEventKind::OnDestroy) + 1
+					: Version == BlueprintPreviousAssetFormatVersion
+						? static_cast<size_t>(BlueprintEventKind::OnActionCancelled) + 1 : BlueprintMaximumEventPrograms;
 			if (EventIndex >= SupportedEventCount)
 				return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidOperand,
 					"Blueprint asset contains an event unsupported by its format version"));

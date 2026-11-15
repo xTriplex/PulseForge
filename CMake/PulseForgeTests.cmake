@@ -299,6 +299,15 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.BlueprintRuntime COMMAND PulseForgeBlueprintRuntimeTests)
 
+	if(TARGET PulseForgeCookedRuntime)
+		add_executable(PulseForgeCookedBlueprintProgramConsumer
+			Tests/ModuleConsumers/CookedBlueprintProgramConsumer.cpp)
+		target_link_libraries(PulseForgeCookedBlueprintProgramConsumer PRIVATE PulseForgeCookedRuntime)
+		set_property(TARGET PulseForgeCookedBlueprintProgramConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+		add_test(NAME PulseForge.CookedBlueprintProgramConsumer COMMAND PulseForgeCookedBlueprintProgramConsumer)
+		set_tests_properties(PulseForge.CookedBlueprintProgramConsumer PROPERTIES RUN_SERIAL TRUE TIMEOUT 30)
+	endif()
+
 	add_executable(PulseForgePlayerLaunchConfigurationTests
 		Tests/PlayerLaunchConfigurationTestMain.cpp
 		Tests/PlayerLaunchConfigurationTests.cpp
@@ -467,6 +476,7 @@ if(BUILD_TESTING)
 		PulseForgeSceneRendererConsumer
 		PulseForgeAudioRuntimeTests
 		PulseForgeAudioSessionConsumer
+		PulseForgeBlueprintRuntimeTests
 		PulseForgeScriptingRuntimeTests
 		PulseForgePlayerLaunchConfigurationTests
 		PulseForgeBufferUpdateTests
@@ -514,6 +524,9 @@ if(BUILD_TESTING)
 	endif()
 	if(TARGET PulseForgeGpuValidation)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeGpuValidation)
+	endif()
+	if(TARGET PulseForgeCookedBlueprintProgramConsumer)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeCookedBlueprintProgramConsumer)
 	endif()
 	if(TARGET PulseForgeMacOSRendererValidation)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeMacOSRendererValidation)

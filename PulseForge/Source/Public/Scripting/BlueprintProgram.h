@@ -16,8 +16,11 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintProgramFormatVersion = 5;
-	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 4;
+	inline constexpr uint32_t BlueprintProgramFormatVersion = 8;
+	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 7;
+	inline constexpr uint32_t BlueprintSpawnProgramFormatVersion = 8;
+	inline constexpr uint32_t BlueprintDeferredServiceProgramFormatVersion = 6;
+	inline constexpr uint32_t BlueprintTimerProgramFormatVersion = 7;
 	inline constexpr uint32_t BlueprintSceneTransitionProgramFormatVersion = 4;
 	inline constexpr uint32_t BlueprintIntermediateProgramFormatVersion = 3;
 	inline constexpr uint32_t BlueprintActionProgramFormatVersion = 2;
@@ -28,8 +31,16 @@ namespace PulseForge
 	inline constexpr size_t BlueprintMaximumActionNameCount = 64;
 	inline constexpr size_t BlueprintMaximumActionNameLength = 128;
 	inline constexpr size_t BlueprintMaximumSceneTransitionAssetCount = 64;
+	inline constexpr size_t BlueprintMaximumTimerNameCount = 64;
+	inline constexpr size_t BlueprintMaximumTimerNameLength = 64;
 	inline constexpr uint32_t BlueprintDefaultInstructionBudget = 10000;
 	inline constexpr uint32_t BlueprintMaximumEventDispatchesPerFrame = 4096;
+	inline constexpr size_t BlueprintMaximumDeferredPhysicsCallsPerEvent = 256;
+	inline constexpr size_t BlueprintMaximumEntitySpawnsPerEvent = 64;
+	inline constexpr size_t BlueprintMaximumScheduledTimers = 1024;
+	inline constexpr size_t BlueprintMaximumTimersPerEvent = 64;
+	inline constexpr float BlueprintMinimumTimerDelaySeconds = 0.001f;
+	inline constexpr float BlueprintMaximumTimerDelaySeconds = 86400.0f;
 
 	enum class BlueprintEventKind : uint8_t
 	{
@@ -45,7 +56,16 @@ namespace PulseForge
 		OnDestroy,
 		OnActionPressed,
 		OnActionReleased,
-		OnActionCancelled
+		OnActionCancelled,
+		OnTimer
+	};
+
+	enum class BlueprintAudioControl : uint8_t
+	{
+		Play,
+		Pause,
+		Resume,
+		Stop
 	};
 
 	enum class BlueprintOpcode : uint8_t
@@ -63,7 +83,12 @@ namespace PulseForge
 		RequestStop,
 		RequestPause,
 		RequestSceneTransition,
-		RequestDestroySelf
+		RequestDestroySelf,
+		RequestApplyForceSelf,
+		RequestAudioControlSelf,
+		RequestTimerSelf,
+		JumpIfTimer,
+		RequestSpawnEntity
 	};
 
 	struct BlueprintInstruction
@@ -81,6 +106,7 @@ namespace PulseForge
 		std::vector<std::string> ScalarPropertyIds;
 		std::vector<std::string> ActionNames;
 		std::vector<AssetID> SceneTransitionAssets;
+		std::vector<std::string> TimerNames;
 		std::vector<BlueprintInstruction> Instructions;
 	};
 
@@ -130,6 +156,35 @@ namespace PulseForge
 		UUID SourceNode;
 	};
 
+	struct BlueprintPhysicsForceRequest
+	{
+		float X = 0.0f;
+		float Y = 0.0f;
+		float Z = 0.0f;
+		UUID SourceNode;
+	};
+
+	struct BlueprintAudioControlRequest
+	{
+		BlueprintAudioControl Operation = BlueprintAudioControl::Play;
+		UUID SourceNode;
+	};
+
+	struct BlueprintTimerRequest
+	{
+		std::string Name;
+		float DelaySeconds = 0.0f;
+		UUID SourceNode;
+	};
+
+	struct BlueprintEntitySpawnRequest
+	{
+		float X = 0.0f;
+		float Y = 0.0f;
+		float Z = 0.0f;
+		UUID SourceNode;
+	};
+
 	struct BlueprintExecutionResult
 	{
 		uint32_t InstructionsExecuted = 0;
@@ -142,6 +197,10 @@ namespace PulseForge
 		UUID SceneTransitionSourceNode;
 		bool RequestsEntityDestroy = false;
 		UUID EntityDestroySourceNode;
+		std::vector<BlueprintPhysicsForceRequest> PhysicsForceRequests;
+		std::optional<BlueprintAudioControlRequest> AudioControlRequest;
+		std::vector<BlueprintTimerRequest> TimerRequests;
+		std::vector<BlueprintEntitySpawnRequest> EntitySpawnRequests;
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>
@@ -150,7 +209,7 @@ namespace PulseForge
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
 		uint32_t InstructionBudget = BlueprintDefaultInstructionBudget,
-		std::string_view ActionName = {});
+		std::string_view EventName = {});
 	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, BlueprintProgramError>
 		SerializeBlueprintProgram(const BlueprintProgramSource& Source);
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>
