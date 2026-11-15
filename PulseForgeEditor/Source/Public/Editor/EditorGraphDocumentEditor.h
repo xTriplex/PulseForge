@@ -445,7 +445,8 @@ namespace PulseForgeEditor
 	enum class EditorGraphFixtureKind : uint8_t
 	{
 		MaterialExpression,
-		GameplayEvent
+		GameplayEvent,
+		BlueprintEvent
 	};
 
 	struct EditorGraphFixtureLocation

@@ -43,6 +43,7 @@ namespace PulseForgeEditor
 		OpenScene,
 		OpenMaterialGraphFixture,
 		OpenGameplayGraphFixture,
+		OpenBlueprintGraphFixture,
 		SetPanelVisible,
 		SetOpeningPreference,
 		ResetLayout

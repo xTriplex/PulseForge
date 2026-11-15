@@ -2,6 +2,7 @@
 
 #include "Editor/EditorGraphLayout.h"
 #include "Editor/EditorGraphModel.h"
+#include "Editor/BlueprintGraphCompiler.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -260,6 +261,9 @@ namespace
 
 		EditorGraphCommandHistory History;
 		EditorGraphSchema Schema;
+		uint64_t BlueprintCompileRevision = (std::numeric_limits<uint64_t>::max)();
+		size_t BlueprintCompiledEventCount = 0;
+		std::optional<BlueprintGraphDiagnostic> BlueprintCompileDiagnostic;
 		uint64_t SchemaRevision = 0;
 		std::filesystem::path SourcePath;
 		std::string SavedBytes;
@@ -688,7 +692,8 @@ namespace PulseForgeEditor
 	{
 		if (ProjectRoot.empty()) return std::unexpected("Open a project before creating a graph authoring fixture");
 		const EditorGraphSchema Schema = Kind == EditorGraphFixtureKind::MaterialExpression
-			? MakeMaterialExpressionFixtureSchema() : MakeGameplayEventFixtureSchema();
+			? MakeMaterialExpressionFixtureSchema() : Kind == EditorGraphFixtureKind::BlueprintEvent
+				? MakeBlueprintAuthoringSchema() : MakeGameplayEventFixtureSchema();
 		auto GraphID = PulseForge::UUID::Generate();
 		if (!GraphID) return std::unexpected(GraphID.error().Message);
 		auto Graph = CreateEditorGraph(Schema, *GraphID);
@@ -707,7 +712,7 @@ namespace PulseForgeEditor
 			if (!ConnectEditorGraphPins(History, Schema, SourcePin->ID, TargetPin->ID))
 				return std::unexpected("Could not connect the material-expression fixture");
 		}
-		else
+		else if (Kind == EditorGraphFixtureKind::GameplayEvent)
 		{
 			if (!Add("gameplay.event.begin", 80.0) || !Add("gameplay.flow.branch", 320.0) || !Add("gameplay.action.log", 600.0))
 				return std::unexpected("Could not build the gameplay-event fixture");
@@ -722,6 +727,75 @@ namespace PulseForgeEditor
 				!ConnectEditorGraphPins(History, Schema, BranchOutput->ID, ActionInput->ID))
 				return std::unexpected("Could not connect the gameplay-event fixture");
 		}
+		else
+		{
+			if (!Add("blueprint.event.action_pressed", 80.0) || !Add("blueprint.action.write_scalar", 600.0) ||
+				!Add("blueprint.value.constant_float", 220.0) || !Add("blueprint.value.constant_float", 220.0) ||
+				!Add("blueprint.math.add", 400.0))
+				return std::unexpected("Could not build the Blueprint event graph fixture");
+			std::string DefaultsError;
+			const bool DefaultsSet = History.Execute(Schema, [](EditorGraph& Graph) -> std::expected<void, std::string>
+			{
+				const auto SetDefault = [](EditorGraphNode& Node, std::string_view Key, EditorGraphValue Value)
+				{
+					const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+						[Key](const EditorGraphPin& Candidate) { return Candidate.Key == Key; });
+					if (Pin == Node.Pins.end()) return false;
+					Pin->DefaultValue = std::move(Value);
+					return true;
+				};
+				auto FindNode = [&Graph](std::string_view Type, size_t Index = 0) -> EditorGraphNode*
+				{
+					for (EditorGraphNode& Node : Graph.Nodes)
+						if (Node.TypeKey == Type && Index-- == 0) return &Node;
+					return nullptr;
+				};
+				EditorGraphNode* Event = FindNode("blueprint.event.action_pressed");
+				EditorGraphNode* Write = FindNode("blueprint.action.write_scalar");
+				EditorGraphNode* ConstantA = FindNode("blueprint.value.constant_float");
+				EditorGraphNode* ConstantB = FindNode("blueprint.value.constant_float", 1);
+				if (!Event || !Write || !ConstantA || !ConstantB ||
+					!SetDefault(*Event, "action", std::string("Confirm")) ||
+					!SetDefault(*Write, "property", std::string("health")) ||
+					!SetDefault(*ConstantA, "value", 3.0) || !SetDefault(*ConstantB, "value", 7.0))
+					return std::unexpected("Could not initialize Blueprint fixture defaults");
+				return {};
+			}, DefaultsError);
+			if (!DefaultsSet) return std::unexpected(DefaultsError);
+			const auto FindNode = [&History](std::string_view Type, size_t Index = 0) -> const EditorGraphNode*
+			{
+				for (const EditorGraphNode& Node : History.Graph().Nodes)
+					if (Node.TypeKey == Type && Index-- == 0) return &Node;
+				return nullptr;
+			};
+			const auto FindPin = [](const EditorGraphNode& Node, std::string_view Key) -> const EditorGraphPin*
+			{
+				const auto Found = std::find_if(Node.Pins.begin(), Node.Pins.end(),
+					[Key](const EditorGraphPin& Pin) { return Pin.Key == Key; });
+				return Found == Node.Pins.end() ? nullptr : &*Found;
+			};
+			const EditorGraphNode* Event = FindNode("blueprint.event.action_pressed");
+			const EditorGraphNode* Write = FindNode("blueprint.action.write_scalar");
+			const EditorGraphNode* ConstantA = FindNode("blueprint.value.constant_float");
+			const EditorGraphNode* ConstantB = FindNode("blueprint.value.constant_float", 1);
+			const EditorGraphNode* Add = FindNode("blueprint.math.add");
+			if (!Event || !Write || !ConstantA || !ConstantB || !Add)
+				return std::unexpected("The Blueprint event graph fixture is incomplete");
+			const EditorGraphPin* EventExec = FindPin(*Event, "exec");
+			const EditorGraphPin* WriteExec = FindPin(*Write, "exec-in");
+			const EditorGraphPin* AValue = FindPin(*ConstantA, "value");
+			const EditorGraphPin* BValue = FindPin(*ConstantB, "value");
+			const EditorGraphPin* AddA = FindPin(*Add, "a");
+			const EditorGraphPin* AddB = FindPin(*Add, "b");
+			const EditorGraphPin* AddValue = FindPin(*Add, "value");
+			const EditorGraphPin* WriteValue = FindPin(*Write, "value");
+			if (!EventExec || !WriteExec || !AValue || !BValue || !AddA || !AddB || !AddValue || !WriteValue ||
+				!ConnectEditorGraphPins(History, Schema, EventExec->ID, WriteExec->ID) ||
+				!ConnectEditorGraphPins(History, Schema, AValue->ID, AddA->ID) ||
+				!ConnectEditorGraphPins(History, Schema, BValue->ID, AddB->ID) ||
+				!ConnectEditorGraphPins(History, Schema, AddValue->ID, WriteValue->ID))
+				return std::unexpected("Could not connect the Blueprint event graph fixture");
+		}
 		const auto Serialized = SerializeEditorGraph(History.Graph(), Schema);
 		if (!Serialized) return std::unexpected(Serialized.error());
 		const auto RelativePath = GetFixturePath(*GraphID);
@@ -729,7 +803,8 @@ namespace PulseForgeEditor
 		if (auto Written = PublishGraphSource(FullPath, {}, *Serialized, true); !Written)
 			return std::unexpected(Written.error());
 		const std::string Display = Kind == EditorGraphFixtureKind::MaterialExpression
-			? "Material Expression Fixture — authoring only" : "Gameplay Event Fixture — authoring only";
+			? "Material Expression Fixture — authoring only" : Kind == EditorGraphFixtureKind::BlueprintEvent
+				? "Blueprint Event Graph — authoring preview" : "Gameplay Event Fixture — authoring only";
 		return EditorGraphFixtureLocation{ *GraphID, RelativePath, Display };
 	}
 
@@ -740,6 +815,8 @@ namespace PulseForgeEditor
 			if (auto Added = m_SchemaRegistry.Register(MakeMaterialExpressionFixtureSchema()); !Added) return Added;
 		if (!m_SchemaRegistry.Contains("pulseforge.gameplay-event-fixture"))
 			if (auto Added = m_SchemaRegistry.Register(MakeGameplayEventFixtureSchema()); !Added) return Added;
+		if (!m_SchemaRegistry.Contains("pulseforge.blueprint"))
+			if (auto Added = m_SchemaRegistry.Register(MakeBlueprintAuthoringSchema()); !Added) return Added;
 		EditorDocumentEditorAdapter Adapter;
 		Adapter.Kind = EditorDocumentKind::Graph;
 		Adapter.IsEligible = [this](const auto& Context) { return IsEligible(Context); };
@@ -1194,6 +1271,30 @@ namespace PulseForgeEditor
 			ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", State->Error.c_str());
 			if (ImGui::Button("Retry Graph Canvas")) CancelCanvasInteraction(*State);
 			return;
+		}
+		if (State->Schema.Key == "pulseforge.blueprint")
+		{
+			const uint64_t GraphRevision = State->History.GraphRevision();
+			if (State->BlueprintCompileRevision != GraphRevision)
+			{
+				const auto Compiled = CompileBlueprintGraph(State->History.Graph(), State->Schema);
+				State->BlueprintCompileDiagnostic = Compiled
+					? std::nullopt : std::optional<BlueprintGraphDiagnostic>(Compiled.error());
+				State->BlueprintCompiledEventCount = Compiled ? Compiled->GetEvents().size() : 0;
+				State->BlueprintCompileRevision = GraphRevision;
+			}
+			ImGui::SeparatorText("Blueprint Compile Preview");
+			if (State->BlueprintCompileDiagnostic)
+			{
+				const BlueprintGraphDiagnostic& Diagnostic = *State->BlueprintCompileDiagnostic;
+				ImGui::TextColored(ImVec4(1.0f, 0.34f, 0.25f, 1.0f), "%s", Diagnostic.Message.c_str());
+				if (!Diagnostic.Node.IsNil())
+					ImGui::TextDisabled("Node %s", Diagnostic.Node.ToString().c_str());
+				if (!Diagnostic.Pin.IsNil())
+					ImGui::TextDisabled("Pin %s", Diagnostic.Pin.ToString().c_str());
+			}
+			else
+				ImGui::TextDisabled("Valid Blueprint program: %zu event handler(s)", State->BlueprintCompiledEventCount);
 		}
 		const auto CanvasContext = MakeCanvasDocumentContext(Session, State->History.Graph().ID);
 		const auto ContextMatches = [&CanvasContext](const EditorGraphCanvasDocumentContext& Captured)

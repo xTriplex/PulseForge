@@ -6432,6 +6432,9 @@ namespace
 			case EditorMainMenuActionKind::OpenGameplayGraphFixture:
 				OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind::GameplayEvent);
 				break;
+			case EditorMainMenuActionKind::OpenBlueprintGraphFixture:
+				OpenGraphFixture(PulseForgeEditor::EditorGraphFixtureKind::BlueprintEvent);
+				break;
 			case EditorMainMenuActionKind::SetPanelVisible:
 				(void)SetEditorPanelVisible(Action.Panel, Action.PanelVisible);
 				break;

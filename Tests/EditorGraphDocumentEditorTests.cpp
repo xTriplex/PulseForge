@@ -1,6 +1,7 @@
 #include "TestAssetSupport.h"
 
 #include "Editor/EditorGraphDocumentEditor.h"
+#include "Editor/BlueprintGraphCompiler.h"
 #include "Editor/EditorGraphModel.h"
 
 #include <imgui.h>
@@ -343,8 +344,28 @@ namespace
 		PF_CHECK(Tests, GraphEditor.Register().has_value());
 		const auto Material = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::MaterialExpression);
 		const auto Gameplay = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::GameplayEvent);
-		PF_CHECK(Tests, Material.has_value() && Gameplay.has_value());
-		if (!Material || !Gameplay) return;
+		const auto Blueprint = GraphEditor.CreateFixture(Project->GetRootPath(), EditorGraphFixtureKind::BlueprintEvent);
+		PF_CHECK(Tests, Material.has_value() && Gameplay.has_value() && Blueprint.has_value());
+		if (!Material || !Gameplay || !Blueprint) return;
+		const EditorDocumentIdentity BlueprintIdentity{ Project->GetDescription().ID, Blueprint->GraphID,
+			EditorDocumentKind::Graph };
+		auto BlueprintOpen = Documents.Open(BlueprintIdentity, Blueprint->ProjectRelativePath, Blueprint->DisplayName,
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		auto* BlueprintSession = Documents.Find(BlueprintIdentity);
+		const EditorDocumentEditorContext BlueprintContext{ BlueprintIdentity, Project->GetRootPath(),
+			Blueprint->ProjectRelativePath, Blueprint->DisplayName, nullptr };
+		PF_CHECK(Tests, BlueprintOpen && BlueprintSession && GraphEditor.Open(*BlueprintSession, BlueprintContext));
+		if (BlueprintSession)
+		{
+			const auto Authored = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *BlueprintSession);
+			const auto Compiled = CompileBlueprintGraph(Authored, MakeBlueprintAuthoringSchema());
+			PF_CHECK(Tests, Compiled && Compiled->GetEvents().size() == 1 && !BlueprintSession->IsDirty());
+			PF_CHECK(Tests, GraphEditor.Save(*BlueprintSession) && !BlueprintSession->IsDirty());
+			PF_CHECK(Tests, Editors.Discard(*BlueprintSession) && !BlueprintSession->IsDirty());
+			const auto Reopened = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *BlueprintSession);
+			const auto Recompiled = CompileBlueprintGraph(Reopened, MakeBlueprintAuthoringSchema());
+			PF_CHECK(Tests, Recompiled && Recompiled->GetEvents().size() == 1 && Reopened.ID == Blueprint->GraphID);
+		}
 		if (FutureFixture)
 		{
 			const EditorDocumentIdentity FutureIdentity{ Project->GetDescription().ID, FutureFixture->GraphID,
