@@ -753,6 +753,27 @@ def bounded_timeout(deadline: float, cap: float = 8.0) -> float:
     return max(0.1, min(cap, deadline - time.monotonic()))
 
 
+def has_unique_window_title_observation(output: str, expected_pid: int, title_fragment: str) -> bool:
+    if not title_fragment:
+        return False
+    target_processes = [
+        line for line in output.splitlines()
+        if line.startswith(f"DIRECT_AX_TARGET_PROCESS pid={expected_pid};")
+    ]
+    observed_titles = []
+    for line in output.splitlines():
+        marker = "DIRECT_AX_WINDOW_TITLE_QUERY_END "
+        if not line.startswith(marker) or "; ax_error=0; title=" not in line:
+            continue
+        title = line.split("; ax_error=0; title=", 1)[1]
+        observed_titles.append(title)
+    required_titles = (title_fragment, MAIN_TITLE_FRAGMENT)
+    return len(target_processes) == 1 and all(
+        sum(fragment in title for title in observed_titles) == 1
+        for fragment in required_titles
+    )
+
+
 def is_transport_timeout(exit_code: int, output: str) -> bool:
     lowered = output.lower()
     return exit_code == 124 or "-1712" in lowered or "timed out" in lowered or "timeout" in lowered
@@ -1189,6 +1210,39 @@ def click_point(
             timeout=bounded_timeout(deadline, 10.0),
         )
         output += error
+        if code == 124 and has_unique_window_title_observation(output, process.pid, FIXTURE_TITLE):
+            remaining = deadline - time.monotonic()
+            if remaining > 0.1:
+                retry_timeout = min(4.0, remaining)
+                print(
+                    f"MACOS_DOC_CLOSE_ACTIVATION_RECOVERY=RETRY; pid={process.pid}; title={FIXTURE_TITLE!r}; "
+                    f"reason=bounded AX activation timed out after uniquely observing its target; timeout={retry_timeout:.3f}"
+                )
+                retry_code, retry_output, retry_error = run_direct_ax(
+                    process.pid,
+                    operation="activate-window",
+                    window_title=FIXTURE_TITLE,
+                    timeout=retry_timeout,
+                )
+                retry_output += retry_error
+                if retry_code == 0:
+                    code, output = retry_code, retry_output
+                    print(
+                        f"MACOS_DOC_CLOSE_ACTIVATION_RECOVERY=PASS; pid={process.pid}; "
+                        f"title={FIXTURE_TITLE!r}; focused_window_verified=1"
+                    )
+                else:
+                    print(
+                        f"MACOS_DOC_CLOSE_ACTIVATION_RECOVERY=FAIL; pid={process.pid}; "
+                        f"retry_exit_code={retry_code}; original_timeout=124"
+                    )
+                    output = (
+                        output
+                        + "\nMACOS_DOC_CLOSE_ACTIVATION_RECOVERY=RETRY_FAILED; retry_exit_code="
+                        + str(retry_code)
+                        + "\n"
+                        + retry_output
+                    )
         activated_title = parse_window_activation(output, process.pid, FIXTURE_TITLE) if code == 0 else ""
     except (OSError, ValueError) as error:
         evidence.api_exit_code = 1

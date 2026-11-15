@@ -1399,6 +1399,78 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "the release barrier must start after this click's observed press before another gesture",
         )
 
+    def test_click_retries_only_a_timed_out_activation_that_identified_its_window(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        capture = FakeCapture()
+        timed_out_activation = (
+            "DIRECT_AX_CLIENT pid=100; path=swift; name=client; trusted=true\n"
+            "DIRECT_AX_TARGET_PROCESS pid=42; name=PulseForge; bundle=org.pulseforge.editor\n"
+            "DIRECT_AX_WINDOW_TITLE_QUERY_END index=0; ax_error=0; title=Host Test Fixture 1\n"
+            "DIRECT_AX_WINDOW_TITLE_QUERY_END index=1; ax_error=0; title=EditorWorkflowOverview.scene - PulseForge Editor\n"
+            "DIRECT_AX_RESULT status=timeout; process_group_reaped=true\n"
+        )
+        focused_activation = (
+            "DIRECT_AX_RESULT status=window-focused; pid=42; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(
+            smoke,
+            "run_direct_ax",
+            side_effect=[(124, timed_out_activation, ""), (0, focused_activation, "")],
+        ) as activate, patch.object(
+            smoke, "run_bounded_command", return_value=(0, "Quartz event posted", "")
+        ) as dispatch, patch.object(
+            smoke,
+            "wait_for_pointer_edge",
+            side_effect=[
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "press", "_capture_index": "5", "raw": "press"},
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "release", "_capture_index": "6", "raw": "release"},
+            ],
+        ):
+            evidence = smoke.click_point(
+                Process(), capture, Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Cancel",
+                {"scenario": "cancel-save", "host": "host-a", "asset": "asset-a", "generation": "0"},
+            )
+
+        self.assertTrue(evidence.dispatch_attempted)
+        self.assertEqual(2, activate.call_count)
+        self.assertLessEqual(activate.call_args_list[1].kwargs["timeout"], 4.0)
+        self.assertEqual(1, dispatch.call_count)
+
+    def test_timed_out_activation_without_unique_target_observation_does_not_retry_or_dispatch(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        with patch.object(
+            smoke,
+            "run_direct_ax",
+            return_value=(
+                124,
+                "DIRECT_AX_TARGET_PROCESS pid=42; name=PulseForge; bundle=org.pulseforge.editor\n"
+                "DIRECT_AX_WINDOW_TITLE_QUERY_END index=0; ax_error=0; title=Host Test Fixture 1\n"
+                "DIRECT_AX_RESULT status=timeout; process_group_reaped=true\n",
+                "",
+            ),
+        ) as activate, patch.object(smoke, "run_bounded_command") as dispatch:
+            with self.assertRaisesRegex(RuntimeError, "dispatch was not attempted"):
+                smoke.click_point(
+                    Process(), FakeCapture(), Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Cancel",
+                    {"scenario": "cancel-save", "host": "host-a", "asset": "asset-a", "generation": "0"},
+                )
+
+        activate.assert_called_once()
+        dispatch.assert_not_called()
+
     def test_pointer_edge_wait_uses_current_document_and_requires_release_evidence(self) -> None:
         class Capture:
             reader_error = None
