@@ -40,6 +40,9 @@ namespace PulseForge
 		std::optional<AssetID> MaterialAsset;
 		glm::mat4 WorldTransform{ 1.0f };
 		WorldTransformOrientation Orientation = WorldTransformOrientation::Normal;
+		std::optional<std::string> SkeletalProductKey;
+		std::optional<std::string> AnimationClipKey;
+		std::vector<RuntimeSkeletalLocalTransform> SkeletalLocalTransforms;
 	};
 
 	struct SceneDirectionalLight

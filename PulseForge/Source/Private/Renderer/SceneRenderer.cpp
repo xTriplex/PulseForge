@@ -12,6 +12,8 @@
 
 #include "Assets/MaterialAssetCache.h"
 #include "Assets/CookedProductCodec.h"
+#include "Assets/GltfMeshImportCoordinator.h"
+#include "Animation/GltfSkinning.h"
 #include "Assets/AssetPathResolver.h"
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPreparationService.h"
@@ -30,9 +32,11 @@
 
 #include <cmath>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <string_view>
 #include <limits>
 #include <span>
 #include <exception>
@@ -41,6 +45,47 @@
 
 namespace PulseForge
 {
+	namespace
+	{
+		constexpr size_t MaximumRendererSkeletalVerticesPerSnapshot = 2'000'000;
+		constexpr size_t MaximumRendererSkeletalProductBytes = 256ull * 1024ull * 1024ull;
+
+		[[nodiscard]] std::string MakeSkeletalProductCacheKey(const AssetID& Asset, std::string_view ProductKey)
+		{
+			return Asset.ToString() + "/" + std::string(ProductKey);
+		}
+
+		[[nodiscard]] std::optional<size_t> EstimateSkeletalProductBytes(const ImportedGltfSkeletalMesh& Product)
+		{
+			size_t Total = sizeof(Product);
+			const auto Add = [&Total](size_t Count, size_t ElementSize)
+			{
+				if (ElementSize != 0 && Count > (MaximumRendererSkeletalProductBytes - Total) / ElementSize) return false;
+				Total += Count * ElementSize;
+				return true;
+			};
+			if (!Add(Product.Geometry.Vertices.capacity(), sizeof(GltfMeshVertex)) ||
+				!Add(Product.Geometry.Indices.capacity(), sizeof(uint32_t)) || !Add(Product.Geometry.Name.capacity(), sizeof(char)) ||
+				!Add(Product.SkeletonNodes.capacity(), sizeof(ImportedGltfSkeletonNode)) ||
+				!Add(Product.JointNodeIndices.capacity(), sizeof(uint16_t)) ||
+				!Add(Product.InverseBindMatrices.capacity(), sizeof(std::array<float, 16>)) ||
+				!Add(Product.VertexInfluences.capacity(), sizeof(GltfVertexInfluences)) ||
+				!Add(Product.Animations.capacity(), sizeof(ImportedGltfAnimationClip)))
+				return std::nullopt;
+			for (const ImportedGltfSkeletonNode& Node : Product.SkeletonNodes)
+				if (!Add(Node.StableKey.capacity(), sizeof(char)) || !Add(Node.Name.capacity(), sizeof(char))) return std::nullopt;
+			for (const ImportedGltfAnimationClip& Clip : Product.Animations)
+			{
+				if (!Add(Clip.StableKey.capacity(), sizeof(char)) || !Add(Clip.Name.capacity(), sizeof(char)) ||
+					!Add(Clip.Channels.capacity(), sizeof(ImportedGltfAnimationChannel))) return std::nullopt;
+				for (const ImportedGltfAnimationChannel& Channel : Clip.Channels)
+					if (!Add(Channel.TargetNodeKey.capacity(), sizeof(char)) || !Add(Channel.Times.capacity(), sizeof(float)) ||
+						!Add(Channel.Values.capacity(), sizeof(std::array<float, 4>))) return std::nullopt;
+			}
+			return Total;
+		}
+	}
+
 	struct GraphMaterialRuntime final
 	{
 		std::string RecipeFingerprint;
@@ -110,9 +155,9 @@ namespace PulseForge
 			return true;
 		}
 
-		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, const AssetID& Asset)
+		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, UUID Entity)
 		{
-			const auto Found = PreparedMeshes.find(Asset);
+			const auto Found = PreparedMeshes.find(Entity);
 			return Found == PreparedMeshes.end() ? nullptr : Found->second;
 		}
 
@@ -244,6 +289,15 @@ namespace PulseForge
 				throw std::invalid_argument("Cooked scene renderer requires a content provider");
 		}
 #endif
+	};
+
+	struct SceneRenderer::PreparedSkeletalMeshResource final
+	{
+		AssetID SourceAsset;
+		std::string ProductKey;
+		std::shared_ptr<const ImportedGltfSkeletalMesh> Product;
+		std::vector<std::array<float, 16>> LastLocalTransforms;
+		MeshHandle Resource;
 	};
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -788,6 +842,85 @@ namespace PulseForge
 				Snapshot.error().Message
 			});
 		}
+		std::erase_if(m_SkeletalMeshResources, [&Snapshot](const auto& Entry)
+		{
+			return std::none_of(Snapshot->Meshes.begin(), Snapshot->Meshes.end(), [&Entry](const SceneMeshInstance& Instance)
+			{
+				return Instance.Entity == Entry.first && Instance.SkeletalProductKey &&
+					*Instance.SkeletalProductKey == Entry.second->ProductKey && Instance.MeshAsset == Entry.second->SourceAsset;
+			});
+		});
+		std::vector<std::string> RequiredSkeletalProductKeys;
+		RequiredSkeletalProductKeys.reserve(Snapshot->Meshes.size());
+		for (const SceneMeshInstance& Instance : Snapshot->Meshes)
+			if (Instance.SkeletalProductKey)
+				RequiredSkeletalProductKeys.push_back(MakeSkeletalProductCacheKey(Instance.MeshAsset, *Instance.SkeletalProductKey));
+		std::sort(RequiredSkeletalProductKeys.begin(), RequiredSkeletalProductKeys.end());
+		RequiredSkeletalProductKeys.erase(
+			std::unique(RequiredSkeletalProductKeys.begin(), RequiredSkeletalProductKeys.end()), RequiredSkeletalProductKeys.end());
+		std::erase_if(m_SkeletalProducts, [this, &RequiredSkeletalProductKeys](const auto& Entry)
+		{
+			if (std::binary_search(RequiredSkeletalProductKeys.begin(), RequiredSkeletalProductKeys.end(), Entry.first))
+				return false;
+			m_SkeletalProductBytes -= Entry.second.second;
+			return true;
+		});
+		const auto LoadSkeletalProduct = [this](
+			const AssetID& Asset,
+			const std::string& ProductKey) -> std::expected<std::shared_ptr<const ImportedGltfSkeletalMesh>, std::string>
+		{
+			const std::string CacheKey = MakeSkeletalProductCacheKey(Asset, ProductKey);
+			if (const auto Found = m_SkeletalProducts.find(CacheKey); Found != m_SkeletalProducts.end())
+				return Found->second.first;
+
+			std::expected<ImportedGltfSkeletalMesh, std::string> Loaded =
+				std::unexpected("Skeletal renderer has no source project or cooked provider");
+			if (m_ProjectAssetCaches->CookedContent)
+			{
+				auto Product = m_ProjectAssetCaches->CookedContent->LoadSkeletalMeshByProductKey(Asset, ProductKey);
+				if (!Product) return std::unexpected("Could not load cooked skeletal mesh: " + Product.error().Message);
+				Loaded = std::move(*Product);
+			}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			else if (m_Project)
+			{
+				auto Product = GltfMeshImportCoordinator::LoadLastSuccessfulSkeletalProduct(
+					Asset, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), ProductKey);
+				if (!Product) return std::unexpected("Could not load source skeletal mesh: " + Product.error().Message);
+				Loaded = std::move(Product->Mesh);
+			}
+#endif
+			if (!Loaded) return std::unexpected(Loaded.error());
+			auto EstimatedBytes = EstimateSkeletalProductBytes(*Loaded);
+			if (!EstimatedBytes || *EstimatedBytes > MaximumRendererSkeletalProductBytes - m_SkeletalProductBytes)
+				return std::unexpected("Immutable skeletal product cache exceeds its 256 MiB renderer budget");
+			try
+			{
+				auto Retained = std::make_shared<const ImportedGltfSkeletalMesh>(std::move(*Loaded));
+				auto Inserted = m_SkeletalProducts.emplace(CacheKey, std::pair{ std::move(Retained), *EstimatedBytes });
+				m_SkeletalProductBytes += Inserted.first->second.second;
+				return Inserted.first->second.first;
+			}
+			catch (const std::bad_alloc&)
+			{
+				return std::unexpected("Could not retain the immutable skeletal product within renderer memory");
+			}
+		};
+		size_t TotalSkeletalVertices = 0;
+		for (const SceneMeshInstance& Instance : Snapshot->Meshes)
+		{
+			if (!Instance.SkeletalProductKey) continue;
+			auto Product = LoadSkeletalProduct(Instance.MeshAsset, *Instance.SkeletalProductKey);
+			if (!Product)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+					Instance.MeshAsset, Product.error() });
+			const size_t VertexCount = (*Product)->Geometry.Vertices.size();
+			if (VertexCount == 0 || VertexCount > MaximumGltfSkinnedVertices ||
+				VertexCount > MaximumRendererSkeletalVerticesPerSnapshot - TotalSkeletalVertices)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Instance.Entity,
+					Instance.MeshAsset, "Visible skeletal instances exceed the renderer's 2,000,000 vertex memory budget" });
+			TotalSkeletalVertices += VertexCount;
+		}
 		const auto ResolveImage = [this](AssetID Asset) -> const Texture*
 		{
 			if (Asset.IsNil()) return nullptr;
@@ -896,26 +1029,93 @@ namespace PulseForge
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
 					*Instance.MaterialAsset, "Referenced material asset is not present in the project registry" });
 
-			const bool HasPreviewMesh = m_TransientPreviewMesh && m_TransientPreviewMeshIdentity == Instance.MeshAsset;
-			auto MeshResult = HasPreviewMesh
-				? std::expected<std::reference_wrapper<const Mesh>, MeshAssetError>(std::cref(*m_TransientPreviewMesh))
-				: m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
-			if (!MeshResult)
+			const Mesh* MeshResource = nullptr;
+			if (Instance.SkeletalProductKey)
 			{
-				if (MeshResult.error().Code == MeshAssetErrorCode::Pending)
+				auto Existing = m_SkeletalMeshResources.find(Instance.Entity);
+				if (Existing != m_SkeletalMeshResources.end() &&
+					(Existing->second->SourceAsset != Instance.MeshAsset || Existing->second->ProductKey != *Instance.SkeletalProductKey))
 				{
-					m_AssetPreparationPending = true;
-					continue;
+					m_SkeletalMeshResources.erase(Existing);
+					Existing = m_SkeletalMeshResources.end();
 				}
-				return std::unexpected(SceneRendererError{
-					SceneRendererErrorCode::AssetLoadFailed,
-					Instance.Entity,
-					Instance.MeshAsset,
-				"Could not load mesh asset: " + MeshResult.error().Message
-				});
-			}
+				if (Existing == m_SkeletalMeshResources.end())
+				{
+					auto Product = LoadSkeletalProduct(Instance.MeshAsset, *Instance.SkeletalProductKey);
+					if (!Product)
+						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+							Instance.MeshAsset, Product.error() });
 
-			const Mesh* const MeshResource = &MeshResult->get();
+					auto Prepared = std::make_unique<PreparedSkeletalMeshResource>();
+					Prepared->SourceAsset = Instance.MeshAsset;
+					Prepared->ProductKey = *Instance.SkeletalProductKey;
+					Prepared->Product = std::move(*Product);
+					Existing = m_SkeletalMeshResources.emplace(Instance.Entity, std::move(Prepared)).first;
+				}
+
+				PreparedSkeletalMeshResource& Skeletal = *Existing->second;
+				std::vector<std::array<float, 16>> LocalTransforms = Instance.SkeletalLocalTransforms;
+				if (LocalTransforms.empty())
+				{
+					LocalTransforms.reserve(Skeletal.Product->SkeletonNodes.size());
+					for (const ImportedGltfSkeletonNode& Node : Skeletal.Product->SkeletonNodes)
+						LocalTransforms.push_back(Node.LocalBindMatrix);
+				}
+				if (LocalTransforms != Skeletal.LastLocalTransforms || !Skeletal.Resource)
+				{
+					auto Palette = BuildGltfJointPalette(*Skeletal.Product, LocalTransforms);
+					if (!Palette)
+						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+							Instance.MeshAsset, "Could not build skeletal joint palette: " + Palette.error().Message });
+					auto SkinnedVertices = SkinGltfMeshVertices(*Skeletal.Product, *Palette);
+					if (!SkinnedVertices)
+						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+							Instance.MeshAsset, "Could not prepare skinned vertices: " + SkinnedVertices.error().Message });
+
+					MeshDesc Description = Skeletal.Product->Geometry.GetMeshDescription();
+					Description.VertexData = std::as_bytes(std::span(*SkinnedVertices));
+					if (Skeletal.Resource)
+					{
+						auto Updated = m_Runtime.UpdateDynamicMeshVertices(
+							*Skeletal.Resource, Description.VertexLayout, Description.VertexData);
+						if (!Updated)
+							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Instance.Entity,
+								Instance.MeshAsset, "Could not update skinned mesh vertices: " + Updated.error().Message });
+					}
+					else
+					{
+						auto Created = m_Runtime.CreateDynamicMesh(Description);
+					if (!Created)
+						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Instance.Entity,
+							Instance.MeshAsset, "Could not create skeletal mesh buffers: " + Created.error().Message });
+						Skeletal.Resource = std::move(*Created);
+					}
+					Skeletal.LastLocalTransforms = std::move(LocalTransforms);
+				}
+				MeshResource = Skeletal.Resource.get();
+			}
+			else
+			{
+				const bool HasPreviewMesh = m_TransientPreviewMesh && m_TransientPreviewMeshIdentity == Instance.MeshAsset;
+				auto MeshResult = HasPreviewMesh
+					? std::expected<std::reference_wrapper<const Mesh>, MeshAssetError>(std::cref(*m_TransientPreviewMesh))
+					: m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
+				if (!MeshResult)
+				{
+					if (MeshResult.error().Code == MeshAssetErrorCode::Pending)
+					{
+						m_AssetPreparationPending = true;
+						continue;
+					}
+					return std::unexpected(SceneRendererError{
+						SceneRendererErrorCode::AssetLoadFailed,
+						Instance.Entity,
+						Instance.MeshAsset,
+						"Could not load mesh asset: " + MeshResult.error().Message
+					});
+				}
+				MeshResource = &MeshResult->get();
+			}
 			const VertexLayoutDesc& Layout = MeshResource->GetVertexLayout();
 			if (SceneVertexLayout && !SceneRendererPipelineCache::HasSameVertexLayout(*SceneVertexLayout, Layout))
 			{
@@ -927,7 +1127,7 @@ namespace PulseForge
 				});
 			}
 			SceneVertexLayout = Layout;
-			m_PreparedMeshResources.try_emplace(Instance.MeshAsset, MeshResource);
+			m_PreparedMeshResources.insert_or_assign(Instance.Entity, MeshResource);
 
 			std::expected<void, SceneRendererError> Bindings;
 			if (Instance.MaterialAsset)
@@ -1268,6 +1468,9 @@ namespace PulseForge
 		m_TransparentDrawOrder.clear();
 		m_PreparedSnapshot.reset();
 		m_PreparedMeshResources.clear();
+		m_SkeletalMeshResources.clear();
+		m_SkeletalProducts.clear();
+		m_SkeletalProductBytes = 0;
 		m_PreparedRuntimeUITextures.clear();
 		m_PreparedMaterialBindings.clear();
 		m_PreparedGraphMaterials.clear();
@@ -1649,7 +1852,7 @@ namespace PulseForge
 			auto ResolvedMaterialBinding = ResolveMaterialBinding(Instance);
 			if (!ResolvedMaterialBinding) return std::unexpected(std::move(ResolvedMaterialBinding.error()));
 			const BindingSet* const MaterialBinding = *ResolvedMaterialBinding;
-			const Mesh* MeshResource = FindPreparedMesh(m_PreparedMeshResources, Instance.MeshAsset);
+			const Mesh* MeshResource = FindPreparedMesh(m_PreparedMeshResources, Instance.Entity);
 			if (!MeshResource)
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, Instance.MeshAsset,
 					"Prepared mesh resource is unavailable" });
@@ -1693,6 +1896,15 @@ namespace PulseForge
 					Instance.MeshAsset,
 					"Could not draw scene mesh: " + Draw.error().Message
 				});
+			}
+			if (Graph && !m_LoggedCookedGraphMaterialDraw)
+			{
+				const char* Acceptance = std::getenv("PULSEFORGE_COOKED_PLAYER_ACCEPTANCE");
+				if (Acceptance && std::string_view(Acceptance) == "1")
+				{
+					m_LoggedCookedGraphMaterialDraw = true;
+					PF_INFO("PULSEFORGE_COOKED_GRAPH_MATERIAL=PASS; graph material pipeline submitted a successful indexed draw");
+				}
 			}
 			++SubmittedDraws;
 			return {};

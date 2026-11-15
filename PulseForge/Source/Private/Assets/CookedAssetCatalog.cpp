@@ -53,6 +53,16 @@ namespace PulseForge
 		constexpr std::string_view DigestID = "xxh3-128-v0.8.2/pf-cooked-payload-v1";
 		constexpr uint64_t MaximumCatalogPayloadBytes = 8ull * 1024ull * 1024ull * 1024ull;
 
+		bool IsStableSkeletalProductKey(std::string_view Key) noexcept
+		{
+			constexpr std::string_view Prefix = "skeletal/";
+			if (!Key.starts_with(Prefix) || Key.size() != Prefix.size() + 32) return false;
+			return std::all_of(Key.begin() + static_cast<std::ptrdiff_t>(Prefix.size()), Key.end(), [](char Character)
+			{
+				return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f');
+			});
+		}
+
 		CookedAssetCatalogError MakeError(
 			CookedAssetCatalogErrorCode Code, const std::filesystem::path& Path, std::string Message,
 			std::optional<AssetID> Asset = std::nullopt)
@@ -296,6 +306,7 @@ namespace PulseForge
 		std::set<AssetID> Assets;
 		std::set<std::tuple<AssetID, uint8_t, std::string>> Identities;
 		std::set<std::string> ScriptPaths;
+		std::set<std::pair<AssetID, std::string>> StableProductIdentities;
 		for (CookedAssetEntry& Entry : Entries)
 		{
 			if (CancellationToken.stop_requested())
@@ -312,6 +323,13 @@ namespace PulseForge
 			if (!Entry.SourceRelativePath.empty() && !ScriptPaths.emplace(LowerAscii(Entry.SourceRelativePath)).second)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::DuplicateIdentity, {},
 					"Manifest script source paths are ambiguous under case-insensitive filesystem semantics", Entry.Asset));
+			if ((Entry.Product == CookedAssetProductKind::SkeletalMesh && !IsStableSkeletalProductKey(Entry.StableProductKey)) ||
+				(Entry.Product != CookedAssetProductKind::SkeletalMesh && !Entry.StableProductKey.empty()))
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {},
+					"Stable product identity is invalid or attached to a non-skeletal product", Entry.Asset));
+			if (!Entry.StableProductKey.empty() && !StableProductIdentities.emplace(Entry.Asset, Entry.StableProductKey).second)
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::DuplicateIdentity, {},
+					"Manifest repeats a stable skeletal product identity", Entry.Asset));
 			const auto Key = EntryKey(Entry);
 			if (Previous && *Previous == Key)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::DuplicateIdentity, {}, "Manifest repeats an asset product identity", Entry.Asset));
@@ -345,7 +363,7 @@ namespace PulseForge
 			}
 			JsonEntries.push_back(Json::object({ { "assetId", Entry.Asset.ToString() },
 				{ "product", ProductName(Entry.Product) }, { "subresource", Entry.Subresource },
-				{ "sourcePath", Entry.SourceRelativePath },
+				{ "sourcePath", Entry.SourceRelativePath }, { "stableProductKey", Entry.StableProductKey },
 				{ "payload", Entry.RelativePayloadPath }, { "payloadVersion", Entry.PayloadVersion },
 				{ "bytes", Entry.PayloadBytes }, { "digestAlgorithm", Entry.DigestAlgorithm }, { "digest", Entry.Digest },
 				{ "runtimeDependencies", std::move(Dependencies) } }));
@@ -419,10 +437,11 @@ namespace PulseForge
 			if (!Root.is_object() || !Root.contains("version") || !Root["version"].is_number_integer())
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest version is missing or invalid"));
 			const int64_t Version = Root["version"].get<int64_t>();
-			if (Version != 2 && Version != 3 && Version != 4 && Version != ManifestVersion)
+			if (Version != 2 && Version != 3 && Version != 4 && Version != 6 && Version != ManifestVersion)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedVersion, ManifestPath, "Cook manifest version is unsupported"));
 			const bool HasScriptPaths = Version >= 3;
 			const bool HasAudioMixDefaults = Version >= 4;
+			const bool HasStableProductKeys = Version >= 7;
 			const bool RootFieldsValid = HasAudioMixDefaults
 				? HasExactFields(Root, { "format", "version", "projectId", "startupScene", "targetPlatform", "rendererBackend",
 					"runtimeABI", "configuration", "audioMixDefaults", "dynamicRoots", "entries" })
@@ -502,17 +521,21 @@ namespace PulseForge
 			std::set<AssetID> Assets;
 			uint64_t Aggregate = 0;
 			std::set<std::string> ScriptPaths;
+			std::set<std::pair<AssetID, std::string>> StableProductIdentities;
 			for (const Json& Value : Root["entries"])
 			{
-				const bool EntryFieldsValid = HasScriptPaths
-					? HasExactFields(Value, { "assetId", "product", "subresource", "sourcePath", "payload", "payloadVersion", "bytes", "digestAlgorithm", "digest", "runtimeDependencies" })
-					: HasExactFields(Value, { "assetId", "product", "subresource", "payload", "payloadVersion", "bytes", "digestAlgorithm", "digest", "runtimeDependencies" });
+				const bool EntryFieldsValid = HasStableProductKeys
+					? HasExactFields(Value, { "assetId", "product", "subresource", "sourcePath", "stableProductKey", "payload", "payloadVersion", "bytes", "digestAlgorithm", "digest", "runtimeDependencies" })
+					: HasScriptPaths
+						? HasExactFields(Value, { "assetId", "product", "subresource", "sourcePath", "payload", "payloadVersion", "bytes", "digestAlgorithm", "digest", "runtimeDependencies" })
+						: HasExactFields(Value, { "assetId", "product", "subresource", "payload", "payloadVersion", "bytes", "digestAlgorithm", "digest", "runtimeDependencies" });
 				if (!EntryFieldsValid)
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cooked entry fields are missing or unsupported"));
 				auto ID = ReadUUID(Value["assetId"], "assetId");
 				if (!ID) return std::unexpected(ID.error());
 				if (!Value["product"].is_string() || !Value["subresource"].is_string() || !Value["payload"].is_string() ||
 					(HasScriptPaths && !Value["sourcePath"].is_string()) ||
+					(HasStableProductKeys && !Value["stableProductKey"].is_string()) ||
 					!Value["payloadVersion"].is_number_integer() || !Value["digestAlgorithm"].is_string() || !Value["digest"].is_string() ||
 					!Value["runtimeDependencies"].is_array())
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cooked entry has invalid field types", *ID));
@@ -525,6 +548,7 @@ namespace PulseForge
 				CookedAssetEntry Entry{ *ID, *Product, Value["subresource"].get<std::string>(), Value["payload"].get<std::string>(),
 					static_cast<uint32_t>(*Version), *Bytes, Value["digestAlgorithm"].get<std::string>(), Value["digest"].get<std::string>(), {} };
 				if (HasScriptPaths) Entry.SourceRelativePath = Value["sourcePath"].get<std::string>();
+				if (HasStableProductKeys) Entry.StableProductKey = Value["stableProductKey"].get<std::string>();
 				if ((Entry.Product == CookedAssetProductKind::Script && !Entry.SourceRelativePath.empty() &&
 						!IsSafeScriptSourcePath(Entry.SourceRelativePath)) ||
 					(Entry.Product != CookedAssetProductKind::Script && !Entry.SourceRelativePath.empty()))
@@ -533,6 +557,14 @@ namespace PulseForge
 				if (!Entry.SourceRelativePath.empty() && !ScriptPaths.emplace(LowerAscii(Entry.SourceRelativePath)).second)
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::DuplicateIdentity, ManifestPath,
 						"Cooked script source paths are ambiguous under case-insensitive filesystem semantics", *ID));
+				if ((HasStableProductKeys && Entry.Product == CookedAssetProductKind::SkeletalMesh &&
+						!IsStableSkeletalProductKey(Entry.StableProductKey)) ||
+					(HasStableProductKeys && Entry.Product != CookedAssetProductKind::SkeletalMesh && !Entry.StableProductKey.empty()))
+					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath,
+						"Stable product identity is invalid or attached to a non-skeletal product", *ID));
+				if (!Entry.StableProductKey.empty() && !StableProductIdentities.emplace(Entry.Asset, Entry.StableProductKey).second)
+					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::DuplicateIdentity, ManifestPath,
+						"Manifest repeats a stable skeletal product identity", *ID));
 				if (!IsSafeRelativePayloadPath(Entry.RelativePayloadPath) || Entry.DigestAlgorithm != DigestID || Entry.Digest.size() != 32 ||
 					!std::all_of(Entry.Digest.begin(), Entry.Digest.end(), [](unsigned char C) { return (C >= '0' && C <= '9') || (C >= 'a' && C <= 'f'); }))
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cooked payload path or digest is invalid", *ID));

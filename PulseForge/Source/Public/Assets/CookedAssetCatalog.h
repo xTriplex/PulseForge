@@ -77,6 +77,8 @@ namespace PulseForge
 		std::vector<CookedAssetDependency> RuntimeDependencies;
 		// Managed project-relative source identity for Lua modules; empty on legacy and non-script entries.
 		std::string SourceRelativePath;
+		// Stable output identity independent of the source-local locator; populated for skeletal mesh products.
+		std::string StableProductKey;
 		friend bool operator==(const CookedAssetEntry&, const CookedAssetEntry&) = default;
 	};
 
@@ -123,8 +125,8 @@ namespace PulseForge
 	{
 	public:
 		// v2 adds configuration provenance, v3 script identities, v4 audio defaults, v5 graph shader products,
-		// and v6 versioned Blueprint event programs.
-		static constexpr uint32_t ManifestVersion = 6;
+		// v6 versioned Blueprint event programs, and v7 stable skeletal product identities.
+		static constexpr uint32_t ManifestVersion = 7;
 		static constexpr std::string_view ManifestFileName = "manifest.pfmanifest";
 		static constexpr size_t MaximumManifestBytes = 16u * 1024u * 1024u;
 		static constexpr size_t MaximumEntries = 250'000;

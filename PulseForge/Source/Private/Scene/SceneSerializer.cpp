@@ -599,6 +599,10 @@ namespace PulseForge
 					});
 					if (MeshRenderer->value().MaterialAsset)
 						MeshRendererRecord["materialAsset"] = MeshRenderer->value().MaterialAsset->ToString();
+					if (MeshRenderer->value().SkeletalProductKey)
+						MeshRendererRecord["skeletalProduct"] = *MeshRenderer->value().SkeletalProductKey;
+					if (MeshRenderer->value().AnimationClipKey)
+						MeshRendererRecord["animationClip"] = *MeshRenderer->value().AnimationClipKey;
 					Record["meshRenderer"] = std::move(MeshRendererRecord);
 				}
 				if (Rigidbody->has_value())
@@ -1062,7 +1066,8 @@ namespace PulseForge
 						return std::unexpected(MakeError(
 							SceneSerializationErrorCode::InvalidEntityData,
 							"Entity meshRenderer must be an object"));
-					if (auto Fields = ValidateKnownFields(*SerializedMeshRenderer, { "meshAsset", "materialAsset" },
+					if (auto Fields = ValidateKnownFields(*SerializedMeshRenderer,
+							{ "meshAsset", "materialAsset", "skeletalProduct", "animationClip" },
 							"Mesh renderer component", SceneSerializationErrorCode::InvalidEntityData);
 						!Fields)
 						return std::unexpected(Fields.error());
@@ -1094,8 +1099,29 @@ namespace PulseForge
 								ParsedMaterialAsset ? "Mesh renderer material UUID must not be nil" : ParsedMaterialAsset.error().Message));
 						MaterialAsset = *ParsedMaterialAsset;
 					}
+					std::optional<std::string> SkeletalProductKey;
+					const auto SerializedSkeletalProduct = SerializedMeshRenderer->find("skeletalProduct");
+					if (SerializedSkeletalProduct != SerializedMeshRenderer->end())
+					{
+						if (!SerializedSkeletalProduct->is_string() ||
+							!IsValidGltfSkeletalProductKey(SerializedSkeletalProduct->get<std::string>()))
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Mesh renderer skeletalProduct must be a stable skeletal product fingerprint"));
+						SkeletalProductKey = SerializedSkeletalProduct->get<std::string>();
+					}
+					std::optional<std::string> AnimationClipKey;
+					const auto SerializedAnimationClip = SerializedMeshRenderer->find("animationClip");
+					if (SerializedAnimationClip != SerializedMeshRenderer->end())
+					{
+						if (!SkeletalProductKey || !SerializedAnimationClip->is_string() ||
+							!IsValidGltfAnimationClipKey(SerializedAnimationClip->get<std::string>()))
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Mesh renderer animationClip requires a stable skeletal product and clip fingerprint"));
+						AnimationClipKey = SerializedAnimationClip->get<std::string>();
+					}
 
-					MeshRendererData = MeshRendererComponent{ *ParsedMeshAsset, MaterialAsset };
+					MeshRendererData = MeshRendererComponent{
+						*ParsedMeshAsset, MaterialAsset, std::move(SkeletalProductKey), std::move(AnimationClipKey) };
 				}
 
 				std::optional<RigidbodyComponent> RigidbodyData;

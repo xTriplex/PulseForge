@@ -4,6 +4,9 @@
 #include "Assets/AssetPathResolver.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,6 +30,34 @@ namespace PulseForge
 			auto Created = std::make_shared<std::mutex>();
 			WeakMutex = Created;
 			return Created;
+		}
+
+		std::expected<std::array<uint32_t, 3>, std::string> ParseSkeletalSourceLocator(std::string_view Locator)
+		{
+			constexpr std::string_view Prefix = "skeletal/node/";
+			if (!Locator.starts_with(Prefix)) return std::unexpected("Skeletal source locator is invalid");
+			Locator.remove_prefix(Prefix.size());
+			const size_t MeshMarker = Locator.find("/mesh/");
+			const size_t PrimitiveMarker = MeshMarker == std::string_view::npos
+				? std::string_view::npos : Locator.find("/primitive/", MeshMarker + 6);
+			if (MeshMarker == std::string_view::npos || PrimitiveMarker == std::string_view::npos)
+				return std::unexpected("Skeletal source locator is incomplete");
+			const std::array<std::string_view, 3> Parts = {
+				Locator.substr(0, MeshMarker),
+				Locator.substr(MeshMarker + 6, PrimitiveMarker - (MeshMarker + 6)),
+				Locator.substr(PrimitiveMarker + 10)
+			};
+			std::array<uint32_t, 3> Values{};
+			for (size_t Index = 0; Index < Parts.size(); ++Index)
+			{
+				uint64_t Value = 0;
+				const auto [End, Error] = std::from_chars(Parts[Index].data(), Parts[Index].data() + Parts[Index].size(), Value);
+				if (Error != std::errc{} || End != Parts[Index].data() + Parts[Index].size() ||
+					Value > std::numeric_limits<uint32_t>::max())
+					return std::unexpected("Skeletal source locator index is invalid or out of range");
+				Values[Index] = static_cast<uint32_t>(Value);
+			}
+			return Values;
 		}
 	}
 
@@ -161,5 +192,50 @@ namespace PulseForge
 		if (auto Recorded = RecordSuccess(Asset, ProjectRoot, Registry, Receipt); !Recorded)
 			return std::unexpected(std::move(Recorded.error()));
 		return GltfSkeletalMeshImportWithReceipt{ std::move(Product->Mesh), Receipt };
+	}
+
+	std::expected<GltfSkeletalMeshImportWithReceipt, GltfMeshImportCoordinatorError>
+		GltfMeshImportCoordinator::LoadLastSuccessfulSkeletalProduct(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			std::string_view StableProductKey)
+	{
+		const auto Record = Registry.Find(Asset);
+		if (!Record)
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				ProjectRoot, "Skeletal source asset is no longer registered", std::nullopt, std::nullopt });
+		auto SourcePath = AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, Record->ProjectRelativePath);
+		if (!SourcePath)
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				SourcePath.error().Path, SourcePath.error().Message, std::nullopt, std::nullopt });
+		const auto Receipts = AssetImportProvenanceSerializer::LoadAll(
+			AssetImportProvenanceSerializer::GetSidecarPath(*SourcePath));
+		if (!Receipts)
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				Receipts.error().Path, "Could not read successful skeletal import receipt: " + Receipts.error().Message,
+				std::nullopt, std::move(Receipts.error()) });
+		const auto Receipt = std::find_if(Receipts->begin(), Receipts->end(), [&](const AssetImportSuccessReceipt& Candidate)
+		{
+			return Candidate.Recipe.SourceAsset == Asset && Candidate.Recipe.SubresourceKey == StableProductKey &&
+				Candidate.Recipe.ImporterID == "PulseForge.SkeletalGltfMeshImporter";
+		});
+		if (Receipt == Receipts->end())
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				*SourcePath, "No successful skeletal import receipt matches the stable product key", std::nullopt, std::nullopt });
+		auto Locator = ParseSkeletalSourceLocator(Receipt->Recipe.SourceLocator);
+		if (!Locator)
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				*SourcePath, Locator.error(), std::nullopt, std::nullopt });
+		auto Product = GltfMeshImporter::ProcessSkeletalPrimitive(
+			Asset, ProjectRoot, Registry, (*Locator)[0], (*Locator)[1], (*Locator)[2]);
+		if (!Product)
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				Product.error().Path, "Could not rebuild the last successful skeletal product: " + Product.error().Message,
+				std::move(Product.error()), std::nullopt });
+		if (Product->Recipe.SubresourceKey != StableProductKey || Product->ResultFingerprint != Receipt->ResultFingerprint)
+			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				*SourcePath, "Skeletal source no longer matches the last successful imported product", std::nullopt, std::nullopt });
+		return GltfSkeletalMeshImportWithReceipt{ std::move(Product->Mesh), *Receipt };
 	}
 }

@@ -69,6 +69,10 @@ namespace PulseForge
 			const AssetID& Asset, std::string_view Subresource) const noexcept;
 		[[nodiscard]] std::expected<ImportedGltfSkeletalMesh, CookedAssetCatalogError> LoadSkeletalMesh(
 			const AssetID& Asset, std::string_view Subresource) const;
+		[[nodiscard]] const CookedAssetEntry* FindSkeletalMeshByProductKey(
+			const AssetID& Asset, std::string_view StableProductKey) const noexcept;
+		[[nodiscard]] std::expected<ImportedGltfSkeletalMesh, CookedAssetCatalogError> LoadSkeletalMeshByProductKey(
+			const AssetID& Asset, std::string_view StableProductKey) const;
 
 		[[nodiscard]] const CookedAssetEntry* FindTexture(
 			const AssetID& Asset, std::string_view Subresource = "srgb") const noexcept;

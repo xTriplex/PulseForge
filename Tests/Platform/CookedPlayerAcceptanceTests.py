@@ -4,10 +4,13 @@
 from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, TextIOWrapper
 import sys
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from AcceptanceDiagnostics import configure_utf8_diagnostics
-from CookedPlayerAcceptance import make_linux_standalone_environment
+from CookedPlayerAcceptance import make_linux_standalone_environment, verify_cook_manifest
 
 
 class LinuxStandaloneEnvironmentTests(unittest.TestCase):
@@ -37,6 +40,32 @@ class LinuxStandaloneEnvironmentTests(unittest.TestCase):
         self.assertNotIn("DISPLAY", environment)
         self.assertNotIn("XAUTHORITY", environment)
         self.assertNotIn("VULKAN_SDK", environment)
+
+
+class CookedGraphMaterialManifestTests(unittest.TestCase):
+    def _verify(self, entries: list[dict[str, str]]) -> None:
+        manifest = {
+            "entries": entries,
+            "dynamicRoots": ["bfc10000-0000-4000-8000-000000000002"],
+            "configuration": "Debug",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            verify_cook_manifest(path, "bfc10000-0000-4000-8000-000000000002")
+
+    def test_requires_the_expected_cooked_graph_material(self) -> None:
+        products = ("scene", "mesh-primitive", "material", "texture", "environment", "script", "audio", "gameplay-input")
+        entries = [{"product": product, "assetId": "other"} for product in products]
+        entries.append({"product": "graph-material", "assetId": "10000000-0000-4000-8000-000000000008"})
+        self._verify(entries)
+
+    def test_rejects_graph_material_product_for_an_unrelated_asset(self) -> None:
+        products = ("scene", "mesh-primitive", "material", "texture", "environment", "script", "audio", "gameplay-input")
+        entries = [{"product": product, "assetId": "other"} for product in products]
+        entries.append({"product": "graph-material", "assetId": "other"})
+        with self.assertRaisesRegex(RuntimeError, "expected graph-backed floor material"):
+            self._verify(entries)
 
 
 class Utf8DiagnosticTests(unittest.TestCase):

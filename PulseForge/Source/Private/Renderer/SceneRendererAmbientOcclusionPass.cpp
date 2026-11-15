@@ -27,9 +27,9 @@ namespace PulseForge
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
 		}
 
-		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, const AssetID& Asset)
+		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, UUID Entity)
 		{
-			const auto Found = PreparedMeshes.find(Asset);
+			const auto Found = PreparedMeshes.find(Entity);
 			return Found == PreparedMeshes.end() ? nullptr : Found->second;
 		}
 
@@ -434,7 +434,7 @@ namespace PulseForge
 			if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
 			auto Bindings = Inputs.ResolveBindings(Instance);
 			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
-			const Mesh* MeshResource = FindPreparedMesh(Inputs.PreparedMeshes, Instance.MeshAsset);
+			const Mesh* MeshResource = FindPreparedMesh(Inputs.PreparedMeshes, Instance.Entity);
 			if (!MeshResource)
 				return std::unexpected(MakeAmbientOcclusionDrawError("Prepared SSAO prepass mesh is unavailable"));
 

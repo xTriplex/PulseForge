@@ -24,6 +24,7 @@ PHYSICS_ENTITY = "bfc10000-0000-4000-8000-000000000003"
 AUDIO_ENTITY = "bfc10000-0000-4000-8000-000000000004"
 SCRIPT_ENTITY = "bfc10000-0000-4000-8000-000000000005"
 AUDIO_ASSET = "bfc10000-0000-4000-8000-000000000006"
+PBR_FLOOR_GRAPH_MATERIAL = "10000000-0000-4000-8000-000000000008"
 
 
 def read_log_tail(log: Path) -> str:
@@ -233,10 +234,13 @@ def make_acceptance_project(source_project: Path, input_actions: Path, destinati
 def verify_cook_manifest(path: Path, dynamic_root: str) -> None:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     products = {entry["product"] for entry in manifest["entries"]}
-    required = {"scene", "mesh-primitive", "material", "texture", "environment", "script", "audio", "gameplay-input"}
+    required = {"scene", "mesh-primitive", "material", "graph-material", "texture", "environment", "script", "audio", "gameplay-input"}
     missing = sorted(required - products)
     if missing:
         raise RuntimeError(f"cook omitted required acceptance products: {missing}")
+    if not any(entry.get("product") == "graph-material" and
+               entry.get("assetId", "").lower() == PBR_FLOOR_GRAPH_MATERIAL for entry in manifest["entries"]):
+        raise RuntimeError("cook omitted the PBR sample's expected graph-backed floor material")
     if dynamic_root not in manifest["dynamicRoots"]:
         raise RuntimeError("cook manifest did not retain the explicit dynamic script root")
     if manifest.get("configuration") not in {"Debug", "Release", "Dist"}:
@@ -401,6 +405,7 @@ def main() -> int:
             "PULSEFORGE_COOKED_SCRIPT=PASS",
             "PULSEFORGE_COOKED_ENVIRONMENT=PASS",
             "PULSEFORGE_COOKED_RENDER_READBACK=PASS",
+            "PULSEFORGE_COOKED_GRAPH_MATERIAL=PASS",
             "PULSEFORGE_COOKED_PLAYER_ACCEPTANCE=PASS",
             "PULSEFORGE_COOKED_PLAYER_SHUTDOWN=PASS",
         )

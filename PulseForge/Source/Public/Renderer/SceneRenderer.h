@@ -40,8 +40,9 @@ namespace PulseForge
 	class CookedContentProvider;
 	struct GraphMaterialRuntime;
 	struct CookedGraphMaterialProduct;
+	struct ImportedGltfSkeletalMesh;
 
-	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
+	using PreparedMeshResourceMap = std::unordered_map<UUID, const Mesh*, UUIDHash>;
 	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
 
 	enum class SceneRendererErrorCode : uint8_t
@@ -327,6 +328,11 @@ namespace PulseForge
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 		// Non-owning frame pins. The next PrepareSnapshot clears them before cache publication advances any resource.
 		PreparedMeshResourceMap m_PreparedMeshResources;
+		struct PreparedSkeletalMeshResource;
+		std::unordered_map<UUID, std::unique_ptr<PreparedSkeletalMeshResource>, UUIDHash> m_SkeletalMeshResources;
+		std::unordered_map<std::string,
+			std::pair<std::shared_ptr<const ImportedGltfSkeletalMesh>, size_t>> m_SkeletalProducts;
+		size_t m_SkeletalProductBytes = 0;
 		PreparedMaterialBindingMap m_PreparedMaterialBindings;
 		std::unordered_map<UUID, const GraphMaterialRuntime*, UUIDHash> m_PreparedGraphMaterials;
 		std::unordered_map<AssetID, std::unique_ptr<GraphMaterialRuntime>, UUIDHash> m_GraphMaterialResources;
@@ -340,6 +346,7 @@ namespace PulseForge
 		bool m_AssetPreparationPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
+		bool m_LoggedCookedGraphMaterialDraw = false;
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
 		uint64_t m_ValidationPreparationRequest = 0;
 #endif

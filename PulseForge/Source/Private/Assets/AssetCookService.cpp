@@ -788,6 +788,7 @@ namespace PulseForge
 			std::vector<std::byte> Bytes;
 			uint32_t Version = 1;
 			CookedAssetProductKind EntryProduct = Product.Product;
+			std::string StableProductKey;
 			if (Product.Product == CookedAssetProductKind::MeshPrimitive)
 			{
 				uint32_t MeshIndex = 0, PrimitiveIndex = 0;
@@ -831,6 +832,7 @@ namespace PulseForge
 					return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 						Imported.error().Message, Imported.error().Path, Product.Asset));
 				}
+				StableProductKey = Imported->Recipe.SubresourceKey;
 				auto Encoded = Detail::EncodeSkeletalMeshProduct(Imported->Mesh, Request.CancellationToken);
 				if (Request.CancellationToken.stop_requested())
 					return std::unexpected(Error(AssetCookErrorCode::Cancelled,
@@ -1071,6 +1073,7 @@ namespace PulseForge
 			Entry.DigestAlgorithm = Digest->Algorithm;
 			Entry.Digest = Digest->Value;
 			Entry.RuntimeDependencies = Product.RuntimeDependencies;
+			Entry.StableProductKey = std::move(StableProductKey);
 			if (Product.Product == CookedAssetProductKind::Script)
 			{
 				const auto SourceRecord = Plan.Request.SourceSnapshot->GetRegistry().Find(Product.Asset);

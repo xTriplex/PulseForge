@@ -1,5 +1,8 @@
 #include "Runtime/SceneRuntime.h"
 #include "Runtime/CookedContentProvider.h"
+#include "Animation/GltfAnimationPlayback.h"
+#include "Assets/CookedProductCodec.h"
+#include "Assets/GltfMeshImportCoordinator.h"
 
 #include "Assets/AssetPathResolver.h"
 #include "Assets/AssetTypes.h"
@@ -59,6 +62,90 @@ namespace PulseForge
 		}
 		constexpr uint32_t MaximumBlueprintInstructionsPerFrame = 50'000;
 		constexpr size_t MaximumQueuedEntityDestructionsPerFrame = 4096;
+		constexpr size_t MaximumRuntimeSkeletalInstances = 256;
+		constexpr size_t MaximumRuntimeSkinnedVerticesPerFrame = 2'000'000;
+		constexpr size_t MaximumRuntimeSkeletalNodes = 4096;
+
+		[[nodiscard]] std::expected<GltfAnimationNodePose, std::string> DecomposeSkeletalRestTransform(
+			std::string NodeKey, const std::array<float, 16>& Matrix)
+		{
+			if (!std::all_of(Matrix.begin(), Matrix.end(), [](float Value) { return std::isfinite(Value); }) ||
+				std::abs(Matrix[3]) > 1.0e-5f || std::abs(Matrix[7]) > 1.0e-5f ||
+				std::abs(Matrix[11]) > 1.0e-5f || std::abs(Matrix[15] - 1.0f) > 1.0e-5f)
+				return std::unexpected("Skeletal rest transform is not a finite affine matrix");
+
+			double ScaleX = std::sqrt(static_cast<double>(Matrix[0]) * Matrix[0] +
+				static_cast<double>(Matrix[1]) * Matrix[1] + static_cast<double>(Matrix[2]) * Matrix[2]);
+			const double ScaleY = std::sqrt(static_cast<double>(Matrix[4]) * Matrix[4] +
+				static_cast<double>(Matrix[5]) * Matrix[5] + static_cast<double>(Matrix[6]) * Matrix[6]);
+			const double ScaleZ = std::sqrt(static_cast<double>(Matrix[8]) * Matrix[8] +
+				static_cast<double>(Matrix[9]) * Matrix[9] + static_cast<double>(Matrix[10]) * Matrix[10]);
+			const double Determinant = static_cast<double>(Matrix[0]) * (Matrix[5] * Matrix[10] - Matrix[9] * Matrix[6]) -
+				static_cast<double>(Matrix[4]) * (Matrix[1] * Matrix[10] - Matrix[9] * Matrix[2]) +
+				static_cast<double>(Matrix[8]) * (Matrix[1] * Matrix[6] - Matrix[5] * Matrix[2]);
+			if (!std::isfinite(Determinant) || std::abs(Determinant) <= 1.0e-12 ||
+				ScaleY <= 1.0e-8 || ScaleZ <= 1.0e-8 || ScaleX <= 1.0e-8)
+				return std::unexpected("Skeletal rest transform has a singular scale or basis");
+			if (Determinant < 0.0) ScaleX = -ScaleX;
+			const double R00 = Matrix[0] / ScaleX, R10 = Matrix[1] / ScaleX, R20 = Matrix[2] / ScaleX;
+			const double R01 = Matrix[4] / ScaleY, R11 = Matrix[5] / ScaleY, R21 = Matrix[6] / ScaleY;
+			const double R02 = Matrix[8] / ScaleZ, R12 = Matrix[9] / ScaleZ, R22 = Matrix[10] / ScaleZ;
+			const auto DotColumns = [](double AX, double AY, double AZ, double BX, double BY, double BZ)
+				{ return AX * BX + AY * BY + AZ * BZ; };
+			if (std::abs(DotColumns(R00, R10, R20, R01, R11, R21)) > 1.0e-4 ||
+				std::abs(DotColumns(R00, R10, R20, R02, R12, R22)) > 1.0e-4 ||
+				std::abs(DotColumns(R01, R11, R21, R02, R12, R22)) > 1.0e-4)
+				return std::unexpected("Animated skeletal node has shear that cannot be represented by glTF TRS channels");
+
+			GltfAnimationNodePose Pose;
+			Pose.NodeKey = std::move(NodeKey);
+			Pose.Translation = { Matrix[12], Matrix[13], Matrix[14], 0.0f };
+			Pose.Scale = { static_cast<float>(ScaleX), static_cast<float>(ScaleY), static_cast<float>(ScaleZ), 0.0f };
+			const double Trace = R00 + R11 + R22;
+			if (Trace > 0.0)
+			{
+				const double S = std::sqrt(Trace + 1.0) * 2.0;
+				Pose.Rotation = { static_cast<float>((R21 - R12) / S), static_cast<float>((R02 - R20) / S),
+					static_cast<float>((R10 - R01) / S), static_cast<float>(0.25 * S) };
+			}
+			else if (R00 > R11 && R00 > R22)
+			{
+				const double S = std::sqrt(1.0 + R00 - R11 - R22) * 2.0;
+				Pose.Rotation = { static_cast<float>(0.25 * S), static_cast<float>((R01 + R10) / S),
+					static_cast<float>((R02 + R20) / S), static_cast<float>((R21 - R12) / S) };
+			}
+			else if (R11 > R22)
+			{
+				const double S = std::sqrt(1.0 + R11 - R00 - R22) * 2.0;
+				Pose.Rotation = { static_cast<float>((R01 + R10) / S), static_cast<float>(0.25 * S),
+					static_cast<float>((R12 + R21) / S), static_cast<float>((R02 - R20) / S) };
+			}
+			else
+			{
+				const double S = std::sqrt(1.0 + R22 - R00 - R11) * 2.0;
+				Pose.Rotation = { static_cast<float>((R02 + R20) / S), static_cast<float>((R12 + R21) / S),
+					static_cast<float>(0.25 * S), static_cast<float>((R10 - R01) / S) };
+			}
+			return Pose;
+		}
+
+		[[nodiscard]] std::array<float, 16> ComposeSkeletalTransform(const GltfAnimationNodePose& Pose)
+		{
+			const double X = Pose.Rotation[0], Y = Pose.Rotation[1], Z = Pose.Rotation[2], W = Pose.Rotation[3];
+			const double XX = X * X, YY = Y * Y, ZZ = Z * Z;
+			const double XY = X * Y, XZ = X * Z, YZ = Y * Z;
+			const double XW = X * W, YW = Y * W, ZW = Z * W;
+			const double SX = Pose.Scale[0], SY = Pose.Scale[1], SZ = Pose.Scale[2];
+			return {
+				static_cast<float>((1.0 - 2.0 * (YY + ZZ)) * SX), static_cast<float>((2.0 * (XY + ZW)) * SX),
+				static_cast<float>((2.0 * (XZ - YW)) * SX), 0.0f,
+				static_cast<float>((2.0 * (XY - ZW)) * SY), static_cast<float>((1.0 - 2.0 * (XX + ZZ)) * SY),
+				static_cast<float>((2.0 * (YZ + XW)) * SY), 0.0f,
+				static_cast<float>((2.0 * (XZ + YW)) * SZ), static_cast<float>((2.0 * (YZ - XW)) * SZ),
+				static_cast<float>((1.0 - 2.0 * (XX + YY)) * SZ), 0.0f,
+				Pose.Translation[0], Pose.Translation[1], Pose.Translation[2], 1.0f
+			};
+		}
 
 		std::expected<std::string, std::string> ReadRuntimeUIDocumentBytes(
 			const Project* SourceProject, const std::shared_ptr<const CookedContentProvider>& CookedAssets, const AssetID& Asset)
@@ -89,6 +176,36 @@ namespace PulseForge
 			return Text;
 #else
 			return std::unexpected(std::string("Cooked runtime cannot resolve source project UI documents"));
+#endif
+		}
+
+		[[nodiscard]] std::expected<ImportedGltfSkeletalMesh, std::string> LoadRuntimeSkeletalProduct(
+			const Project* SourceProject,
+			const std::shared_ptr<const CookedContentProvider>& CookedAssets,
+			const AssetID& Asset,
+			std::string_view ProductKey)
+		{
+			if (CookedAssets)
+			{
+				auto Product = CookedAssets->LoadSkeletalMeshByProductKey(Asset, ProductKey);
+				if (!Product) return std::unexpected("Cooked skeletal product load failed: " + Product.error().Message);
+				return std::move(*Product);
+			}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			if (!SourceProject)
+				return std::unexpected("Skeletal playback requires a source project or cooked content provider");
+			const auto Record = SourceProject->GetAssetRegistry().Find(Asset);
+			if (!Record)
+				return std::unexpected("Skeletal source asset is not present in the active project registry");
+			auto Imported = GltfMeshImportCoordinator::LoadLastSuccessfulSkeletalProduct(
+				Asset, SourceProject->GetRootPath(), SourceProject->GetAssetRegistry(), ProductKey);
+			if (!Imported) return std::unexpected("Skeletal source import failed: " + Imported.error().Message);
+			return std::move(Imported->Mesh);
+#else
+			(void)SourceProject;
+			(void)Asset;
+			(void)ProductKey;
+			return std::unexpected("Cooked runtime cannot resolve a skeletal product without its cooked provider");
 #endif
 		}
 	}
@@ -159,6 +276,16 @@ namespace PulseForge
 			std::vector<RuntimeUIDrawCommand> DrawCommands;
 			uint64_t TreeGeneration = 0;
 		};
+		struct SkeletalInstanceState final
+		{
+			Entity BoundEntity;
+			AssetID SourceAsset;
+			std::string ProductKey;
+			std::string ClipKey;
+			ImportedGltfSkeletalMesh Product;
+			std::vector<GltfAnimationNodePose> RestPose;
+			GltfAnimationInstancePlayback Playback;
+		};
 		// Reverse destruction stops scripts and scene voices before the session-owned engine and cache.
 		std::unique_ptr<AudioSession> OwnedAudioSession;
 		AudioSession* AudioSessionState = nullptr;
@@ -167,6 +294,7 @@ namespace PulseForge
 		std::unique_ptr<ScriptRuntime> Scripting;
 		SceneRuntimeServices Services;
 		std::optional<RuntimeUICanvasState> RuntimeUI;
+		std::unordered_map<UUID, SkeletalInstanceState, UUIDHash> SkeletalInstances;
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInitialScalarDefaults, UUIDHash>, UUIDHash>
@@ -199,6 +327,115 @@ namespace PulseForge
 		uint32_t BlueprintInstructionsExecuted = 0;
 		uint32_t BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
 		bool BlueprintDispatchLimitReported = false;
+
+		[[nodiscard]] std::expected<void, std::string> AdvanceSkeletalAnimations(
+			Scene& SceneValue,
+			float DeltaSeconds,
+			const Project* SourceProject,
+			const std::shared_ptr<const CookedContentProvider>& CookedAssets)
+		{
+			std::erase_if(SkeletalInstances, [&](const auto& Entry)
+			{
+				const auto Current = SceneValue.FindEntity(Entry.first);
+				if (Current && *Current == Entry.second.BoundEntity) return false;
+				SceneValue.ClearRuntimeSkeletalPose(Entry.first);
+				return true;
+			});
+			std::vector<UUID> LiveSkeletalEntities;
+			LiveSkeletalEntities.reserve(std::min(SceneValue.GetEntityCount(), MaximumRuntimeSkeletalInstances));
+			size_t SkinnedVerticesThisFrame = 0;
+			for (const Entity& EntityValue : SceneValue.GetEntities())
+			{
+				auto MeshRenderer = EntityValue.GetMeshRenderer();
+				if (!MeshRenderer) return std::unexpected("Could not inspect skeletal mesh component: " + MeshRenderer.error().Message);
+				if (!MeshRenderer->has_value() || !(**MeshRenderer).SkeletalProductKey)
+				{
+					SkeletalInstances.erase(EntityValue.GetUUID());
+					SceneValue.ClearRuntimeSkeletalPose(EntityValue.GetUUID());
+					continue;
+				}
+
+				const MeshRendererComponent& Component = **MeshRenderer;
+				if (SkeletalInstances.size() >= MaximumRuntimeSkeletalInstances &&
+					!SkeletalInstances.contains(EntityValue.GetUUID()))
+					return std::unexpected("Scene exceeds the 256-instance skeletal animation runtime limit");
+				auto Found = SkeletalInstances.find(EntityValue.GetUUID());
+				if (Found != SkeletalInstances.end() &&
+					(Found->second.BoundEntity != EntityValue || Found->second.SourceAsset != Component.MeshAsset ||
+					Found->second.ProductKey != *Component.SkeletalProductKey))
+				{
+					SkeletalInstances.erase(Found);
+					Found = SkeletalInstances.end();
+				}
+				if (Found == SkeletalInstances.end())
+				{
+					auto Product = LoadRuntimeSkeletalProduct(
+						SourceProject, CookedAssets, Component.MeshAsset, *Component.SkeletalProductKey);
+					if (!Product) return std::unexpected(Product.error());
+					if (Product->SkeletonNodes.empty() || Product->SkeletonNodes.size() > MaximumRuntimeSkeletalNodes)
+						return std::unexpected("Skeletal product node count is empty or exceeds the runtime limit");
+					SkeletalInstanceState State;
+					State.BoundEntity = EntityValue;
+					State.SourceAsset = Component.MeshAsset;
+					State.ProductKey = *Component.SkeletalProductKey;
+					State.Product = std::move(*Product);
+					State.RestPose.reserve(State.Product.SkeletonNodes.size());
+					for (const ImportedGltfSkeletonNode& Node : State.Product.SkeletonNodes)
+					{
+						auto Pose = DecomposeSkeletalRestTransform(Node.StableKey, Node.LocalBindMatrix);
+						if (!Pose) return std::unexpected("Invalid skeletal rest pose: " + Pose.error());
+						State.RestPose.push_back(std::move(*Pose));
+					}
+					Found = SkeletalInstances.emplace(EntityValue.GetUUID(), std::move(State)).first;
+				}
+
+				SkeletalInstanceState& State = Found->second;
+				const size_t VertexCount = State.Product.Geometry.Vertices.size();
+				if (VertexCount > MaximumRuntimeSkinnedVerticesPerFrame - SkinnedVerticesThisFrame)
+					return std::unexpected("Scene exceeds the 2,000,000 skinned-vertex per-frame CPU budget");
+				SkinnedVerticesThisFrame += VertexCount;
+				std::vector<GltfAnimationNodePose> Pose;
+				if (Component.AnimationClipKey)
+				{
+					if (State.ClipKey != *Component.AnimationClipKey)
+					{
+					GltfAnimationInstancePlayback CandidatePlayback;
+					if (auto Started = PlayGltfAnimationInstance(CandidatePlayback, State.Product,
+							*Component.AnimationClipKey, true); !Started)
+						return std::unexpected("Could not start skeletal animation clip: " + Started.error().Message);
+					State.Playback = std::move(CandidatePlayback);
+					State.ClipKey = *Component.AnimationClipKey;
+				}
+				auto Advanced = AdvanceGltfAnimationInstance(
+					State.Playback, State.Product, State.RestPose, DeltaSeconds);
+				if (!Advanced) return std::unexpected("Could not advance skeletal animation: " + Advanced.error().Message);
+				Pose = std::move(*Advanced);
+				}
+				else
+				{
+					State.ClipKey.clear();
+					State.Playback = {};
+					Pose = State.RestPose;
+				}
+
+				std::vector<std::array<float, 16>> LocalTransforms;
+				LocalTransforms.reserve(Pose.size());
+				for (const GltfAnimationNodePose& NodePose : Pose)
+					LocalTransforms.push_back(ComposeSkeletalTransform(NodePose));
+				if (auto Published = SceneValue.SetRuntimeSkeletalPose(EntityValue.GetUUID(), std::move(LocalTransforms)); !Published)
+					return std::unexpected("Could not publish runtime skeletal pose: " + Published.error().Message);
+				LiveSkeletalEntities.push_back(EntityValue.GetUUID());
+			}
+
+			std::erase_if(SkeletalInstances, [&](const auto& Entry)
+			{
+				if (std::find(LiveSkeletalEntities.begin(), LiveSkeletalEntities.end(), Entry.first) != LiveSkeletalEntities.end())
+					return false;
+				SceneValue.ClearRuntimeSkeletalPose(Entry.first);
+				return true;
+			});
+			return {};
+		}
 
 		void RecordBlueprintDiagnostic(
 			const Entity& Target,
@@ -820,6 +1057,7 @@ namespace PulseForge
 			Candidate->Source = &Source;
 			Candidate->SessionGeneration = SessionGeneration;
 			Candidate->AudioActivationDeferred = DeferAudioActivation;
+			Source.ClearRuntimeSkeletalPoses();
 			const Project* SourceProject = nullptr;
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 			SourceProject = m_Project;
@@ -1129,6 +1367,9 @@ namespace PulseForge
 			if (m_Impl->Source)
 				for (const Entity& EntityValue : m_Impl->Source->GetEntities())
 					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Impl->Services);
+			if (m_Impl->Source)
+				m_Impl->Source->ClearRuntimeSkeletalPoses();
+			m_Impl->SkeletalInstances.clear();
 			m_Impl->PendingContactEvents.clear();
 			m_Impl->PendingBlueprintPhysicsForces.clear();
 			m_Impl->PendingBlueprintTimers.clear();
@@ -1494,6 +1735,17 @@ namespace PulseForge
 				SceneRuntimeErrorCode::UpdateFailed,
 				SceneRuntimeSubsystem::Physics,
 				"Could not advance scene physics: " + PhysicsResult.error().Message));
+
+		// Sample after physics and publish before contacts and rendering: physics uses the previous pose,
+		// while color, AO, and shadow passes consume the same current pose snapshot.
+		const Project* SourceProject = nullptr;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		SourceProject = m_Project;
+#endif
+		if (auto Animation = m_Impl->AdvanceSkeletalAnimations(
+				Source, static_cast<float>(DeltaSeconds), SourceProject, m_CookedAssets); !Animation)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Animation,
+				"Could not advance scene skeletal animation: " + Animation.error()));
 
 		const std::vector<PhysicsContactEvent> ContactEvents = m_Impl->Physics->TakeContactEvents();
 		constexpr size_t MaximumQueuedContactEvents = 65536;

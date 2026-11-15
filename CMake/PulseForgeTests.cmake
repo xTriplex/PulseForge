@@ -142,6 +142,7 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeMaterialGraph PulseForgeAssetCatalog PulseForgeScriptAssets PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
+	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeSkeletalAnimation)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeRuntime)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeBuildProfiles)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetExportService)
@@ -220,7 +221,7 @@ if(BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeAssetImportTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeAssetImportTests PRIVATE
-		PulseForgeAssetImporters PulseForgeAssetServices PulseForgeAssetDependencyCatalog)
+		PulseForgeAssetImporters PulseForgeAssetServices PulseForgeAssetDependencyCatalog PulseForgeSkeletalAnimation)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAssetImportTests PulseForgePublicHeaderChecks)
 	endif()
@@ -298,6 +299,17 @@ if(BUILD_TESTING)
 		add_dependencies(PulseForgeBlueprintRuntimeTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.BlueprintRuntime COMMAND PulseForgeBlueprintRuntimeTests)
+
+	add_executable(PulseForgeSkeletalAnimationTests
+		Tests/GltfAnimationSamplerTestMain.cpp
+		Tests/GltfAnimationSamplerTests.cpp)
+	target_include_directories(PulseForgeSkeletalAnimationTests PRIVATE Tests)
+	target_link_libraries(PulseForgeSkeletalAnimationTests PRIVATE PulseForgeSkeletalAnimation)
+	set_property(TARGET PulseForgeSkeletalAnimationTests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeSkeletalAnimationTests PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.SkeletalAnimation COMMAND PulseForgeSkeletalAnimationTests)
 
 	if(TARGET PulseForgeCookedRuntime)
 		add_executable(PulseForgeCookedBlueprintProgramConsumer
@@ -477,6 +489,7 @@ if(BUILD_TESTING)
 		PulseForgeAudioRuntimeTests
 		PulseForgeAudioSessionConsumer
 		PulseForgeBlueprintRuntimeTests
+		PulseForgeSkeletalAnimationTests
 		PulseForgeScriptingRuntimeTests
 		PulseForgePlayerLaunchConfigurationTests
 		PulseForgeBufferUpdateTests

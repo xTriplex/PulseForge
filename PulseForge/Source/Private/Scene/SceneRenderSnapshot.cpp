@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <unordered_set>
+#include <utility>
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -221,6 +222,13 @@ namespace PulseForge
 						Current.GetUUID(),
 						"A mesh renderer references a nil material asset UUID"));
 				}
+				if (Component.SkeletalProductKey && !IsValidGltfSkeletalProductKey(*Component.SkeletalProductKey))
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed, Current.GetUUID(),
+						"Mesh renderer skeletal product key is invalid"));
+				if (Component.AnimationClipKey && (!Component.SkeletalProductKey ||
+					!IsValidGltfAnimationClipKey(*Component.AnimationClipKey)))
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed, Current.GetUUID(),
+						"Mesh renderer animation clip requires a valid skeletal product reference"));
 
 				const auto WorldTransform = Current.GetWorldMatrix();
 				if (!WorldTransform)
@@ -244,8 +252,12 @@ namespace PulseForge
 						"Mesh entity world transform is singular and cannot preserve face orientation"));
 				}
 
-				Snapshot.Meshes.push_back(
-					{ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform, Orientation });
+				SceneMeshInstance MeshInstance{ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform,
+					Orientation, Component.SkeletalProductKey, Component.AnimationClipKey };
+				if (Component.SkeletalProductKey)
+					if (auto RuntimePose = Source.GetRuntimeSkeletalPose(Current.GetUUID()))
+						MeshInstance.SkeletalLocalTransforms = std::move(*RuntimePose);
+				Snapshot.Meshes.push_back(std::move(MeshInstance));
 			}
 			return Snapshot;
 		}

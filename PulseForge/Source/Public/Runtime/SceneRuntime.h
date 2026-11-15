@@ -140,6 +140,7 @@ namespace PulseForge
 		AudioDevice,
 		Scripting,
 		Physics,
+		Animation,
 		Audio
 	};
 

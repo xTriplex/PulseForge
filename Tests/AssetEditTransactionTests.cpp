@@ -243,6 +243,7 @@ namespace
 		AssetImportRecipe Recipe;
 		Recipe.SourceAsset = SourceAsset;
 		Recipe.SubresourceKey = "mesh/0/primitive/0";
+		Recipe.SourceLocator = Recipe.SubresourceKey;
 		Recipe.ImporterID = "PulseForge.AssetEditTransactionTests";
 		Recipe.ImporterVersion = "1";
 		Recipe.OutputSchemaVersion = 1;
@@ -258,6 +259,7 @@ namespace
 		const auto FingerprintJson = [](const AssetContentFingerprint& Fingerprint)
 		{ return Json::object({ { "algorithm", Fingerprint.Algorithm }, { "digest", Fingerprint.DigestHex } }); };
 		const Json RecipeJson = Json::object({ { "sourceAsset", Recipe.SourceAsset.ToString() }, { "subresource", Recipe.SubresourceKey },
+			{ "sourceLocator", Recipe.SourceLocator },
 			{ "importer", Recipe.ImporterID }, { "importerVersion", Recipe.ImporterVersion },
 			{ "outputSchemaVersion", Recipe.OutputSchemaVersion }, { "effectiveSettings", Recipe.EffectiveSettings },
 			{ "target", Recipe.TargetID }, { "inputs", Json::array() }, { "inputFingerprint", FingerprintJson(Recipe.InputFingerprint) } });

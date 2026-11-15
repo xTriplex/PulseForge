@@ -15,6 +15,7 @@
 #include "Assets/MaterialGraphCompiler.h"
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Runtime/CookedContentProvider.h"
+#include "Animation/GltfSkinning.h"
 #include "Runtime/PlayerSession.h"
 #include "Scripting/BlueprintAsset.h"
 #include "Scripting/ScriptRuntime.h"
@@ -370,6 +371,15 @@ namespace
 		PF_CHECK(Tests, Provider.has_value());
 		if (!Provider) return;
 		const auto Product = (*Provider)->LoadSkeletalMesh(MeshMetadata->ID, Subresource);
+		const CookedAssetEntry* SkeletalEntry = (*Provider)->FindSkeletalMesh(MeshMetadata->ID, Subresource);
+		PF_CHECK(Tests, SkeletalEntry != nullptr && SkeletalEntry->StableProductKey.starts_with("skeletal/"));
+		if (SkeletalEntry)
+		{
+			const auto StableProduct = (*Provider)->LoadSkeletalMeshByProductKey(MeshMetadata->ID, SkeletalEntry->StableProductKey);
+			PF_CHECK(Tests, StableProduct.has_value());
+			if (StableProduct)
+				PF_CHECK(Tests, StableProduct->JointNodeIndices.size() == 1 && StableProduct->Geometry.Vertices.size() == 3);
+		}
 		PF_CHECK(Tests, Product.has_value());
 		if (Product)
 		{
@@ -379,6 +389,38 @@ namespace
 				PF_CHECK(Tests, Product->SkeletonNodes[Product->JointNodeIndices.front()].Name == "joint");
 			else PF_CHECK(Tests, false);
 			PF_CHECK(Tests, Product->VertexInfluences.size() == 3);
+			std::vector<std::array<float, 16>> LocalTransforms;
+			LocalTransforms.reserve(Product->SkeletonNodes.size());
+			for (const ImportedGltfSkeletonNode& Node : Product->SkeletonNodes)
+				LocalTransforms.push_back(Node.LocalBindMatrix);
+			auto BindPalette = BuildGltfJointPalette(*Product, LocalTransforms);
+			PF_CHECK(Tests, BindPalette.has_value());
+			if (BindPalette)
+			{
+				auto BindPoseVertices = SkinGltfMeshVertices(*Product, *BindPalette);
+				PF_CHECK(Tests, BindPoseVertices.has_value());
+				if (BindPoseVertices)
+				{
+					for (size_t Vertex = 0; Vertex < Product->Geometry.Vertices.size(); ++Vertex)
+						for (size_t Axis = 0; Axis < 3; ++Axis)
+							PF_CHECK(Tests, std::abs(BindPoseVertices->at(Vertex).Position[Axis] -
+								Product->Geometry.Vertices[Vertex].Position[Axis]) < 1.0e-5f);
+				}
+
+				const uint16_t JointNodeIndex = Product->JointNodeIndices.front();
+				LocalTransforms[JointNodeIndex][13] += 0.5f;
+				auto AnimatedPalette = BuildGltfJointPalette(*Product, LocalTransforms);
+				PF_CHECK(Tests, AnimatedPalette.has_value());
+				if (AnimatedPalette)
+				{
+					auto AnimatedVertices = SkinGltfMeshVertices(*Product, *AnimatedPalette);
+					PF_CHECK(Tests, AnimatedVertices.has_value());
+					if (AnimatedVertices)
+						for (size_t Vertex = 0; Vertex < Product->Geometry.Vertices.size(); ++Vertex)
+							PF_CHECK(Tests, std::abs(AnimatedVertices->at(Vertex).Position[1] -
+								Product->Geometry.Vertices[Vertex].Position[1] - 0.5f) < 1.0e-5f);
+				}
+			}
 		}
 		const auto StaticProduct = (*Provider)->LoadMeshPrimitive(MeshMetadata->ID, StaticSubresource);
 		PF_CHECK(Tests, StaticProduct.has_value());

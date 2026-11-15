@@ -1,8 +1,193 @@
 #include "TestGraphicsSupport.h"
 
+#include "Renderer/RenderDevice.h"
+
+#include <algorithm>
+
 namespace
 {
 	using namespace PulseForgeTestSupport;
+
+	class RecordingBuffer final : public PulseForge::Buffer
+	{
+	public:
+		RecordingBuffer(PulseForge::BufferDesc Description, std::span<const std::byte> InitialData)
+			: m_Description(std::move(Description)), m_Data(static_cast<size_t>(m_Description.ByteSize))
+		{
+			std::copy(InitialData.begin(), InitialData.end(), m_Data.begin());
+		}
+
+		const PulseForge::BufferDesc& GetDescription() const noexcept override { return m_Description; }
+		std::vector<std::byte>& Data() noexcept { return m_Data; }
+
+	private:
+		PulseForge::BufferDesc m_Description;
+		std::vector<std::byte> m_Data;
+	};
+
+	class MeshCreationTestDevice final : public PulseForge::RenderDevice
+	{
+	public:
+		std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept override { return {}; }
+		PulseForge::OutputColorEncoding GetOutputColorEncoding() const noexcept override
+		{
+			return PulseForge::OutputColorEncoding::SrgbAttachment;
+		}
+		PulseForge::RenderTargetCreateResult CreateRenderTarget(const PulseForge::RenderTargetDesc&) override
+		{
+			return std::unexpected(PulseForge::RenderTargetError{ PulseForge::RenderTargetErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::DepthCubemapCreateResult CreateDepthCubemap(uint32_t, const std::string&) override
+		{
+			return std::unexpected(PulseForge::DepthCubemapError{ PulseForge::DepthCubemapErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsResult BeginRenderTarget(const PulseForge::RenderTarget&, const PulseForge::RenderTargetClearValue&) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsResult EndRenderTarget() override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::BufferCreateResult CreateBuffer(
+			const PulseForge::BufferDesc& Description,
+			std::span<const std::byte> InitialData) override
+		{
+			if (auto Valid = PulseForge::ValidateBufferDescription(Description, InitialData.size()); !Valid)
+				return std::unexpected(Valid.error());
+			CreatedBufferDescriptions.push_back(Description);
+			return PulseForge::BufferHandle(new RecordingBuffer(Description, InitialData));
+		}
+		PulseForge::BufferUpdateResult WriteBuffer(
+			const PulseForge::Buffer& Target,
+			uint64_t DestinationOffset,
+			std::span<const std::byte> Data) override
+		{
+			const auto* Recorded = dynamic_cast<const RecordingBuffer*>(&Target);
+			if (!Recorded)
+				return std::unexpected(PulseForge::BufferUpdateError{
+					PulseForge::BufferUpdateErrorCode::BackendFailure, "test buffer type mismatch" });
+			if (auto Valid = PulseForge::ValidateBufferUpdate(Target.GetDescription(), DestinationOffset, Data.size()); !Valid)
+				return std::unexpected(Valid.error());
+			auto& Destination = const_cast<RecordingBuffer*>(Recorded)->Data();
+			std::copy(Data.begin(), Data.end(), Destination.begin() + static_cast<ptrdiff_t>(DestinationOffset));
+			LastWriteBytes.assign(Data.begin(), Data.end());
+			++WriteCount;
+			return {};
+		}
+		PulseForge::TextureCreateResult CreateTexture(
+			const PulseForge::TextureDesc&, std::span<const PulseForge::TextureSubresourceData>) override
+		{
+			return std::unexpected(PulseForge::TextureError{ PulseForge::TextureErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::SamplerCreateResult CreateSampler(const PulseForge::SamplerDesc&) override
+		{
+			return std::unexpected(PulseForge::TextureError{ PulseForge::TextureErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::BindingLayoutCreateResult CreateBindingLayout(const PulseForge::BindingLayoutDesc&) override
+		{
+			return std::unexpected(PulseForge::BindingError{ PulseForge::BindingErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::BindingSetCreateResult CreateBindingSet(const PulseForge::BindingSetDesc&) override
+		{
+			return std::unexpected(PulseForge::BindingError{ PulseForge::BindingErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::ShaderCreateResult CreateShader(const PulseForge::ShaderDesc&, std::span<const std::byte>) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsPipelineCreateResult CreateGraphicsPipeline(const PulseForge::GraphicsPipelineDesc&) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsResult Draw(const PulseForge::GraphicsPipeline&, const PulseForge::Buffer&,
+			const PulseForge::DrawArguments&, std::span<const PulseForge::BindingSet* const>) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsResult Draw(const PulseForge::GraphicsPipeline&, const PulseForge::Mesh&,
+			const PulseForge::DrawArguments&, std::span<const PulseForge::BindingSet* const>) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsResult DrawIndexed(const PulseForge::GraphicsPipeline&, const PulseForge::Buffer&,
+			const PulseForge::Buffer&, const PulseForge::DrawIndexedArguments&,
+			std::span<const PulseForge::BindingSet* const>) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+		PulseForge::GraphicsResult DrawIndexed(const PulseForge::GraphicsPipeline&, const PulseForge::Mesh&,
+			const PulseForge::DrawIndexedArguments&, std::span<const PulseForge::BindingSet* const>) override
+		{
+			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::UnsupportedFeature, "test stub" });
+		}
+
+		std::vector<PulseForge::BufferDesc> CreatedBufferDescriptions;
+		std::vector<std::byte> LastWriteBytes;
+		size_t WriteCount = 0;
+	};
+
+	void TestDynamicMeshCreationAndUpdates(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		MeshCreationTestDevice Runtime;
+		const std::array<float, 9> InitialVertices = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+		const std::array<uint32_t, 3> Indices = { 0, 1, 2 };
+		MeshDesc Description;
+		Description.VertexLayout.Stride = sizeof(float) * 3;
+		Description.VertexLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float3, 0 } };
+		Description.VertexData = std::as_bytes(std::span(InitialVertices));
+		Description.Indices = Indices;
+		Description.DebugName = "dynamic mesh contract fixture";
+
+		auto Immutable = Runtime.CreateMesh(Description);
+		PF_CHECK(Tests, Immutable.has_value());
+		PF_CHECK(Tests, Runtime.CreatedBufferDescriptions.size() == 2);
+		if (Runtime.CreatedBufferDescriptions.size() == 2)
+		{
+			PF_CHECK(Tests, !Runtime.CreatedBufferDescriptions[0].IsDynamic);
+			PF_CHECK(Tests, !Runtime.CreatedBufferDescriptions[1].IsDynamic);
+		}
+
+		auto Dynamic = Runtime.CreateDynamicMesh(Description);
+		PF_CHECK(Tests, Dynamic.has_value());
+		PF_CHECK(Tests, Runtime.CreatedBufferDescriptions.size() == 4);
+		if (Runtime.CreatedBufferDescriptions.size() == 4)
+		{
+			PF_CHECK(Tests, Runtime.CreatedBufferDescriptions[2].Usage == BufferUsage::Vertex &&
+				Runtime.CreatedBufferDescriptions[2].IsDynamic);
+			PF_CHECK(Tests, Runtime.CreatedBufferDescriptions[3].Usage == BufferUsage::Index &&
+				!Runtime.CreatedBufferDescriptions[3].IsDynamic);
+		}
+		if (!Dynamic || !Immutable) return;
+
+		const std::array<float, 9> UpdatedVertices = { 0, 0.5f, 0, 1, 0.5f, 0, 0, 1.5f, 0 };
+		const auto Updated = Runtime.UpdateDynamicMeshVertices(**Dynamic, Description.VertexLayout,
+			std::as_bytes(std::span(UpdatedVertices)));
+		PF_CHECK(Tests, Updated.has_value());
+		PF_CHECK(Tests, Runtime.WriteCount == 1);
+		PF_CHECK(Tests, Runtime.LastWriteBytes == std::vector<std::byte>(
+			std::as_bytes(std::span(UpdatedVertices)).begin(), std::as_bytes(std::span(UpdatedVertices)).end()));
+		const auto WrongSize = Runtime.UpdateDynamicMeshVertices(**Dynamic, Description.VertexLayout,
+			std::as_bytes(std::span(UpdatedVertices).first(8)));
+		PF_CHECK(Tests, !WrongSize && WrongSize.error().Code == BufferUpdateErrorCode::InvalidUpdateSize);
+		VertexLayoutDesc WrongLayout = Description.VertexLayout;
+		WrongLayout.Stride = sizeof(float) * 4;
+		const auto LayoutMismatch = Runtime.UpdateDynamicMeshVertices(**Dynamic, WrongLayout,
+			std::as_bytes(std::span(UpdatedVertices)));
+		PF_CHECK(Tests, !LayoutMismatch && LayoutMismatch.error().Code == BufferUpdateErrorCode::InvalidUpdateSize);
+		const auto ImmutableUpdate = Runtime.UpdateDynamicMeshVertices(**Immutable, Description.VertexLayout,
+			std::as_bytes(std::span(UpdatedVertices)));
+		PF_CHECK(Tests, !ImmutableUpdate && ImmutableUpdate.error().Code == BufferUpdateErrorCode::UnsupportedUsage);
+		PF_CHECK(Tests, Runtime.WriteCount == 1);
+
+		auto InvalidDescription = Description;
+		InvalidDescription.VertexLayout.Stride = 0;
+		const auto InvalidLayoutMesh = Runtime.CreateDynamicMesh(InvalidDescription);
+		PF_CHECK(Tests, !InvalidLayoutMesh && InvalidLayoutMesh.error().Code == MeshErrorCode::InvalidVertexLayout);
+		PF_CHECK(Tests, Runtime.CreatedBufferDescriptions.size() == 4);
+	}
+
 	void TestBufferDescriptionValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -197,6 +382,7 @@ namespace
 void RunRendererContractTests(TestRunner& Tests)
 {
 	TestBufferDescriptionValidation(Tests);
+	TestDynamicMeshCreationAndUpdates(Tests);
 	TestShaderDescriptionAndSpirVValidation(Tests);
 	TestVertexLayoutValidation(Tests);
 	TestMeshDescriptionAndDrawValidation(Tests);

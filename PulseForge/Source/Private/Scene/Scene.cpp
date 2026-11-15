@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <unordered_map>
 
 namespace PulseForge::Detail
 {
@@ -34,11 +35,33 @@ namespace PulseForge::Detail
 	{
 		entt::registry Registry;
 		std::unordered_map<UUID, entt::entity, UUIDHash> Entities;
+		std::unordered_map<UUID, std::vector<RuntimeSkeletalLocalTransform>, UUIDHash> RuntimeSkeletalPoses;
+		size_t RuntimeSkeletalPoseNodeCount = 0;
 	};
 }
 
 namespace PulseForge
 {
+	bool IsValidGltfSkeletalProductKey(std::string_view Key) noexcept
+	{
+		constexpr std::string_view Prefix = "skeletal/";
+		if (!Key.starts_with(Prefix) || Key.size() != Prefix.size() + 32) return false;
+		return std::all_of(Key.begin() + static_cast<std::ptrdiff_t>(Prefix.size()), Key.end(), [](char Character)
+		{
+			return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f');
+		});
+	}
+
+	bool IsValidGltfAnimationClipKey(std::string_view Key) noexcept
+	{
+		constexpr std::string_view Prefix = "animation/";
+		if (!Key.starts_with(Prefix) || Key.size() != Prefix.size() + 32) return false;
+		return std::all_of(Key.begin() + static_cast<std::ptrdiff_t>(Prefix.size()), Key.end(), [](char Character)
+		{
+			return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f');
+		});
+	}
+
 	std::expected<void, std::string> EnvironmentLightComponent::Validate() const
 	{
 		if (HdrImage.IsNil())
@@ -426,6 +449,7 @@ namespace PulseForge
 		}
 
 		m_Storage->Entities.erase(Target.GetUUID());
+		ClearRuntimeSkeletalPose(Target.GetUUID());
 		m_Storage->Registry.destroy(*Native);
 		return {};
 	}
@@ -460,6 +484,69 @@ namespace PulseForge
 	size_t Scene::GetEntityCount() const noexcept
 	{
 		return m_Storage->Entities.size();
+	}
+
+	std::expected<void, SceneError> Scene::SetRuntimeSkeletalPose(
+		UUID EntityIdentifier,
+		std::vector<RuntimeSkeletalLocalTransform> LocalNodeTransforms)
+	{
+		if (!ResolveEntity(*m_Storage, EntityIdentifier))
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot publish a skeletal pose for an entity that is not in this scene"));
+		if (LocalNodeTransforms.empty() || LocalNodeTransforms.size() > MaximumRuntimeSkeletalPoseNodesPerEntity)
+			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure,
+				"Runtime skeletal pose must contain between 1 and 4096 local node transforms"));
+		for (const RuntimeSkeletalLocalTransform& Matrix : LocalNodeTransforms)
+			for (const float Value : Matrix)
+				if (!std::isfinite(Value))
+					return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure,
+						"Runtime skeletal pose matrices must contain only finite values"));
+
+		const auto Existing = m_Storage->RuntimeSkeletalPoses.find(EntityIdentifier);
+		const size_t ExistingNodeCount = Existing == m_Storage->RuntimeSkeletalPoses.end() ? 0 : Existing->second.size();
+		const size_t RetainedNodeCount = m_Storage->RuntimeSkeletalPoseNodeCount - ExistingNodeCount;
+		if (LocalNodeTransforms.size() > MaximumRuntimeSkeletalPoseNodesTotal - RetainedNodeCount)
+			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure,
+				"Scene runtime skeletal poses exceed the 65536-node memory bound"));
+
+		try
+		{
+			if (Existing == m_Storage->RuntimeSkeletalPoses.end())
+				m_Storage->RuntimeSkeletalPoses.emplace(EntityIdentifier, std::move(LocalNodeTransforms));
+			else
+				Existing->second = std::move(LocalNodeTransforms);
+			m_Storage->RuntimeSkeletalPoseNodeCount = RetainedNodeCount +
+				m_Storage->RuntimeSkeletalPoses.at(EntityIdentifier).size();
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{ SceneErrorCode::StorageFailure,
+				std::string("Could not publish runtime skeletal pose: ") + Exception.what() });
+		}
+	}
+
+	std::optional<std::vector<RuntimeSkeletalLocalTransform>> Scene::GetRuntimeSkeletalPose(UUID EntityIdentifier) const
+	{
+		const auto Pose = m_Storage->RuntimeSkeletalPoses.find(EntityIdentifier);
+		if (Pose == m_Storage->RuntimeSkeletalPoses.end())
+			return std::nullopt;
+		return Pose->second;
+	}
+
+	void Scene::ClearRuntimeSkeletalPose(UUID EntityIdentifier) noexcept
+	{
+		const auto Pose = m_Storage->RuntimeSkeletalPoses.find(EntityIdentifier);
+		if (Pose == m_Storage->RuntimeSkeletalPoses.end())
+			return;
+		m_Storage->RuntimeSkeletalPoseNodeCount -= Pose->second.size();
+		m_Storage->RuntimeSkeletalPoses.erase(Pose);
+	}
+
+	void Scene::ClearRuntimeSkeletalPoses() noexcept
+	{
+		m_Storage->RuntimeSkeletalPoses.clear();
+		m_Storage->RuntimeSkeletalPoseNodeCount = 0;
 	}
 
 	Entity::Entity(
@@ -796,6 +883,13 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(
 				SceneErrorCode::InvalidAssetReference,
 				"Mesh renderer material reference must be a non-nil asset UUID when present"));
+		if (MeshRenderer.SkeletalProductKey && !IsValidGltfSkeletalProductKey(*MeshRenderer.SkeletalProductKey))
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidAssetReference,
+				"Mesh renderer skeletal product key must be a stable skeletal product fingerprint"));
+		if (MeshRenderer.AnimationClipKey && (!MeshRenderer.SkeletalProductKey ||
+			!IsValidGltfAnimationClipKey(*MeshRenderer.AnimationClipKey)))
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidAssetReference,
+				"Mesh renderer animation clip key requires a stable skeletal product and clip fingerprint"));
 
 		try
 		{

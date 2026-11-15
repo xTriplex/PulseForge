@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace PulseForge
 {
@@ -1804,7 +1807,31 @@ namespace
 		PF_CHECK(Tests, SecondMesh->SetTransform(SecondMeshTransform).has_value());
 		PF_CHECK(Tests, FirstMesh->SetParent(*Parent).has_value());
 		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, MaterialAssetID }).has_value());
-		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, std::nullopt }).has_value());
+		MeshRendererComponent SkeletalMeshRenderer{ FirstMeshAssetID, std::nullopt };
+		SkeletalMeshRenderer.SkeletalProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		SkeletalMeshRenderer.AnimationClipKey = "animation/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(SkeletalMeshRenderer).has_value());
+		std::vector<RuntimeSkeletalLocalTransform> RuntimePose(2);
+		for (RuntimeSkeletalLocalTransform& Matrix : RuntimePose)
+		{
+			Matrix[0] = 1.0f;
+			Matrix[5] = 1.0f;
+			Matrix[10] = 1.0f;
+			Matrix[15] = 1.0f;
+		}
+		RuntimePose[1][13] = 0.75f;
+		PF_CHECK(Tests, TestScene.SetRuntimeSkeletalPose(FirstMeshID, RuntimePose).has_value());
+		const auto PublishedPose = TestScene.GetRuntimeSkeletalPose(FirstMeshID);
+		PF_CHECK(Tests, PublishedPose && *PublishedPose == RuntimePose);
+		std::vector<RuntimeSkeletalLocalTransform> InvalidPose(
+			MaximumRuntimeSkeletalPoseNodesPerEntity + 1, RuntimePose.front());
+		PF_CHECK(Tests, !TestScene.SetRuntimeSkeletalPose(FirstMeshID, std::move(InvalidPose)));
+		const auto PoseAfterRejectedPublish = TestScene.GetRuntimeSkeletalPose(FirstMeshID);
+		PF_CHECK(Tests, PoseAfterRejectedPublish && *PoseAfterRejectedPublish == RuntimePose);
+		auto NonFinitePose = RuntimePose;
+		NonFinitePose.front()[0] = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !TestScene.SetRuntimeSkeletalPose(FirstMeshID, std::move(NonFinitePose)));
+		PF_CHECK(Tests, TestScene.GetRuntimeSkeletalPose(FirstMeshID) == RuntimePose);
 		PF_CHECK(Tests, SharedMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, MaterialAssetID }).has_value());
 		PF_CHECK(Tests, SecondMesh->SetMeshRenderer(MeshRendererComponent{ SecondMeshAssetID }).has_value());
 
@@ -1840,12 +1867,24 @@ namespace
 		PF_CHECK(Tests, Snapshot->Meshes[2].MeshAsset == SecondMeshAssetID);
 		PF_CHECK(Tests, !Snapshot->Meshes[0].MaterialAsset.has_value());
 		PF_CHECK(Tests, Snapshot->Meshes[1].MaterialAsset == MaterialAssetID);
+		PF_CHECK(Tests, Snapshot->Meshes[0].SkeletalProductKey == SkeletalMeshRenderer.SkeletalProductKey);
+		PF_CHECK(Tests, Snapshot->Meshes[0].AnimationClipKey == SkeletalMeshRenderer.AnimationClipKey);
+		PF_CHECK(Tests, Snapshot->Meshes[0].SkeletalLocalTransforms == RuntimePose);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].x - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].y - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].z + 2.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[1].WorldTransform[3].x - 3.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[1].WorldTransform[3].z + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[2].WorldTransform[3].y + 1.0f) < 0.0001f);
+		const auto SerializedRuntimePoseScene = SceneSerializer::Serialize(TestScene);
+		PF_CHECK(Tests, SerializedRuntimePoseScene.has_value());
+		if (SerializedRuntimePoseScene)
+		{
+			PF_CHECK(Tests, SerializedRuntimePoseScene->find("runtimeSkeletalPose") == std::string::npos);
+			Scene RestoredRuntimePoseScene;
+			PF_CHECK(Tests, SceneSerializer::Deserialize(*SerializedRuntimePoseScene, RestoredRuntimePoseScene).has_value());
+			PF_CHECK(Tests, !RestoredRuntimePoseScene.GetRuntimeSkeletalPose(FirstMeshID).has_value());
+		}
 		const glm::vec4 CameraPositionClip = Snapshot->ViewProjection * glm::vec4(CameraTransform.Translation, 1.0f);
 		PF_CHECK(Tests, glm::abs(CameraPositionClip.x) < 0.0001f && glm::abs(CameraPositionClip.y) < 0.0001f);
 		auto DuplicatedCamera = TestScene.DuplicateEntity(*Camera);
@@ -2029,6 +2068,25 @@ namespace
 		InvalidTransientView[2][1] = std::numeric_limits<float>::quiet_NaN();
 		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, InvalidTransientView, glm::vec3(0.0f));
 		PF_CHECK(Tests, !InvalidView && InvalidView.error().Code == SceneRenderSnapshotErrorCode::InvalidViewProjection);
+		TestScene.ClearRuntimeSkeletalPose(FirstMeshID);
+		PF_CHECK(Tests, !TestScene.GetRuntimeSkeletalPose(FirstMeshID).has_value());
+		PF_CHECK(Tests, Snapshot->Meshes[0].SkeletalLocalTransforms == RuntimePose);
+		auto PoseOwner = TestScene.CreateEntityWithUUID(UUID{ 0x4a00000000000000ull, 0x4a }, "Pose lifetime owner");
+		PF_CHECK(Tests, PoseOwner.has_value());
+		if (PoseOwner)
+		{
+			const UUID PoseOwnerID = PoseOwner->GetUUID();
+			PF_CHECK(Tests, TestScene.SetRuntimeSkeletalPose(PoseOwnerID, RuntimePose).has_value());
+			PF_CHECK(Tests, TestScene.GetRuntimeSkeletalPose(PoseOwnerID).has_value());
+			PF_CHECK(Tests, TestScene.DestroyEntity(*PoseOwner).has_value());
+			PF_CHECK(Tests, !TestScene.GetRuntimeSkeletalPose(PoseOwnerID).has_value());
+			auto RecreatedPoseOwner = TestScene.CreateEntityWithUUID(PoseOwnerID, "Recreated pose owner");
+			PF_CHECK(Tests, RecreatedPoseOwner.has_value());
+			PF_CHECK(Tests, !TestScene.GetRuntimeSkeletalPose(PoseOwnerID).has_value());
+		}
+		PF_CHECK(Tests, TestScene.SetRuntimeSkeletalPose(FirstMeshID, RuntimePose).has_value());
+		TestScene.ClearRuntimeSkeletalPoses();
+		PF_CHECK(Tests, !TestScene.GetRuntimeSkeletalPose(FirstMeshID).has_value());
 	}
 } // namespace
 

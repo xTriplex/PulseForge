@@ -105,6 +105,7 @@ int main()
 	CookedAssetEntry SkeletalMeshEntry{ SkeletalMeshID, CookedAssetProductKind::SkeletalMesh, "skeletal/test-id",
 		"Payloads/Triangle.skeletal.bin", Detail::SkeletalMeshProductSchemaVersion, SkeletalMeshBytes->size(),
 		SkeletalMeshDigest.Algorithm, SkeletalMeshDigest.Value, {} };
+	SkeletalMeshEntry.StableProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 	const AssetID TextureID{ 0x300, 0x400 };
 	Detail::PreparedTextureCpuProduct Texture{ 1, 1, Detail::ImageColorSpace::Srgb, { { 1, 1, { 20, 40, 60, 255 } } } };
 	const auto TextureBytes = Detail::EncodeTextureProduct(Texture);
@@ -133,6 +134,7 @@ int main()
 		Detail::MaterialProductSchemaVersion, MaterialBytes->size(), MaterialDigest.Algorithm, MaterialDigest.Value,
 		{ { TextureID, CookedAssetProductKind::Texture, "srgb" } } };
 	const CookedAssetCompatibility Compatibility{ "test-target", "test-renderer", "test-runtime-abi" };
+	const std::string SkeletalProductKey = SkeletalMeshEntry.StableProductKey;
 	const auto Manifest = CookedAssetCatalog::SerializeManifest(*Project, *SceneID, Compatibility, {},
 		{ std::move(Entry), std::move(MeshEntry), std::move(SkeletalMeshEntry), std::move(TextureEntry), std::move(MaterialEntry) });
 	if (!Manifest) return 5;
@@ -157,6 +159,8 @@ int main()
 		LoadedSkeletalMesh->VertexInfluences.size() != 3 || LoadedSkeletalMesh->Animations.size() != 1 ||
 		LoadedSkeletalMesh->Animations.front().Channels.front().Values.back()[1] != 1.0f)
 		return 22;
+	const auto LoadedStableSkeletalMesh = (*Provider)->LoadSkeletalMeshByProductKey(SkeletalMeshID, SkeletalProductKey);
+	if (!LoadedStableSkeletalMesh || LoadedStableSkeletalMesh->JointNodeIndices != std::vector<uint16_t>{ 1 }) return 25;
 	auto FutureSkeletalBytes = *SkeletalMeshBytes;
 	FutureSkeletalBytes[4] = static_cast<std::byte>(Detail::SkeletalMeshProductSchemaVersion + 1);
 	if (Detail::DecodeSkeletalMeshProduct(FutureSkeletalBytes)) return 23;

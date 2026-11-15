@@ -8,19 +8,34 @@ namespace
 		Scene Source;
 		const AssetID MeshAsset{ 0x8100000000000000ull, 81 };
 		const AssetID MaterialAsset{ 0x8200000000000000ull, 82 };
+		const std::string SkeletalProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		const std::string AnimationClipKey = "animation/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 		auto Created = Source.CreateEntity("Material assignment target");
 		PF_CHECK(Tests, Created.has_value());
 		if (!Created) return;
 		const UUID EntityID = Created->GetUUID();
 		PF_CHECK(Tests, Created->SetMeshRenderer(MeshRendererComponent{ MeshAsset, MaterialAsset }).has_value());
-		PF_CHECK(Tests, Created->SetMeshRenderer(MeshRendererComponent{ MeshAsset, std::nullopt }).has_value());
+		MeshRendererComponent SkeletalRenderer{ MeshAsset, std::nullopt };
+		SkeletalRenderer.SkeletalProductKey = SkeletalProductKey;
+		SkeletalRenderer.AnimationClipKey = AnimationClipKey;
+		PF_CHECK(Tests, Created->SetMeshRenderer(SkeletalRenderer).has_value());
+		auto InvalidLongProductKey = SkeletalRenderer;
+		InvalidLongProductKey.SkeletalProductKey = SkeletalProductKey + std::string(32, 'a');
+		PF_CHECK(Tests, !Created->SetMeshRenderer(InvalidLongProductKey));
+		auto InvalidLongAnimationKey = SkeletalRenderer;
+		InvalidLongAnimationKey.AnimationClipKey = AnimationClipKey + std::string(32, 'b');
+		PF_CHECK(Tests, !Created->SetMeshRenderer(InvalidLongAnimationKey));
 		const auto Cleared = Created->GetMeshRenderer();
 		PF_CHECK(Tests, Cleared && Cleared->has_value() && !Cleared->value().MaterialAsset);
+		PF_CHECK(Tests, Cleared && Cleared->has_value() && Cleared->value().SkeletalProductKey == SkeletalProductKey &&
+			Cleared->value().AnimationClipKey == AnimationClipKey);
 
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\"") == std::string::npos);
+		PF_CHECK(Tests, Serialized->find(SkeletalProductKey) != std::string::npos);
+		PF_CHECK(Tests, Serialized->find(AnimationClipKey) != std::string::npos);
 
 		Scene Restored;
 		PF_CHECK(Tests, SceneSerializer::Deserialize(*Serialized, Restored).has_value());
@@ -29,7 +44,19 @@ namespace
 		if (!RestoredEntity) return;
 		const auto RestoredMeshRenderer = RestoredEntity->GetMeshRenderer();
 		PF_CHECK(Tests, RestoredMeshRenderer && RestoredMeshRenderer->has_value() && RestoredMeshRenderer->value().MeshAsset == MeshAsset &&
-							!RestoredMeshRenderer->value().MaterialAsset);
+							!RestoredMeshRenderer->value().MaterialAsset &&
+							RestoredMeshRenderer->value().SkeletalProductKey == SkeletalProductKey &&
+							RestoredMeshRenderer->value().AnimationClipKey == AnimationClipKey);
+
+		std::string InvalidSkeletalProduct = *Serialized;
+		const size_t ProductKeyPosition = InvalidSkeletalProduct.find(SkeletalProductKey);
+		PF_CHECK(Tests, ProductKeyPosition != std::string::npos);
+		if (ProductKeyPosition != std::string::npos)
+			InvalidSkeletalProduct.replace(ProductKeyPosition, SkeletalProductKey.size(), "skeletal/node/1/mesh/0/primitive/0");
+		Scene InvalidDestination;
+		const auto InvalidSkeletalProductResult = SceneSerializer::Deserialize(InvalidSkeletalProduct, InvalidDestination);
+		PF_CHECK(Tests, !InvalidSkeletalProductResult &&
+			InvalidSkeletalProductResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)

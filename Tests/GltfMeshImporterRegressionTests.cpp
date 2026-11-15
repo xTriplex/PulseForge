@@ -4,10 +4,12 @@
 #include "Assets/AssetImportProvenance.h"
 #include "Assets/GltfMeshImportCoordinator.h"
 #include "Assets/GltfMeshImporter.h"
+#include "Animation/GltfAnimationSampler.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <optional>
@@ -538,6 +540,10 @@ namespace
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].TargetNodeKey ==
 					Animated->Mesh.SkeletonNodes[2].StableKey);
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].Values[1][1] == 1.0f);
+				const auto ReferenceSample = SampleGltfAnimationChannel(
+					Animated->Mesh.Animations[0].Channels[0], 0.5f);
+				PF_CHECK(Tests, ReferenceSample && std::abs((*ReferenceSample)[0]) < 1.0e-6f &&
+					std::abs((*ReferenceSample)[1] - 0.5f) < 1.0e-6f && std::abs((*ReferenceSample)[2]) < 1.0e-6f);
 			}
 		}
 

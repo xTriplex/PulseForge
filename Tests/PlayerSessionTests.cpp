@@ -5,11 +5,13 @@
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Assets/CookedAssetCatalog.h"
+#include "Assets/CookedProductCodec.h"
 #include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/BlueprintComponent.h"
 #include "Scene/Components/BoxColliderComponent.h"
+#include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/RigidbodyComponent.h"
 #include "Scene/SceneSerializer.h"
 #include "Scene/Components/ScriptComponent.h"
@@ -19,12 +21,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -536,6 +540,56 @@ namespace
 		auto AuthoredEntity = AuthoredScene.CreateEntity("Cooked Runtime Entity");
 		PF_CHECK(Tests, AuthoredEntity.has_value());
 		if (!AuthoredEntity) return;
+		const AssetID SkeletalAssetIdentifier = UUID::Generate().value_or(UUID{});
+		PF_CHECK(Tests, !SkeletalAssetIdentifier.IsNil());
+		if (SkeletalAssetIdentifier.IsNil()) return;
+		constexpr std::string_view SkeletalProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		constexpr std::string_view AnimationClipKey = "animation/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		MeshRendererComponent SkeletalComponent;
+		SkeletalComponent.MeshAsset = SkeletalAssetIdentifier;
+		SkeletalComponent.SkeletalProductKey = std::string(SkeletalProductKey);
+		SkeletalComponent.AnimationClipKey = std::string(AnimationClipKey);
+		PF_CHECK(Tests, AuthoredEntity->SetMeshRenderer(SkeletalComponent).has_value());
+
+		ImportedGltfSkeletalMesh SkeletalProduct;
+		SkeletalProduct.Geometry.Vertices.resize(3);
+		SkeletalProduct.Geometry.Vertices[0].Position[0] = 0.0f;
+		SkeletalProduct.Geometry.Vertices[1].Position[0] = 1.0f;
+		SkeletalProduct.Geometry.Vertices[2].Position[1] = 1.0f;
+		SkeletalProduct.Geometry.Indices = { 0, 1, 2 };
+		ImportedGltfSkeletonNode MeshNode;
+		MeshNode.StableKey = "node/mesh";
+		MeshNode.Name = "mesh";
+		MeshNode.LocalBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+		ImportedGltfSkeletonNode JointNode;
+		JointNode.StableKey = "node/mesh/joint";
+		JointNode.Name = "joint";
+		JointNode.ParentNodeIndex = 0;
+		JointNode.IsJoint = true;
+		JointNode.LocalBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+		SkeletalProduct.SkeletonNodes = { MeshNode, JointNode };
+		SkeletalProduct.JointNodeIndices = { 1 };
+		SkeletalProduct.InverseBindMatrices = { { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 } };
+		SkeletalProduct.VertexInfluences.resize(3);
+		for (GltfVertexInfluences& Influence : SkeletalProduct.VertexInfluences)
+		{
+			Influence.JointIndices = { 0, 0, 0, 0 };
+			Influence.Weights = { 1, 0, 0, 0 };
+		}
+		ImportedGltfAnimationClip RuntimeClip;
+		RuntimeClip.StableKey = std::string(AnimationClipKey);
+		RuntimeClip.Name = "move-up";
+		RuntimeClip.Duration = 1.0f;
+		ImportedGltfAnimationChannel RuntimeChannel;
+		RuntimeChannel.TargetNodeKey = JointNode.StableKey;
+		RuntimeChannel.Path = GltfAnimationPath::Translation;
+		RuntimeChannel.Times = { 0.0f, 1.0f };
+		RuntimeChannel.Values = { { 0,0,0,0 }, { 0,1,0,0 } };
+		RuntimeClip.Channels.push_back(std::move(RuntimeChannel));
+		SkeletalProduct.Animations.push_back(std::move(RuntimeClip));
+		auto SkeletalProductBytes = Detail::EncodeSkeletalMeshProduct(SkeletalProduct);
+		PF_CHECK(Tests, SkeletalProductBytes.has_value());
+		if (!SkeletalProductBytes) return;
 		PF_CHECK(Tests, AuthoredEntity->SetScript(ScriptComponent{ *ScriptIdentifier }).has_value());
 		BlueprintComponent BlueprintDefaults{ *BlueprintIdentifier, true, {} };
 		PF_CHECK(Tests, BlueprintDefaults.SetFloatProperty("runtime_value", 10.0f).has_value());
@@ -556,9 +610,20 @@ namespace
 			Output.write(reinterpret_cast<const char*>(Payload.data()), static_cast<std::streamsize>(Payload.size()));
 			PF_CHECK(Tests, static_cast<bool>(Output));
 		}
+		{
+			std::ofstream Output(Root / "products" / "character.skeletal.bin", std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(SkeletalProductBytes->data()),
+				static_cast<std::streamsize>(SkeletalProductBytes->size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
 		const CookedAssetDigest Digest = CookedAssetCatalog::ComputePayloadDigest(Payload);
 		CookedAssetEntry Entry{ *SceneIdentifier, CookedAssetProductKind::Scene, {}, "products/startup.scene", 1,
 			Payload.size(), Digest.Algorithm, Digest.Value, {} };
+		const CookedAssetDigest SkeletalDigest = CookedAssetCatalog::ComputePayloadDigest(*SkeletalProductBytes);
+		CookedAssetEntry SkeletalEntry{ SkeletalAssetIdentifier, CookedAssetProductKind::SkeletalMesh,
+			"skeletal/runtime-fixture", "products/character.skeletal.bin", Detail::SkeletalMeshProductSchemaVersion,
+			SkeletalProductBytes->size(), SkeletalDigest.Algorithm, SkeletalDigest.Value, {} };
+		SkeletalEntry.StableProductKey = std::string(SkeletalProductKey);
 		const std::string Script =
 			"function OnCreate() assert(entity:play_audio()) end\n"
 			"function OnUpdate(dt) assert(entity:set_translation(dt, 0, 0)) end\n";
@@ -609,7 +674,8 @@ namespace
 		const CookedAssetCompatibility Compatibility{ "test-target", "test-renderer", "test-runtime-abi" };
 		auto Manifest = CookedAssetCatalog::SerializeManifest(
 			*ProjectIdentifier, *SceneIdentifier, Compatibility, {},
-			{ std::move(Entry), std::move(ScriptEntry), std::move(AudioEntry), std::move(BlueprintEntry) });
+			{ std::move(Entry), std::move(ScriptEntry), std::move(AudioEntry), std::move(BlueprintEntry),
+				std::move(SkeletalEntry) });
 		PF_CHECK(Tests, Manifest.has_value());
 		if (!Manifest) return;
 		{
@@ -647,6 +713,11 @@ namespace
 		auto Advanced = Session.Advance(Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, Advanced.has_value());
 		PF_CHECK(Tests, Advanced && Advanced->PhysicsSteps > 0);
+		const auto FirstRuntimePose = Session.GetActiveScene()->GetRuntimeSkeletalPose(AuthoredEntity->GetUUID());
+		PF_CHECK(Tests, FirstRuntimePose.has_value() && FirstRuntimePose->size() == 2);
+		if (FirstRuntimePose && FirstRuntimePose->size() == 2)
+			PF_CHECK(Tests, std::abs((*FirstRuntimePose)[1][13] - (1.0f / 60.0f)) < 1.0e-4f);
+		PF_CHECK(Tests, !AuthoredScene.GetRuntimeSkeletalPose(AuthoredEntity->GetUUID()).has_value());
 		auto ReadRuntimeValue = [&Tests, &Session, &AuthoredEntity](float ExpectedValue)
 		{
 			const auto Traces = Session.GetBlueprintTraces();
@@ -673,6 +744,11 @@ namespace
 		++BlueprintProgramGeneration;
 		Advanced = Session.Advance(Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, Advanced.has_value());
+		const auto SecondRuntimePose = Session.GetActiveScene()->GetRuntimeSkeletalPose(AuthoredEntity->GetUUID());
+		PF_CHECK(Tests, SecondRuntimePose.has_value() && SecondRuntimePose->size() == 2);
+		if (SecondRuntimePose && SecondRuntimePose->size() == 2)
+			PF_CHECK(Tests, std::abs((*SecondRuntimePose)[1][13] - (2.0f / 60.0f)) < 1.0e-4f);
+		PF_CHECK(Tests, !AuthoredScene.GetRuntimeSkeletalPose(AuthoredEntity->GetUUID()).has_value());
 		ReadRuntimeValue(11.0f);
 		const auto CookedBlueprintAfterRebind = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());
 		PF_CHECK(Tests, CookedBlueprintAfterRebind.has_value());

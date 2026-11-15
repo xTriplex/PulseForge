@@ -199,7 +199,10 @@ namespace
 		LegacyVersionTwo["version"] = 2;
 		LegacyVersionTwo.erase("audioMixDefaults");
 		for (auto& Entry : LegacyVersionTwo["entries"])
+		{
 			Entry.erase("sourcePath");
+			Entry.erase("stableProductKey");
+		}
 		Fixture.WriteManifest(LegacyVersionTwo.dump(2) + "\n");
 		const auto LegacyManifestTwo = Fixture.Open();
 		PF_CHECK(Tests, LegacyManifestTwo.has_value());
@@ -208,11 +211,20 @@ namespace
 		auto LegacyVersionThree = nlohmann::ordered_json::parse(*Baseline);
 		LegacyVersionThree["version"] = 3;
 		LegacyVersionThree.erase("audioMixDefaults");
+		for (auto& Entry : LegacyVersionThree["entries"])
+			Entry.erase("stableProductKey");
 		Fixture.WriteManifest(LegacyVersionThree.dump(2) + "\n");
 		const auto LegacyManifestThree = Fixture.Open();
 		PF_CHECK(Tests, LegacyManifestThree.has_value());
 		if (LegacyManifestThree)
 			PF_CHECK(Tests, (*LegacyManifestThree)->GetAudioMixDefaults() == AudioMixGains{});
+		auto LegacyVersionSix = nlohmann::ordered_json::parse(*Baseline);
+		LegacyVersionSix["version"] = 6;
+		for (auto& Entry : LegacyVersionSix["entries"])
+			Entry.erase("stableProductKey");
+		Fixture.WriteManifest(LegacyVersionSix.dump(2) + "\n");
+		const auto LegacyManifestSix = Fixture.Open();
+		PF_CHECK(Tests, LegacyManifestSix.has_value());
 		auto UnsupportedLegacy = nlohmann::ordered_json::parse(*Baseline);
 		UnsupportedLegacy["version"] = 1;
 		Fixture.WriteManifest(UnsupportedLegacy.dump(2) + "\n");

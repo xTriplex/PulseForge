@@ -28,9 +28,9 @@ namespace PulseForge
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
 		}
 
-		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, const AssetID& Asset)
+		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, UUID Entity)
 		{
-			const auto Found = PreparedMeshes.find(Asset);
+			const auto Found = PreparedMeshes.find(Entity);
 			return Found == PreparedMeshes.end() ? nullptr : Found->second;
 		}
 
@@ -122,7 +122,7 @@ namespace PulseForge
 				const GraphicsPipeline* Pipeline =
 					Resources.Pipelines.FindShadowPipeline(RasterBias, (*Material)->DoubleSided, Instance.Orientation);
 				if (!Pipeline) return std::unexpected(MakeShadowResourceError("Directional alpha-tested shadow pipeline was not prepared"));
-				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.MeshAsset);
+				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.Entity);
 				if (!MeshResource) return std::unexpected(MakeShadowDrawError("Prepared shadow-pass mesh is unavailable"));
 				const glm::mat4 ShadowTransform = Resources.Cascades->Cascades[CascadeIndex].ViewProjection * Instance.WorldTransform;
 				const auto Update =
@@ -168,7 +168,7 @@ namespace PulseForge
 				const GraphicsPipeline* Pipeline =
 					Resources.Pipelines.FindShadowPipeline(1, (*Material)->DoubleSided, Instance.Orientation);
 				if (!Pipeline) return std::unexpected(MakeShadowResourceError("Spotlight alpha-tested shadow pipeline was not prepared"));
-				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.MeshAsset);
+				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.Entity);
 				if (!MeshResource) return std::unexpected(MakeShadowDrawError("Prepared spotlight shadow mesh is unavailable"));
 				const glm::mat4 ShadowTransform = Resources.LocalLighting.SpotlightMatrices()[Slot] * Instance.WorldTransform;
 				const auto Update =
@@ -235,7 +235,7 @@ namespace PulseForge
 					const GraphicsPipeline* Pipeline =
 						Resources.Pipelines.FindPointShadowPipeline((*Material)->DoubleSided, Instance.Orientation);
 					if (!Pipeline) return std::unexpected(MakeShadowResourceError("Point-shadow alpha-tested pipeline was not prepared"));
-					const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.MeshAsset);
+				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.Entity);
 					if (!MeshResource) return std::unexpected(MakeShadowDrawError("Prepared point-shadow mesh is unavailable"));
 					const PointShadowObjectConstants Object{ Resources.LocalLighting.PointMatrices()[Slot][Face],
 						glm::vec4(Selected->Point->WorldPosition, Selected->Point->Range), Instance.WorldTransform };

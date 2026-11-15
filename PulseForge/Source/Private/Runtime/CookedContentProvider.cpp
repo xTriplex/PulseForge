@@ -280,6 +280,27 @@ namespace PulseForge
 		return std::move(*Product);
 	}
 
+	const CookedAssetEntry* CookedContentProvider::FindSkeletalMeshByProductKey(
+		const AssetID& Asset, std::string_view StableProductKey) const noexcept
+	{
+		if (StableProductKey.empty()) return nullptr;
+		for (const CookedAssetEntry& Entry : m_Catalog->GetEntries())
+			if (Entry.Asset == Asset && Entry.Product == CookedAssetProductKind::SkeletalMesh &&
+				Entry.StableProductKey == StableProductKey)
+				return &Entry;
+		return nullptr;
+	}
+
+	std::expected<ImportedGltfSkeletalMesh, CookedAssetCatalogError> CookedContentProvider::LoadSkeletalMeshByProductKey(
+		const AssetID& Asset, std::string_view StableProductKey) const
+	{
+		const CookedAssetEntry* Entry = FindSkeletalMeshByProductKey(Asset, StableProductKey);
+		if (!Entry)
+			return std::unexpected(CookedAssetCatalogError{ CookedAssetCatalogErrorCode::AssetNotFound, {}, Asset,
+				"Stable skeletal product key is not present in the cooked catalog" });
+		return LoadSkeletalMesh(Asset, Entry->Subresource);
+	}
+
 	const CookedAssetEntry* CookedContentProvider::FindTexture(const AssetID& Asset, std::string_view Subresource) const noexcept
 	{
 		return Find(Asset, CookedAssetProductKind::Texture, Subresource);

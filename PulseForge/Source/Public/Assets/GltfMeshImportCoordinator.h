@@ -56,6 +56,13 @@ namespace PulseForge
 				uint32_t NodeIndex,
 				uint32_t MeshIndex,
 				uint32_t PrimitiveIndex);
+		// Rebuilds one previously successful source product by its stable key without writing provenance.
+		[[nodiscard]] static std::expected<GltfSkeletalMeshImportWithReceipt, GltfMeshImportCoordinatorError>
+			LoadLastSuccessfulSkeletalProduct(
+				const AssetID& Asset,
+				const std::filesystem::path& ProjectRoot,
+				const AssetRegistry& Registry,
+				std::string_view StableProductKey);
 
 	private:
 		[[nodiscard]] static std::expected<void, GltfMeshImportCoordinatorError> RecordSuccess(

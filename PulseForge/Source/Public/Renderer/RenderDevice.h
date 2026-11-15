@@ -97,5 +97,13 @@ namespace PulseForge
 			const DrawIndexedArguments& Arguments, std::span<const BindingSet* const> BindingSets = {}) = 0;
 
 		[[nodiscard]] MeshCreateResult CreateMesh(const MeshDesc& Description);
+		[[nodiscard]] MeshCreateResult CreateDynamicMesh(const MeshDesc& Description);
+		[[nodiscard]] BufferUpdateResult UpdateDynamicMeshVertices(
+			Mesh& Target,
+			const VertexLayoutDesc& VertexLayout,
+			std::span<const std::byte> VertexData);
+
+	private:
+		[[nodiscard]] MeshCreateResult CreateMeshInternal(const MeshDesc& Description, bool DynamicVertices);
 	};
 } // namespace PulseForge
