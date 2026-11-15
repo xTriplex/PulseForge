@@ -9,6 +9,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PulseForgeEditor/Source/Private/EditorMaterialDraftStore.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDraftController.cpp
 		PulseForgeEditor/Source/Private/EditorGraphModel.cpp
+		PulseForgeEditor/Source/Private/BlueprintGraphCompiler.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorSceneWorkspaceState.cpp
 		PulseForgeEditor/Source/Private/EditorSceneHistoryState.cpp
@@ -50,6 +51,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 	)
 	target_link_libraries(PulseForgeEditorCore
 		PUBLIC PulseForgeAssetServices PulseForgeAssetDependencyCatalog PulseForgeScene PulseForgeMaterialGraph
+			PulseForgeBlueprintRuntime
 		PRIVATE PulseForgeCore PulseForgeAssetImporters PulseForgeSceneSerialization
 	)
 	target_precompile_headers(PulseForgeEditorCore PRIVATE

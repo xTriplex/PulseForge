@@ -2,6 +2,7 @@
 
 #include "Editor/EditorGraphModel.h"
 #include "Editor/EditorGraphLayout.h"
+#include "Editor/BlueprintGraphCompiler.h"
 
 #include <algorithm>
 #include <array>
@@ -2230,6 +2231,130 @@ void RunEditorGraphModelTests(TestRunner& Tests)
 				PF_CHECK(Tests, DeleteEditorGraphNodes(History, Schema, { Scalar->ID }).has_value());
 				PF_CHECK(Tests, !IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
 				PF_CHECK(Tests, History.Undo() && IsEditorGraphNodeConnected(History.Graph(), Multiply->ID));
+			}
+		}
+	}
+	{
+		using namespace PulseForgeEditor;
+		const EditorGraphSchema Schema = MakeBlueprintAuthoringSchema();
+		auto Graph = CreateEditorGraph(Schema, ID(0x7B10));
+		PF_CHECK(Tests, Graph.has_value());
+		if (Graph)
+		{
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "blueprint.event.action_pressed", 0.0));
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "blueprint.action.write_scalar", 240.0));
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "blueprint.value.constant_float", 120.0));
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "blueprint.value.constant_float", 120.0));
+			PF_CHECK(Tests, AppendNode(*Graph, Schema, "blueprint.math.add", 360.0));
+			EditorGraphNode* Event = FindNode(*Graph, "blueprint.event.action_pressed");
+			EditorGraphNode* Write = FindNode(*Graph, "blueprint.action.write_scalar");
+			EditorGraphNode* ConstantA = FindNode(*Graph, "blueprint.value.constant_float");
+			EditorGraphNode* ConstantB = FindNode(*Graph, "blueprint.value.constant_float", 1);
+			EditorGraphNode* Add = FindNode(*Graph, "blueprint.math.add");
+			PF_CHECK(Tests, Event && Write && ConstantA && ConstantB && Add);
+			if (Event && Write && ConstantA && ConstantB && Add)
+			{
+				const auto SetPinDefault = [](EditorGraphNode& Node, std::string_view Key, EditorGraphValue Value)
+				{
+					const auto Pin = std::find_if(Node.Pins.begin(), Node.Pins.end(), [Key](const EditorGraphPin& Candidate)
+						{ return Candidate.Key == Key; });
+					if (Pin == Node.Pins.end()) return false;
+					Pin->DefaultValue = std::move(Value);
+					return true;
+				};
+				PF_CHECK(Tests, SetPinDefault(*Event, "action", std::string("Confirm")));
+				PF_CHECK(Tests, SetPinDefault(*Write, "property", std::string("health")));
+				PF_CHECK(Tests, SetPinDefault(*ConstantA, "value", 3.0));
+				PF_CHECK(Tests, SetPinDefault(*ConstantB, "value", 7.0));
+				const auto Link = [&](const EditorGraphPin* Output, const EditorGraphPin* Input, uint64_t LinkID)
+				{
+					if (!Output || !Input) return false;
+					Graph->Connections.push_back({ ID(LinkID), Output->ID, Input->ID });
+					return true;
+				};
+				PF_CHECK(Tests, Link(FindPin(*Event, "exec"), FindPin(*Write, "exec-in"), 0x7B20));
+				PF_CHECK(Tests, Link(FindPin(*ConstantA, "value"), FindPin(*Add, "a"), 0x7B21));
+				PF_CHECK(Tests, Link(FindPin(*ConstantB, "value"), FindPin(*Add, "b"), 0x7B22));
+				PF_CHECK(Tests, Link(FindPin(*Add, "value"), FindPin(*Write, "value"), 0x7B23));
+				const auto Compiled = CompileBlueprintGraph(*Graph, Schema);
+				PF_CHECK(Tests, Compiled && Compiled->GetEvents().size() == 1 &&
+					Compiled->GetEvents().front().Event == PulseForge::BlueprintEventKind::OnActionPressed);
+				if (Compiled)
+				{
+					const auto& Source = Compiled->GetEvents().front().Program.GetSource();
+					PF_CHECK(Tests, Source.ActionNames.size() == 1 && Source.ActionNames.front() == "Confirm" &&
+						Source.ScalarPropertyIds.size() == 1 && Source.ScalarPropertyIds.front() == "health");
+					PF_CHECK(Tests, std::any_of(Source.Instructions.begin(), Source.Instructions.end(),
+						[&](const PulseForge::BlueprintInstruction& Instruction)
+						{ return Instruction.Opcode == PulseForge::BlueprintOpcode::Add && Instruction.SourceNode == Add->ID; }));
+					std::array<float, 1> State{ 0.0f };
+					const auto Matched = PulseForge::ExecuteBlueprintProgram(
+						Compiled->GetEvents().front().Program, State, PulseForge::BlueprintDefaultInstructionBudget, "Confirm");
+					PF_CHECK(Tests, Matched && State[0] == 10.0f && Matched->PropertyWrites.size() == 1 &&
+						Matched->PropertyWrites.front().Value == 10.0f && Matched->PropertyWrites.front().SourceNode == Write->ID);
+					State[0] = 0.0f;
+					const auto Unmatched = PulseForge::ExecuteBlueprintProgram(
+						Compiled->GetEvents().front().Program, State, PulseForge::BlueprintDefaultInstructionBudget, "Cancel");
+					PF_CHECK(Tests, Unmatched && State[0] == 0.0f && Unmatched->PropertyWrites.empty());
+					std::vector<PulseForge::BlueprintEventProgramSource> SourcePrograms{ {
+						Compiled->GetEvents().front().Event, Compiled->GetEvents().front().Program.GetSource() } };
+					const auto Bytes = PulseForge::SerializeBlueprintAsset(SourcePrograms);
+					PF_CHECK(Tests, Bytes.has_value());
+					if (Bytes)
+					{
+						PF_CHECK(Tests, PulseForge::DeserializeBlueprintAsset(*Bytes).has_value());
+						EditorGraph Rerouted = *Graph;
+						auto ExecutionReroute = CreateEditorGraphNode(Schema, "pulseforge.reroute.execution", 120.0, 0.0);
+						auto ValueReroute = CreateEditorGraphNode(Schema, "pulseforge.reroute.float", 360.0, 0.0);
+						PF_CHECK(Tests, ExecutionReroute && ValueReroute);
+						if (ExecutionReroute && ValueReroute)
+						{
+							Rerouted.Nodes.push_back(std::move(*ExecutionReroute));
+							Rerouted.Nodes.push_back(std::move(*ValueReroute));
+							EditorGraphNode* ReroutedEvent = FindNode(Rerouted, "blueprint.event.action_pressed");
+							EditorGraphNode* ReroutedWrite = FindNode(Rerouted, "blueprint.action.write_scalar");
+							EditorGraphNode* ReroutedAdd = FindNode(Rerouted, "blueprint.math.add");
+							EditorGraphNode* ExecNode = FindNode(Rerouted, "pulseforge.reroute.execution");
+							EditorGraphNode* ValueNode = FindNode(Rerouted, "pulseforge.reroute.float");
+							PF_CHECK(Tests, ReroutedEvent && ReroutedWrite && ReroutedAdd && ExecNode && ValueNode);
+							if (ReroutedEvent && ReroutedWrite && ReroutedAdd && ExecNode && ValueNode)
+							{
+								const PulseForge::UUID ExecInput = FindPin(*ReroutedWrite, "exec-in")->ID;
+								const PulseForge::UUID ValueInput = FindPin(*ReroutedWrite, "value")->ID;
+								std::erase_if(Rerouted.Connections, [&](const EditorGraphConnection& Connection)
+									{ return Connection.InputPin == ExecInput || Connection.InputPin == ValueInput; });
+								Rerouted.Connections.push_back({ ID(0x7B24), FindPin(*ReroutedEvent, "exec")->ID,
+									FindPin(*ExecNode, "in")->ID });
+								Rerouted.Connections.push_back({ ID(0x7B25), FindPin(*ExecNode, "out")->ID, ExecInput });
+								Rerouted.Connections.push_back({ ID(0x7B26), FindPin(*ReroutedAdd, "value")->ID,
+									FindPin(*ValueNode, "in")->ID });
+								Rerouted.Connections.push_back({ ID(0x7B27), FindPin(*ValueNode, "out")->ID, ValueInput });
+								const auto ReroutedCompiled = CompileBlueprintGraph(Rerouted, Schema);
+								PF_CHECK(Tests, ReroutedCompiled.has_value());
+								if (ReroutedCompiled)
+								{
+									std::vector<PulseForge::BlueprintEventProgramSource> ReroutedPrograms{ {
+										ReroutedCompiled->GetEvents().front().Event,
+										ReroutedCompiled->GetEvents().front().Program.GetSource() } };
+									const auto ReroutedBytes = PulseForge::SerializeBlueprintAsset(ReroutedPrograms);
+									PF_CHECK(Tests, ReroutedBytes && *ReroutedBytes == *Bytes);
+								}
+							}
+						}
+					}
+				}
+				EditorGraph Invalid = *Graph;
+				const EditorGraphNode* InvalidWrite = FindNode(Invalid, "blueprint.action.write_scalar");
+				if (InvalidWrite)
+				{
+					const auto Pin = FindPin(*InvalidWrite, "property");
+					for (EditorGraphNode& Node : Invalid.Nodes)
+						if (Node.ID == InvalidWrite->ID)
+							for (EditorGraphPin& Value : Node.Pins) if (Pin && Value.ID == Pin->ID) Value.DefaultValue = std::string{};
+					const auto Rejected = CompileBlueprintGraph(Invalid, Schema);
+					PF_CHECK(Tests, !Rejected && Rejected.error().Code == BlueprintGraphDiagnosticCode::InvalidProperty &&
+						Rejected.error().Node == InvalidWrite->ID);
+				}
 			}
 		}
 	}
