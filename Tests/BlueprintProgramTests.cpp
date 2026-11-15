@@ -35,7 +35,7 @@ namespace
 			Decoded->GetSource().Instructions[3].SourceNode == UUID(10, 4) &&
 			Decoded->GetSource().ScalarPropertyIds == Verified->GetSource().ScalarPropertyIds);
 		std::vector<std::byte> CorruptBytes = *Encoded;
-		CorruptBytes[4] = std::byte{ 4 };
+		CorruptBytes[4] = std::byte{ 5 };
 		const auto UnsupportedEncoded = DeserializeBlueprintProgram(CorruptBytes);
 		PF_CHECK(Tests, !UnsupportedEncoded && UnsupportedEncoded.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
 		const auto TruncatedEncoded = DeserializeBlueprintProgram(std::span<const std::byte>(*Encoded).first(12));
@@ -45,7 +45,7 @@ namespace
 		const auto TrailingEncoded = DeserializeBlueprintProgram(TrailingBytes);
 		PF_CHECK(Tests, !TrailingEncoded && TrailingEncoded.error().Code == BlueprintProgramErrorCode::InvalidByteStream);
 		std::vector<std::byte> InvalidOpcodeBytes = *Encoded;
-		InvalidOpcodeBytes[24 + 2 * sizeof(uint32_t) + sizeof(uint16_t) + std::string("health").size() + 3 * 25] = std::byte{ 0xff };
+		InvalidOpcodeBytes[28 + 2 * sizeof(uint32_t) + sizeof(uint16_t) + std::string("health").size() + 3 * 25] = std::byte{ 0xff };
 		const auto InvalidOpcodeEncoded = DeserializeBlueprintProgram(InvalidOpcodeBytes);
 		PF_CHECK(Tests, !InvalidOpcodeEncoded && InvalidOpcodeEncoded.error().Code == BlueprintProgramErrorCode::InvalidOpcode &&
 			InvalidOpcodeEncoded.error().Instruction == 3 && InvalidOpcodeEncoded.error().SourceNode == UUID(10, 4));
@@ -56,15 +56,22 @@ namespace
 			Executed->PropertyWrites[0].Value == 6.0f);
 		std::vector<std::byte> LegacyProgramBytes = *Encoded;
 		LegacyProgramBytes[4] = std::byte{ 1 };
+		LegacyProgramBytes.erase(LegacyProgramBytes.begin() + 20, LegacyProgramBytes.begin() + 24);
 		LegacyProgramBytes.erase(LegacyProgramBytes.begin() + 16, LegacyProgramBytes.begin() + 20);
 		const auto LegacyProgram = DeserializeBlueprintProgram(LegacyProgramBytes);
 		PF_CHECK(Tests, LegacyProgram && LegacyProgram->GetSource().Version == BlueprintProgramFormatVersion &&
 			LegacyProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
 		std::vector<std::byte> PreviousProgramBytes = *Encoded;
 		PreviousProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintPreviousProgramFormatVersion) };
+		PreviousProgramBytes.erase(PreviousProgramBytes.begin() + 20, PreviousProgramBytes.begin() + 24);
 		const auto PreviousProgram = DeserializeBlueprintProgram(PreviousProgramBytes);
 		PF_CHECK(Tests, PreviousProgram && PreviousProgram->GetSource().Version == BlueprintProgramFormatVersion &&
 			PreviousProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
+		std::vector<std::byte> ActionProgramBytes = PreviousProgramBytes;
+		ActionProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintActionProgramFormatVersion) };
+		const auto ActionProgram = DeserializeBlueprintProgram(ActionProgramBytes);
+		PF_CHECK(Tests, ActionProgram && ActionProgram->GetSource().Version == BlueprintProgramFormatVersion &&
+			ActionProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
 
 		BlueprintProgramSource Unsupported = MakeScalarWriteProgram();
 		Unsupported.Version++;
@@ -148,6 +155,39 @@ namespace
 			PF_CHECK(Tests, PauseResult && PauseResult->RequestedPause == true &&
 				PauseResult->PauseRequestSourceNode == UUID(17, 3));
 		}
+		BlueprintProgramSource TransitionProgram;
+		constexpr AssetID TransitionScene{ 0x6200000000004000ull, 0x8000000000000001ull };
+		TransitionProgram.SceneTransitionAssets = { TransitionScene };
+		TransitionProgram.Instructions = {
+			{ BlueprintOpcode::RequestSceneTransition, 0, 0, UUID(17, 7) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(17, 8) }
+		};
+		const auto VerifiedTransition = VerifyBlueprintProgram(std::move(TransitionProgram));
+		PF_CHECK(Tests, VerifiedTransition.has_value());
+		if (VerifiedTransition)
+		{
+			const auto TransitionBytes = SerializeBlueprintProgram(VerifiedTransition->GetSource());
+			PF_CHECK(Tests, TransitionBytes.has_value());
+			if (TransitionBytes)
+			{
+				const auto TransitionDecoded = DeserializeBlueprintProgram(*TransitionBytes);
+				PF_CHECK(Tests, TransitionDecoded &&
+					TransitionDecoded->GetSource().SceneTransitionAssets == std::vector<AssetID>{ TransitionScene });
+			}
+			std::array<float, 0> NoState{};
+			const auto TransitionResult = ExecuteBlueprintProgram(*VerifiedTransition, NoState);
+			PF_CHECK(Tests, TransitionResult && TransitionResult->RequestedSceneTransition == TransitionScene &&
+				TransitionResult->SceneTransitionSourceNode == UUID(17, 7));
+		}
+		BlueprintProgramSource InvalidTransition;
+		InvalidTransition.Instructions = {
+			{ BlueprintOpcode::RequestSceneTransition, 0, 0, UUID(17, 9) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(17, 10) }
+		};
+		const auto RejectedTransition = VerifyBlueprintProgram(std::move(InvalidTransition));
+		PF_CHECK(Tests, !RejectedTransition &&
+			RejectedTransition.error().Code == BlueprintProgramErrorCode::InvalidOperand &&
+			RejectedTransition.error().SourceNode == UUID(17, 9));
 		BlueprintProgramSource InvalidPause;
 		InvalidPause.Instructions = {
 			{ BlueprintOpcode::RequestPause, 2, 0, UUID(17, 5) },

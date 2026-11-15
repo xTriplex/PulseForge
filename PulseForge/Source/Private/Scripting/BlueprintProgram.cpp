@@ -66,7 +66,8 @@ namespace PulseForge
 				"Blueprint program version is not supported"));
 		if (Source.Instructions.empty() || Source.Instructions.size() > BlueprintMaximumInstructionCount ||
 			Source.Constants.size() > BlueprintMaximumInstructionCount || Source.ScalarPropertyIds.size() > BlueprintMaximumScalarCount ||
-			Source.ActionNames.size() > BlueprintMaximumActionNameCount)
+			Source.ActionNames.size() > BlueprintMaximumActionNameCount ||
+			Source.SceneTransitionAssets.size() > BlueprintMaximumSceneTransitionAssetCount)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, 0, {},
 				"Blueprint program exceeds a structural limit or has no instructions"));
 
@@ -89,6 +90,11 @@ namespace PulseForge
 			if (Name.empty() || Name.size() > BlueprintMaximumActionNameLength || !ActionNames.emplace(Name).second)
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
 					"Blueprint UI action names must be unique, non-empty, and bounded"));
+		std::unordered_set<AssetID, UUIDHash> SceneTransitionAssets;
+		for (const AssetID& Asset : Source.SceneTransitionAssets)
+			if (Asset.IsNil() || !SceneTransitionAssets.emplace(Asset).second)
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
+					"Blueprint scene transition targets must be unique and have stable asset identities"));
 
 		std::vector<std::optional<size_t>> StackDepth(Source.Instructions.size());
 		std::deque<uint32_t> Pending;
@@ -172,6 +178,11 @@ namespace PulseForge
 				if (Instruction.Operand > 1)
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
 						"Blueprint pause request must contain a boolean operand"));
+				break;
+			case BlueprintOpcode::RequestSceneTransition:
+				if (Instruction.Operand >= Source.SceneTransitionAssets.size())
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
+						"Blueprint scene transition asset index is out of range"));
 				break;
 			case BlueprintOpcode::Return:
 				if (Depth != 0)
@@ -281,6 +292,11 @@ namespace PulseForge
 				Result.PauseRequestSourceNode = Instruction.SourceNode;
 				++ProgramCounter;
 				break;
+			case BlueprintOpcode::RequestSceneTransition:
+				Result.RequestedSceneTransition = Source.SceneTransitionAssets[Instruction.Operand];
+				Result.SceneTransitionSourceNode = Instruction.SourceNode;
+				++ProgramCounter;
+				break;
 			case BlueprintOpcode::Return:
 				std::copy(CandidateState.begin(), CandidateState.end(), ScalarState.begin());
 				return Result;
@@ -297,12 +313,14 @@ namespace PulseForge
 	{
 		if (const auto Verified = VerifyBlueprintProgram(Source); !Verified) return std::unexpected(Verified.error());
 		std::vector<std::byte> Bytes;
-		Bytes.reserve(24 + Source.Constants.size() * sizeof(uint32_t) + Source.Instructions.size() * 25);
+		Bytes.reserve(28 + Source.Constants.size() * sizeof(uint32_t) + Source.SceneTransitionAssets.size() * 16 +
+			Source.Instructions.size() * 25);
 		Bytes.insert(Bytes.end(), BlueprintMagic.begin(), BlueprintMagic.end());
 		AppendInteger(Bytes, Source.Version);
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.Constants.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.ScalarPropertyIds.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.ActionNames.size()));
+		AppendInteger(Bytes, static_cast<uint32_t>(Source.SceneTransitionAssets.size()));
 		AppendInteger(Bytes, static_cast<uint32_t>(Source.Instructions.size()));
 		for (const float Constant : Source.Constants) AppendInteger(Bytes, std::bit_cast<uint32_t>(Constant));
 		for (const std::string& PropertyId : Source.ScalarPropertyIds)
@@ -314,6 +332,11 @@ namespace PulseForge
 		{
 			AppendInteger(Bytes, static_cast<uint16_t>(ActionName.size()));
 			for (const char Character : ActionName) Bytes.push_back(static_cast<std::byte>(static_cast<uint8_t>(Character)));
+		}
+		for (const AssetID& Asset : Source.SceneTransitionAssets)
+		{
+			AppendInteger(Bytes, Asset.GetHigh());
+			AppendInteger(Bytes, Asset.GetLow());
 		}
 		for (const BlueprintInstruction& Instruction : Source.Instructions)
 		{
@@ -340,29 +363,36 @@ namespace PulseForge
 		uint32_t ConstantCount = 0;
 		uint32_t PropertyCount = 0;
 		uint32_t InstructionCount = 0;
+		uint32_t SceneTransitionAssetCount = 0;
 		if (!ReadInteger(Bytes, Offset, Source.Version) || !ReadInteger(Bytes, Offset, ConstantCount) ||
 			!ReadInteger(Bytes, Offset, PropertyCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
 		const uint32_t EncodedVersion = Source.Version;
-		if (EncodedVersion != BlueprintLegacyProgramFormatVersion &&
-			EncodedVersion != BlueprintPreviousProgramFormatVersion && EncodedVersion != BlueprintProgramFormatVersion)
+		if (EncodedVersion < BlueprintLegacyProgramFormatVersion || EncodedVersion > BlueprintProgramFormatVersion)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, 0, {},
 				"Blueprint program version is not supported"));
 		uint32_t ActionNameCount = 0;
-		if ((EncodedVersion >= BlueprintPreviousProgramFormatVersion &&
-			(!ReadInteger(Bytes, Offset, ActionNameCount) || !ReadInteger(Bytes, Offset, InstructionCount))) ||
-			(EncodedVersion == BlueprintLegacyProgramFormatVersion && !ReadInteger(Bytes, Offset, InstructionCount)))
+		if (EncodedVersion >= BlueprintActionProgramFormatVersion && !ReadInteger(Bytes, Offset, ActionNameCount))
+			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
+				"Blueprint program header is truncated"));
+		if (EncodedVersion >= BlueprintProgramFormatVersion &&
+			!ReadInteger(Bytes, Offset, SceneTransitionAssetCount))
+			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
+				"Blueprint program header is truncated"));
+		if (!ReadInteger(Bytes, Offset, InstructionCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
 		if (ConstantCount > BlueprintMaximumInstructionCount || PropertyCount > BlueprintMaximumScalarCount ||
 			ActionNameCount > BlueprintMaximumActionNameCount ||
+			SceneTransitionAssetCount > BlueprintMaximumSceneTransitionAssetCount ||
 			InstructionCount == 0 || InstructionCount > BlueprintMaximumInstructionCount)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, 0, {},
 				"Blueprint program counts exceed structural limits"));
 		Source.Constants.reserve(ConstantCount);
 		Source.ScalarPropertyIds.reserve(PropertyCount);
 		Source.ActionNames.reserve(ActionNameCount);
+		Source.SceneTransitionAssets.reserve(SceneTransitionAssetCount);
 		Source.Instructions.reserve(InstructionCount);
 		for (uint32_t Index = 0; Index < ConstantCount; ++Index)
 		{
@@ -395,6 +425,15 @@ namespace PulseForge
 			ActionName.resize(Length);
 			for (char& Character : ActionName) Character = static_cast<char>(std::to_integer<uint8_t>(Bytes[Offset++]));
 			Source.ActionNames.push_back(std::move(ActionName));
+		}
+		for (uint32_t Index = 0; Index < SceneTransitionAssetCount; ++Index)
+		{
+			uint64_t High = 0;
+			uint64_t Low = 0;
+			if (!ReadInteger(Bytes, Offset, High) || !ReadInteger(Bytes, Offset, Low))
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
+					"Blueprint scene transition asset table is truncated"));
+			Source.SceneTransitionAssets.emplace_back(High, Low);
 		}
 		for (uint32_t Index = 0; Index < InstructionCount; ++Index)
 		{

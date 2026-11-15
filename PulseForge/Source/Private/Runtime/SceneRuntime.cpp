@@ -293,7 +293,15 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
-				if (!Result->RequestsStop && Result->RequestedPause &&
+				if (!Result->RequestsStop && Result->RequestedSceneTransition &&
+					(!Services.QueueSceneTransition || !Services.QueueSceneTransition(*Result->RequestedSceneTransition)))
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						Result->SceneTransitionSourceNode, "Scene runtime host rejected the Blueprint transition request");
+					Instance.Faulted = true;
+					return;
+				}
+				if (!Result->RequestsStop && !Result->RequestedSceneTransition && Result->RequestedPause &&
 					(!Services.QueuePause || !Services.QueuePause(*Result->RequestedPause)))
 				{
 					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Assets/AssetID.h"
 #include "Core/Core.h"
 #include "Scene/UUID.h"
 
@@ -15,14 +16,16 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintProgramFormatVersion = 3;
-	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 2;
+	inline constexpr uint32_t BlueprintProgramFormatVersion = 4;
+	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 3;
+	inline constexpr uint32_t BlueprintActionProgramFormatVersion = 2;
 	inline constexpr uint32_t BlueprintLegacyProgramFormatVersion = 1;
 	inline constexpr size_t BlueprintMaximumInstructionCount = 4096;
 	inline constexpr size_t BlueprintMaximumScalarCount = 64;
 	inline constexpr size_t BlueprintMaximumPropertyIdentifierLength = 64;
 	inline constexpr size_t BlueprintMaximumActionNameCount = 64;
 	inline constexpr size_t BlueprintMaximumActionNameLength = 128;
+	inline constexpr size_t BlueprintMaximumSceneTransitionAssetCount = 64;
 	inline constexpr uint32_t BlueprintDefaultInstructionBudget = 10000;
 	inline constexpr uint32_t BlueprintMaximumEventDispatchesPerFrame = 4096;
 
@@ -56,7 +59,8 @@ namespace PulseForge
 		Return,
 		JumpIfAction,
 		RequestStop,
-		RequestPause
+		RequestPause,
+		RequestSceneTransition
 	};
 
 	struct BlueprintInstruction
@@ -73,6 +77,7 @@ namespace PulseForge
 		std::vector<float> Constants;
 		std::vector<std::string> ScalarPropertyIds;
 		std::vector<std::string> ActionNames;
+		std::vector<AssetID> SceneTransitionAssets;
 		std::vector<BlueprintInstruction> Instructions;
 	};
 
@@ -128,8 +133,10 @@ namespace PulseForge
 		std::vector<BlueprintScalarPropertyWrite> PropertyWrites;
 		bool RequestsStop = false;
 		UUID StopRequestSourceNode;
-	std::optional<bool> RequestedPause;
-	UUID PauseRequestSourceNode;
+		std::optional<bool> RequestedPause;
+		UUID PauseRequestSourceNode;
+		std::optional<AssetID> RequestedSceneTransition;
+		UUID SceneTransitionSourceNode;
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>

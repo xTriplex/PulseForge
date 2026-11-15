@@ -628,6 +628,45 @@ namespace
 		const auto PausedFrame = PauseRuntime.Advance(PauseScene, Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, PausedFrame && PausedFrame->BlueprintInstructionsExecuted == 0 && PauseRuntime.IsPaused());
 		PauseRuntime.Stop();
+
+		Scene TransitionSceneState;
+		constexpr UUID TransitionTarget{ 0x5a00000000004000ull, 0x8000000000000001ull };
+		PF_CHECK(Tests, TransitionSceneState.CreateEntityWithUUID(TransitionTarget, "Transition request source").has_value());
+		constexpr AssetID TransitionAsset{ 0x5b00000000004000ull, 0x8000000000000001ull };
+		BlueprintProgramSource TransitionSource;
+		TransitionSource.SceneTransitionAssets = { TransitionAsset };
+		TransitionSource.Instructions = {
+			{ BlueprintOpcode::RequestSceneTransition, 0, 0, UUID(62, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(62, 2) }
+		};
+		const auto VerifiedTransition = VerifyBlueprintProgram(std::move(TransitionSource));
+		PF_CHECK(Tests, VerifiedTransition.has_value());
+		if (!VerifiedTransition) return;
+		const auto TransitionProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedTransition));
+		uint32_t TransitionRequests = 0;
+		SceneRuntimeServices TransitionServices;
+		TransitionServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target.GetUUID() != TransitionTarget || Event != BlueprintEventKind::OnUpdate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 4, TransitionProgram };
+		};
+		TransitionServices.QueueSceneTransition = [&](const AssetID& Requested)
+		{
+			++TransitionRequests;
+			return Requested == TransitionAsset;
+		};
+		SceneRuntime TransitionRuntime(*ProjectResult, Description, TransitionServices);
+		PF_CHECK(Tests, TransitionRuntime.Start(TransitionSceneState).has_value());
+		const auto TransitionFrame = TransitionRuntime.Advance(TransitionSceneState, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, TransitionFrame && TransitionFrame->BlueprintInstructionsExecuted == 2 && TransitionRequests == 1);
+		const auto TransitionRequest = TransitionRuntime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, TransitionRequest && TransitionRequest->Kind == SceneRuntimeBoundaryRequestKind::SceneTransition &&
+			TransitionRequest->Scene == TransitionAsset);
+		if (TransitionRequest)
+			PF_CHECK(Tests, TransitionRuntime.ResolveBoundaryRequest(
+				*TransitionRequest, SceneRuntimeBoundaryResolution::Rejected));
+		TransitionRuntime.Stop();
 	}
 }
 
