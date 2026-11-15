@@ -460,7 +460,8 @@ namespace PulseForgeEditor
 	{
 	public:
 		EditorGraphDocumentEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
-			std::function<void()> PresentationChanged = {});
+			std::function<void()> PresentationChanged = {},
+			std::function<void(const PulseForge::AssetID&)> BlueprintProgramPublished = {});
 
 		[[nodiscard]] std::expected<void, std::string> Register();
 		// Schemas are registered before Register() and remain immutable for all document sessions.
@@ -531,6 +532,7 @@ namespace PulseForgeEditor
 		EditorDocumentManager& m_Documents;
 		EditorDocumentEditorRegistry& m_Editors;
 		std::function<void()> m_PresentationChanged;
+		std::function<void(const PulseForge::AssetID&)> m_BlueprintProgramPublished;
 		std::vector<EditorDocumentWorkspaceState::GraphPinVisibility> m_PinVisibilitySettings;
 		EditorGraphSchemaRegistry m_SchemaRegistry;
 		bool m_Registered = false;

@@ -16,6 +16,7 @@
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "Core/PlatformServices.h"
+#include "Core/BoundedInput.h"
 #include "Input/GameplayInputStore.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
@@ -36,6 +37,7 @@
 #include "Scene/Scene.h"
 #include "Scene/SceneSerializer.h"
 #include "Runtime/SceneRuntime.h"
+#include "Scripting/BlueprintAsset.h"
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorAssetPreviewService.h"
@@ -53,6 +55,7 @@
 #include "Editor/EditorInspectorPanel.h"
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "Editor/EditorMaterialDocumentEditor.h"
+#include "Editor/EditorBlueprintProgramCatalog.h"
 #include "Editor/EditorMaterialPreviewService.h"
 #include "Editor/EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
@@ -889,7 +892,8 @@ namespace
 			if (auto Result = m_MaterialDocumentEditor->Register(); !Result)
 				PF_ERROR("Could not register the fixed-PBR material document editor: {}", Result.error());
 			m_GraphDocumentEditor = std::make_unique<PulseForgeEditor::EditorGraphDocumentEditor>(m_Documents,
-				m_DocumentEditors, [this] { MarkDocumentWorkspaceDirty(false); });
+				m_DocumentEditors, [this] { MarkDocumentWorkspaceDirty(false); },
+				[this](const PulseForge::AssetID& Asset) { OnBlueprintProgramPublished(Asset); });
 			if (auto Result = m_GraphDocumentEditor->Register(); !Result)
 				PF_ERROR("Could not register the graph authoring fixture editor: {}", Result.error());
 			m_PrefabInstanceController = std::make_unique<PulseForgeEditor::EditorPrefabInstanceController>(*this);
@@ -984,6 +988,39 @@ namespace
 		}
 
 		[[nodiscard]] PulseForge::UUID GetScriptProjectIdentity() const override
+		{
+			return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{};
+		}
+
+		[[nodiscard]] std::expected<std::vector<std::string>, std::string> ReadBlueprintScalarPropertyIds(
+			const PulseForge::AssetID& AssetID) override
+		{
+			if (!m_Project) return std::unexpected("Open a project before inspecting Blueprint properties.");
+			const auto Asset = m_Project->GetAssetRegistry().Find(AssetID);
+			if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Blueprint))
+				return std::unexpected("The Blueprint property source is not a registered .pfblueprint asset.");
+			const std::filesystem::path ProgramPath = m_Project->GetRootPath() / Asset->ProjectRelativePath;
+			std::error_code FileSizeError;
+			const uintmax_t FileSize = std::filesystem::file_size(ProgramPath, FileSizeError);
+			if (FileSizeError || FileSize == 0 || FileSize > PulseForge::BlueprintMaximumAssetBytes)
+				return std::unexpected("The Blueprint program is missing or exceeds its supported size.");
+			std::ifstream Input(ProgramPath, std::ios::binary);
+			if (!Input) return std::unexpected("The Blueprint program could not be opened.");
+			std::vector<char> Bytes(static_cast<size_t>(FileSize));
+			Input.read(Bytes.data(), static_cast<std::streamsize>(Bytes.size()));
+			if (!Input || static_cast<size_t>(Input.gcount()) != Bytes.size())
+				return std::unexpected("The Blueprint program could not be read completely.");
+			const auto Program = PulseForge::DeserializeBlueprintAsset(std::as_bytes(std::span<const char>(Bytes.data(), Bytes.size())));
+			if (!Program) return std::unexpected("The Blueprint program is invalid: " + Program.error().Message);
+			if (Program->GetEvents().empty()) return std::unexpected("The Blueprint program has no event schema.");
+			std::vector<std::string> PropertyIDs = Program->GetEvents().front().Program.GetSource().ScalarPropertyIds;
+			for (const PulseForge::BlueprintVerifiedEventProgram& Event : Program->GetEvents())
+				if (Event.Program.GetSource().ScalarPropertyIds != PropertyIDs)
+					return std::unexpected("Blueprint events do not share one scalar property schema.");
+			return PropertyIDs;
+		}
+
+		[[nodiscard]] PulseForge::UUID GetBlueprintProjectIdentity() const override
 		{
 			return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{};
 		}
@@ -2603,7 +2640,12 @@ namespace
 			m_MaterialPreviews.Clear();
 			m_PendingAssetMovePlan.reset();
 			++m_AssetOperationGeneration;
+			// Invalidate project-owned Blueprint programs before optional storage is reused for a new Project.
+			m_BlueprintProgramCatalog.SetProject(nullptr);
+			m_ReportedBlueprintLoadFailures.clear();
 			m_Project.emplace(std::move(Prepared.Project));
+			m_BlueprintProgramCatalog.SetProject(&*m_Project);
+			m_ReportedBlueprintLoadFailures.clear();
 			ConfigureProjectAudio();
 			ConfigureGameplayInputForProject();
 			RegisterLevelDocument();
@@ -5785,6 +5827,8 @@ namespace
 			ResetViewportSceneRenderer();
 			m_MaterialPreviews.Clear();
 			ClearGameplayInputProject();
+			m_BlueprintProgramCatalog.SetProject(nullptr);
+			m_ReportedBlueprintLoadFailures.clear();
 			m_Project.reset();
 			m_PendingAssetMovePlan.reset();
 			++m_AssetOperationGeneration;
@@ -9591,6 +9635,25 @@ namespace
 			Services.GameplayInput = &PulseForge::Application::Get().GetGameplayInput();
 			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
 			Services.AudioSessionState = m_AudioSession.get();
+			m_BlueprintProgramCatalog.BindRuntimeServices(Services);
+			const auto ResolveProgram = Services.ResolveBlueprintProgram;
+			Services.ResolveBlueprintProgram = [this, ResolveProgram](const PulseForge::Entity& Target,
+				PulseForge::BlueprintEventKind Event)
+			{
+				auto Binding = ResolveProgram(Target, Event);
+				if (!Binding)
+				{
+					const auto Component = Target.GetBlueprint();
+					if (Component && Component->has_value())
+					{
+						const PulseForge::AssetID Asset = (**Component).BlueprintAsset;
+						if (const auto Failure = m_BlueprintProgramCatalog.GetLoadFailure(Asset);
+							Failure && m_ReportedBlueprintLoadFailures.insert(Asset).second)
+							PF_WARN("Could not load Blueprint program {}: {}", Asset.ToString(), *Failure);
+					}
+				}
+				return Binding;
+			};
 			Services.QueueSceneTransition = [this](const PulseForge::AssetID& Asset)
 			{
 				if (!m_SceneRuntime || !m_Project || m_QueuedRuntimeSceneTransition) return false;
@@ -9604,6 +9667,12 @@ namespace
 				return true;
 			};
 			return Services;
+		}
+
+		void OnBlueprintProgramPublished(const PulseForge::AssetID& Asset)
+		{
+			m_BlueprintProgramCatalog.ProgramPublished(Asset);
+			m_ReportedBlueprintLoadFailures.erase(Asset);
 		}
 
 		void ServiceRuntimeBoundaryRequests()
@@ -10360,6 +10429,8 @@ namespace
 		PulseForgeEditor::Detail::EditorViewportScrollInput m_ViewportScrollInput;
 		PulseForge::RuntimeUIInputAdapter m_RuntimeUIInputAdapter;
 		bool m_RuntimeUITextInputBlocked = false;
+		PulseForgeEditor::EditorBlueprintProgramCatalog m_BlueprintProgramCatalog;
+		std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> m_ReportedBlueprintLoadFailures;
 		float m_SceneViewportOwnerScrollDelta = 0.0f;
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;

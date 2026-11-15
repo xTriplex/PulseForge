@@ -103,6 +103,19 @@ namespace PulseForge
 		[[nodiscard]] Scene* GetActiveScene() noexcept { return m_Scene.get(); }
 		[[nodiscard]] const Scene* GetActiveScene() const noexcept { return m_Scene.get(); }
 		[[nodiscard]] const std::optional<AssetID>& GetActiveSceneAsset() const noexcept { return m_SceneAsset; }
+		[[nodiscard]] std::span<const BlueprintRuntimeDiagnostic> GetBlueprintDiagnostics() const noexcept
+		{
+			return m_Runtime ? m_Runtime->GetBlueprintDiagnostics() : std::span<const BlueprintRuntimeDiagnostic>{};
+		}
+		[[nodiscard]] std::span<const BlueprintRuntimeTrace> GetBlueprintTraces() const noexcept
+		{
+			return m_Runtime ? m_Runtime->GetBlueprintTraces() : std::span<const BlueprintRuntimeTrace>{};
+		}
+		[[nodiscard]] std::optional<BlueprintRuntimeTrace> ReadBlueprintTrace(
+			const BlueprintRuntimeTraceHandle& Handle) const
+		{
+			return m_Runtime ? m_Runtime->ReadBlueprintTrace(Handle) : std::nullopt;
+		}
 
 	private:
 		struct PendingScene;

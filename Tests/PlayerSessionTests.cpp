@@ -8,6 +8,7 @@
 #include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
 #include "Scene/Components/AudioSourceComponent.h"
+#include "Scene/Components/BlueprintComponent.h"
 #include "Scene/Components/BoxColliderComponent.h"
 #include "Scene/Components/RigidbodyComponent.h"
 #include "Scene/SceneSerializer.h"
@@ -16,6 +17,7 @@
 #include "Scripting/BlueprintAsset.h"
 #include "Scripting/ScriptRuntime.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +26,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -534,7 +537,9 @@ namespace
 		PF_CHECK(Tests, AuthoredEntity.has_value());
 		if (!AuthoredEntity) return;
 		PF_CHECK(Tests, AuthoredEntity->SetScript(ScriptComponent{ *ScriptIdentifier }).has_value());
-		PF_CHECK(Tests, AuthoredEntity->SetBlueprint(BlueprintComponent{ *BlueprintIdentifier, true, {} }).has_value());
+		BlueprintComponent BlueprintDefaults{ *BlueprintIdentifier, true, {} };
+		PF_CHECK(Tests, BlueprintDefaults.SetFloatProperty("runtime_value", 10.0f).has_value());
+		PF_CHECK(Tests, AuthoredEntity->SetBlueprint(BlueprintDefaults).has_value());
 		PF_CHECK(Tests, AuthoredEntity->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.2f, 0.0f, false }).has_value());
 		PF_CHECK(Tests, AuthoredEntity->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
 		const auto AudioIdentifier = UUID::Generate();
@@ -567,15 +572,19 @@ namespace
 		}
 		CookedAssetEntry ScriptEntry{ *ScriptIdentifier, CookedAssetProductKind::Script, {}, "products/script.lua", 1,
 			ScriptBytes.size(), ScriptDigest.Algorithm, ScriptDigest.Value, {} };
-		BlueprintProgramSource BlueprintOnCreate;
-		BlueprintOnCreate.Constants = { 42.0f };
-		BlueprintOnCreate.ScalarPropertyIds = { "runtime_value" };
-		BlueprintOnCreate.Instructions = {
-			{ BlueprintOpcode::PushConstant, 0, 0, UUID(0x50, 1) },
-			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(0x50, 2) },
-			{ BlueprintOpcode::Return, 0, 0, UUID(0x50, 3) }
+		BlueprintProgramSource BlueprintOnUpdate;
+		BlueprintOnUpdate.Constants = { 1.0f };
+		BlueprintOnUpdate.ScalarPropertyIds = { "runtime_value" };
+		BlueprintOnUpdate.Instructions = {
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(0x50, 1) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(0x50, 2) },
+			{ BlueprintOpcode::Add, 0, 0, UUID(0x50, 3) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(0x50, 4) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(0x50, 5) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(0x50, 6) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(0x50, 7) }
 		};
-		const std::array BlueprintEvents{ BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, BlueprintOnCreate } };
+		const std::array BlueprintEvents{ BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, BlueprintOnUpdate } };
 		auto BlueprintBytes = SerializeBlueprintAsset(BlueprintEvents);
 		PF_CHECK(Tests, BlueprintBytes.has_value());
 		if (!BlueprintBytes) return;
@@ -613,8 +622,10 @@ namespace
 		if (!Provider) return;
 
 		ScriptObservationBuffer ScriptObservations;
+		uint64_t BlueprintProgramGeneration = 1;
 		SceneRuntimeServices RuntimeServices;
 		RuntimeServices.ScriptObserver = { &ScriptObservations, StoreScriptObservation };
+		RuntimeServices.GetBlueprintProgramGeneration = [&BlueprintProgramGeneration] { return BlueprintProgramGeneration; };
 		SceneRuntimeDesc RuntimeDescription;
 		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
 		PlayerSession Session(*Provider, RuntimeDescription, RuntimeServices);
@@ -631,11 +642,49 @@ namespace
 		{
 			const auto CookedBlueprint = CookedEntityAtStart->GetBlueprint();
 			PF_CHECK(Tests, CookedBlueprint && CookedBlueprint->has_value() &&
-				(**CookedBlueprint).FindFloatProperty("runtime_value") == 42.0f);
+				(**CookedBlueprint).FindFloatProperty("runtime_value") == 10.0f);
 		}
 		auto Advanced = Session.Advance(Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, Advanced.has_value());
 		PF_CHECK(Tests, Advanced && Advanced->PhysicsSteps > 0);
+		auto ReadRuntimeValue = [&Tests, &Session, &AuthoredEntity](float ExpectedValue)
+		{
+			const auto Traces = Session.GetBlueprintTraces();
+			const auto Trace = std::find_if(Traces.begin(), Traces.end(), [&](const BlueprintRuntimeTrace& Candidate)
+				{ return Candidate.Handle.Target.GetUUID() == AuthoredEntity->GetUUID(); });
+			PF_CHECK(Tests, Trace != Traces.end());
+			if (Trace == Traces.end()) return;
+			const auto Current = Session.ReadBlueprintTrace(Trace->Handle);
+			PF_CHECK(Tests, Current && Current->ScalarPropertyIds == std::vector<std::string>{ "runtime_value" } &&
+				Current->ScalarValues == std::vector<float>{ ExpectedValue });
+		};
+		ReadRuntimeValue(11.0f);
+		const auto CookedBlueprintAfterFirstUpdate = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());
+		PF_CHECK(Tests, CookedBlueprintAfterFirstUpdate.has_value());
+		if (CookedBlueprintAfterFirstUpdate)
+		{
+			const auto Blueprint = CookedBlueprintAfterFirstUpdate->GetBlueprint();
+			PF_CHECK(Tests, Blueprint && Blueprint->has_value() &&
+				(**Blueprint).FindFloatProperty("runtime_value") == 11.0f);
+		}
+		const auto AuthoredBlueprintAfterFirstUpdate = AuthoredEntity->GetBlueprint();
+		PF_CHECK(Tests, AuthoredBlueprintAfterFirstUpdate && AuthoredBlueprintAfterFirstUpdate->has_value() &&
+			(**AuthoredBlueprintAfterFirstUpdate).FindFloatProperty("runtime_value") == 10.0f);
+		++BlueprintProgramGeneration;
+		Advanced = Session.Advance(Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, Advanced.has_value());
+		ReadRuntimeValue(11.0f);
+		const auto CookedBlueprintAfterRebind = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());
+		PF_CHECK(Tests, CookedBlueprintAfterRebind.has_value());
+		if (CookedBlueprintAfterRebind)
+		{
+			const auto Blueprint = CookedBlueprintAfterRebind->GetBlueprint();
+			PF_CHECK(Tests, Blueprint && Blueprint->has_value() &&
+				(**Blueprint).FindFloatProperty("runtime_value") == 11.0f);
+		}
+		const auto AuthoredBlueprintAfterRebind = AuthoredEntity->GetBlueprint();
+		PF_CHECK(Tests, AuthoredBlueprintAfterRebind && AuthoredBlueprintAfterRebind->has_value() &&
+			(**AuthoredBlueprintAfterRebind).FindFloatProperty("runtime_value") == 10.0f);
 		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
 			*ScriptIdentifier, AuthoredEntity->GetUUID(), ScriptRuntimeCallback::OnCreate) == 1);
 		const auto CookedEntity = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());

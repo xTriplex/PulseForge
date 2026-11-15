@@ -1369,9 +1369,17 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         )
         with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")) as activate, patch.object(
             smoke, "run_bounded_command", return_value=(0, "Quartz event posted", "")
-        ) as dispatch:
+        ) as dispatch, patch.object(
+            smoke,
+            "wait_for_pointer_edge",
+            side_effect=[
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "press", "_capture_index": "5", "raw": "press"},
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "release", "_capture_index": "6", "raw": "release"},
+            ],
+        ) as wait_edge:
             evidence = smoke.click_point(
-                Process(), capture, Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Cancel"
+                Process(), capture, Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Cancel",
+                {"scenario": "cancel-save", "host": "host-a", "asset": "asset-a", "generation": "0"},
             )
 
         self.assertTrue(evidence.dispatch_attempted)
@@ -1380,9 +1388,63 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual(42, activate.call_args.args[0])
         self.assertEqual("activate-window", activate.call_args.kwargs["operation"])
         self.assertEqual(smoke.FIXTURE_TITLE, activate.call_args.kwargs["window_title"])
-        dispatch.assert_called_once()
-        self.assertEqual(5, len(dispatch.call_args.args[0]))
-        self.assertEqual(evidence.action_id, dispatch.call_args.args[0][2])
+        self.assertEqual(1, dispatch.call_count)
+        self.assertEqual(6, len(dispatch.call_args_list[0].args[0]))
+        self.assertEqual("click", dispatch.call_args_list[0].args[0][-1])
+        self.assertEqual(evidence.action_id, dispatch.call_args_list[0].args[0][2])
+        self.assertEqual(["press", "release"], [call.args[3] for call in wait_edge.call_args_list])
+        self.assertEqual(
+            [evidence.output_watermark, 5],
+            [call.args[4] for call in wait_edge.call_args_list],
+            "the release barrier must start after this click's observed press before another gesture",
+        )
+
+    def test_pointer_edge_wait_uses_current_document_and_requires_release_evidence(self) -> None:
+        class Capture:
+            reader_error = None
+
+            @staticmethod
+            def recent_telemetry(_expected: dict[str, str]) -> list[dict[str, str]]:
+                return [{
+                    "kind": "DIAG_GLFW_MOUSE_BUTTON", "scenario": "discard", "host": "host-a", "asset": "asset-a",
+                    "generation": "1", "button": "left", "action": "release", "native_focused": "1",
+                    "_capture_index": "9", "raw": "release",
+                }]
+
+        evidence = smoke.ActionEvidence(
+            label="Discard", action_id="0123456789abcdef0123456789abcdef",
+            expected_marker_fields={"scenario": "discard", "host": "host-a", "asset": "asset-a", "generation": "1"},
+        )
+        edge = smoke.wait_for_pointer_edge(Capture(), FakeProcess(), evidence, "release", 8, time.monotonic() + 1.0)
+        self.assertEqual("release", edge["action"])
+
+        class MissingRelease(Capture):
+            @staticmethod
+            def recent_telemetry(_expected: dict[str, str]) -> list[dict[str, str]]:
+                return [{
+                    "kind": "DIAG_GLFW_MOUSE_BUTTON", "scenario": "discard", "host": "host-a", "asset": "asset-a",
+                    "generation": "1", "button": "left", "action": "press", "native_focused": "1",
+                    "_capture_index": "9", "raw": "press",
+                }]
+
+        with self.assertRaisesRegex(RuntimeError, "application-observed left-button release"):
+            smoke.wait_for_pointer_edge(
+                MissingRelease(), FakeProcess(), evidence, "release", 8, time.monotonic() + 0.05
+            )
+
+        class ReleaseBeforePress(Capture):
+            @staticmethod
+            def recent_telemetry(_expected: dict[str, str]) -> list[dict[str, str]]:
+                return [{
+                    "kind": "DIAG_GLFW_MOUSE_BUTTON", "scenario": "discard", "host": "host-a", "asset": "asset-a",
+                    "generation": "1", "button": "left", "action": "release", "native_focused": "1",
+                    "_capture_index": "9", "raw": "late release from the preceding gesture",
+                }]
+
+        with self.assertRaisesRegex(RuntimeError, "application-observed left-button release"):
+            smoke.wait_for_pointer_edge(
+                ReleaseBeforePress(), FakeProcess(), evidence, "release", 10, time.monotonic() + 0.05
+            )
 
     def test_malformed_accessibility_bounds_are_diagnostic_only(self) -> None:
         class Process:

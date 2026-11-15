@@ -1,6 +1,7 @@
 #include "TestSceneSupport.h"
 
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/BlueprintComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/PropertyMetadata.h"
 
@@ -39,6 +40,33 @@ void RunScriptPropertyMetadataTests(TestRunner& Tests)
 	PF_CHECK(Tests, MeshValue && std::get<AssetID>(*MeshValue) == ReplacementMesh);
 	PF_CHECK(Tests,
 		!WriteProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset, PropertyValue{ std::optional<AssetID>{} }));
+
+	const PropertyDescriptor* BlueprintDescriptor = FindPropertyDescriptor(PropertyComponentIds::Blueprint, PropertyIds::Asset);
+	PF_CHECK(Tests, BlueprintDescriptor && BlueprintDescriptor->Type == PropertyValueType::AssetId &&
+		BlueprintDescriptor->ReferenceKind == PropertyReferenceKind::BlueprintAsset);
+	BlueprintComponent Blueprint{ AssetID{ 0x1234123412341234ull, 0x4321432143214321ull } };
+	PF_CHECK(Tests, Blueprint.SetFloatProperty("health", 12.0f));
+	PF_CHECK(Tests, Target.SetBlueprint(Blueprint));
+	const auto BlueprintAssetValue = ReadProperty(Target, PropertyComponentIds::Blueprint, PropertyIds::Asset);
+	PF_CHECK(Tests, BlueprintAssetValue && std::get<AssetID>(*BlueprintAssetValue) == Blueprint.BlueprintAsset);
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::Blueprint, PropertyIds::Enabled, PropertyValue{ false }));
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::Blueprint, PropertyIds::Asset,
+		PropertyValue{ AssetID{ 0x5678567856785678ull, 0x8765876587658765ull } }));
+	const auto BlueprintAfterStaticEdit = Target.GetBlueprint();
+	PF_CHECK(Tests, BlueprintAfterStaticEdit && BlueprintAfterStaticEdit->has_value() &&
+		!(**BlueprintAfterStaticEdit).Enabled && (**BlueprintAfterStaticEdit).BlueprintAsset != Blueprint.BlueprintAsset);
+	auto BlueprintDynamic = GetDynamicPropertyDescriptors(Target, PropertyComponentIds::BlueprintFloat);
+	PF_CHECK(Tests, BlueprintDynamic && BlueprintDynamic->size() == 1 && BlueprintDynamic->front().Id == "health" &&
+		BlueprintDynamic->front().ComponentId == PropertyComponentIds::BlueprintFloat);
+	const auto BlueprintFloatValue = ReadProperty(Target, PropertyComponentIds::BlueprintFloat, "health");
+	PF_CHECK(Tests, BlueprintFloatValue && std::get<float>(*BlueprintFloatValue) == 12.0f);
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::BlueprintFloat, "health", PropertyValue{ 35.0f }));
+	PF_CHECK(Tests, !WriteProperty(Target, PropertyComponentIds::BlueprintFloat, "health", PropertyValue{ true }));
+	const auto UpdatedBlueprintFloat = ReadProperty(Target, PropertyComponentIds::BlueprintFloat, "health");
+	PF_CHECK(Tests, UpdatedBlueprintFloat && std::get<float>(*UpdatedBlueprintFloat) == 35.0f);
+	PF_CHECK(Tests, RemoveBlueprintFloatProperty(Target, "health"));
+	PF_CHECK(Tests, !ReadProperty(Target, PropertyComponentIds::BlueprintFloat, "health"));
+	PF_CHECK(Tests, !RemoveBlueprintFloatProperty(Target, "health"));
 
 	const AssetID ScriptAsset{ 0xabcdef0123456789ull, 0x8765432101234567ull };
 	ScriptComponent Script{ ScriptAsset };

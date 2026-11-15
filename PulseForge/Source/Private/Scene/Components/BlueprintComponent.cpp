@@ -9,7 +9,6 @@ namespace PulseForge
 	{
 		constexpr size_t MaximumBlueprintPropertyCount = 64;
 		constexpr size_t MaximumBlueprintPropertyIdentifierLength = 64;
-		constexpr float MaximumBlueprintPropertyMagnitude = 1'000'000'000.0f;
 
 		bool IsValidIdentifier(std::string_view Identifier) noexcept
 		{
@@ -31,7 +30,7 @@ namespace PulseForge
 		{
 			if (!IsValidIdentifier(Identifier))
 				return std::unexpected("Blueprint scalar property identifier is invalid");
-			if (!std::isfinite(Value) || std::abs(Value) > MaximumBlueprintPropertyMagnitude)
+			if (!std::isfinite(Value) || std::abs(Value) > MaximumBlueprintFloatPropertyMagnitude)
 				return std::unexpected("Blueprint scalar property value must be finite and bounded");
 		}
 		return {};
@@ -46,11 +45,19 @@ namespace PulseForge
 	std::expected<void, std::string> BlueprintComponent::SetFloatProperty(std::string_view Identifier, float Value)
 	{
 		if (!IsValidIdentifier(Identifier)) return std::unexpected("Blueprint scalar property identifier is invalid");
-		if (!std::isfinite(Value) || std::abs(Value) > MaximumBlueprintPropertyMagnitude)
+		if (!std::isfinite(Value) || std::abs(Value) > MaximumBlueprintFloatPropertyMagnitude)
 			return std::unexpected("Blueprint scalar property value must be finite and bounded");
 		if (!FloatProperties.contains(Identifier) && FloatProperties.size() >= MaximumBlueprintPropertyCount)
 			return std::unexpected("Blueprint component exceeds the scalar property limit");
 		FloatProperties.insert_or_assign(std::string(Identifier), Value);
+		return {};
+	}
+
+	std::expected<void, std::string> BlueprintComponent::RemoveFloatProperty(std::string_view Identifier)
+	{
+		if (!IsValidIdentifier(Identifier)) return std::unexpected("Blueprint scalar property identifier is invalid");
+		if (FloatProperties.erase(std::string(Identifier)) == 0)
+			return std::unexpected("Blueprint scalar property does not exist");
 		return {};
 	}
 }

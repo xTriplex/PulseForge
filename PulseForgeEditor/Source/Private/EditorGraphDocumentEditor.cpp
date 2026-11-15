@@ -685,8 +685,10 @@ namespace
 namespace PulseForgeEditor
 {
 	EditorGraphDocumentEditor::EditorGraphDocumentEditor(EditorDocumentManager& Documents,
-		EditorDocumentEditorRegistry& Editors, std::function<void()> PresentationChanged)
-		: m_Documents(Documents), m_Editors(Editors), m_PresentationChanged(std::move(PresentationChanged))
+		EditorDocumentEditorRegistry& Editors, std::function<void()> PresentationChanged,
+		std::function<void(const PulseForge::AssetID&)> BlueprintProgramPublished)
+		: m_Documents(Documents), m_Editors(Editors), m_PresentationChanged(std::move(PresentationChanged)),
+		  m_BlueprintProgramPublished(std::move(BlueprintProgramPublished))
 	{
 	}
 
@@ -845,6 +847,7 @@ namespace PulseForgeEditor
 			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
 			return std::unexpected("Could not publish Blueprint graph source: " + Published.error());
 		}
+		if (m_BlueprintProgramPublished) m_BlueprintProgramPublished(CreatedRecord->ID);
 		return EditorGraphFixtureLocation{ CreatedRecord->ID, CreatedRecord->ProjectRelativePath,
 			"Blueprint — " + CreatedRecord->ProjectRelativePath.stem().string() };
 	}
@@ -1209,6 +1212,8 @@ namespace PulseForgeEditor
 		if (!State->ProgramPath.empty()) State->SavedProgramBytes = std::move(CompiledProgramBytes);
 		State->History.MarkSaved();
 		State->Error.clear();
+		if (!State->ProgramPath.empty() && m_BlueprintProgramPublished)
+			m_BlueprintProgramPublished(Session.Identity.Asset);
 		(void)SavedRevision;
 		return true;
 	}

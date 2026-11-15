@@ -34,6 +34,7 @@ TELEMETRY_MARKERS = {
 }
 CONTROL_MARKERS = {"CLOSE_CONTROL", "PROMPT_GEOMETRY", "ALLOW_CLOSE_CONTROL"}
 ACTION_RESPONSE_SECONDS = 15.0
+POINTER_EDGE_RESPONSE_SECONDS = 3.0
 FIXTURE_TITLE = "Host Test Fixture 1"
 MAIN_TITLE_FRAGMENT = "PulseForge Editor"
 SCENARIOS = ("cancel-save", "discard", "save-retry", "close-retry")
@@ -228,8 +229,8 @@ if CommandLine.arguments.count >= 2 &&
     exit(0)
 }
 
-guard CommandLine.arguments.count == 5 else {
-    fail("CGEvent input requires PID, click identity and finite desktop coordinates", 2)
+guard CommandLine.arguments.count == 6 else {
+    fail("CGEvent input requires PID, action identity, finite desktop coordinates and an edge phase", 2)
 }
 guard let targetPID = Int32(CommandLine.arguments[1]), targetPID > 0 else {
     fail("CGEvent input PID must be a positive 32-bit integer", 2)
@@ -246,6 +247,10 @@ guard let x = Double(CommandLine.arguments[3]), let y = Double(CommandLine.argum
 }
 guard x.isFinite, y.isFinite else {
     fail("CGEvent input coordinates are not finite", 2)
+}
+let phase = CommandLine.arguments[5]
+guard ["click", "down", "up"].contains(phase) else {
+    fail("CGEvent pointer phase must be click, down, or up", 2)
 }
 guard CGPreflightPostEventAccess() else {
     fail("TCC_DENIED: CGPreflightPostEventAccess rejected synthetic pointer input", 77)
@@ -272,12 +277,19 @@ func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
           "post_returned=1; route=global-hid-event-stream")
 }
 
-post(.mouseMoved, "move", 0)
-Thread.sleep(forTimeInterval: 0.05)
-post(.leftMouseDown, "down", 1)
-Thread.sleep(forTimeInterval: 0.05)
-post(.leftMouseUp, "up", 1)
-print("CGEventPost=SEQUENCE_RETURNED; click_id=\(actionID); source_pid=\(sourcePID); source_name=\(sourceName); " +
+if phase == "click" || phase == "down" {
+    post(.mouseMoved, "move", 0)
+    Thread.sleep(forTimeInterval: 0.05)
+    post(.leftMouseDown, "down", 1)
+}
+if phase == "click" {
+    Thread.sleep(forTimeInterval: 0.05)
+    post(.leftMouseUp, "up", 1)
+}
+if phase == "up" {
+    post(.leftMouseUp, "up", 1)
+}
+print("CGEventPost=SEQUENCE_RETURNED; phase=\(phase); click_id=\(actionID); source_pid=\(sourcePID); source_name=\(sourceName); " +
       "target_pid=\(targetPID); access=preflight-approved; post_return_is_not_application_acknowledgement")
 '''
 
@@ -426,6 +438,7 @@ class ActionEvidence:
     pointer_observation: str = "NOT_REQUESTED"
     application_response: str = "PENDING"
     semantic_outcome: str = "PENDING"
+    application_edge_error: str = ""
     output_watermark: int = -1
     point: tuple[int, int] | None = None
     target_window_bounds: tuple[float, float, float, float] | None = None
@@ -856,6 +869,14 @@ def await_application_event(
     diagnose: Callable[[BoundedCapture, subprocess.Popen[str], ActionEvidence, float], str] | None = None,
 ) -> dict[str, str]:
     collect_diagnostics = diagnose or capture_action_diagnostics
+    if evidence.application_edge_error:
+        evidence.application_response = "MISSING_POINTER_EDGE"
+        evidence.semantic_outcome = "FAIL_POINTER_EDGE_MISSING"
+        diagnostics = collect_diagnostics(capture, process, evidence, deadline)
+        raise RuntimeError(
+            f"{evidence.label}: native button edge was not observed by the application; {evidence.summary()}; "
+            f"diagnostics={diagnostics}"
+        )
     if not evidence.dispatch_attempted:
         reconcile_action_response(evidence, response_observed=False)
     if evidence.api_exit_code != 0 and not evidence.transport_uncertain:
@@ -1144,6 +1165,7 @@ def click_point(
     point: tuple[int, int],
     deadline: float,
     label: str,
+    expected_marker_fields: dict[str, str],
 ) -> ActionEvidence:
     evidence = ActionEvidence(
         label=label,
@@ -1151,6 +1173,7 @@ def click_point(
         point=point,
         output_watermark=capture.watermark(),
         target_window_bounds=fixture_bounds,
+        expected_marker_fields=expected_marker_fields,
     )
     print(
         f"MACOS_DOC_CLOSE_TARGET_PREPARATION=PASS; action={label}; pid={process.pid}; "
@@ -1186,36 +1209,76 @@ def click_point(
 
     evidence.output_watermark = capture.watermark()
     try:
-        exit_code, stdout, stderr = run_bounded_command(
-            [str(pointer_driver), str(process.pid), evidence.action_id, str(point[0]), str(point[1])],
+        click_exit, click_stdout, click_stderr = run_bounded_command(
+            [str(pointer_driver), str(process.pid), evidence.action_id, str(point[0]), str(point[1]), "click"],
             timeout=bounded_timeout(deadline, 5.0),
+        )
+        evidence.dispatch_attempted = True
+        evidence.api_exit_code = click_exit
+        if click_exit != 0:
+            evidence.api_result = f"Quartz click dispatch failed; stdout={click_stdout[-1000:]!r}; stderr={click_stderr[-1000:]!r}"
+            return evidence
+
+        press = wait_for_pointer_edge(
+            capture, process, evidence, "press", evidence.output_watermark, deadline
+        )
+        release = wait_for_pointer_edge(
+            capture, process, evidence, "release", int(press["_capture_index"]), deadline
+        )
+        evidence.api_result = (
+            f"click={click_stdout.strip()}; app_press={press.get('raw', '')}; app_release={release.get('raw', '')}"
         )
     except UnsafeChildCleanupError as error:
         evidence.dispatch_attempted = True
         evidence.api_exit_code = 124
-        evidence.api_result = f"Quartz dispatch timed out and helper cleanup failed: {error}"
+        evidence.api_result = f"Quartz edge dispatch timed out and helper cleanup failed: {error}"
         raise
-    except OSError as error:
-        evidence.dispatch_attempted = False
-        evidence.api_exit_code = 127
-        evidence.api_result = f"driver launch failed before dispatch: {type(error).__name__}: {error}"
-        return evidence
-    evidence.dispatch_attempted = True
-    evidence.api_exit_code = exit_code
-    if exit_code == 0:
-        evidence.api_result = stdout.strip() or "Quartz driver returned success"
-    elif exit_code == 124:
-        evidence.transport_uncertain = True
-        evidence.api_result = f"Quartz dispatch timed out; delivery uncertain; {stderr.strip()}"
-    elif exit_code == 77:
-        evidence.api_result = f"TCC_DENIED: {stderr.strip()}"
-    else:
-        evidence.api_result = f"Quartz dispatch failed; stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+    except (OSError, RuntimeError) as error:
+        evidence.api_exit_code = 124 if isinstance(error, TimeoutError) else 1
+        evidence.transport_uncertain = evidence.dispatch_attempted
+        evidence.api_result = f"Native pointer edge was not fully observed: {error}"
+        evidence.application_edge_error = evidence.api_result
     print(
         f"MACOS_DOC_CLOSE_POINTER_INPUT=RESULT; {evidence.summary()}; api_detail={evidence.api_result!r}; "
-        "posting return is transport evidence only"
+        "both application-observed button edges are required"
     )
     return evidence
+
+
+def wait_for_pointer_edge(
+    capture: BoundedCapture,
+    process: subprocess.Popen[str],
+    evidence: ActionEvidence,
+    action: str,
+    after_index: int,
+    deadline: float,
+) -> dict[str, str]:
+    expected = evidence.expected_marker_fields or {}
+    edge_deadline = min(deadline, time.monotonic() + POINTER_EDGE_RESPONSE_SECONDS)
+    while time.monotonic() < edge_deadline:
+        if capture.reader_error:
+            raise RuntimeError(f"editor output capture failed while waiting for button {action}: {capture.reader_error}")
+        if process.poll() is not None:
+            raise RuntimeError(f"editor exited before application-observed button {action}; exit_code={process.returncode}")
+        for event in capture.recent_telemetry(expected):
+            if event.get("kind") != "DIAG_GLFW_MOUSE_BUTTON" or event.get("button") != "left" or event.get("action") != action:
+                continue
+            if int(event.get("_capture_index", "-1")) <= after_index:
+                continue
+            if event.get("native_focused") != "1":
+                raise RuntimeError(f"application observed button {action} without native focus: {event.get('raw')!r}")
+            print(
+                f"MACOS_DOC_CLOSE_APP_POINTER_EDGE=PASS; action={action}; action_id={evidence.action_id}; "
+                f"marker={event.get('raw', '')}"
+            )
+            return event
+        time.sleep(0.025)
+    recent = capture.recent_telemetry(expected)
+    detail = " | ".join(event.get("raw", "") for event in recent if event.get("kind") == "DIAG_GLFW_MOUSE_BUTTON")
+    raise RuntimeError(
+        f"timed out waiting for application-observed left-button {action}; action_id={evidence.action_id}; "
+        f"watermark={after_index}; recent_pointer_edges={detail!r}"
+    )
 
 
 def click_document_tab_close(
@@ -1231,12 +1294,15 @@ def click_document_tab_close(
     drain_prompt_geometry(capture, protocol)
     control = wait_close_control(capture, process, protocol, deadline)
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "document tab close")
-    evidence = click_point(process, capture, pointer_driver, fixture_bounds, point, deadline, label)
-    evidence.expected_marker_fields = {
+    expected_marker_fields = {
         "scenario": protocol.scenario,
         "host": protocol.host,
         "asset": protocol.asset,
+        "generation": str(protocol.generation),
     }
+    evidence = click_point(
+        process, capture, pointer_driver, fixture_bounds, point, deadline, label, expected_marker_fields
+    )
 
     def validate(event: dict[str, str]) -> None:
         protocol.check_identity(event)
@@ -1282,13 +1348,15 @@ def enter_editor_value(
     if control.get("generation") != "0" or control.get("value") != "20":
         raise RuntimeError(f"editor text control started in an unexpected state: {control.get('raw')!r}")
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "editable value")
-    focus_evidence = click_point(process, capture, pointer_driver, fixture_bounds, point, deadline, "Editable value")
-    focus_evidence.expected_marker_fields = {
+    expected_marker_fields = {
         "scenario": protocol.scenario,
         "host": protocol.host,
         "asset": protocol.asset,
         "generation": "0",
     }
+    focus_evidence = click_point(
+        process, capture, pointer_driver, fixture_bounds, point, deadline, "Editable value", expected_marker_fields
+    )
 
     def validate_focus(event: dict[str, str]) -> None:
         protocol.check_identity(event)
@@ -1473,7 +1541,21 @@ def click_decision(
     error: str = "",
 ) -> dict[str, str]:
     point = get_prompt_point(capture, protocol, choice)
-    evidence = click_point(process, capture, pointer_driver, fixture_bounds, point, deadline, choice.title())
+    evidence = click_point(
+        process,
+        capture,
+        pointer_driver,
+        fixture_bounds,
+        point,
+        deadline,
+        choice.title(),
+        {
+            "scenario": protocol.scenario,
+            "host": protocol.host,
+            "asset": protocol.asset,
+            "generation": str(protocol.generation),
+        },
+    )
     return expect_action(
         capture,
         process,
@@ -1564,7 +1646,21 @@ def run_decisions(
         fixture_generation = protocol.accept_fixture(fixture)
         allow_control = wait_close_control(capture, process, protocol, deadline, kind="ALLOW_CLOSE_CONTROL")
         allow_point = parse_point(f"{allow_control.get('x', '')},{allow_control.get('y', '')}", "Allow close")
-        allow_evidence = click_point(process, capture, pointer_driver, fixture_bounds, allow_point, deadline, "Allow close")
+        allow_evidence = click_point(
+            process,
+            capture,
+            pointer_driver,
+            fixture_bounds,
+            allow_point,
+            deadline,
+            "Allow close",
+            {
+                "scenario": protocol.scenario,
+                "host": protocol.host,
+                "asset": protocol.asset,
+                "generation": str(protocol.generation),
+            },
+        )
         expect_action(
             capture, process, deadline, protocol, allow_evidence, "allow-close", fixture_generation,
             resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42",

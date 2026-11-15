@@ -159,7 +159,10 @@ namespace PulseForge
 				if (auto Result = Destination.RemoveAudioListener(); !Result) return std::unexpected(ToReconcileError(Result.error()));
 			}
 
-			return SyncOptional<ScriptComponent>(Source, Destination, &Entity::GetScript, &Entity::SetScript, &Entity::RemoveScript);
+			if (auto Result = SyncOptional<ScriptComponent>(Source, Destination,
+				&Entity::GetScript, &Entity::SetScript, &Entity::RemoveScript); !Result) return Result;
+			return SyncOptional<BlueprintComponent>(Source, Destination,
+				&Entity::GetBlueprint, &Entity::SetBlueprint, &Entity::RemoveBlueprint);
 		}
 
 		std::expected<void, PrefabReconcileError> SyncFullEntity(const Entity& Source, const Entity& Destination)
@@ -196,6 +199,8 @@ namespace PulseForge
 				&Entity::SetRuntimeUICanvas, &Entity::RemoveRuntimeUICanvas));
 			Remember(SyncOptional<AudioListenerComponent>(Source, Destination, &Entity::GetAudioListener, &Entity::SetAudioListener, &Entity::RemoveAudioListener));
 			Remember(SyncOptional<ScriptComponent>(Source, Destination, &Entity::GetScript, &Entity::SetScript, &Entity::RemoveScript));
+			Remember(SyncOptional<BlueprintComponent>(Source, Destination,
+				&Entity::GetBlueprint, &Entity::SetBlueprint, &Entity::RemoveBlueprint));
 
 			const auto SourcePrefab = Source.GetPrefabInstance();
 			const auto DestinationPrefab = Destination.GetPrefabInstance();
@@ -2085,7 +2090,9 @@ namespace PulseForge
 		auto SourceValue = ReadProperty(*SourceEntity, ComponentID, PropertyID);
 		const bool UsesScriptDefault = !SourceValue && SourceValue.error().Code == PropertyAccessErrorCode::UnknownProperty &&
 			ComponentID == PropertyComponentIds::ScriptFloat;
-		if (!SourceValue && !UsesScriptDefault)
+		const bool UsesBlueprintDefault = !SourceValue && SourceValue.error().Code == PropertyAccessErrorCode::UnknownProperty &&
+			ComponentID == PropertyComponentIds::BlueprintFloat;
+		if (!SourceValue && !UsesScriptDefault && !UsesBlueprintDefault)
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, SourceValue.error().Message));
 		const auto Subtree = GetSubtree(LinkedRoot);
 		if (!Subtree) return std::unexpected(Subtree.error());
@@ -2112,9 +2119,11 @@ namespace PulseForge
 		});
 		if (auto Validation = Metadata.Validate(LinkedRoot.GetUUID()); !Validation)
 			return std::unexpected(MakeError(PrefabReconcileErrorCode::InvalidInstance, Validation.error()));
-		if (UsesScriptDefault)
+		if (UsesScriptDefault || UsesBlueprintDefault)
 		{
-			auto Removed = RemoveScriptFloatProperty(*LiveIt, PropertyID);
+			auto Removed = UsesScriptDefault
+				? RemoveScriptFloatProperty(*LiveIt, PropertyID)
+				: RemoveBlueprintFloatProperty(*LiveIt, PropertyID);
 			if (!Removed) return std::unexpected(MakeError(PrefabReconcileErrorCode::UnsupportedOverride, Removed.error().Message));
 		}
 		else if (auto Result = WriteProperty(*LiveIt, ComponentID, PropertyID, *SourceValue); !Result)

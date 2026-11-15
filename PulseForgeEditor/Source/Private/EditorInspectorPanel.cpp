@@ -7,6 +7,7 @@
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorStyle.h"
 #include "Assets/PrefabInstanceReconciler.h"
+#include "Scene/Components/BlueprintComponent.h"
 
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -218,23 +219,25 @@ namespace PulseForgeEditor
 				"Could not read Inspector property '" + std::string(PropertyId) + "': " + Value.error().Message);
 			return;
 		}
-		if (!DrawWidget(*Value)) return;
-
-		const auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit " + std::string(PropertyId),
-			[Entity, ComponentId = std::string(ComponentId), PropertyId = std::string(PropertyId),
-				Value = std::move(*Value), Actions = &Inspector.Actions]() -> std::expected<void, PulseForge::SceneError>
-			{
-				const auto Result = PulseForge::WriteProperty(Entity, ComponentId, PropertyId, Value);
-				if (!Result)
-					return std::unexpected(PulseForge::SceneError{ PulseForge::SceneErrorCode::StorageFailure, Result.error().Message });
-				if (auto Recorded = Actions->RecordPrefabPropertyOverride(Entity, ComponentId, PropertyId); !Recorded)
-					return std::unexpected(PulseForge::SceneError{
-						PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
-				return {};
-			});
-		if (!Updated) Inspector.Actions.ReportInspectorError("Inspector property update failed: " + Updated.error());
+		if (DrawWidget(*Value))
+		{
+			const auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit " + std::string(PropertyId),
+				[Entity, ComponentId = std::string(ComponentId), PropertyId = std::string(PropertyId),
+					Value = std::move(*Value), Actions = &Inspector.Actions]() -> std::expected<void, PulseForge::SceneError>
+				{
+					const auto Result = PulseForge::WriteProperty(Entity, ComponentId, PropertyId, Value);
+					if (!Result)
+						return std::unexpected(PulseForge::SceneError{ PulseForge::SceneErrorCode::StorageFailure, Result.error().Message });
+					if (auto Recorded = Actions->RecordPrefabPropertyOverride(Entity, ComponentId, PropertyId); !Recorded)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
+					return {};
+				});
+			if (!Updated) Inspector.Actions.ReportInspectorError("Inspector property update failed: " + Updated.error());
+		}
 
 		if (!Inspector.SceneValue) return;
+		if (!Inspector.Actions.IsLinkedPrefabEntity(Entity)) return;
 		auto LinkedRoot = PulseForge::PrefabInstanceReconciler::FindLinkedRoot(*Inspector.SceneValue, Entity);
 		if (!LinkedRoot || !LinkedRoot->has_value()) return;
 		const auto Metadata = (**LinkedRoot).GetPrefabInstance();
@@ -343,8 +346,9 @@ namespace PulseForgeEditor
 			const auto AudioListener = Entity.GetAudioListener();
 			const auto Script = Entity.GetScript();
 			const auto RuntimeUICanvas = Entity.GetRuntimeUICanvas();
+			const auto Blueprint = Entity.GetBlueprint();
 			if (!Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !Mesh || !Rigidbody || !Collider ||
-				!AudioSource || !AudioListener || !Script || !RuntimeUICanvas)
+				!AudioSource || !AudioListener || !Script || !RuntimeUICanvas || !Blueprint)
 				Inspector.Actions.ReportInspectorError("Could not inspect entity components.");
 
 			if (Camera && !Camera->has_value() && Inspector.Style.MenuItem(PulseForgeEditor::EditorIcon::Camera, "Camera"))
@@ -479,6 +483,25 @@ namespace PulseForgeEditor
 				if (!HasDocuments) ImGui::MenuItem("Create a .pfui asset first", nullptr, false, false);
 				ImGui::EndMenu();
 			}
+
+			if (Blueprint && !Blueprint->has_value() && ImGui::BeginMenu("Blueprint"))
+			{
+				bool HasBlueprintAssets = false;
+				for (const PulseForge::AssetRecord& Asset : Inspector.Assets)
+				{
+					if (!IsAssetExtension(Asset, { ".pfblueprint" })) continue;
+					HasBlueprintAssets = true;
+					const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+					if (!ImGui::MenuItem(Path.c_str())) continue;
+					PulseForge::BlueprintComponent Component;
+					Component.BlueprintAsset = Asset.ID;
+					RecordComponentOperation(
+						Inspector, [Entity, Component] { return Entity.SetBlueprint(Component); }, "Blueprint component add failed");
+					break;
+				}
+				if (!HasBlueprintAssets) ImGui::MenuItem("Create a .pfblueprint asset first", nullptr, false, false);
+				ImGui::EndMenu();
+			}
 			ImGui::EndPopup();
 		}
 	}
@@ -497,6 +520,177 @@ namespace PulseForgeEditor
 		DrawRuntimeUICanvasComponent(Inspector, Entity);
 		DrawAudioListenerComponent(Inspector, Entity);
 		DrawScriptComponent(Inspector, Entity);
+		DrawBlueprintComponent(Inspector, Entity);
+	}
+
+	void EditorInspectorPanel::DrawBlueprintComponent(Context& Inspector, const PulseForge::Entity& Entity)
+	{
+		const auto Result = Entity.GetBlueprint();
+		if (!Result || !Result->has_value()) return;
+		PulseForge::BlueprintComponent Component = **Result;
+		const bool Expanded = Inspector.Style.SectionHeader(EditorIcon::Script, "Blueprint");
+		ImGui::SameLine();
+		ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
+		if (Inspector.Style.IconButton(EditorIcon::Delete, "Remove", "RemoveBlueprint", "Remove Blueprint component", true))
+		{
+			RecordComponentOperation(Inspector, [Entity] { return Entity.RemoveBlueprint(); }, "Blueprint component removal failed");
+			return;
+		}
+		if (!Expanded) return;
+
+		Inspector.Style.BeginComponentBody("BlueprintComponentBody");
+		const bool LinkedInstance = Inspector.Actions.IsLinkedPrefabEntity(Entity);
+		if (LinkedInstance) ImGui::TextDisabled("Inherited Blueprint values can be overridden per instance.");
+		if (Inspector.Style.BeginPropertyTable("BlueprintProperties"))
+		{
+			if (Inspector.Style.BeginPropertyRow("Blueprint Asset"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Blueprint, PulseForge::PropertyIds::Asset,
+					[&Inspector, this](PulseForge::PropertyValue& Value)
+					{
+						auto* BlueprintAsset = std::get_if<PulseForge::AssetID>(&Value);
+						if (!BlueprintAsset) return false;
+						std::optional<PulseForge::AssetID> Selected{ *BlueprintAsset };
+						if (!DrawAssetSelector(Inspector, "##BlueprintAsset", Selected, { ".pfblueprint" }, false) || !Selected)
+							return false;
+						*BlueprintAsset = *Selected;
+						return true;
+					});
+			if (Inspector.Style.BeginPropertyRow("Enabled"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Blueprint, PulseForge::PropertyIds::Enabled,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Enabled = std::get_if<bool>(&Value);
+						return Enabled && ImGui::Checkbox("##BlueprintEnabled", Enabled);
+					});
+			Inspector.Style.EndPropertyTable();
+		}
+
+		DrawBlueprintFloatProperties(Inspector, Entity, Component);
+		Inspector.Style.EndComponentBody();
+	}
+
+	void EditorInspectorPanel::DrawBlueprintFloatProperties(
+		Context& Inspector, const PulseForge::Entity& Entity, const PulseForge::BlueprintComponent& Component)
+	{
+		ImGui::TextDisabled("Blueprint Properties");
+		if (ImGui::SmallButton("Refresh Blueprint Schema")) m_CachedBlueprintProperties.reset();
+		const PulseForge::UUID ProjectIdentity = Inspector.Actions.GetBlueprintProjectIdentity();
+		if (!m_CachedBlueprintProperties || !m_CachedBlueprintProject || *m_CachedBlueprintProject != ProjectIdentity ||
+			!m_CachedBlueprintAsset || *m_CachedBlueprintAsset != Component.BlueprintAsset)
+		{
+			m_CachedBlueprintProject = ProjectIdentity;
+			m_CachedBlueprintAsset = Component.BlueprintAsset;
+			m_CachedBlueprintProperties = Inspector.Actions.ReadBlueprintScalarPropertyIds(Component.BlueprintAsset);
+		}
+
+		const auto& Schema = *m_CachedBlueprintProperties;
+		if (!Schema) ImGui::TextWrapped("Blueprint properties are unavailable: %s", Schema.error().c_str());
+		const bool HasSchemaRows = Schema && !Schema->empty();
+		std::vector<std::string> DisplayedIDs;
+		if (HasSchemaRows && Inspector.Style.BeginPropertyTable("BlueprintFloatProperties"))
+		{
+			DisplayedIDs.reserve(Schema->size());
+			for (const std::string& Identifier : *Schema)
+			{
+				DisplayedIDs.push_back(Identifier);
+				const auto Stored = Component.FloatProperties.find(Identifier);
+				const bool HasOverride = Stored != Component.FloatProperties.end();
+				float Value = HasOverride ? Stored->second : 0.0f;
+				const std::string Label = Identifier + (HasOverride ? "  [Override]" : "  [Default]");
+				ImGui::PushID(Identifier.c_str());
+				if (Inspector.Style.BeginPropertyRow(Label))
+				{
+					ImGui::SetNextItemWidth((std::max)(ImGui::GetContentRegionAvail().x, 1.0f));
+					if (ImGui::DragFloat("##BlueprintFloatProperty", &Value, 0.05f,
+							-PulseForge::MaximumBlueprintFloatPropertyMagnitude,
+							PulseForge::MaximumBlueprintFloatPropertyMagnitude, "%.3f"))
+					{
+						auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit Blueprint property " + Identifier,
+							[Entity, Identifier, Value, Actions = &Inspector.Actions]() -> std::expected<void, PulseForge::SceneError>
+							{
+								const auto Written = PulseForge::WriteProperty(Entity,
+									PulseForge::PropertyComponentIds::BlueprintFloat, Identifier, PulseForge::PropertyValue{ Value });
+								if (!Written) return std::unexpected(ToSceneError(Written.error()));
+								if (Actions->IsLinkedPrefabEntity(Entity))
+									if (auto Recorded = Actions->RecordPrefabPropertyOverride(
+											Entity, PulseForge::PropertyComponentIds::BlueprintFloat, Identifier); !Recorded)
+										return std::unexpected(PulseForge::SceneError{
+											PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
+								return {};
+							});
+						if (!Updated) Inspector.Actions.ReportInspectorError("Blueprint property update failed: " + Updated.error());
+					}
+					if (HasOverride && ImGui::SmallButton("Reset"))
+					{
+						if (Inspector.Actions.IsLinkedPrefabEntity(Entity))
+						{
+							auto Reset = Inspector.Actions.ResetPrefabPropertyOverride(
+								Entity, PulseForge::PropertyComponentIds::BlueprintFloat, Identifier);
+							if (!Reset) Inspector.Actions.ReportInspectorError("Blueprint property reset failed: " + Reset.error());
+						}
+						else
+						{
+							auto Reset = Inspector.Actions.RunInspectorSceneEdit("Reset Blueprint property " + Identifier,
+								[Entity, Identifier]() -> std::expected<void, PulseForge::SceneError>
+								{
+									const auto Removed = PulseForge::RemoveBlueprintFloatProperty(Entity, Identifier);
+									if (!Removed) return std::unexpected(ToSceneError(Removed.error()));
+									return {};
+								});
+							if (!Reset) Inspector.Actions.ReportInspectorError("Blueprint property reset failed: " + Reset.error());
+						}
+					}
+				}
+				ImGui::PopID();
+			}
+			Inspector.Style.EndPropertyTable();
+		}
+
+		std::vector<std::string> LegacyIDs;
+		for (const auto& [Identifier, Value] : Component.FloatProperties)
+		{
+			(void)Value;
+			if (std::find(DisplayedIDs.begin(), DisplayedIDs.end(), Identifier) == DisplayedIDs.end())
+				LegacyIDs.push_back(Identifier);
+		}
+		if (!LegacyIDs.empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextDisabled("Stored values absent from the current graph are preserved.");
+			if (Inspector.Style.BeginPropertyTable(HasSchemaRows ? "LegacyBlueprintFloatProperties" : "BlueprintFloatProperties"))
+			{
+				for (const std::string& Identifier : LegacyIDs)
+				{
+					ImGui::PushID(Identifier.c_str());
+					if (Inspector.Style.BeginPropertyRow(Identifier + "  [Legacy]"))
+					{
+						float Value = Component.FloatProperties.at(Identifier);
+						ImGui::SetNextItemWidth((std::max)(ImGui::GetContentRegionAvail().x, 1.0f));
+						if (ImGui::DragFloat("##LegacyBlueprintFloat", &Value, 0.05f,
+								-PulseForge::MaximumBlueprintFloatPropertyMagnitude,
+								PulseForge::MaximumBlueprintFloatPropertyMagnitude, "%.3f"))
+						{
+							auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit legacy Blueprint property " + Identifier,
+								[Entity, Identifier, Value, Actions = &Inspector.Actions]() -> std::expected<void, PulseForge::SceneError>
+								{
+									const auto Written = PulseForge::WriteProperty(Entity,
+										PulseForge::PropertyComponentIds::BlueprintFloat, Identifier, PulseForge::PropertyValue{ Value });
+									if (!Written) return std::unexpected(ToSceneError(Written.error()));
+									if (Actions->IsLinkedPrefabEntity(Entity))
+									if (auto Recorded = Actions->RecordPrefabPropertyOverride(
+											Entity, PulseForge::PropertyComponentIds::BlueprintFloat, Identifier); !Recorded)
+										return std::unexpected(PulseForge::SceneError{
+											PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
+									return {};
+								});
+							if (!Updated) Inspector.Actions.ReportInspectorError("Legacy Blueprint property update failed: " + Updated.error());
+						}
+					}
+					ImGui::PopID();
+				}
+				Inspector.Style.EndPropertyTable();
+			}
+		}
 	}
 
 	void EditorInspectorPanel::DrawEnvironmentLightComponent(Context& Inspector, const PulseForge::Entity& Entity)

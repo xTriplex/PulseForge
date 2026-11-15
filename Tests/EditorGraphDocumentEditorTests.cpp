@@ -1,6 +1,7 @@
 #include "TestAssetSupport.h"
 
 #include "Editor/EditorGraphDocumentEditor.h"
+#include "Editor/EditorBlueprintProgramCatalog.h"
 #include "Editor/BlueprintGraphCompiler.h"
 #include "Editor/EditorGraphModel.h"
 #include "Assets/AssetCookService.h"
@@ -23,6 +24,7 @@
 #include <unordered_set>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace PulseForgeEditor
 {
@@ -270,7 +272,12 @@ namespace
 		const auto ID = UUID::Generate();
 		PF_CHECK(Tests, ID.has_value());
 		if (!ID) return;
-		Temporary.Path = std::filesystem::temp_directory_path() / ID->ToString();
+		std::error_code TemporaryRootError;
+		const auto TemporaryRoot = std::filesystem::weakly_canonical(
+			std::filesystem::temp_directory_path(), TemporaryRootError);
+		PF_CHECK(Tests, !TemporaryRootError);
+		if (TemporaryRootError) return;
+		Temporary.Path = TemporaryRoot / ID->ToString();
 		std::error_code Error;
 		std::filesystem::create_directories(Temporary.Path, Error);
 		PF_CHECK(Tests, !Error);
@@ -281,7 +288,9 @@ namespace
 
 		EditorDocumentManager Documents;
 		EditorDocumentEditorRegistry Editors;
-		EditorGraphDocumentEditor GraphEditor(Documents, Editors);
+		std::vector<PulseForge::AssetID> PublishedBlueprintPrograms;
+		EditorGraphDocumentEditor GraphEditor(Documents, Editors, {},
+			[&](const PulseForge::AssetID& Asset) { PublishedBlueprintPrograms.push_back(Asset); });
 		EditorGraphSchema FutureSchema{ "test.future-document", 3, EditorGraphCyclePolicy::Reject,
 			EditorGraphCyclePolicy::Allow, true, {
 				{ "custom.emitter", "Emitter", { { "text-out", "Text", EditorGraphPinDirection::Output,
@@ -382,6 +391,7 @@ namespace
 		auto ManagedBlueprint = GraphEditor.CreateBlueprintAsset(
 			Project->GetAssetRegistry(), Project->GetRootPath(), BlueprintAssetPath);
 		PF_CHECK(Tests, ManagedBlueprint.has_value());
+		PF_CHECK(Tests, ManagedBlueprint && PublishedBlueprintPrograms == std::vector<PulseForge::AssetID>{ ManagedBlueprint->GraphID });
 		if (ManagedBlueprint)
 		{
 			const auto ProgramPath = Project->GetRootPath() / ManagedBlueprint->ProjectRelativePath;
@@ -425,11 +435,13 @@ namespace
 							{ PropertyPinID, std::string{}, false, true, true } });
 					PF_CHECK(Tests, ManagedSession->IsDirty());
 					PF_CHECK(Tests, !GraphEditor.Save(*ManagedSession) && ManagedSession->IsDirty());
+					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == 1);
 					PF_CHECK(Tests, ReadBytes(ProgramPath) == InitialProgram && ReadBytes(GraphPath) == InitialGraph);
 					(void)EditorGraphDocumentEditorTestAccess::Process(GraphEditor, *ManagedSession,
 						{ { PropertyPinID, std::string("health"), true, true, false },
 							{ PropertyPinID, std::string("health"), false, true, true } });
 					PF_CHECK(Tests, GraphEditor.Save(*ManagedSession) && !ManagedSession->IsDirty());
+					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == 2 && PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
 					PF_CHECK(Tests, Editors.Discard(*ManagedSession) && !ManagedSession->IsDirty());
 					const auto ReopenedProgram = ReadBytes(ProgramPath);
 					const auto ReopenedGraph = ReadBytes(GraphPath);
@@ -448,6 +460,48 @@ namespace
 						BlueprintComponent CookBlueprint{ ManagedBlueprint->GraphID, true };
 						if (CookEntity)
 							PF_CHECK(Tests, CookBlueprint.SetFloatProperty("health", 0.0f) && CookEntity->SetBlueprint(CookBlueprint));
+						if (CookEntity)
+						{
+							EditorBlueprintProgramCatalog ProgramCatalog;
+							ProgramCatalog.SetProject(&*Project);
+							SceneRuntimeServices EditorServices;
+							ProgramCatalog.BindRuntimeServices(EditorServices);
+							SceneRuntimeDesc EditorRuntimeDescription;
+							EditorRuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+							SceneRuntime EditorRuntime(*Project, EditorRuntimeDescription, EditorServices);
+							PF_CHECK(Tests, EditorRuntime.Start(CookScene).has_value());
+							const auto PlayedBlueprint = CookEntity->GetBlueprint();
+							PF_CHECK(Tests, PlayedBlueprint && PlayedBlueprint->has_value() &&
+								(**PlayedBlueprint).FindFloatProperty("health") == 10.0f);
+							const auto EditorTraces = EditorRuntime.GetBlueprintTraces();
+							PF_CHECK(Tests, std::any_of(EditorTraces.begin(), EditorTraces.end(),
+								[&](const BlueprintRuntimeTrace& Trace)
+								{
+									return Trace.Handle.Asset == ManagedBlueprint->GraphID &&
+										Trace.Event == BlueprintEventKind::OnCreate;
+								}));
+							const uint64_t PublishedGeneration = ProgramCatalog.GetGeneration();
+							ProgramCatalog.ProgramPublished(ManagedBlueprint->GraphID);
+							PF_CHECK(Tests, ProgramCatalog.GetGeneration() != PublishedGeneration);
+							const auto ReboundProgram = ProgramCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate);
+							PF_CHECK(Tests, ReboundProgram && ReboundProgram->Program &&
+								ReboundProgram->Revision == ProgramCatalog.GetGeneration());
+							EditorRuntime.Stop();
+							PF_CHECK(Tests, CookBlueprint.SetFloatProperty("health", 0.0f) && CookEntity->SetBlueprint(CookBlueprint));
+						}
+						if (CookEntity && InitialProgram)
+						{
+							EditorBlueprintProgramCatalog FailureCatalog;
+							FailureCatalog.SetProject(&*Project);
+							PF_CHECK(Tests, WriteBytes(ProgramPath, "malformed Blueprint program"));
+							PF_CHECK(Tests, !FailureCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate) &&
+								FailureCatalog.GetLoadFailure(ManagedBlueprint->GraphID).has_value());
+							PF_CHECK(Tests, WriteBytes(ProgramPath, *InitialProgram));
+							PF_CHECK(Tests, !FailureCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate));
+							FailureCatalog.ProgramPublished(ManagedBlueprint->GraphID);
+							PF_CHECK(Tests, FailureCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate).has_value() &&
+								!FailureCatalog.GetLoadFailure(ManagedBlueprint->GraphID));
+						}
 						const auto SceneBytes = SceneSerializer::Serialize(CookScene);
 						PF_CHECK(Tests, SceneBytes.has_value());
 						const auto ScenePath = Project->GetRootPath() / "Assets" / "BlueprintCook.scene";
@@ -477,6 +531,8 @@ namespace
 #endif
 										CookRoot };
 									const auto Cooked = AssetCookService::Cook(Request);
+									if (!Cooked) std::cerr << "Managed Blueprint cook failed: " << Cooked.error().Message
+										<< " (" << Cooked.error().Path.string() << ")\n";
 									PF_CHECK(Tests, Cooked.has_value());
 									if (Cooked)
 									{

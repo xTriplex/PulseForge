@@ -27,6 +27,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PulseForgeEditor/Source/Private/EditorDocumentCloseRequest.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspaceStore.cpp
+		PulseForgeEditor/Source/Private/EditorBlueprintProgramCatalog.cpp
 		PulseForgeEditor/Source/Private/EditorMeshPickingCache.cpp
 		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
 		PulseForgeEditor/Source/Private/ViewportMath.cpp

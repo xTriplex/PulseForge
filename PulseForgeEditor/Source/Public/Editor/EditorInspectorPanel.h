@@ -15,6 +15,11 @@
 #include <string_view>
 #include <vector>
 
+namespace PulseForge
+{
+	struct BlueprintComponent;
+}
+
 namespace PulseForgeEditor
 {
 	class EditorAssetSelector;
@@ -47,6 +52,13 @@ namespace PulseForgeEditor
 			return std::unexpected("Script source metadata is unavailable in this Inspector context");
 		}
 		[[nodiscard]] virtual PulseForge::UUID GetScriptProjectIdentity() const { return {}; }
+		[[nodiscard]] virtual std::expected<std::vector<std::string>, std::string> ReadBlueprintScalarPropertyIds(
+			const PulseForge::AssetID& Asset)
+		{
+			(void)Asset;
+			return std::unexpected("Blueprint scalar properties are unavailable in this Inspector context");
+		}
+		[[nodiscard]] virtual PulseForge::UUID GetBlueprintProjectIdentity() const { return {}; }
 		[[nodiscard]] virtual std::expected<void, std::string> OpenScriptAsset(const PulseForge::AssetID& Asset)
 		{
 			(void)Asset;
@@ -128,10 +140,16 @@ namespace PulseForgeEditor
 		void DrawAudioListenerComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawScriptComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity);
+		void DrawBlueprintComponent(Context& Inspector, const PulseForge::Entity& Entity);
+		void DrawBlueprintFloatProperties(Context& Inspector, const PulseForge::Entity& Entity,
+			const PulseForge::BlueprintComponent& Component);
 
 		bool m_FocusEntityNameNextFrame = false;
 		std::optional<PulseForge::UUID> m_CachedScriptProject;
 		std::optional<PulseForge::AssetID> m_CachedScriptAsset;
 		std::optional<std::expected<PulseForge::ScriptSourceMetadata, std::string>> m_CachedScriptMetadata;
+		std::optional<PulseForge::UUID> m_CachedBlueprintProject;
+		std::optional<PulseForge::AssetID> m_CachedBlueprintAsset;
+		std::optional<std::expected<std::vector<std::string>, std::string>> m_CachedBlueprintProperties;
 	};
 } // namespace PulseForgeEditor

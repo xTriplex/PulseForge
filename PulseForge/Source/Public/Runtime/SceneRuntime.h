@@ -95,7 +95,7 @@ namespace PulseForge
 		std::function<uint64_t()> GetBlueprintProgramGeneration;
 		// Reads authored initial scalar values once when an asset instance is first bound.
 		std::function<std::optional<float>(const Entity&, std::string_view)> ReadBlueprintScalarProperty;
-		// Applies one event's scalar property writes as a single owner-thread transaction.
+		// Accepts/rejects one event's per-instance scalar-state transaction before SceneRuntime commits it.
 		std::function<bool(const Entity&, std::span<const BlueprintScalarPropertyWrite>)> ApplyBlueprintPropertyWrites;
 		// Accepted requests are committed by the owning host after SceneRuntime::Advance returns.
 		std::function<bool(const AssetID&)> QueueSceneTransition;

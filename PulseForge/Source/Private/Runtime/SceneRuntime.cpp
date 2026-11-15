@@ -112,6 +112,11 @@ namespace PulseForge
 			std::vector<std::string> PropertyIds;
 			std::vector<float> ScalarState;
 		};
+		struct BlueprintInitialScalarDefaults final
+		{
+			Entity BoundEntity;
+			std::unordered_map<std::string, float> Values;
+		};
 		struct PendingBlueprintPhysicsForce final
 		{
 			Entity Target;
@@ -164,6 +169,8 @@ namespace PulseForge
 		std::optional<RuntimeUICanvasState> RuntimeUI;
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
+		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInitialScalarDefaults, UUIDHash>, UUIDHash>
+			BlueprintInitialDefaults;
 		std::unordered_map<UUID, Entity, UUIDHash> BlueprintKnownEntities;
 		std::deque<Entity> PendingEntityDestructions;
 		std::deque<PendingBlueprintPhysicsForce> PendingBlueprintPhysicsForces;
@@ -463,6 +470,7 @@ namespace PulseForge
 				}
 				BlueprintEvents.erase(Target.GetUUID());
 				BlueprintInstances.erase(Target.GetUUID());
+				BlueprintInitialDefaults.erase(Target.GetUUID());
 				BlueprintKnownEntities.erase(Target.GetUUID());
 				std::erase_if(PendingBlueprintTimers,
 					[&](const PendingBlueprintTimer& Timer) { return Timer.Target == Target; });
@@ -545,11 +553,20 @@ namespace PulseForge
 					ProgramInstance.Revision = Instance.Revision;
 					ProgramInstance.PropertyIds = ProgramSource.ScalarPropertyIds;
 					ProgramInstance.ScalarState.resize(ProgramSource.ScalarPropertyIds.size(), 0.0f);
-					if (Services.ReadBlueprintScalarProperty)
+					BlueprintInitialScalarDefaults& InitialDefaults = BlueprintInitialDefaults[Target.GetUUID()][Instance.Asset];
+					if (InitialDefaults.BoundEntity != Target)
 					{
-						for (size_t PropertyIndex = 0; PropertyIndex < ProgramInstance.PropertyIds.size(); ++PropertyIndex)
-							if (const auto InitialValue = Services.ReadBlueprintScalarProperty(Target, ProgramInstance.PropertyIds[PropertyIndex]))
-								ProgramInstance.ScalarState[PropertyIndex] = *InitialValue;
+						InitialDefaults = {};
+						InitialDefaults.BoundEntity = Target;
+					}
+					for (size_t PropertyIndex = 0; PropertyIndex < ProgramInstance.PropertyIds.size(); ++PropertyIndex)
+					{
+						const std::string& PropertyId = ProgramInstance.PropertyIds[PropertyIndex];
+						auto [Default, Inserted] = InitialDefaults.Values.try_emplace(PropertyId, 0.0f);
+						if (Inserted && Services.ReadBlueprintScalarProperty)
+							if (const auto InitialValue = Services.ReadBlueprintScalarProperty(Target, PropertyId))
+								Default->second = *InitialValue;
+						ProgramInstance.ScalarState[PropertyIndex] = Default->second;
 					}
 				}
 				else if (ProgramInstance.PropertyIds != ProgramSource.ScalarPropertyIds)
@@ -741,6 +758,7 @@ namespace PulseForge
 				{
 					BlueprintEvents.erase(Iterator->first);
 					BlueprintInstances.erase(Iterator->first);
+					BlueprintInitialDefaults.erase(Iterator->first);
 					std::erase_if(BlueprintTraces,
 						[&](const BlueprintRuntimeTrace& Trace) { return Trace.Handle.Target == Iterator->second; });
 					std::erase_if(PendingBlueprintTimers,

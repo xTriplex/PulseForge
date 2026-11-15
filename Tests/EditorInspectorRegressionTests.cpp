@@ -3,6 +3,7 @@
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorAudioPreviewController.h"
 #include "Editor/EditorInspectorPanel.h"
+#include "Scene/Components/BlueprintComponent.h"
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorStyle.h"
 
@@ -343,9 +344,19 @@ namespace
 		}
 
 		void ReportInspectorError(std::string Message) override { Errors.push_back(std::move(Message)); }
+		std::expected<std::vector<std::string>, std::string> ReadBlueprintScalarPropertyIds(
+			const PulseForge::AssetID&) override
+		{
+			++BlueprintSchemaReadCount;
+			return BlueprintScalarPropertyIDs;
+		}
+		PulseForge::UUID GetBlueprintProjectIdentity() const override { return BlueprintProjectIdentity; }
 
 		int FinishCount = 0;
 		int CommandCount = 0;
+		int BlueprintSchemaReadCount = 0;
+		PulseForge::UUID BlueprintProjectIdentity{ 77, 88 };
+		std::vector<std::string> BlueprintScalarPropertyIDs;
 		std::vector<std::string> Errors;
 	};
 
@@ -380,6 +391,7 @@ namespace
 		ImGui::Begin("Inspector regression", nullptr, ImGuiWindowFlags_NoSavedSettings);
 		ImGui::GetStateStorage()->SetInt(ImGui::GetID("Mesh Renderer"), 1);
 		ImGui::GetStateStorage()->SetInt(ImGui::GetID("Script"), 1);
+		ImGui::GetStateStorage()->SetInt(ImGui::GetID("Blueprint"), 1);
 
 		ImGuiContext& Context = *ImGui::GetCurrentContext();
 		const int InitialColorDepth = Context.ColorStack.Size;
@@ -400,6 +412,44 @@ namespace
 		else
 			PF_CHECK(Tests, FloatTable && FloatTable->LastFrameActive == Context.FrameCount && FloatTable->ColumnsCount == 2 &&
 								FloatTable->CurrentRow == ExpectedFloatRows - 1);
+
+		if (const auto Selected = Workspace.Selection().GetPrimary(); Selected)
+			if (const auto Target = Scene.FindEntity(*Selected); Target)
+				if (const auto Blueprint = Target->GetBlueprint(); Blueprint && Blueprint->has_value())
+				{
+					ImGuiWindow* BlueprintBody = FindActiveChildWindow(Context, "/BlueprintComponentBody_");
+					ImGuiTable* BlueprintTable = BlueprintBody
+						? Context.Tables.GetByKey(BlueprintBody->GetID("BlueprintProperties")) : nullptr;
+					PF_CHECK(Tests, BlueprintTable && BlueprintTable->LastFrameActive == Context.FrameCount &&
+						BlueprintTable->ColumnsCount == 2 && BlueprintTable->CurrentRow == 1);
+					ImGuiTable* BlueprintFloatTable = BlueprintBody
+						? Context.Tables.GetByKey(BlueprintBody->GetID("BlueprintFloatProperties")) : nullptr;
+					size_t ExpectedBlueprintRows = Actions.BlueprintScalarPropertyIDs.size();
+					size_t ExpectedLegacyBlueprintRows = 0;
+					for (const auto& [Identifier, Value] : (**Blueprint).FloatProperties)
+					{
+						(void)Value;
+						if (std::find(Actions.BlueprintScalarPropertyIDs.begin(), Actions.BlueprintScalarPropertyIDs.end(), Identifier) ==
+							Actions.BlueprintScalarPropertyIDs.end())
+							++ExpectedLegacyBlueprintRows;
+					}
+					if (ExpectedBlueprintRows == 0)
+						PF_CHECK(Tests, !BlueprintFloatTable || BlueprintFloatTable->LastFrameActive != Context.FrameCount);
+					else
+					{
+						PF_CHECK(Tests, BlueprintFloatTable && BlueprintFloatTable->LastFrameActive == Context.FrameCount &&
+							BlueprintFloatTable->CurrentRow == static_cast<int>(ExpectedBlueprintRows) - 1);
+					}
+					ImGuiTable* LegacyBlueprintFloatTable = BlueprintBody
+						? Context.Tables.GetByKey(BlueprintBody->GetID("LegacyBlueprintFloatProperties")) : nullptr;
+					if (ExpectedLegacyBlueprintRows == 0)
+						PF_CHECK(Tests, !LegacyBlueprintFloatTable || LegacyBlueprintFloatTable->LastFrameActive != Context.FrameCount);
+					else
+					{
+						PF_CHECK(Tests, LegacyBlueprintFloatTable && LegacyBlueprintFloatTable->LastFrameActive == Context.FrameCount &&
+							LegacyBlueprintFloatTable->CurrentRow == static_cast<int>(ExpectedLegacyBlueprintRows) - 1);
+					}
+				}
 
 		ImGui::End();
 		ImGui::Render();
@@ -442,5 +492,13 @@ void RunEditorInspectorRegressionTests(TestRunner& Tests)
 	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 1);
 	SetScriptFloatProperties(Entity, {});
 	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 0);
+	PulseForge::BlueprintComponent Blueprint{ PulseForge::AssetID{ 3, 4 }, true };
+	PF_CHECK(Tests, Blueprint.SetFloatProperty("legacy", 5.0f));
+	PF_CHECK(Tests, Entity.SetBlueprint(Blueprint));
+	Actions.BlueprintScalarPropertyIDs = { "health" };
+	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 0);
+	PF_CHECK(Tests, Actions.BlueprintSchemaReadCount == 1);
+	PF_CHECK(Tests, !Entity.GetBlueprint()->value().FindFloatProperty("health"));
+	PF_CHECK(Tests, Entity.GetBlueprint()->value().FindFloatProperty("legacy") == 5.0f);
 	TestEditorAudioPreviewController(Tests);
 }

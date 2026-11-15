@@ -43,6 +43,8 @@ namespace PulseForge
 		inline constexpr std::string_view PointLight = "pointLight";
 		inline constexpr std::string_view SpotLight = "spotLight";
 		inline constexpr std::string_view MeshRenderer = "meshRenderer";
+		inline constexpr std::string_view Blueprint = "blueprint";
+		inline constexpr std::string_view BlueprintFloat = "blueprint.float";
 		inline constexpr std::string_view Script = "script";
 		inline constexpr std::string_view ScriptFloat = "script.float";
 		inline constexpr std::string_view Collider = "physics.collider";
@@ -83,7 +85,8 @@ namespace PulseForge
 		None,
 		MeshAsset,
 		MaterialAsset,
-		ScriptAsset
+		ScriptAsset,
+		BlueprintAsset
 	};
 
 	// Dynamic descriptors own their identity strings because authored IDs belong to the entity's script component.
@@ -170,5 +173,7 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<void, PropertyAccessError> AddScriptFloatProperty(
 		const Entity& Target, std::string_view AuthoredId, float Value);
 	[[nodiscard]] PULSEFORGE_API std::expected<void, PropertyAccessError> RemoveScriptFloatProperty(
+		const Entity& Target, std::string_view AuthoredId);
+	[[nodiscard]] PULSEFORGE_API std::expected<void, PropertyAccessError> RemoveBlueprintFloatProperty(
 		const Entity& Target, std::string_view AuthoredId);
 } // namespace PulseForge

@@ -1,8 +1,10 @@
 #include "Scene/PropertyMetadata.h"
 
 #include "Scene/Entity.h"
+#include "Scene/Components/BlueprintComponent.h"
 
 #include <array>
+#include <map>
 #include <type_traits>
 
 namespace PulseForge
@@ -15,6 +17,7 @@ namespace PulseForge
 		constexpr std::string_view PointLightId = PropertyComponentIds::PointLight;
 		constexpr std::string_view SpotLightId = PropertyComponentIds::SpotLight;
 		constexpr std::string_view MeshRendererId = PropertyComponentIds::MeshRenderer;
+		constexpr std::string_view BlueprintId = PropertyComponentIds::Blueprint;
 		constexpr std::string_view ScriptId = PropertyComponentIds::Script;
 		constexpr std::string_view ColliderId = PropertyComponentIds::Collider;
 
@@ -55,6 +58,9 @@ namespace PulseForge
 			PropertyDescriptor{ MeshRendererId, "materialAsset", "Material", std::optional<AssetID>{}, "", true, true, {}, {},
 				PropertyReferenceKind::MaterialAsset },
 			PropertyDescriptor{ MeshRendererId, "meshAsset", "Mesh", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::MeshAsset },
+			PropertyDescriptor{ BlueprintId, "enabled", "Enabled", true, "" },
+			PropertyDescriptor{ BlueprintId, "asset", "Blueprint", AssetID{}, "", true, true, {}, {},
+				PropertyReferenceKind::BlueprintAsset },
 			PropertyDescriptor{ ScriptId, "enabled", "Enabled", true, "" },
 			PropertyDescriptor{ ScriptId, "asset", "Script", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::ScriptAsset },
 			PropertyDescriptor{ ColliderId, PropertyIds::Shape, "Shape", std::string("box") },
@@ -92,6 +98,11 @@ namespace PulseForge
 			return MakeError(PropertyAccessErrorCode::InvalidValue, Error.Message);
 		}
 
+		PropertyAccessError BlueprintErrorToPropertyError(std::string Message)
+		{
+			return MakeError(PropertyAccessErrorCode::InvalidValue, std::move(Message));
+		}
+
 		template <typename T>
 		std::expected<T, PropertyAccessError> RequireComponent(
 			std::expected<std::optional<T>, SceneError> Result, std::string_view ComponentId)
@@ -119,15 +130,27 @@ namespace PulseForge
 	std::expected<std::vector<DynamicPropertyDescriptor>, PropertyAccessError> GetDynamicPropertyDescriptors(
 		const Entity& Target, std::string_view ComponentId)
 	{
-		if (ComponentId != PropertyComponentIds::ScriptFloat) return std::unexpected(UnknownPropertyError(ComponentId, {}));
-		auto Script = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
-		if (!Script) return std::unexpected(Script.error());
+		if (ComponentId != PropertyComponentIds::ScriptFloat && ComponentId != PropertyComponentIds::BlueprintFloat)
+			return std::unexpected(UnknownPropertyError(ComponentId, {}));
+		std::map<std::string, float, std::less<>> Properties;
+		if (ComponentId == PropertyComponentIds::ScriptFloat)
+		{
+			auto Script = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
+			if (!Script) return std::unexpected(Script.error());
+			Properties = Script->FloatProperties;
+		}
+		else
+		{
+			auto Blueprint = RequireComponent(Target.GetBlueprint(), PropertyComponentIds::Blueprint);
+			if (!Blueprint) return std::unexpected(Blueprint.error());
+			Properties = Blueprint->FloatProperties;
+		}
 		std::vector<DynamicPropertyDescriptor> Results;
-		Results.reserve(Script->FloatProperties.size());
-		for (const auto& [Identifier, Value] : Script->FloatProperties)
+		Results.reserve(Properties.size());
+		for (const auto& [Identifier, Value] : Properties)
 		{
 			(void)Value;
-			Results.push_back({ std::string(PropertyComponentIds::ScriptFloat), Identifier, Identifier, PropertyValueType::Float, true });
+			Results.push_back({ std::string(ComponentId), Identifier, Identifier, PropertyValueType::Float, true });
 		}
 		return Results;
 	}
@@ -151,6 +174,16 @@ namespace PulseForge
 			if (!Value)
 				return std::unexpected(MakeError(
 					PropertyAccessErrorCode::UnknownProperty, "Script float property '" + std::string(PropertyId) + "' does not exist"));
+			return PropertyValue{ *Value };
+		}
+		if (ComponentId == PropertyComponentIds::BlueprintFloat)
+		{
+			auto Blueprint = RequireComponent(Target.GetBlueprint(), PropertyComponentIds::Blueprint);
+			if (!Blueprint) return std::unexpected(Blueprint.error());
+			const auto Value = Blueprint->FindFloatProperty(PropertyId);
+			if (!Value)
+				return std::unexpected(MakeError(PropertyAccessErrorCode::UnknownProperty,
+					"Blueprint float property '" + std::string(PropertyId) + "' does not exist"));
 			return PropertyValue{ *Value };
 		}
 		if (!FindPropertyDescriptor(ComponentId, PropertyId)) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
@@ -231,6 +264,12 @@ namespace PulseForge
 			if (!Mesh) return std::unexpected(Mesh.error());
 			return PropertyId == PropertyIds::MeshAsset ? PropertyValue{ Mesh->MeshAsset } : PropertyValue{ Mesh->MaterialAsset };
 		}
+		if (ComponentId == BlueprintId)
+		{
+			const auto Blueprint = RequireComponent(Target.GetBlueprint(), ComponentId);
+			if (!Blueprint) return std::unexpected(Blueprint.error());
+			return PropertyId == PropertyIds::Enabled ? PropertyValue{ Blueprint->Enabled } : PropertyValue{ Blueprint->BlueprintAsset };
+		}
 		const auto Script = RequireComponent(Target.GetScript(), ComponentId);
 		if (!Script) return std::unexpected(Script.error());
 		return PropertyId == "enabled" ? PropertyValue{ Script->Enabled } : PropertyValue{ Script->ScriptAsset };
@@ -252,6 +291,17 @@ namespace PulseForge
 			if (auto Updated = Current->SetFloatProperty(PropertyId, *Typed); !Updated)
 				return std::unexpected(ScriptErrorToPropertyError(Updated.error()));
 			const auto Result = Target.SetScript(*Current);
+			return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
+		}
+		if (ComponentId == PropertyComponentIds::BlueprintFloat)
+		{
+			auto Typed = RequireValue<float>(Value, PropertyId);
+			if (!Typed) return std::unexpected(Typed.error());
+			auto Current = RequireComponent(Target.GetBlueprint(), PropertyComponentIds::Blueprint);
+			if (!Current) return std::unexpected(Current.error());
+			if (auto Updated = Current->SetFloatProperty(PropertyId, *Typed); !Updated)
+				return std::unexpected(BlueprintErrorToPropertyError(Updated.error()));
+			const auto Result = Target.SetBlueprint(*Current);
 			return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
 		}
 		if (!Descriptor) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
@@ -393,6 +443,26 @@ namespace PulseForge
 			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());
 		}
 
+		if (ComponentId == BlueprintId)
+		{
+			auto Current = RequireComponent(Target.GetBlueprint(), ComponentId);
+			if (!Current) return std::unexpected(Current.error());
+			if (PropertyId == PropertyIds::Enabled)
+			{
+				auto Typed = RequireValue<bool>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->Enabled = *Typed;
+			}
+			else
+			{
+				auto Typed = RequireValue<AssetID>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->BlueprintAsset = *Typed;
+			}
+			const auto Result = Target.SetBlueprint(*Current);
+			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());
+		}
+
 		if (ComponentId == DirectionalLightId)
 		{
 			auto Current = RequireComponent(Target.GetDirectionalLight(), ComponentId);
@@ -479,6 +549,16 @@ namespace PulseForge
 		if (auto Updated = Current->RemoveFloatProperty(AuthoredId); !Updated)
 			return std::unexpected(ScriptErrorToPropertyError(Updated.error()));
 		const auto Result = Target.SetScript(*Current);
+		return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
+	}
+
+	std::expected<void, PropertyAccessError> RemoveBlueprintFloatProperty(const Entity& Target, std::string_view AuthoredId)
+	{
+		auto Current = RequireComponent(Target.GetBlueprint(), PropertyComponentIds::Blueprint);
+		if (!Current) return std::unexpected(Current.error());
+		if (auto Updated = Current->RemoveFloatProperty(AuthoredId); !Updated)
+			return std::unexpected(BlueprintErrorToPropertyError(Updated.error()));
+		const auto Result = Target.SetBlueprint(*Current);
 		return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
 	}
 } // namespace PulseForge

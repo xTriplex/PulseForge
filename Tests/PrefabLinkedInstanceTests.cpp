@@ -2,6 +2,7 @@
 
 #include "Assets/PrefabInstanceReconciler.h"
 #include "Assets/AssetImportProvenance.h"
+#include "Scene/Components/BlueprintComponent.h"
 
 #include <array>
 #include <limits>
@@ -827,6 +828,118 @@ namespace
 			(**ReopenedMetadata).Overrides.front().ComponentID == ColliderComponent &&
 			(**ReopenedMetadata).Overrides.front().PropertyID == RadiusProperty &&
 			std::get<float>((**ReopenedMetadata).Overrides.front().Value) == 2.0f);
+	}
+
+	void TestBlueprintPropertyOverridesSurviveSourceRevisionAndReportRemovedProperties(TestRunner& Tests)
+	{
+		LinkedPrefabFixture Fixture;
+		PF_CHECK(Tests, Fixture.Valid);
+		if (!Fixture.Valid) return;
+		auto SourceResult = PrefabAssetService::LoadSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry);
+		PF_CHECK(Tests, SourceResult.has_value());
+		if (!SourceResult) return;
+		const auto SourceChild = SourceResult->GetScene().FindEntity(SourceChildKey);
+		PF_CHECK(Tests, SourceChild.has_value());
+		if (!SourceChild) return;
+
+		BlueprintComponent SourceBlueprint{ AssetID{ 0xb100000000000000ull, 1 } };
+		PF_CHECK(Tests, SourceBlueprint.SetFloatProperty("health", 10.0f));
+		PF_CHECK(Tests, SourceChild->SetBlueprint(SourceBlueprint));
+		PF_CHECK(Tests, PrefabAssetService::SaveSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, *SourceResult));
+		auto SavedSource = PrefabAssetService::LoadSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry);
+		PF_CHECK(Tests, SavedSource.has_value());
+		if (!SavedSource) return;
+		const auto SavedSourceChild = SavedSource->GetScene().FindEntity(SourceChildKey);
+		PF_CHECK(Tests, SavedSourceChild.has_value());
+		if (!SavedSourceChild) return;
+		const auto SavedSourceBlueprint = SavedSourceChild->GetBlueprint();
+		PF_CHECK(Tests, SavedSourceBlueprint && SavedSourceBlueprint->has_value() &&
+			(**SavedSourceBlueprint).FindFloatProperty("health") == std::optional<float>{ 10.0f });
+
+		Scene Destination;
+		const auto LinkedRoot = PrefabAssetService::InstantiateLinked(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination);
+		PF_CHECK(Tests, LinkedRoot.has_value());
+		if (!LinkedRoot) return;
+		const auto ChildID = FindMappedEntity(*LinkedRoot, SourceChildKey);
+		PF_CHECK(Tests, ChildID.has_value());
+		if (!ChildID) return;
+		const auto Child = Destination.FindEntity(*ChildID);
+		PF_CHECK(Tests, Child.has_value());
+		if (!Child) return;
+
+		const std::string Component(PropertyComponentIds::BlueprintFloat);
+		const std::string Property("health");
+		const auto InstanceBlueprint = Child->GetBlueprint();
+		if (!InstanceBlueprint || !InstanceBlueprint->has_value())
+			std::cerr << "Blueprint prefab instance component missing: " <<
+				(InstanceBlueprint ? "component absent" : InstanceBlueprint.error().Message) << '\n';
+		else if (!(**InstanceBlueprint).FindFloatProperty(Property))
+			std::cerr << "Blueprint prefab instance property missing: " << Property << '\n';
+		PF_CHECK(Tests, InstanceBlueprint && InstanceBlueprint->has_value());
+		if (InstanceBlueprint && InstanceBlueprint->has_value())
+			PF_CHECK(Tests, (**InstanceBlueprint).FindFloatProperty(Property) == std::optional<float>{ 10.0f });
+		const auto PropertyWrite = WriteProperty(*Child, Component, Property, PropertyValue{ 42.0f });
+		if (!PropertyWrite) std::cerr << "Blueprint prefab instance property write failed: " << PropertyWrite.error().Message << '\n';
+		PF_CHECK(Tests, PropertyWrite.has_value());
+		PF_CHECK(Tests, PrefabInstanceReconciler::RecordPropertyOverride(
+			*LinkedRoot, *Child, Component, Property, PropertyValue{ 42.0f }));
+
+		PF_CHECK(Tests, SourceBlueprint.SetFloatProperty("health", 15.0f));
+		PF_CHECK(Tests, SourceChild->SetBlueprint(SourceBlueprint));
+		PF_CHECK(Tests, PrefabAssetService::SaveSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, *SourceResult));
+		const auto UpdatedPlan = PrefabAssetService::PlanReconcile(
+			Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination, *LinkedRoot);
+		PF_CHECK(Tests, UpdatedPlan && UpdatedPlan->CanApply());
+		if (!UpdatedPlan) return;
+		PF_CHECK(Tests, PrefabAssetService::ApplyReconcile(
+			Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination, *UpdatedPlan));
+		auto CurrentValue = ReadProperty(*Child, Component, Property);
+		PF_CHECK(Tests, CurrentValue && std::get<float>(*CurrentValue) == 42.0f);
+
+		PF_CHECK(Tests, SourceBlueprint.RemoveFloatProperty(Property));
+		PF_CHECK(Tests, SourceChild->SetBlueprint(SourceBlueprint));
+		PF_CHECK(Tests, PrefabAssetService::SaveSource(Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, *SourceResult));
+		const auto RemovedPlan = PrefabAssetService::PlanReconcile(
+			Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination, *LinkedRoot);
+		PF_CHECK(Tests, RemovedPlan && !RemovedPlan->CanApply() && RemovedPlan->GetSummary().ConflictCount == 1);
+		if (!RemovedPlan) return;
+		PF_CHECK(Tests, std::any_of(RemovedPlan->GetConflicts().begin(), RemovedPlan->GetConflicts().end(),
+			[&](const PrefabConflictRecord& Conflict)
+			{
+				return Conflict.Entity == PrefabEntityAddress{ SourceChildKey, false } &&
+					Conflict.Kind == PrefabConflictKind::MissingProperty && Conflict.ComponentID == Component &&
+					Conflict.PropertyID == Property;
+			}));
+		const auto RemovedApplied = PrefabAssetService::ApplyReconcile(
+			Fixture.Asset, Fixture.ProjectRoot, Fixture.Registry, Destination, *RemovedPlan);
+		PF_CHECK(Tests, RemovedApplied && RemovedApplied->ConflictCount == 1);
+		// A missing source property conflicts with the local override. Reconciliation is atomic:
+		// it records the conflict and retains the last usable live value for recovery.
+		const auto RetainedValue = ReadProperty(*Child, Component, Property);
+		PF_CHECK(Tests, RetainedValue && std::get<float>(*RetainedValue) == 42.0f);
+		const auto Metadata = LinkedRoot->GetPrefabInstance();
+		PF_CHECK(Tests, Metadata && Metadata->has_value() && (**Metadata).Overrides.size() == 1 &&
+			(**Metadata).Conflicts.size() == 1 && (**Metadata).Conflicts.front().Kind == PrefabConflictKind::MissingProperty);
+
+		const auto Serialized = SceneSerializer::Serialize(Destination);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized) return;
+		Scene Reopened;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(*Serialized, Reopened));
+		const auto ReopenedRoot = Reopened.FindEntity(LinkedRoot->GetUUID());
+		PF_CHECK(Tests, ReopenedRoot.has_value());
+		if (!ReopenedRoot) return;
+		const auto ReopenedMetadata = ReopenedRoot->GetPrefabInstance();
+		PF_CHECK(Tests, ReopenedMetadata && ReopenedMetadata->has_value() &&
+			(**ReopenedMetadata).Overrides == (**Metadata).Overrides &&
+			(**ReopenedMetadata).Conflicts == (**Metadata).Conflicts);
+		const auto ReopenedChild = Reopened.FindEntity(Child->GetUUID());
+		PF_CHECK(Tests, ReopenedChild.has_value());
+		if (ReopenedChild)
+		{
+			const auto ReopenedValue = ReadProperty(*ReopenedChild, Component, Property);
+			PF_CHECK(Tests, ReopenedValue && std::get<float>(*ReopenedValue) == 42.0f);
+		}
 	}
 
 	void TestPrefabSourceSaveRejectsDetachedEntitiesWithoutDroppingThem(TestRunner& Tests)
@@ -2313,6 +2426,7 @@ void RunPrefabLinkedInstanceTests(TestRunner& Tests)
 	TestLegacyScenesLoadWithoutLinkedPrefabMetadata(Tests);
 	TestLinkedInstantiationReconcileOverridesAndStalePlans(Tests);
 	TestColliderPropertiesRemainInstanceLocalThroughPrefabReconciliation(Tests);
+	TestBlueprintPropertyOverridesSurviveSourceRevisionAndReportRemovedProperties(Tests);
 	TestDuplicateMissingPrefabMappingTargetsRejected(Tests);
 	TestChangedPrefabOverrideTypePreservesMaterializedValue(Tests);
 	TestPrefabSourcePrimaryCameraAndListenerPolicy(Tests);
