@@ -26,7 +26,7 @@ namespace
 
 	AssetImportRecipe MakeRecipe(const AssetImportObservation& Observation)
 	{
-		return { Observation.Asset, Observation.SubresourceKey, Observation.ImporterID, Observation.ImporterVersion,
+		return { Observation.Asset, Observation.SubresourceKey, Observation.SubresourceKey, Observation.ImporterID, Observation.ImporterVersion,
 			Observation.OutputSchemaVersion, Observation.EffectiveSettings, Observation.TargetID,
 			Observation.Inputs, Observation.InputFingerprint };
 	}

@@ -89,6 +89,8 @@ namespace PulseForge
 	{
 		ImportedGltfMesh Geometry;
 		std::vector<ImportedGltfSkeletonNode> SkeletonNodes;
+		// Index into SkeletonNodes for the mesh node whose local/world transform frames skinning.
+		uint16_t MeshNodeIndex = 0;
 		// Skin-local joint order maps each JOINTS_0 value into SkeletonNodes.
 		std::vector<uint16_t> JointNodeIndices;
 		// Same order as JointNodeIndices, stored separately from node bind transforms.
@@ -180,7 +182,7 @@ namespace PulseForge
 	namespace Detail
 	{
 		inline constexpr uint32_t MeshProductSchemaVersion = 1;
-		inline constexpr uint32_t SkeletalMeshProductSchemaVersion = 1;
+		inline constexpr uint32_t SkeletalMeshProductSchemaVersion = 2;
 		inline constexpr uint32_t TextureProductSchemaVersion = 1;
 		inline constexpr uint32_t EnvironmentProductSchemaVersion = 1;
 		inline constexpr uint32_t MaterialProductSchemaVersion = 1;

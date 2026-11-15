@@ -1099,19 +1099,57 @@ namespace PulseForge
 				AssetImportRecipe Recipe;
 				Recipe.SourceAsset = Owner.ID;
 				Recipe.SubresourceKey = Subresource.Identity.SubresourceKey;
+				Recipe.SourceLocator = Subresource.Identity.SubresourceKey;
 				Recipe.ImporterID = GltfImporterID;
 				Recipe.ImporterVersion = GltfImporterVersion;
 				Recipe.OutputSchemaVersion = GltfOutputSchemaVersion;
 				Recipe.EffectiveSettings = *CanonicalSettings;
 				Recipe.TargetID = "cpu-generic-v1";
 				Recipe.Inputs = RecipeInputs;
+				const bool SkeletalOutput = Recipe.SourceLocator.starts_with("skeletal/node/");
+			const AssetImportSuccessReceipt* SuccessfulRecord = nullptr;
+				if (const auto ByOutput = std::lower_bound(LastSuccesses.begin(), LastSuccesses.end(), Recipe.SubresourceKey,
+					[](const AssetImportSuccessReceipt& Receipt, std::string_view Key)
+					{ return Receipt.Recipe.SubresourceKey < Key; });
+					ByOutput != LastSuccesses.end() && ByOutput->Recipe.SubresourceKey == Recipe.SubresourceKey)
+					SuccessfulRecord = &*ByOutput;
+				if (!SuccessfulRecord && SkeletalOutput)
+				{
+					const auto ByLocator = std::find_if(LastSuccesses.begin(), LastSuccesses.end(), [&](const AssetImportSuccessReceipt& Receipt)
+						{ return Receipt.Recipe.ImporterID == "PulseForge.SkeletalGltfMeshImporter" &&
+							Receipt.Recipe.SourceLocator == Recipe.SourceLocator; });
+					if (ByLocator != LastSuccesses.end()) SuccessfulRecord = &*ByLocator;
+					else
+					{
+						const size_t CurrentSkeletalOutputs = static_cast<size_t>(std::count_if(Output.Subresources.begin(),
+							Output.Subresources.end(), [&](const AssetSubresourceRecord& Candidate)
+							{ return Candidate.Identity.Asset == Owner.ID &&
+								Candidate.Identity.SubresourceKey.starts_with("skeletal/node/"); }));
+						const auto FirstSkeletalReceipt = std::find_if(LastSuccesses.begin(), LastSuccesses.end(),
+							[](const AssetImportSuccessReceipt& Receipt)
+							{ return Receipt.Recipe.ImporterID == "PulseForge.SkeletalGltfMeshImporter"; });
+						if (CurrentSkeletalOutputs == 1 && FirstSkeletalReceipt != LastSuccesses.end() &&
+							std::count_if(std::next(FirstSkeletalReceipt), LastSuccesses.end(), [](const AssetImportSuccessReceipt& Receipt)
+								{ return Receipt.Recipe.ImporterID == "PulseForge.SkeletalGltfMeshImporter"; }) == 0)
+							SuccessfulRecord = &*FirstSkeletalReceipt;
+					}
+				}
+				if (SuccessfulRecord && SkeletalOutput &&
+					SuccessfulRecord->Recipe.ImporterID == "PulseForge.SkeletalGltfMeshImporter")
+				{
+					Recipe.SubresourceKey = SuccessfulRecord->Recipe.SubresourceKey;
+					Recipe.ImporterID = SuccessfulRecord->Recipe.ImporterID;
+					Recipe.ImporterVersion = SuccessfulRecord->Recipe.ImporterVersion;
+					Recipe.OutputSchemaVersion = SuccessfulRecord->Recipe.OutputSchemaVersion;
+					Recipe.TargetID = SuccessfulRecord->Recipe.TargetID;
+				}
 				auto Fingerprint = ComputeAssetImportInputFingerprint(Recipe);
 				if (!Fingerprint) return std::unexpected(MakeError(SourcePath, "Could not compute glTF import recipe: " + Fingerprint.error()));
 				Recipe.InputFingerprint = *Fingerprint;
 
 				AssetImportObservation Observation;
 				Observation.Asset = Owner.ID;
-				Observation.SubresourceKey = Recipe.SubresourceKey;
+				Observation.SubresourceKey = Subresource.Identity.SubresourceKey;
 				Observation.ImporterID = Recipe.ImporterID;
 				Observation.ImporterVersion = Recipe.ImporterVersion;
 				Observation.SettingsVersion = GltfMeshImportSettings::CurrentVersion;
@@ -1123,10 +1161,7 @@ namespace PulseForge
 				if (Subresource.Classification == AssetSubresourceClassification::Invalid ||
 					Subresource.Classification == AssetSubresourceClassification::Unsupported || ProvenanceUnavailable)
 					Observation.ResultState = AssetImportResultState::Unavailable;
-				else if (const auto SuccessfulRecord = std::lower_bound(LastSuccesses.begin(), LastSuccesses.end(),
-					Recipe.SubresourceKey, [](const AssetImportSuccessReceipt& Receipt, std::string_view Key)
-					{ return Receipt.Recipe.SubresourceKey < Key; });
-					SuccessfulRecord != LastSuccesses.end() && SuccessfulRecord->Recipe.SubresourceKey == Recipe.SubresourceKey)
+				else if (SuccessfulRecord)
 				{
 					const AssetImportSuccessReceipt& LastSuccess = *SuccessfulRecord;
 					const AssetImportRecipe& SuccessfulRecipe = LastSuccess.Recipe;

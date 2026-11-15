@@ -2,6 +2,7 @@
 
 #include "Assets/AssetDependencyCatalog.h"
 #include "Assets/AssetImportProvenance.h"
+#include "Assets/GltfMeshImportCoordinator.h"
 #include "Assets/GltfMeshImporter.h"
 
 #include <algorithm>
@@ -19,6 +20,15 @@
 namespace
 {
 	using namespace PulseForge;
+
+	std::optional<std::string> ReadTextFile(const std::filesystem::path& Path)
+	{
+		std::ifstream Input(Path, std::ios::binary);
+		if (!Input) return std::nullopt;
+		std::string Text{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
+		if (Input.bad()) return std::nullopt;
+		return Text;
+	}
 
 	class RepeatedBufferFixture final
 	{
@@ -77,7 +87,8 @@ namespace
 			std::string_view FileName,
 			bool ZeroWeights = false,
 			bool InvalidJointIndex = false,
-			bool AddAnimation = false)
+			bool AddAnimation = false,
+			bool ReorderedNodes = false)
 		{
 			const std::filesystem::path Directory = Root / "Assets" / "Models";
 			std::vector<std::byte> Bytes = PositionBytes();
@@ -95,6 +106,8 @@ namespace
 			}
 			const std::vector<std::byte> Indices = IndexBytes();
 			Bytes.insert(Bytes.end(), Indices.begin(), Indices.end());
+			Bytes.push_back(std::byte{ 0 });
+			Bytes.push_back(std::byte{ 0 });
 			for (const float Value : std::array<float, 16>{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 })
 			{
 				const uint32_t Bits = std::bit_cast<uint32_t>(Value);
@@ -112,16 +125,26 @@ namespace
 			}
 			const std::filesystem::path BufferPath = Directory / "Skinned.bin";
 			if (!WriteBinary(BufferPath, Bytes)) return {};
-			if (!AssetMetadataSerializer::CreateForNewAsset(BufferPath)) return {};
+			std::error_code MetadataError;
+			if (!std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(BufferPath), MetadataError) &&
+				!AssetMetadataSerializer::CreateForNewAsset(BufferPath)) return {};
+			if (MetadataError) return {};
 
-			const std::string Document =
+			const std::string NodeArray = ReorderedNodes
+				? "\"nodes\":[{\"name\":\"root\",\"children\":[1]},{\"name\":\"joint\"},"
+					"{\"mesh\":0,\"skin\":0,\"name\":\"mesh\",\"translation\":[2,3,4],\"scale\":[-1,1,1]},"
+					"{\"mesh\":1,\"name\":\"static\"}],\"skins\":[{\"joints\":[1],\"inverseBindMatrices\":4}]"
+				: "\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\",\"translation\":[2,3,4],\"scale\":[-1,1,1]},"
+					"{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"},{\"mesh\":1,\"name\":\"static\"}],"
+					"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]";
+			std::string Document =
 				"{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"uri\":\"Skinned.bin\",\"byteLength\":" +
 				std::to_string(Bytes.size()) +
 				"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
 				"{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12},{\"buffer\":0,\"byteOffset\":48,\"byteLength\":48},"
 				"{\"buffer\":0,\"byteOffset\":96,\"byteLength\":6},"
-				"{\"buffer\":0,\"byteOffset\":102,\"byteLength\":64}" +
-				(AddAnimation ? ",{\"buffer\":0,\"byteOffset\":166,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":174,\"byteLength\":24}" : "") +
+				"{\"buffer\":0,\"byteOffset\":104,\"byteLength\":64}" +
+				(AddAnimation ? ",{\"buffer\":0,\"byteOffset\":168,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":176,\"byteLength\":24}" : "") +
 				"],\"accessors\":["
 				"{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
 				"{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
@@ -132,10 +155,8 @@ namespace
 					"{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}" : "") + "],"
 				"\"meshes\":[{\"name\":\"Original Skinned Fixture\",\"primitives\":[{\"attributes\":"
 				"{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]},"
-				"{\"name\":\"Explicit Static Fixture\",\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":3}]}],"
-				"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},"
-				"{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"},{\"mesh\":1,\"name\":\"static\"}],"
-				"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]}";
+				"{\"name\":\"Explicit Static Fixture\",\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":3}]}]," +
+				NodeArray + "}";
 			if (AddAnimation)
 			{
 				Document.pop_back();
@@ -144,6 +165,14 @@ namespace
 			}
 			const std::filesystem::path SourcePath = Directory / std::string(FileName);
 			if (!WriteText(SourcePath, Document)) return {};
+			std::error_code ExistingMetadataError;
+			const auto MetadataPath = AssetMetadataSerializer::GetSidecarPath(SourcePath);
+			if (std::filesystem::exists(MetadataPath, ExistingMetadataError) && !ExistingMetadataError)
+			{
+				const auto Metadata = AssetMetadataSerializer::LoadFromFile(MetadataPath);
+				return Metadata ? Metadata->ID : AssetID{};
+			}
+			if (ExistingMetadataError) return {};
 			const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
 			return Metadata ? Metadata->ID : AssetID{};
 		}
@@ -400,19 +429,97 @@ namespace
 		if (!Registry) return;
 
 		const auto Imported = GltfMeshImporter::ProcessSkeletalPrimitive(Source, Fixture.Root, *Registry, 0, 0, 0);
+		if (!Imported) std::cerr << "Skeletal import failed: " << Imported.error().Message << "\n";
 		PF_CHECK(Tests, Imported.has_value());
 		if (!Imported) return;
 		PF_CHECK(Tests, Imported->Mesh.Geometry.Vertices.size() == 3);
-		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes.size() == 2);
-		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[0].Name == "root");
-		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[1].Name == "joint");
-		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[1].ParentNodeIndex == 0);
-		PF_CHECK(Tests, Imported->Mesh.JointNodeIndices == std::vector<uint16_t>{ 1 });
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes.size() == 3);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[0].Name == "mesh");
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[1].Name == "root");
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[2].Name == "joint");
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[2].ParentNodeIndex == 1);
+		PF_CHECK(Tests, Imported->Mesh.MeshNodeIndex == 0);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[Imported->Mesh.MeshNodeIndex].LocalBindMatrix[0] == -1.0f);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[Imported->Mesh.MeshNodeIndex].LocalBindMatrix[12] == 2.0f);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[Imported->Mesh.MeshNodeIndex].LocalBindMatrix[13] == 3.0f);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[Imported->Mesh.MeshNodeIndex].LocalBindMatrix[14] == 4.0f);
+		PF_CHECK(Tests, Imported->Mesh.JointNodeIndices == std::vector<uint16_t>{ 2 });
 		PF_CHECK(Tests, Imported->Mesh.InverseBindMatrices.size() == 1);
 		PF_CHECK(Tests, Imported->Mesh.VertexInfluences.size() == 3);
+		PF_CHECK(Tests, !Imported->ResultFingerprint.DigestHex.empty());
 		PF_CHECK(Tests, Imported->Mesh.VertexInfluences[0].JointIndices[0] == 0);
 		PF_CHECK(Tests, Imported->Mesh.VertexInfluences[0].Weights[0] == 1.0f);
 		PF_CHECK(Tests, !Imported->Recipe.SubresourceKey.empty());
+		PF_CHECK(Tests, Imported->Recipe.SourceLocator == "skeletal/node/0/mesh/0/primitive/0");
+
+		const auto Recorded = GltfMeshImportCoordinator::ProcessAndRecordSkeletalPrimitive(
+			Source, Fixture.Root, *Registry, 0, 0, 0);
+		PF_CHECK(Tests, Recorded.has_value());
+		if (Recorded)
+		{
+			const std::filesystem::path SourcePath = Fixture.Root / "Assets" / "Models" / "SkeletalImportFixture.gltf";
+			const std::filesystem::path ReceiptPath = AssetImportProvenanceSerializer::GetSidecarPath(SourcePath);
+			const auto OriginalReceiptBytes = ReadTextFile(ReceiptPath);
+			PF_CHECK(Tests, OriginalReceiptBytes.has_value());
+			const auto ReorderedSource = Fixture.WriteSkinnedSource("SkeletalImportFixture.gltf", false, false, false, true);
+			const auto ReorderedRegistry = Fixture.BuildRegistry();
+			PF_CHECK(Tests, ReorderedSource == Source && ReorderedRegistry.has_value());
+			if (ReorderedSource == Source && ReorderedRegistry)
+			{
+				const auto BeforeReimportCatalog = AssetDependencyCatalogBuilder::Build(Fixture.Root, Fixture.ProjectID, 1);
+				PF_CHECK(Tests, BeforeReimportCatalog.has_value());
+				if (BeforeReimportCatalog)
+				{
+					const AssetImportObservation* PreviousOutput = FindObservation(
+						**BeforeReimportCatalog, Source, "skeletal/node/2/mesh/0/primitive/0");
+					PF_CHECK(Tests, PreviousOutput != nullptr);
+					if (PreviousOutput)
+					{
+						PF_CHECK(Tests, PreviousOutput->ResultState == AssetImportResultState::SuccessfulInputsDiffer);
+						PF_CHECK(Tests, PreviousOutput->LastSuccessfulResult.has_value());
+						if (PreviousOutput->LastSuccessfulResult)
+							PF_CHECK(Tests, PreviousOutput->LastSuccessfulResult->Recipe.SubresourceKey ==
+								Recorded->Receipt.Recipe.SubresourceKey);
+					}
+				}
+				const auto Reimported = GltfMeshImportCoordinator::ProcessAndRecordSkeletalPrimitive(
+					Source, Fixture.Root, *ReorderedRegistry, 2, 0, 0);
+				PF_CHECK(Tests, Reimported.has_value());
+				if (Reimported)
+				{
+					PF_CHECK(Tests, Reimported->Receipt.Recipe.SubresourceKey == Recorded->Receipt.Recipe.SubresourceKey);
+					PF_CHECK(Tests, Reimported->Receipt.Recipe.SourceLocator == "skeletal/node/2/mesh/0/primitive/0");
+					const auto Receipts = AssetImportProvenanceSerializer::LoadAll(ReceiptPath);
+					PF_CHECK(Tests, Receipts && Receipts->size() == 1);
+					if (Receipts && Receipts->size() == 1)
+					{
+						PF_CHECK(Tests, Receipts->front().Recipe.SubresourceKey == Recorded->Receipt.Recipe.SubresourceKey);
+						PF_CHECK(Tests, Receipts->front().Recipe.SourceLocator == "skeletal/node/2/mesh/0/primitive/0");
+					}
+					const auto AfterReimportCatalog = AssetDependencyCatalogBuilder::Build(Fixture.Root, Fixture.ProjectID, 2);
+					PF_CHECK(Tests, AfterReimportCatalog.has_value());
+					if (AfterReimportCatalog)
+					{
+						const AssetImportObservation* CurrentOutput = FindObservation(
+							**AfterReimportCatalog, Source, "skeletal/node/2/mesh/0/primitive/0");
+						PF_CHECK(Tests, CurrentOutput != nullptr);
+						if (CurrentOutput)
+						{
+							PF_CHECK(Tests, CurrentOutput->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+						PF_CHECK(Tests, CurrentOutput->LastSuccessfulResult.has_value());
+						if (CurrentOutput->LastSuccessfulResult)
+							PF_CHECK(Tests, CurrentOutput->LastSuccessfulResult->Recipe.SubresourceKey ==
+								Recorded->Receipt.Recipe.SubresourceKey);
+						}
+					}
+					const auto ReceiptBytesBeforeRejectedReimport = ReadTextFile(ReceiptPath);
+					const auto Rejected = GltfMeshImportCoordinator::ProcessAndRecordSkeletalPrimitive(
+						Source, Fixture.Root, *ReorderedRegistry, 0, 0, 0);
+					PF_CHECK(Tests, !Rejected && Rejected.error().Code == GltfMeshImportCoordinatorErrorCode::ImportFailed);
+					PF_CHECK(Tests, ReadTextFile(ReceiptPath) == ReceiptBytesBeforeRejectedReimport);
+				}
+			}
+		}
 
 		const AssetID AnimatedSource = Fixture.WriteSkinnedSource("SkeletalAnimationFixture.gltf", false, false, true);
 		const auto AnimatedRegistry = Fixture.BuildRegistry();
@@ -429,7 +536,7 @@ namespace
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Duration == 1.0f);
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels.size() == 1);
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].TargetNodeKey ==
-					Animated->Mesh.SkeletonNodes[1].StableKey);
+					Animated->Mesh.SkeletonNodes[2].StableKey);
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].Values[1][1] == 1.0f);
 			}
 		}

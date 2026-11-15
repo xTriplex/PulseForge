@@ -30,29 +30,12 @@ namespace PulseForge
 		}
 	}
 
-	std::expected<GltfMeshImportWithReceipt, GltfMeshImportCoordinatorError>
-		GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
-			const AssetID& Asset,
-			const std::filesystem::path& ProjectRoot,
-			const AssetRegistry& Registry,
-			uint32_t MeshIndex,
-			uint32_t PrimitiveIndex)
+	std::expected<void, GltfMeshImportCoordinatorError> GltfMeshImportCoordinator::RecordSuccess(
+		const AssetID& Asset,
+		const std::filesystem::path& ProjectRoot,
+		const AssetRegistry& Registry,
+		const AssetImportSuccessReceipt& Receipt)
 	{
-		auto Product = GltfMeshImporter::ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex);
-		if (!Product)
-			return std::unexpected(GltfMeshImportCoordinatorError{
-				GltfMeshImportCoordinatorErrorCode::ImportFailed,
-				Product.error().Path,
-				"CPU mesh import failed: " + Product.error().Message,
-				std::move(Product.error()),
-				std::nullopt
-			});
-
-		const AssetImportSuccessReceipt Receipt{
-			Product->Recipe,
-			Product->ResultFingerprint,
-			Product->Recipe.SubresourceKey
-		};
 		const auto Record = Registry.Find(Asset);
 		if (!Record)
 			return std::unexpected(GltfMeshImportCoordinatorError{
@@ -112,6 +95,7 @@ namespace PulseForge
 				std::nullopt,
 				std::nullopt
 			});
+
 		const auto ExistingOutput = std::lower_bound(Receipts->begin(), Receipts->end(), Receipt.Recipe.SubresourceKey,
 			[](const AssetImportSuccessReceipt& Existing, std::string_view Key)
 			{ return Existing.Recipe.SubresourceKey < Key; });
@@ -126,7 +110,56 @@ namespace PulseForge
 				std::nullopt,
 				std::move(Saved.error())
 			});
+		return {};
+	}
 
+	std::expected<GltfMeshImportWithReceipt, GltfMeshImportCoordinatorError>
+		GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			uint32_t MeshIndex,
+			uint32_t PrimitiveIndex)
+	{
+		auto Product = GltfMeshImporter::ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex);
+		if (!Product)
+			return std::unexpected(GltfMeshImportCoordinatorError{
+				GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				Product.error().Path,
+				"CPU mesh import failed: " + Product.error().Message,
+				std::move(Product.error()),
+				std::nullopt
+			});
+
+		const AssetImportSuccessReceipt Receipt{ Product->Recipe, Product->ResultFingerprint, Product->Recipe.SubresourceKey };
+		if (auto Recorded = RecordSuccess(Asset, ProjectRoot, Registry, Receipt); !Recorded)
+			return std::unexpected(std::move(Recorded.error()));
 		return GltfMeshImportWithReceipt{ std::move(Product->Mesh), Receipt };
+	}
+
+	std::expected<GltfSkeletalMeshImportWithReceipt, GltfMeshImportCoordinatorError>
+		GltfMeshImportCoordinator::ProcessAndRecordSkeletalPrimitive(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			uint32_t NodeIndex,
+			uint32_t MeshIndex,
+			uint32_t PrimitiveIndex)
+	{
+		auto Product = GltfMeshImporter::ProcessSkeletalPrimitive(
+			Asset, ProjectRoot, Registry, NodeIndex, MeshIndex, PrimitiveIndex);
+		if (!Product)
+			return std::unexpected(GltfMeshImportCoordinatorError{
+				GltfMeshImportCoordinatorErrorCode::ImportFailed,
+				Product.error().Path,
+				"CPU skeletal mesh import failed: " + Product.error().Message,
+				std::move(Product.error()),
+				std::nullopt
+			});
+
+		const AssetImportSuccessReceipt Receipt{ Product->Recipe, Product->ResultFingerprint, Product->Recipe.SubresourceKey };
+		if (auto Recorded = RecordSuccess(Asset, ProjectRoot, Registry, Receipt); !Recorded)
+			return std::unexpected(std::move(Recorded.error()));
+		return GltfSkeletalMeshImportWithReceipt{ std::move(Product->Mesh), Receipt };
 	}
 }

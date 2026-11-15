@@ -329,8 +329,9 @@ namespace
 			"{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
 			"{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
 			"{\"bufferView\":4,\"componentType\":5126,\"count\":1,\"type\":\"MAT4\"}],"
-			"\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}],"
-			"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"}],"
+			"\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]},"
+			"{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":3}]}],"
+			"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"},{\"mesh\":1,\"name\":\"static\"}],"
 			"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]}");
 		const auto MeshMetadata = AssetMetadataSerializer::CreateForNewAsset(GltfPath);
 		PF_CHECK(Tests, MeshMetadata.has_value());
@@ -350,6 +351,12 @@ namespace
 			{ return Product.Asset == MeshMetadata->ID && Product.Product == CookedAssetProductKind::SkeletalMesh && Product.Subresource == Subresource; });
 		PF_CHECK(Tests, Planned != Plan->Products.end());
 		if (Planned == Plan->Products.end()) return;
+		constexpr std::string_view StaticSubresource = "mesh/1/primitive/0";
+		const auto PlannedStatic = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == MeshMetadata->ID && Product.Product == CookedAssetProductKind::MeshPrimitive &&
+				Product.Subresource == StaticSubresource; });
+		PF_CHECK(Tests, PlannedStatic != Plan->Products.end());
+		if (PlannedStatic == Plan->Products.end()) return;
 
 		auto Cooked = AssetCookService::Cook(*Plan);
 		if (!Cooked) std::cerr << "Skeletal cook fixture cook failed: " << Cooked.error().Message << "\n";
@@ -373,6 +380,10 @@ namespace
 			else PF_CHECK(Tests, false);
 			PF_CHECK(Tests, Product->VertexInfluences.size() == 3);
 		}
+		const auto StaticProduct = (*Provider)->LoadMeshPrimitive(MeshMetadata->ID, StaticSubresource);
+		PF_CHECK(Tests, StaticProduct.has_value());
+		if (StaticProduct)
+			PF_CHECK(Tests, StaticProduct->Vertices.size() == 3 && StaticProduct->Indices.size() == 3);
 	}
 
 	void TestLinkedPrefabSampleCookAndRuntimeScene(TestRunner& Tests)
@@ -451,7 +462,7 @@ namespace
 		PF_CHECK(Tests, HasProduct(SourceMaterial, CookedAssetProductKind::Material));
 		PF_CHECK(Tests, HasProduct(OverrideMaterial, CookedAssetProductKind::Material));
 		PF_CHECK(Tests, HasProduct(ScriptAsset, CookedAssetProductKind::Script));
-		auto Cooked = AssetCookService::Cook(*Plan);
+		auto Cooked = RunCookWithBoundary("linked-prefab-sample", [&] { return AssetCookService::Cook(*Plan); });
 		PF_CHECK(Tests, Cooked.has_value());
 		if (!Cooked) return;
 		auto Provider = CookedContentProvider::Open(OutputRoot, Request.Compatibility);

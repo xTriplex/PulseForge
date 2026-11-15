@@ -99,5 +99,15 @@ namespace PulseForge
 			uint32_t MeshIndex,
 			uint32_t PrimitiveIndex,
 			std::stop_token CancellationToken = {});
+
+	private:
+		[[nodiscard]] static std::expected<GltfMeshImportProduct, GltfMeshImportError> ProcessStaticPrimitiveImpl(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			uint32_t MeshIndex,
+			uint32_t PrimitiveIndex,
+			std::stop_token CancellationToken,
+			bool AllowSkinnedGeometry);
 	};
 }

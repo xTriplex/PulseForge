@@ -291,10 +291,11 @@ namespace PulseForge
 		auto Geometry = EncodeMeshProduct(Mesh.Geometry, CancellationToken);
 		if (!Geometry) return std::unexpected("Skeletal geometry is invalid: " + Geometry.error());
 		if (Mesh.SkeletonNodes.empty() || Mesh.SkeletonNodes.size() > MaximumSkeletonNodes ||
+			Mesh.MeshNodeIndex >= Mesh.SkeletonNodes.size() ||
 			Mesh.JointNodeIndices.empty() || Mesh.JointNodeIndices.size() > MaximumJoints ||
 			Mesh.InverseBindMatrices.size() != Mesh.JointNodeIndices.size() ||
 			Mesh.VertexInfluences.size() != Mesh.Geometry.Vertices.size() || Mesh.Animations.size() > MaximumClips)
-			return std::unexpected("Skeletal mesh structure exceeds schema bounds");
+				return std::unexpected("Skeletal mesh structure exceeds schema bounds");
 
 		std::vector<uint8_t> JointFlags(Mesh.SkeletonNodes.size(), 0);
 		std::vector<std::string_view> StableKeys;
@@ -339,7 +340,7 @@ namespace PulseForge
 			if (!std::isfinite(WeightSum) || std::abs(WeightSum - 1.0f) > 1.0e-4f)
 				return std::unexpected("Vertex influence weights must be normalized");
 		}
-		uint64_t RequiredBytes = 16ull + Geometry->size();
+		uint64_t RequiredBytes = 20ull + Geometry->size();
 		const auto AddRequiredBytes = [&](uint64_t Count)
 		{
 			if (Count > MaximumProductBytes || RequiredBytes > MaximumProductBytes - Count) return false;
@@ -370,6 +371,7 @@ namespace PulseForge
 		AppendU32(Output, static_cast<uint32_t>(Geometry->size()));
 		Output.insert(Output.end(), Geometry->begin(), Geometry->end());
 		AppendU32(Output, static_cast<uint32_t>(Mesh.SkeletonNodes.size()));
+		AppendU32(Output, Mesh.MeshNodeIndex);
 		for (const ImportedGltfSkeletonNode& Node : Mesh.SkeletonNodes)
 		{
 			if (CancellationToken.stop_requested()) return std::unexpected("Skeletal mesh encoding cancelled");
@@ -468,10 +470,11 @@ namespace PulseForge
 		Offset += GeometrySize;
 		ImportedGltfSkeletalMesh Mesh;
 		Mesh.Geometry = std::move(*Geometry);
-		uint32_t NodeCount = 0;
+		uint32_t NodeCount = 0, MeshNodeIndex = 0;
 		if (!ReadU32(Input, Offset, NodeCount) || NodeCount == 0 || NodeCount > MaximumSkeletonNodes ||
-			NodeCount > (Input.size() - Offset) / 80)
+			NodeCount > (Input.size() - Offset) / 80 || !ReadU32(Input, Offset, MeshNodeIndex) || MeshNodeIndex >= NodeCount)
 			return std::unexpected("Skeleton node count exceeds schema bounds");
+		Mesh.MeshNodeIndex = static_cast<uint16_t>(MeshNodeIndex);
 		try { Mesh.SkeletonNodes.resize(NodeCount); }
 		catch (const std::bad_alloc&) { return std::unexpected("Insufficient memory decoding skeleton nodes"); }
 		std::vector<std::string_view> StableKeys;

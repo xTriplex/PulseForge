@@ -222,6 +222,7 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	PF_CHECK(Tests, PreviousReceipt.has_value());
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->Recipe.InputFingerprint == Imported->Recipe.InputFingerprint);
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->Recipe.SubresourceKey == Imported->Recipe.SubresourceKey);
+	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->Recipe.SourceLocator == "mesh/0/primitive/0");
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->ResultIdentity == "mesh/0/primitive/0");
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->ResultFingerprint == Imported->ResultFingerprint);
 
@@ -316,8 +317,18 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	if (!MultiOutputReceiptBeforeLegacyRead) return;
 	using Json = nlohmann::ordered_json;
 	Json LegacyVersionOne = Json::object({ { "format", "PulseForgeImportResult" }, { "version", 1 } });
-	const Json CurrentVersionTwo = Json::parse(*MultiOutputReceiptBeforeLegacyRead);
-	for (auto It = CurrentVersionTwo.at("records").front().begin(); It != CurrentVersionTwo.at("records").front().end(); ++It)
+	const Json CurrentVersionThree = Json::parse(*MultiOutputReceiptBeforeLegacyRead);
+	PF_CHECK(Tests, CurrentVersionThree.at("version") == AssetImportProvenanceSerializer::CurrentVersion);
+	Json LegacyVersionTwo = CurrentVersionThree;
+	LegacyVersionTwo["version"] = AssetImportProvenanceSerializer::LegacyMultiRecordVersion;
+	for (Json& Record : LegacyVersionTwo["records"])
+		Record["recipe"].erase("sourceLocator");
+	const auto ReadLegacyVersionTwo = AssetImportProvenanceSerializer::DeserializeAll(LegacyVersionTwo.dump());
+	PF_CHECK(Tests, ReadLegacyVersionTwo && ReadLegacyVersionTwo->size() == 2);
+	if (ReadLegacyVersionTwo && ReadLegacyVersionTwo->size() == 2)
+		PF_CHECK(Tests, (*ReadLegacyVersionTwo)[0].Recipe.SourceLocator.empty() &&
+			(*ReadLegacyVersionTwo)[1].Recipe.SourceLocator.empty());
+	for (auto It = CurrentVersionThree.at("records").front().begin(); It != CurrentVersionThree.at("records").front().end(); ++It)
 		LegacyVersionOne[It.key()] = It.value();
 	const std::string LegacyVersionOneBytes = LegacyVersionOne.dump(2) + "\n";
 	PF_CHECK(Tests, WriteTextFile(MultiOutputReceiptPath, LegacyVersionOneBytes));
@@ -352,9 +363,9 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 		PF_CHECK(Tests, LegacyAObservation->LastSuccessfulResult.has_value());
 		PF_CHECK(Tests, LegacyBObservation->LastSuccessfulResult.has_value());
 	}
-	const auto VersionTwoBytesBeforeInjectedFailure = ReadTextFile(MultiOutputReceiptPath);
-	PF_CHECK(Tests, VersionTwoBytesBeforeInjectedFailure.has_value());
-	if (!VersionTwoBytesBeforeInjectedFailure) return;
+	const auto VersionThreeBytesBeforeInjectedFailure = ReadTextFile(MultiOutputReceiptPath);
+	PF_CHECK(Tests, VersionThreeBytesBeforeInjectedFailure.has_value());
+	if (!VersionThreeBytesBeforeInjectedFailure) return;
 	std::vector<AssetImportSuccessReceipt> AlteredRecords = *UpgradedReceiptRecords;
 	AlteredRecords[0].ResultFingerprint.DigestHex[0] = AlteredRecords[0].ResultFingerprint.DigestHex[0] == '0' ? '1' : '0';
 	bool ReplacementInvoked = false;
@@ -368,13 +379,13 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	PF_CHECK(Tests, !InjectedPersistenceFailure &&
 		InjectedPersistenceFailure.error().Code == AssetImportProvenanceErrorCode::WriteFailed);
 	PF_CHECK(Tests, ReplacementInvoked);
-	PF_CHECK(Tests, ReadTextFile(MultiOutputReceiptPath) == VersionTwoBytesBeforeInjectedFailure);
+	PF_CHECK(Tests, ReadTextFile(MultiOutputReceiptPath) == VersionThreeBytesBeforeInjectedFailure);
 	const auto RecordsAfterInjectedFailure = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
 	PF_CHECK(Tests, RecordsAfterInjectedFailure && RecordsAfterInjectedFailure->size() == 2);
 	if (RecordsAfterInjectedFailure && RecordsAfterInjectedFailure->size() == 2)
 		PF_CHECK(Tests, (*RecordsAfterInjectedFailure)[0].ResultFingerprint == (*UpgradedReceiptRecords)[0].ResultFingerprint);
 
-	Json MalformedDuplicateOutput = Json::parse(*VersionTwoBytesBeforeInjectedFailure);
+	Json MalformedDuplicateOutput = Json::parse(*VersionThreeBytesBeforeInjectedFailure);
 	MalformedDuplicateOutput["records"].push_back(MalformedDuplicateOutput["records"].front());
 	const auto DuplicateOutputParse = AssetImportProvenanceSerializer::DeserializeAll(MalformedDuplicateOutput.dump());
 	PF_CHECK(Tests, !DuplicateOutputParse &&

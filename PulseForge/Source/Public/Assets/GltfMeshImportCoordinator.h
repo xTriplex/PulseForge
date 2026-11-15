@@ -31,6 +31,12 @@ namespace PulseForge
 		AssetImportSuccessReceipt Receipt;
 	};
 
+	struct GltfSkeletalMeshImportWithReceipt final
+	{
+		ImportedGltfSkeletalMesh Mesh;
+		AssetImportSuccessReceipt Receipt;
+	};
+
 	// Explicit CPU processing operation. Ordinary importer and renderer-cache calls do not write provenance.
 	class PULSEFORGE_API GltfMeshImportCoordinator final
 	{
@@ -42,5 +48,20 @@ namespace PulseForge
 				const AssetRegistry& Registry,
 				uint32_t MeshIndex = 0,
 				uint32_t PrimitiveIndex = 0);
+		[[nodiscard]] static std::expected<GltfSkeletalMeshImportWithReceipt, GltfMeshImportCoordinatorError>
+			ProcessAndRecordSkeletalPrimitive(
+				const AssetID& Asset,
+				const std::filesystem::path& ProjectRoot,
+				const AssetRegistry& Registry,
+				uint32_t NodeIndex,
+				uint32_t MeshIndex,
+				uint32_t PrimitiveIndex);
+
+	private:
+		[[nodiscard]] static std::expected<void, GltfMeshImportCoordinatorError> RecordSuccess(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			const AssetImportSuccessReceipt& Receipt);
 	};
 }

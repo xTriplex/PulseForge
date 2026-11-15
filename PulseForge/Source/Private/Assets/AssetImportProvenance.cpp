@@ -119,6 +119,7 @@ namespace PulseForge
 			return Json::object({
 				{ "sourceAsset", Recipe.SourceAsset.ToString() },
 				{ "subresource", Recipe.SubresourceKey },
+				{ "sourceLocator", Recipe.SourceLocator },
 				{ "importer", Recipe.ImporterID },
 				{ "importerVersion", Recipe.ImporterVersion },
 				{ "outputSchemaVersion", Recipe.OutputSchemaVersion },
@@ -129,7 +130,7 @@ namespace PulseForge
 			});
 		}
 
-		std::expected<AssetImportRecipe, std::string> RecipeFromJson(const Json& Value)
+		std::expected<AssetImportRecipe, std::string> RecipeFromJson(const Json& Value, bool HasSourceLocator)
 		{
 			if (!Value.is_object()) return std::unexpected("Import recipe must be an object");
 			const auto ReadString = [&Value](std::string_view Name) -> std::expected<std::string, std::string>
@@ -140,11 +141,12 @@ namespace PulseForge
 			};
 			auto Source = ReadString("sourceAsset");
 			auto Subresource = ReadString("subresource");
+			auto SourceLocator = HasSourceLocator ? ReadString("sourceLocator") : std::expected<std::string, std::string>{ std::string{} };
 			auto Importer = ReadString("importer");
 			auto ImporterVersion = ReadString("importerVersion");
 			auto Settings = ReadString("effectiveSettings");
 			auto Target = ReadString("target");
-			if (!Source || !Subresource || !Importer || !ImporterVersion || !Settings || !Target)
+			if (!Source || !Subresource || !SourceLocator || !Importer || !ImporterVersion || !Settings || !Target)
 				return std::unexpected("Import recipe is missing a required string field");
 			const auto ParsedAsset = UUID::Parse(*Source);
 			if (!ParsedAsset || ParsedAsset->IsNil()) return std::unexpected("Import recipe source UUID is invalid");
@@ -155,6 +157,7 @@ namespace PulseForge
 			AssetImportRecipe Recipe;
 			Recipe.SourceAsset = *ParsedAsset;
 			Recipe.SubresourceKey = std::move(*Subresource);
+			Recipe.SourceLocator = std::move(*SourceLocator);
 			Recipe.ImporterID = std::move(*Importer);
 			Recipe.ImporterVersion = std::move(*ImporterVersion);
 			Recipe.OutputSchemaVersion = OutputSchemaVersion;
@@ -204,7 +207,7 @@ namespace PulseForge
 			});
 		}
 
-		std::expected<AssetImportSuccessReceipt, std::string> ReceiptFromJson(const Json& Value)
+		std::expected<AssetImportSuccessReceipt, std::string> ReceiptFromJson(const Json& Value, bool HasSourceLocator)
 		{
 			if (!Value.is_object()) return std::unexpected("Import output record must be an object");
 			const auto RecipeValue = Value.find("recipe");
@@ -217,7 +220,7 @@ namespace PulseForge
 				ArtifactValue == Value.end() || !ArtifactValue->is_string() || ArtifactValue->get<std::string>() != "notPersisted" ||
 				ResidencyValue == Value.end() || !ResidencyValue->is_string() || ResidencyValue->get<std::string>() != "unknown")
 				return std::unexpected("Import output record has invalid result, artifact, or residency fields");
-			auto Recipe = RecipeFromJson(*RecipeValue);
+			auto Recipe = RecipeFromJson(*RecipeValue, HasSourceLocator);
 			auto ResultFingerprint = ParseFingerprint(*ResultValue);
 			if (!Recipe || !ResultFingerprint)
 				return std::unexpected(Recipe ? ResultFingerprint.error() : Recipe.error());
@@ -381,13 +384,14 @@ namespace PulseForge
 				Version == Document.end() || !ReadUInt32(*Version, ReceiptVersion))
 				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
 					"Import receipt requires a format identifier and numeric version"));
-			if (ReceiptVersion != LegacySingleRecordVersion && ReceiptVersion != CurrentVersion)
+			if (ReceiptVersion != LegacySingleRecordVersion && ReceiptVersion != LegacyMultiRecordVersion &&
+				ReceiptVersion != CurrentVersion)
 				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::UnsupportedVersion, Path,
 					"Import receipt version is not supported"));
 			std::vector<AssetImportSuccessReceipt> Receipts;
 			if (ReceiptVersion == LegacySingleRecordVersion)
 			{
-				auto Receipt = ReceiptFromJson(Document);
+				auto Receipt = ReceiptFromJson(Document, false);
 				if (!Receipt)
 					return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, Receipt.error()));
 				Receipts.push_back(std::move(*Receipt));
@@ -397,11 +401,11 @@ namespace PulseForge
 				const auto Records = Document.find("records");
 				if (Records == Document.end() || !Records->is_array() || Records->empty() || Records->size() > MaxReceiptRecords)
 					return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
-						"Version-2 import receipt records are missing, empty, or exceed their limit"));
+					"Versioned import receipt records are missing, empty, or exceed their limit"));
 				Receipts.reserve(Records->size());
 				for (const Json& RecordValue : *Records)
 				{
-					auto Receipt = ReceiptFromJson(RecordValue);
+					auto Receipt = ReceiptFromJson(RecordValue, ReceiptVersion >= CurrentVersion);
 					if (!Receipt)
 						return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, Receipt.error()));
 					Receipts.push_back(std::move(*Receipt));

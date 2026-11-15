@@ -1273,6 +1273,18 @@ namespace PulseForge
 		uint32_t PrimitiveIndex,
 		std::stop_token CancellationToken)
 	{
+		return ProcessStaticPrimitiveImpl(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex, CancellationToken, false);
+	}
+
+	std::expected<GltfMeshImportProduct, GltfMeshImportError> GltfMeshImporter::ProcessStaticPrimitiveImpl(
+		const AssetID& Asset,
+		const std::filesystem::path& ProjectRoot,
+		const AssetRegistry& Registry,
+		uint32_t MeshIndex,
+		uint32_t PrimitiveIndex,
+		std::stop_token CancellationToken,
+		bool AllowSkinnedGeometry)
+	{
 		if (CancellationToken.stop_requested())
 			return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, ProjectRoot, "glTF import was cancelled before processing"));
 		const auto Record = Registry.Find(Asset);
@@ -1448,6 +1460,7 @@ namespace PulseForge
 			AssetImportRecipe Recipe;
 			Recipe.SourceAsset = Asset;
 			Recipe.SubresourceKey = "mesh/" + std::to_string(MeshIndex) + "/primitive/" + std::to_string(PrimitiveIndex);
+			Recipe.SourceLocator = Recipe.SubresourceKey;
 			Recipe.ImporterID = "PulseForge.StaticGltfMeshImporter";
 			Recipe.ImporterVersion = "1";
 			Recipe.OutputSchemaVersion = 1;
@@ -1515,6 +1528,14 @@ namespace PulseForge
 					GltfMeshImportErrorCode::InvalidMesh,
 					*Source,
 					"glTF primitive requires an attributes object"));
+			}
+			if (!AllowSkinnedGeometry && (FindField(*Attributes, "JOINTS_0") != nullptr ||
+				FindField(*Attributes, "WEIGHTS_0") != nullptr))
+			{
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::UnsupportedFeature,
+					*Source,
+					"Skinned glTF primitives cannot be silently imported as static geometry; select the skeletal product kind"));
 			}
 			const Json* PositionIndexValue = FindField(*Attributes, "POSITION");
 			const auto PositionIndex = ReadUnsignedInteger(PositionIndexValue, *Source, "attributes.POSITION");
@@ -1799,7 +1820,8 @@ namespace PulseForge
 		uint32_t PrimitiveIndex,
 		std::stop_token CancellationToken)
 	{
-		auto StaticProduct = ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex, CancellationToken);
+		auto StaticProduct = ProcessStaticPrimitiveImpl(
+			Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex, CancellationToken, true);
 		if (!StaticProduct) return std::unexpected(std::move(StaticProduct.error()));
 		const auto Record = Registry.Find(Asset);
 		if (!Record) return std::unexpected(MakeError(GltfMeshImportErrorCode::AssetNotFound, {}, "glTF source asset is no longer registered"));
@@ -1930,28 +1952,15 @@ namespace PulseForge
 				}
 				JointAncestors.push_back(std::move(Ancestors));
 			}
-			auto CommonRoot = std::find_if(JointAncestors.front().begin(), JointAncestors.front().end(),
-				[&](size_t Candidate)
-				{
-					return std::all_of(JointAncestors.begin() + 1, JointAncestors.end(), [&](const auto& Ancestors)
-						{ return std::find(Ancestors.begin(), Ancestors.end(), Candidate) != Ancestors.end(); });
-				});
-			if (CommonRoot == JointAncestors.front().end())
-				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
-					"Skin joints do not share a common hierarchy root"));
-			const size_t CommonRootIndex = *CommonRoot;
 			std::set<size_t> IncludedNodes;
 			for (const auto& Ancestors : JointAncestors)
-			{
-				for (const size_t Node : Ancestors)
-				{
-					IncludedNodes.insert(Node);
-					if (Node == CommonRootIndex) break;
-				}
-			}
+				IncludedNodes.insert(Ancestors.begin(), Ancestors.end());
+			for (int32_t Current = static_cast<int32_t>(NodeIndex); Current >= 0;
+				Current = ParentIndices[static_cast<size_t>(Current)])
+				IncludedNodes.insert(static_cast<size_t>(Current));
 			if (IncludedNodes.size() > MaximumSkeletonNodeCount)
 				return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
-					"Skin joint hierarchy exceeds the 4096-node supported skeleton limit"));
+					"Skin and mesh node hierarchies exceed the 4096-node supported skeleton limit"));
 
 			std::vector<size_t> OrderedNodes(IncludedNodes.begin(), IncludedNodes.end());
 			std::sort(OrderedNodes.begin(), OrderedNodes.end(), [&](size_t First, size_t Second)
@@ -2063,6 +2072,7 @@ namespace PulseForge
 				OutputNodeIndices.emplace(Node, static_cast<uint16_t>(Imported.SkeletonNodes.size()));
 				Imported.SkeletonNodes.push_back(std::move(Output));
 			}
+			Imported.MeshNodeIndex = OutputNodeIndices.at(NodeIndex);
 			for (const uint32_t Joint : SkinJoints) Imported.JointNodeIndices.push_back(OutputNodeIndices.at(Joint));
 
 			const Json* InverseBindValue = FindField(Skin, "inverseBindMatrices");
@@ -2284,10 +2294,13 @@ namespace PulseForge
 			Product.Recipe.OutputSchemaVersion = 1;
 			const std::string PrimitiveJson = Primitive.dump();
 			AssetFingerprintBuilder SubresourceBuilder("PulseForge.GltfSkeletalSubresource.v1");
+			SubresourceBuilder.UpdateText("mesh-node", Product.Mesh.SkeletonNodes[Product.Mesh.MeshNodeIndex].StableKey);
 			for (const uint32_t Joint : SkinJoints)
 				SubresourceBuilder.UpdateText("joint", NodeKeys[Joint]);
 			SubresourceBuilder.UpdateText("primitive", PrimitiveJson);
 			Product.Recipe.SubresourceKey = "skeletal/" + SubresourceBuilder.Finish().DigestHex;
+			Product.Recipe.SourceLocator = "skeletal/node/" + std::to_string(NodeIndex) + "/mesh/" +
+				std::to_string(MeshIndex) + "/primitive/" + std::to_string(PrimitiveIndex);
 			auto InputFingerprint = ComputeAssetImportInputFingerprint(Product.Recipe);
 			if (!InputFingerprint)
 				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath, InputFingerprint.error()));
@@ -2295,6 +2308,7 @@ namespace PulseForge
 			AssetFingerprintBuilder ResultBuilder("PulseForge.GltfSkeletalResult.v1");
 			ResultBuilder.UpdateText("inputs", Product.Recipe.InputFingerprint.DigestHex);
 			ResultBuilder.UpdateText("subresource", Product.Recipe.SubresourceKey);
+			ResultBuilder.UpdateText("mesh-node", Product.Mesh.SkeletonNodes[Product.Mesh.MeshNodeIndex].StableKey);
 			for (const ImportedGltfSkeletonNode& Node : Product.Mesh.SkeletonNodes)
 			{
 				ResultBuilder.UpdateText("node-key", Node.StableKey);

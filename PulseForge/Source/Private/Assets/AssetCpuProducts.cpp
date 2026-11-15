@@ -34,7 +34,7 @@ namespace PulseForge::Detail
 
 		AssetImportRecipe MakeRecipe(const AssetImportObservation& O)
 		{
-			return { O.Asset, O.SubresourceKey, O.ImporterID, O.ImporterVersion, O.OutputSchemaVersion,
+			return { O.Asset, O.SubresourceKey, O.SubresourceKey, O.ImporterID, O.ImporterVersion, O.OutputSchemaVersion,
 				O.EffectiveSettings, O.TargetID, O.Inputs, O.InputFingerprint };
 		}
 

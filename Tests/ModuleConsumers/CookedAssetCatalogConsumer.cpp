@@ -158,7 +158,7 @@ int main()
 		LoadedSkeletalMesh->Animations.front().Channels.front().Values.back()[1] != 1.0f)
 		return 22;
 	auto FutureSkeletalBytes = *SkeletalMeshBytes;
-	FutureSkeletalBytes[4] = std::byte{ 2 };
+	FutureSkeletalBytes[4] = static_cast<std::byte>(Detail::SkeletalMeshProductSchemaVersion + 1);
 	if (Detail::DecodeSkeletalMeshProduct(FutureSkeletalBytes)) return 23;
 	const auto LoadedTexture = (*Provider)->LoadTextureProduct(TextureID, "srgb");
 	if (!LoadedTexture || LoadedTexture->Width != 1 || LoadedTexture->MipLevels.size() != 1 ||

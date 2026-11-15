@@ -37,7 +37,9 @@ namespace PulseForge
 	struct AssetImportRecipe
 	{
 		AssetID SourceAsset;
+		// Stable output identity. SourceLocator is the current source-document address, which may change on reorder.
 		std::string SubresourceKey;
+		std::string SourceLocator;
 		std::string ImporterID;
 		std::string ImporterVersion;
 		uint32_t OutputSchemaVersion = 0;
@@ -100,7 +102,8 @@ namespace PulseForge
 	{
 	public:
 		static constexpr uint32_t LegacySingleRecordVersion = 1;
-		static constexpr uint32_t CurrentVersion = 2;
+		static constexpr uint32_t LegacyMultiRecordVersion = 2;
+		static constexpr uint32_t CurrentVersion = 3;
 
 		[[nodiscard]] static std::filesystem::path GetSidecarPath(const std::filesystem::path& SourceAssetPath);
 		[[nodiscard]] static std::expected<std::vector<AssetImportSuccessReceipt>, AssetImportProvenanceError> DeserializeAll(
