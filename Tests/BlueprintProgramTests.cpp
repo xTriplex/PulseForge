@@ -151,8 +151,13 @@ namespace
 			PF_CHECK(Tests, Decoded->GetEvents()[0].Program.GetSource().Instructions[3].SourceNode == UUID(10, 4));
 		}
 
+		std::vector<std::byte> LegacyVersion = *Encoded;
+		LegacyVersion[4] = std::byte{ 1 };
+		const auto LegacyDecoded = DeserializeBlueprintAsset(LegacyVersion);
+		PF_CHECK(Tests, LegacyDecoded && LegacyDecoded->GetEvents().size() == 2);
+
 		std::vector<std::byte> UnsupportedVersion = *Encoded;
-		UnsupportedVersion[4] = std::byte{ 2 };
+		UnsupportedVersion[4] = std::byte{ 3 };
 		const auto Unsupported = DeserializeBlueprintAsset(UnsupportedVersion);
 		PF_CHECK(Tests, !Unsupported && Unsupported.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
 		const auto Truncated = DeserializeBlueprintAsset(std::span<const std::byte>(*Encoded).first(8));
@@ -172,6 +177,22 @@ namespace
 		};
 		const auto InvalidEventResult = SerializeBlueprintAsset(InvalidEvent);
 		PF_CHECK(Tests, !InvalidEventResult && InvalidEventResult.error().Code == BlueprintProgramErrorCode::InvalidOperand);
+		const std::array<BlueprintEventProgramSource, 1> DestroyEvent{
+			BlueprintEventProgramSource{ BlueprintEventKind::OnDestroy, CreateProgram }
+		};
+		const auto DestroyEncoded = SerializeBlueprintAsset(DestroyEvent);
+		PF_CHECK(Tests, DestroyEncoded.has_value());
+		if (DestroyEncoded)
+		{
+			const auto DestroyDecoded = DeserializeBlueprintAsset(*DestroyEncoded);
+			PF_CHECK(Tests, DestroyDecoded && DestroyDecoded->GetEvents().size() == 1 &&
+				DestroyDecoded->GetEvents()[0].Event == BlueprintEventKind::OnDestroy);
+			std::vector<std::byte> LegacyDestroy = *DestroyEncoded;
+			LegacyDestroy[4] = std::byte{ 1 };
+			const auto LegacyDestroyDecoded = DeserializeBlueprintAsset(LegacyDestroy);
+			PF_CHECK(Tests, !LegacyDestroyDecoded &&
+				LegacyDestroyDecoded.error().Code == BlueprintProgramErrorCode::InvalidOperand);
+		}
 	}
 }
 

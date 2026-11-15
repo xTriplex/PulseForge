@@ -29,7 +29,8 @@ namespace PulseForge
 		OnTriggerEnter,
 		OnTriggerStay,
 		OnTriggerExit,
-		OnUIAction
+		OnUIAction,
+		OnDestroy
 	};
 
 	enum class BlueprintOpcode : uint8_t

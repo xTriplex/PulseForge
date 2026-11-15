@@ -110,7 +110,7 @@ namespace PulseForge
 		if (!ReadInteger(Bytes, Offset, Version))
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint asset header is truncated"));
-		if (Version != BlueprintAssetFormatVersion)
+		if (Version != BlueprintLegacyAssetFormatVersion && Version != BlueprintAssetFormatVersion)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::UnsupportedVersion,
 				"Blueprint asset version is not supported"));
 		const size_t EventCount = std::to_integer<uint8_t>(Bytes[Offset++]);
@@ -126,6 +126,13 @@ namespace PulseForge
 				return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 					"Blueprint event header is truncated"));
 			const auto Event = static_cast<BlueprintEventKind>(std::to_integer<uint8_t>(Bytes[Offset++]));
+			const size_t EventIndex = static_cast<size_t>(Event);
+			const size_t SupportedEventCount = Version == BlueprintLegacyAssetFormatVersion
+				? static_cast<size_t>(BlueprintEventKind::OnUIAction) + 1
+				: BlueprintMaximumEventPrograms;
+			if (EventIndex >= SupportedEventCount)
+				return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidOperand,
+					"Blueprint asset contains an event unsupported by its format version"));
 			uint32_t PayloadBytes = 0;
 			if (!ReadInteger(Bytes, Offset, PayloadBytes) || PayloadBytes > Bytes.size() - Offset)
 				return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,

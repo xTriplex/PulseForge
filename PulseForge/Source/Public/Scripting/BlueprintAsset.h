@@ -8,8 +8,9 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintAssetFormatVersion = 1;
-	inline constexpr size_t BlueprintMaximumEventPrograms = 9;
+	inline constexpr uint32_t BlueprintAssetFormatVersion = 2;
+	inline constexpr uint32_t BlueprintLegacyAssetFormatVersion = 1;
+	inline constexpr size_t BlueprintMaximumEventPrograms = 10;
 	inline constexpr size_t BlueprintMaximumAssetBytes = 8u * 1024u * 1024u;
 
 	struct BlueprintEventProgramSource final

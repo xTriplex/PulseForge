@@ -110,7 +110,7 @@ namespace PulseForge
 			std::vector<std::string> PropertyIds;
 			std::vector<float> ScalarState;
 		};
-		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnUIAction) + 1;
+		static constexpr size_t BlueprintEventCount = static_cast<size_t>(BlueprintEventKind::OnDestroy) + 1;
 		using BlueprintEventStates = std::array<BoundBlueprintEvent, BlueprintEventCount>;
 
 		struct RuntimeUICanvasState final
@@ -645,6 +645,11 @@ namespace PulseForge
 	{
 		if (m_Impl)
 		{
+			m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
+			m_Impl->BlueprintInstructionsExecuted = 0;
+			if (m_Impl->Source)
+				for (const Entity& EntityValue : m_Impl->Source->GetEntities())
+					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Services);
 			m_Impl->State = Impl::Lifecycle::Stopping;
 			m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
 			m_Impl->BoundaryRequest.reset();

@@ -82,6 +82,7 @@ namespace
 
 		const UUID ProgramAsset{ 0x5100000000004000ull, 0x8000000000000001ull };
 		const auto OnCreate = MakeBlueprintProgram(5.0f, true, Tests);
+		const auto OnDestroy = MakeBlueprintProgram(99.0f, true, Tests);
 		auto OnUpdate = MakeBlueprintProgram(1.0f, false, Tests);
 		uint64_t UpdateRevision = 1;
 		uint32_t OnCreateBindings = 0;
@@ -90,13 +91,15 @@ namespace
 			-> std::optional<BlueprintProgramBinding>
 		{
 			const bool IsActor = std::find(Actors.begin(), Actors.end(), Target.GetUUID()) != Actors.end();
-			if (!IsActor || Event == BlueprintEventKind::OnCreate)
+			if (!IsActor || Event == BlueprintEventKind::OnCreate || Event == BlueprintEventKind::OnDestroy)
 			{
 				if (Event == BlueprintEventKind::OnCreate && IsActor)
 				{
 					++OnCreateBindings;
 					return BlueprintProgramBinding{ ProgramAsset, 1, OnCreate };
 				}
+				if (Event == BlueprintEventKind::OnDestroy && IsActor)
+					return BlueprintProgramBinding{ ProgramAsset, 1, OnDestroy };
 				return std::nullopt;
 			}
 			if (Event == BlueprintEventKind::OnUpdate)
@@ -178,6 +181,7 @@ namespace
 				return Diagnostic.Code == BlueprintProgramErrorCode::InstructionBudgetExceeded;
 			}));
 		Runtime.Stop();
+		PF_CHECK(Tests, std::all_of(Actors.begin(), Actors.end(), [&](UUID Actor) { return Values[Actor] == 99.0f; }));
 	}
 }
 
