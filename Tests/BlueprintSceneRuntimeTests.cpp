@@ -393,10 +393,95 @@ namespace
 		}));
 		Runtime.Stop();
 	}
+
+	void TestSceneRuntimeBlueprintContactEvents(TestRunner& Tests)
+	{
+		std::error_code Error;
+		const auto ProjectId = UUID::Generate();
+		PF_CHECK(Tests, ProjectId.has_value());
+		if (!ProjectId) return;
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForgeBlueprintContacts-" + ProjectId->ToString());
+		struct Cleanup final
+		{
+			std::filesystem::path Root;
+			~Cleanup() { std::error_code Ignore; std::filesystem::remove_all(Root, Ignore); }
+		} Cleanup{ Root };
+		auto ProjectResult = Project::Create(Root / "BlueprintContacts.pfproj", "Blueprint Contacts");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult) return;
+
+		Scene TestScene;
+		constexpr UUID TriggerId{ 0x5500000000004000ull, 0x8000000000000001ull };
+		constexpr UUID BodyId{ 0x5500000000004000ull, 0x8000000000000002ull };
+		const auto Trigger = TestScene.CreateEntityWithUUID(TriggerId, "Blueprint trigger");
+		const auto Body = TestScene.CreateEntityWithUUID(BodyId, "Blueprint body");
+		PF_CHECK(Tests, Trigger.has_value() && Body.has_value());
+		if (!Trigger || !Body) return;
+		PF_CHECK(Tests, Trigger->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		BoxColliderComponent TriggerCollider;
+		TriggerCollider.IsSensor = true;
+		PF_CHECK(Tests, Trigger->SetCollider(TriggerCollider).has_value());
+		PF_CHECK(Tests, Body->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
+		PF_CHECK(Tests, Body->SetBoxCollider(BoxColliderComponent{}).has_value());
+
+		auto MakePhaseProgram = [&](float Phase)
+		{
+			BlueprintProgramSource Source;
+			Source.Constants = { Phase };
+			Source.ScalarPropertyIds = { "phase" };
+			Source.Instructions = {
+				{ BlueprintOpcode::PushConstant, 0, 0, UUID(59, 1) },
+				{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(59, 2) },
+				{ BlueprintOpcode::Return, 0, 0, UUID(59, 3) }
+			};
+			const auto Verified = VerifyBlueprintProgram(std::move(Source));
+			PF_CHECK(Tests, Verified.has_value());
+			return Verified ? std::make_shared<const VerifiedBlueprintProgram>(std::move(*Verified))
+				: std::shared_ptr<const VerifiedBlueprintProgram>{};
+		};
+		const auto EnterProgram = MakePhaseProgram(1.0f);
+		const auto StayProgram = MakePhaseProgram(2.0f);
+		const auto ExitProgram = MakePhaseProgram(3.0f);
+		constexpr AssetID ProgramAsset{ 0x5600000000004000ull, 0x8000000000000001ull };
+		SceneRuntimeServices Services;
+		Services.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if ((Target.GetUUID() != TriggerId && Target.GetUUID() != BodyId) ||
+				(Event != BlueprintEventKind::OnTriggerEnter && Event != BlueprintEventKind::OnTriggerStay &&
+					Event != BlueprintEventKind::OnTriggerExit)) return std::nullopt;
+			const auto Program = Event == BlueprintEventKind::OnTriggerEnter ? EnterProgram
+				: Event == BlueprintEventKind::OnTriggerStay ? StayProgram : ExitProgram;
+			return BlueprintProgramBinding{ ProgramAsset, 1, Program };
+		};
+		std::unordered_map<UUID, float, UUIDHash> Phases;
+		Services.ApplyBlueprintPropertyWrites = [&](const Entity& Target, std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Writes.size() != 1 || Writes[0].PropertyId != "phase" || !std::isfinite(Writes[0].Value)) return false;
+			Phases[Target.GetUUID()] = Writes[0].Value;
+			return true;
+		};
+		SceneRuntimeDesc Description;
+		Description.Audio.OutputBackend = AudioOutputBackend::Null;
+		SceneRuntime Runtime(*ProjectResult, Description, Services);
+		PF_CHECK(Tests, Runtime.Start(TestScene).has_value());
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Phases[TriggerId] == 1.0f && Phases[BodyId] == 1.0f);
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Phases[TriggerId] == 2.0f && Phases[BodyId] == 2.0f);
+		TransformComponent Away;
+		Away.Translation.x = 5.0f;
+		PF_CHECK(Tests, Body->SetTransform(Away).has_value());
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Phases[TriggerId] == 3.0f && Phases[BodyId] == 3.0f);
+		Runtime.Stop();
+	}
 }
 
 void RunBlueprintSceneRuntimeTests(TestRunner& Tests)
 {
 	TestSceneRuntimeBlueprintEvents(Tests);
 	TestSceneRuntimeBoundsGameplayActionFanout(Tests);
+	TestSceneRuntimeBlueprintContactEvents(Tests);
 }
