@@ -355,6 +355,10 @@ namespace
 		if (!Cooked) std::cerr << "Skeletal cook fixture cook failed: " << Cooked.error().Message << "\n";
 		PF_CHECK(Tests, Cooked.has_value());
 		if (!Cooked) return;
+		const auto UnavailableSource = Fixture.Root / "Skeletal source unavailable";
+		std::filesystem::rename(ModelDirectory, UnavailableSource, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
 		auto Provider = CookedContentProvider::Open(Fixture.Output, Fixture.Compatibility);
 		PF_CHECK(Tests, Provider.has_value());
 		if (!Provider) return;
