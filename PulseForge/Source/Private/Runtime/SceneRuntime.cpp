@@ -902,7 +902,8 @@ namespace PulseForge
 			if (CurrentOwner && *CurrentOwner == Canvas.Owner)
 				for (const RuntimeUIAction& Action : Actions)
 				{
-					(void)m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name);
+					if (!m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name))
+						return MakeFrameResult();
 					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Impl->Services, Action.Name);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)

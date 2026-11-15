@@ -2,6 +2,7 @@
 
 #include "Assets/AssetOperations.h"
 #include "Scene/Components/RuntimeUICanvasComponent.h"
+#include "Scene/Components/ScriptComponent.h"
 #include "UI/RuntimeUI.h"
 
 #include <algorithm>
@@ -103,8 +104,21 @@ namespace
 			ProjectResult->GetRootPath(), UIBytes, "Assets/BlueprintActions.pfui");
 		PF_CHECK(Tests, UIAsset.has_value());
 		if (!UIAsset) return;
+		constexpr std::string_view UIStopScript =
+			"function OnUIAction(action)\n"
+			"  local queued, message = scene.request_stop()\n"
+			"  assert(queued, message)\n"
+			"end\n";
+		std::vector<std::byte> ScriptBytes(UIStopScript.size());
+		std::transform(UIStopScript.begin(), UIStopScript.end(), ScriptBytes.begin(),
+			[](char Value) { return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
+		const auto StopScriptAsset = AssetOperations::CreateAssetFromBytes(ProjectResult->GetAssetRegistry(),
+			ProjectResult->GetRootPath(), ScriptBytes, "Assets/RequestStopOnUI.lua");
+		PF_CHECK(Tests, StopScriptAsset.has_value());
+		if (!StopScriptAsset) return;
 		PF_CHECK(Tests, ActorEntities[0].SetRuntimeUICanvas(RuntimeUICanvasComponent{
 			UIAsset->ID, true, RuntimeUIInputPolicy::Modal }).has_value());
+		PF_CHECK(Tests, ActorEntities[0].SetScript(ScriptComponent{ StopScriptAsset->ID }).has_value());
 
 		const UUID ProgramAsset{ 0x5100000000004000ull, 0x8000000000000001ull };
 		const auto OnCreate = MakeBlueprintProgram(5.0f, true, Tests);
@@ -150,6 +164,7 @@ namespace
 		uint64_t UpdateRevision = 1;
 		uint32_t OnCreateBindings = 0;
 		SceneRuntimeServices Services;
+		Services.QueueStop = [] { return true; };
 		Services.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
 			-> std::optional<BlueprintProgramBinding>
 		{
@@ -226,7 +241,11 @@ namespace
 			PF_CHECK(Tests, Runtime.SubmitRuntimeUIFrame(Viewport, std::span(&InputEvent, 1)));
 			PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
 		}
-		PF_CHECK(Tests, Values[ActorA] == 42.0f);
+		const auto UIStopRequest = Runtime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, UIStopRequest && UIStopRequest->Kind == SceneRuntimeBoundaryRequestKind::Stop);
+		PF_CHECK(Tests, Values[ActorA] == 7.0f);
+		if (UIStopRequest)
+			PF_CHECK(Tests, Runtime.ResolveBoundaryRequest(*UIStopRequest, SceneRuntimeBoundaryResolution::Cancelled));
 		PF_CHECK(Tests, Runtime.SetPaused(false).has_value());
 
 		OnUpdate = MakeBlueprintProgram(10.0f, false, Tests);
