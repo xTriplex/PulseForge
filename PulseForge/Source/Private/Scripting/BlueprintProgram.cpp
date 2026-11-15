@@ -90,11 +90,16 @@ namespace PulseForge
 			if (Name.empty() || Name.size() > BlueprintMaximumActionNameLength || !ActionNames.emplace(Name).second)
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
 					"Blueprint UI action names must be unique, non-empty, and bounded"));
-		std::unordered_set<AssetID, UUIDHash> SceneTransitionAssets;
+		std::vector<AssetID> SceneTransitionAssets;
+		SceneTransitionAssets.reserve(Source.SceneTransitionAssets.size());
 		for (const AssetID& Asset : Source.SceneTransitionAssets)
-			if (Asset.IsNil() || !SceneTransitionAssets.emplace(Asset).second)
+		{
+			if (Asset.IsNil() || std::find(SceneTransitionAssets.begin(), SceneTransitionAssets.end(), Asset) !=
+				SceneTransitionAssets.end())
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, 0, {},
 					"Blueprint scene transition targets must be unique and have stable asset identities"));
+			SceneTransitionAssets.push_back(Asset);
+		}
 
 		std::vector<std::optional<size_t>> StackDepth(Source.Instructions.size());
 		std::deque<uint32_t> Pending;
