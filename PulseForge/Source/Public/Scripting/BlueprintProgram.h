@@ -16,8 +16,10 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintProgramFormatVersion = 4;
-	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 3;
+	inline constexpr uint32_t BlueprintProgramFormatVersion = 5;
+	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 4;
+	inline constexpr uint32_t BlueprintSceneTransitionProgramFormatVersion = 4;
+	inline constexpr uint32_t BlueprintIntermediateProgramFormatVersion = 3;
 	inline constexpr uint32_t BlueprintActionProgramFormatVersion = 2;
 	inline constexpr uint32_t BlueprintLegacyProgramFormatVersion = 1;
 	inline constexpr size_t BlueprintMaximumInstructionCount = 4096;

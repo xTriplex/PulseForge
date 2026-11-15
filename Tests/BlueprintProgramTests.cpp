@@ -35,7 +35,7 @@ namespace
 			Decoded->GetSource().Instructions[3].SourceNode == UUID(10, 4) &&
 			Decoded->GetSource().ScalarPropertyIds == Verified->GetSource().ScalarPropertyIds);
 		std::vector<std::byte> CorruptBytes = *Encoded;
-		CorruptBytes[4] = std::byte{ 5 };
+		CorruptBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintProgramFormatVersion + 1) };
 		const auto UnsupportedEncoded = DeserializeBlueprintProgram(CorruptBytes);
 		PF_CHECK(Tests, !UnsupportedEncoded && UnsupportedEncoded.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
 		const auto TruncatedEncoded = DeserializeBlueprintProgram(std::span<const std::byte>(*Encoded).first(12));
@@ -63,11 +63,16 @@ namespace
 			LegacyProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
 		std::vector<std::byte> PreviousProgramBytes = *Encoded;
 		PreviousProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintPreviousProgramFormatVersion) };
-		PreviousProgramBytes.erase(PreviousProgramBytes.begin() + 20, PreviousProgramBytes.begin() + 24);
 		const auto PreviousProgram = DeserializeBlueprintProgram(PreviousProgramBytes);
 		PF_CHECK(Tests, PreviousProgram && PreviousProgram->GetSource().Version == BlueprintProgramFormatVersion &&
 			PreviousProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
-		std::vector<std::byte> ActionProgramBytes = PreviousProgramBytes;
+		std::vector<std::byte> IntermediateProgramBytes = *Encoded;
+		IntermediateProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintIntermediateProgramFormatVersion) };
+		IntermediateProgramBytes.erase(IntermediateProgramBytes.begin() + 20, IntermediateProgramBytes.begin() + 24);
+		const auto IntermediateProgram = DeserializeBlueprintProgram(IntermediateProgramBytes);
+		PF_CHECK(Tests, IntermediateProgram && IntermediateProgram->GetSource().Version == BlueprintProgramFormatVersion &&
+			IntermediateProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
+		std::vector<std::byte> ActionProgramBytes = IntermediateProgramBytes;
 		ActionProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintActionProgramFormatVersion) };
 		const auto ActionProgram = DeserializeBlueprintProgram(ActionProgramBytes);
 		PF_CHECK(Tests, ActionProgram && ActionProgram->GetSource().Version == BlueprintProgramFormatVersion &&

@@ -681,17 +681,41 @@ namespace
 		PF_CHECK(Tests, VerifiedDestroy.has_value());
 		if (!DestroyEntity || !VerifiedDestroy) return;
 		const auto DestroyProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedDestroy));
+		BlueprintProgramSource DestroyCallbackSource;
+		DestroyCallbackSource.Constants = { 7.0f };
+		DestroyCallbackSource.ScalarPropertyIds = { "destroyed" };
+		DestroyCallbackSource.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(64, 1) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(64, 2) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(64, 3) }
+		};
+		const auto VerifiedDestroyCallback = VerifyBlueprintProgram(std::move(DestroyCallbackSource));
+		PF_CHECK(Tests, VerifiedDestroyCallback.has_value());
+		if (!VerifiedDestroyCallback) return;
+		const auto DestroyCallbackProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedDestroyCallback));
+		uint32_t DestroyCallbacks = 0;
 		SceneRuntimeServices DestroyServices;
 		DestroyServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
 			-> std::optional<BlueprintProgramBinding>
 		{
-			if (Target.GetUUID() != DestroyTarget || Event != BlueprintEventKind::OnUpdate) return std::nullopt;
-			return BlueprintProgramBinding{ ProgramAsset, 5, DestroyProgram };
+			if (Target.GetUUID() != DestroyTarget) return std::nullopt;
+			if (Event == BlueprintEventKind::OnUpdate) return BlueprintProgramBinding{ ProgramAsset, 5, DestroyProgram };
+			if (Event == BlueprintEventKind::OnDestroy) return BlueprintProgramBinding{ ProgramAsset, 6, DestroyCallbackProgram };
+			return std::nullopt;
+		};
+		DestroyServices.ApplyBlueprintPropertyWrites = [&](const Entity& Target,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Target != *DestroyEntity || Writes.size() != 1 || Writes.front().PropertyId != "destroyed" ||
+				Writes.front().Value != 7.0f) return false;
+			++DestroyCallbacks;
+			return true;
 		};
 		SceneRuntime DestroyRuntime(*ProjectResult, Description, DestroyServices);
 		PF_CHECK(Tests, DestroyRuntime.Start(DestroyScene).has_value());
 		const auto DestroyFrame = DestroyRuntime.Advance(DestroyScene, Timestep(1.0 / 60.0));
-		PF_CHECK(Tests, DestroyFrame && DestroyFrame->BlueprintInstructionsExecuted == 2 && !DestroyEntity->IsValid());
+		PF_CHECK(Tests, DestroyFrame && DestroyFrame->BlueprintInstructionsExecuted == 5 && DestroyCallbacks == 1 &&
+			!DestroyEntity->IsValid());
 		DestroyRuntime.Stop();
 	}
 }

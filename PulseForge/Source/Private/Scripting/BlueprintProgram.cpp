@@ -388,7 +388,7 @@ namespace PulseForge
 		if (EncodedVersion >= BlueprintActionProgramFormatVersion && !ReadInteger(Bytes, Offset, ActionNameCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
-		if (EncodedVersion >= BlueprintProgramFormatVersion &&
+		if (EncodedVersion >= BlueprintSceneTransitionProgramFormatVersion &&
 			!ReadInteger(Bytes, Offset, SceneTransitionAssetCount))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
