@@ -14,7 +14,8 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintProgramFormatVersion = 2;
+	inline constexpr uint32_t BlueprintProgramFormatVersion = 3;
+	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 2;
 	inline constexpr uint32_t BlueprintLegacyProgramFormatVersion = 1;
 	inline constexpr size_t BlueprintMaximumInstructionCount = 4096;
 	inline constexpr size_t BlueprintMaximumScalarCount = 64;
@@ -52,7 +53,8 @@ namespace PulseForge
 		JumpIfZero,
 		WriteScalarProperty,
 		Return,
-		JumpIfAction
+		JumpIfAction,
+		RequestStop
 	};
 
 	struct BlueprintInstruction
@@ -88,7 +90,8 @@ namespace PulseForge
 		InstructionBudgetExceeded,
 		HostRejectedPropertyWrite,
 		HostFailure,
-		EventBudgetExceeded
+		EventBudgetExceeded,
+		HostRejectedDeferredCall
 	};
 
 	struct BlueprintProgramError
@@ -121,6 +124,8 @@ namespace PulseForge
 	{
 		uint32_t InstructionsExecuted = 0;
 		std::vector<BlueprintScalarPropertyWrite> PropertyWrites;
+		bool RequestsStop = false;
+		UUID StopRequestSourceNode;
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>

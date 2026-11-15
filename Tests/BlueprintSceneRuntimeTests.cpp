@@ -477,6 +477,76 @@ namespace
 		PF_CHECK(Tests, Phases[TriggerId] == 3.0f && Phases[BodyId] == 3.0f);
 		Runtime.Stop();
 	}
+
+	void TestSceneRuntimeBlueprintDeferredStop(TestRunner& Tests)
+	{
+		std::error_code Error;
+		const auto ProjectId = UUID::Generate();
+		PF_CHECK(Tests, ProjectId.has_value());
+		if (!ProjectId) return;
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForgeBlueprintDeferredStop-" + ProjectId->ToString());
+		struct Cleanup final
+		{
+			std::filesystem::path Root;
+			~Cleanup() { std::error_code Ignore; std::filesystem::remove_all(Root, Ignore); }
+		} Cleanup{ Root };
+		auto ProjectResult = Project::Create(Root / "BlueprintDeferredStop.pfproj", "Blueprint Deferred Stop");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult) return;
+
+		Scene TestScene;
+		constexpr UUID StopperId{ 0x5700000000004000ull, 0x8000000000000001ull };
+		constexpr UUID LaterId{ 0x5700000000004000ull, 0x8000000000000002ull };
+		PF_CHECK(Tests, TestScene.CreateEntityWithUUID(StopperId, "Stop request source").has_value());
+		PF_CHECK(Tests, TestScene.CreateEntityWithUUID(LaterId, "Later entity").has_value());
+		BlueprintProgramSource Source;
+		Source.Instructions = {
+			{ BlueprintOpcode::RequestStop, 0, 0, UUID(60, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(60, 2) }
+		};
+		const auto Verified = VerifyBlueprintProgram(std::move(Source));
+		PF_CHECK(Tests, Verified.has_value());
+		if (!Verified) return;
+		const auto Program = std::make_shared<const VerifiedBlueprintProgram>(std::move(*Verified));
+		constexpr AssetID ProgramAsset{ 0x5800000000004000ull, 0x8000000000000001ull };
+		uint32_t UpdateResolutionAttempts = 0;
+		uint32_t QueueAttempts = 0;
+		bool AcceptStop = true;
+		SceneRuntimeServices Services;
+		Services.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Event == BlueprintEventKind::OnUpdate) ++UpdateResolutionAttempts;
+			if (Event != BlueprintEventKind::OnUpdate || Target.GetUUID() != StopperId) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 1, Program };
+		};
+		Services.QueueStop = [&]
+		{
+			++QueueAttempts;
+			return AcceptStop;
+		};
+		SceneRuntimeDesc Description;
+		Description.Audio.OutputBackend = AudioOutputBackend::Null;
+		SceneRuntime Runtime(*ProjectResult, Description, Services);
+		PF_CHECK(Tests, Runtime.Start(TestScene).has_value());
+		const auto Frame = Runtime.Advance(TestScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, Frame && Frame->BlueprintInstructionsExecuted == 2 && UpdateResolutionAttempts == 1 &&
+			QueueAttempts == 1);
+		const auto Pending = Runtime.GetPendingBoundaryRequest();
+		PF_CHECK(Tests, Pending && Pending->Kind == SceneRuntimeBoundaryRequestKind::Stop && !Pending->Scene);
+		PF_CHECK(Tests, Runtime.ResolveBoundaryRequest(*Pending, SceneRuntimeBoundaryResolution::Cancelled));
+		PF_CHECK(Tests, !Runtime.GetPendingBoundaryRequest().has_value());
+		AcceptStop = false;
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, QueueAttempts == 2 && UpdateResolutionAttempts == 2 &&
+			!Runtime.GetPendingBoundaryRequest().has_value());
+		const auto Diagnostics = Runtime.GetBlueprintDiagnostics();
+		PF_CHECK(Tests, Diagnostics.size() == 1 && Diagnostics[0].Entity == StopperId &&
+			Diagnostics[0].Code == BlueprintProgramErrorCode::HostRejectedDeferredCall &&
+			Diagnostics[0].SourceNode == UUID(60, 1));
+		Runtime.Stop();
+	}
 }
 
 void RunBlueprintSceneRuntimeTests(TestRunner& Tests)
@@ -484,4 +554,5 @@ void RunBlueprintSceneRuntimeTests(TestRunner& Tests)
 	TestSceneRuntimeBlueprintEvents(Tests);
 	TestSceneRuntimeBoundsGameplayActionFanout(Tests);
 	TestSceneRuntimeBlueprintContactEvents(Tests);
+	TestSceneRuntimeBlueprintDeferredStop(Tests);
 }

@@ -131,6 +131,7 @@ namespace PulseForge
 		std::unique_ptr<AudioSceneRuntime> Audio;
 		std::unique_ptr<PhysicsSceneRuntime> Physics;
 		std::unique_ptr<ScriptRuntime> Scripting;
+		SceneRuntimeServices Services;
 		std::optional<RuntimeUICanvasState> RuntimeUI;
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
@@ -282,6 +283,13 @@ namespace PulseForge
 					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedPropertyWrite,
 						Result->PropertyWrites.front().SourceNode,
 						"Scene runtime host rejected the Blueprint property transaction");
+					Instance.Faulted = true;
+					return;
+				}
+				if (Result->RequestsStop && (!Services.QueueStop || !Services.QueueStop()))
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						Result->StopRequestSourceNode, "Scene runtime host rejected the Blueprint stop request");
 					Instance.Faulted = true;
 					return;
 				}
@@ -587,6 +595,9 @@ namespace PulseForge
 				CandidateOwner->RuntimeUI->Document = std::move(CandidateDocument);
 				return true;
 			};
+			Candidate->Services = m_Services;
+			Candidate->Services.QueueSceneTransition = Services.QueueSceneTransition;
+			Candidate->Services.QueueStop = Services.QueueStop;
 			if (m_CookedAssets)
 				Candidate->Scripting = std::make_unique<ScriptRuntime>(m_CookedAssets, m_Description.Scripting, Services);
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -609,7 +620,7 @@ namespace PulseForge
 			for (const Entity& EntityValue : Source.GetEntities())
 			{
 				Candidate->BlueprintKnownEntities.emplace(EntityValue.GetUUID(), EntityValue);
-				Candidate->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnCreate, m_Services);
+				Candidate->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnCreate, Candidate->Services);
 			}
 			m_Impl = std::move(Candidate);
 			return {};
@@ -669,7 +680,7 @@ namespace PulseForge
 			m_Impl->BlueprintDispatchLimitReported = false;
 			if (m_Impl->Source)
 				for (const Entity& EntityValue : m_Impl->Source->GetEntities())
-					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Services);
+					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Impl->Services);
 			m_Impl->PendingContactEvents.clear();
 			m_Impl->State = Impl::Lifecycle::Stopping;
 			m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
@@ -869,7 +880,7 @@ namespace PulseForge
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return MakeFrameResult();
-		m_Impl->ReconcileBlueprintEntities(Source, m_Services);
+		m_Impl->ReconcileBlueprintEntities(Source, m_Impl->Services);
 		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
 				"Could not service queued script reloads: " + Result.error().Message));
@@ -892,7 +903,7 @@ namespace PulseForge
 				for (const RuntimeUIAction& Action : Actions)
 				{
 					(void)m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name);
-					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Services, Action.Name);
+					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Impl->Services, Action.Name);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 						return MakeFrameResult();
@@ -947,7 +958,7 @@ namespace PulseForge
 				for (const Entity& EntityValue : Source.GetEntities())
 				{
 					if (m_Impl->BlueprintDispatchesRemaining == 0) break;
-					m_Impl->DispatchBlueprintEvent(Source, EntityValue, *Event, m_Services, Definition.Id);
+					m_Impl->DispatchBlueprintEvent(Source, EntityValue, *Event, m_Impl->Services, Definition.Id);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 						return MakeFrameResult();
@@ -963,7 +974,10 @@ namespace PulseForge
 		for (const Entity& EntityValue : Source.GetEntities())
 		{
 			if (m_Impl->BlueprintDispatchesRemaining == 0) break;
-			m_Impl->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnUpdate, m_Services);
+			m_Impl->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnUpdate, m_Impl->Services);
+			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+				return MakeFrameResult();
 		}
 		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
@@ -1017,8 +1031,11 @@ namespace PulseForge
 					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnTriggerStay : BlueprintEventKind::OnTriggerExit
 				: Event.Phase == PhysicsContactPhase::Begin ? BlueprintEventKind::OnCollisionBegin
 					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnCollisionStay : BlueprintEventKind::OnCollisionEnd;
-			m_Impl->DispatchBlueprintEvent(Source, Event.First, BlueprintEvent, m_Services);
-			m_Impl->DispatchBlueprintEvent(Source, Event.Second, BlueprintEvent, m_Services);
+			m_Impl->DispatchBlueprintEvent(Source, Event.First, BlueprintEvent, m_Impl->Services);
+			m_Impl->DispatchBlueprintEvent(Source, Event.Second, BlueprintEvent, m_Impl->Services);
+			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
+				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+				return MakeFrameResult(*PhysicsResult);
 		}
 		if (auto Result = m_Impl->Audio->ProcessPendingCommands(); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,

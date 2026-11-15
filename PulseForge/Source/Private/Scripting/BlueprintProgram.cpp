@@ -166,6 +166,8 @@ namespace PulseForge
 						"Blueprint action name index is out of range"));
 				if (const auto Error = Enqueue(Instruction.Target, Depth, Index)) return std::unexpected(*Error);
 				break;
+			case BlueprintOpcode::RequestStop:
+				break;
 			case BlueprintOpcode::Return:
 				if (Depth != 0)
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackMismatch, Index, Instruction.SourceNode,
@@ -264,6 +266,11 @@ namespace PulseForge
 				++ProgramCounter;
 				break;
 			}
+			case BlueprintOpcode::RequestStop:
+				Result.RequestsStop = true;
+				Result.StopRequestSourceNode = Instruction.SourceNode;
+				++ProgramCounter;
+				break;
 			case BlueprintOpcode::Return:
 				std::copy(CandidateState.begin(), CandidateState.end(), ScalarState.begin());
 				return Result;
@@ -328,11 +335,12 @@ namespace PulseForge
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
 				"Blueprint program header is truncated"));
 		const uint32_t EncodedVersion = Source.Version;
-		if (EncodedVersion != BlueprintLegacyProgramFormatVersion && EncodedVersion != BlueprintProgramFormatVersion)
+		if (EncodedVersion != BlueprintLegacyProgramFormatVersion &&
+			EncodedVersion != BlueprintPreviousProgramFormatVersion && EncodedVersion != BlueprintProgramFormatVersion)
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, 0, {},
 				"Blueprint program version is not supported"));
 		uint32_t ActionNameCount = 0;
-		if ((EncodedVersion == BlueprintProgramFormatVersion &&
+		if ((EncodedVersion >= BlueprintPreviousProgramFormatVersion &&
 			(!ReadInteger(Bytes, Offset, ActionNameCount) || !ReadInteger(Bytes, Offset, InstructionCount))) ||
 			(EncodedVersion == BlueprintLegacyProgramFormatVersion && !ReadInteger(Bytes, Offset, InstructionCount)))
 			return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidByteStream, 0, {},
