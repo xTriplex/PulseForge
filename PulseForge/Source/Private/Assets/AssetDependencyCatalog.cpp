@@ -82,7 +82,8 @@ namespace PulseForge
 
 		bool IsSubresourceNode(const AssetDependencyNode& Node)
 		{
-			return !Node.Asset.IsNil() && Node.SubresourceKey.starts_with("mesh/");
+			return !Node.Asset.IsNil() &&
+				(Node.SubresourceKey.starts_with("mesh/") || Node.SubresourceKey.starts_with("skeletal/node/"));
 		}
 
 		bool IsSceneEntityNode(const AssetDependencyNode& Node)

@@ -953,6 +953,67 @@ namespace PulseForge
 						"meshes/" + std::to_string(Locators[Index].MeshIndex) + "/primitives/" +
 							std::to_string(Locators[Index].PrimitiveIndex), std::move(Inspections[Index].Diagnostic));
 				}
+
+				const auto Nodes = Document.find("nodes");
+				const auto Skins = Document.find("skins");
+				if (Nodes != Document.end() && Nodes->is_array() && Skins != Document.end() && Skins->is_array())
+				{
+					const auto ReadIndex = [](const Json& Object, std::string_view Field) -> std::optional<uint32_t>
+					{
+						const auto Value = Object.find(std::string(Field));
+						if (Value == Object.end() || (!Value->is_number_unsigned() && !Value->is_number_integer())) return std::nullopt;
+						if (Value->is_number_integer() && Value->get<int64_t>() < 0) return std::nullopt;
+						try
+						{
+							const uint64_t Index = Value->get<uint64_t>();
+							if (Index > std::numeric_limits<uint32_t>::max()) return std::nullopt;
+							return static_cast<uint32_t>(Index);
+						}
+						catch (const nlohmann::json::exception&) { return std::nullopt; }
+					};
+					const std::optional<uint64_t> BinaryLength = SourceRead->BinaryRange
+						? std::optional<uint64_t>(SourceRead->BinaryRange->Length) : std::nullopt;
+					for (size_t NodeIndex = 0; NodeIndex < Nodes->size(); ++NodeIndex)
+					{
+						if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
+						const Json& Node = (*Nodes)[NodeIndex];
+						if (!Node.is_object()) continue;
+						const auto MeshIndex = ReadIndex(Node, "mesh");
+						const auto SkinIndex = ReadIndex(Node, "skin");
+						if (!MeshIndex || !SkinIndex || *MeshIndex >= Meshes->size() || *SkinIndex >= Skins->size()) continue;
+						const Json& Mesh = (*Meshes)[*MeshIndex];
+						const auto Primitives = Mesh.find("primitives");
+						if (Primitives == Mesh.end() || !Primitives->is_array()) continue;
+						for (size_t PrimitiveIndex = 0; PrimitiveIndex < Primitives->size(); ++PrimitiveIndex)
+						{
+							const Json& Primitive = (*Primitives)[PrimitiveIndex];
+							if (!Primitive.is_object()) continue;
+							const auto Attributes = Primitive.find("attributes");
+							if (Attributes == Primitive.end() || !Attributes->is_object()) continue;
+							const bool HasJoints = Attributes->contains("JOINTS_0");
+							const bool HasWeights = Attributes->contains("WEIGHTS_0");
+							if (!HasJoints && !HasWeights) continue;
+							const std::string Key = "skeletal/node/" + std::to_string(NodeIndex) + "/mesh/" +
+								std::to_string(*MeshIndex) + "/primitive/" + std::to_string(PrimitiveIndex);
+							const AssetDependencyNode SkeletalNode{ Owner.ID, PathToUtf8(Owner.ProjectRelativePath), Key };
+							const auto Inspection = Assets::Detail::InspectStaticPrimitive(SourceRead->JsonText, SourcePath,
+								ProjectRoot, *MeshIndex, static_cast<uint32_t>(PrimitiveIndex), BinaryLength, true);
+							const bool HasUnsupportedExtraInfluences = Attributes->contains("JOINTS_1") || Attributes->contains("WEIGHTS_1");
+							const AssetSubresourceClassification Classification = HasJoints && HasWeights && !HasUnsupportedExtraInfluences
+								? Inspection.Classification : AssetSubresourceClassification::Invalid;
+							Output.Subresources.push_back({ SkeletalNode,
+								FindString(Node, "name").value_or("node " + std::to_string(NodeIndex)) + " / skeletal primitive " +
+									std::to_string(PrimitiveIndex), Classification });
+							if (Classification == AssetSubresourceClassification::Invalid ||
+								Classification == AssetSubresourceClassification::Unsupported)
+								AppendIssue(Output, SkeletalNode, SourceFileNode(PathToUtf8(Owner.ProjectRelativePath)),
+									Classification == AssetSubresourceClassification::Invalid ? AssetDependencyStatus::Invalid : AssetDependencyStatus::Unsupported,
+									"nodes/" + std::to_string(NodeIndex) + "/skin", HasUnsupportedExtraInfluences
+										? "Only JOINTS_0 and WEIGHTS_0 are supported by the skeletal importer"
+										: Inspection.Diagnostic);
+						}
+					}
+				}
 			}
 
 			std::sort(ExternalBuffers.begin(), ExternalBuffers.end(),

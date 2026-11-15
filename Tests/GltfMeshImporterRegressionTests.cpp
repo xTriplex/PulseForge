@@ -371,6 +371,11 @@ namespace
 		PF_CHECK(Tests, Found != Subresources.end());
 		if (Found != Subresources.end())
 			PF_CHECK(Tests, Found->Classification == AssetSubresourceClassification::Unsupported);
+		const auto Skeletal = std::find_if(Subresources.begin(), Subresources.end(), [&](const AssetSubresourceRecord& Entry)
+			{ return Entry.Identity.Asset == Source && Entry.Identity.SubresourceKey == "skeletal/node/0/mesh/0/primitive/0"; });
+		PF_CHECK(Tests, Skeletal != Subresources.end());
+		if (Skeletal != Subresources.end())
+			PF_CHECK(Tests, Skeletal->Classification == AssetSubresourceClassification::SupportedCandidate);
 	}
 
 	void TestSkeletalPrimitiveImportPreservesSkinContract(TestRunner& Tests)

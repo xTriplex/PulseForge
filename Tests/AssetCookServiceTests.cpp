@@ -272,6 +272,105 @@ namespace
 		}
 	};
 
+	void TestSkeletalMeshCookedProviderRoundTrip(TestRunner& Tests)
+	{
+		CookFixture Fixture;
+		PF_CHECK(Tests, !Fixture.Root.empty());
+		if (Fixture.Root.empty()) return;
+
+		const std::filesystem::path ModelDirectory = Fixture.Source / "Assets" / "Models";
+		std::error_code Error;
+		std::filesystem::create_directories(ModelDirectory, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		std::vector<std::byte> Buffer;
+		for (const float Value : std::array<float, 9>{ 0, 0, 0, 1, 0, 0, 0, 1, 0 })
+		{
+			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+				Buffer.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+		}
+		for (size_t Index = 0; Index < 12; ++Index) Buffer.push_back(std::byte{ 0 });
+		for (const float Value : std::array<float, 12>{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 })
+		{
+			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+				Buffer.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+		}
+		for (const uint16_t Index : std::array<uint16_t, 3>{ 0, 1, 2 })
+		{
+			Buffer.push_back(static_cast<std::byte>(Index & 0xff));
+			Buffer.push_back(static_cast<std::byte>(Index >> 8));
+		}
+		Buffer.push_back(std::byte{ 0 });
+		Buffer.push_back(std::byte{ 0 });
+		for (const float Value : std::array<float, 16>{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 })
+		{
+			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+				Buffer.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+		}
+		const auto BufferPath = ModelDirectory / "Skinned.bin";
+		{
+			std::ofstream Output(BufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Buffer.data()), static_cast<std::streamsize>(Buffer.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		PF_CHECK(Tests, AssetMetadataSerializer::CreateForNewAsset(BufferPath).has_value());
+		const auto GltfPath = ModelDirectory / "Skinned.gltf";
+		CookFixture::WriteText(GltfPath,
+			"{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"uri\":\"Skinned.bin\",\"byteLength\":168}],"
+			"\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+			"{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12},{\"buffer\":0,\"byteOffset\":48,\"byteLength\":48},"
+			"{\"buffer\":0,\"byteOffset\":96,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":104,\"byteLength\":64}],"
+			"\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+			"{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
+			"{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+			"{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
+			"{\"bufferView\":4,\"componentType\":5126,\"count\":1,\"type\":\"MAT4\"}],"
+			"\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}],"
+			"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"}],"
+			"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]}");
+		const auto MeshMetadata = AssetMetadataSerializer::CreateForNewAsset(GltfPath);
+		PF_CHECK(Tests, MeshMetadata.has_value());
+		if (!MeshMetadata) return;
+
+		auto Snapshot = Fixture.Build();
+		if (!Snapshot) std::cerr << "Skeletal cook fixture snapshot failed: " << Snapshot.error().Message << "\n";
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		auto Request = Fixture.Request(*Snapshot);
+		Request.DynamicRoots.push_back(MeshMetadata->ID);
+		auto Plan = AssetCookService::Plan(Request);
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		constexpr std::string_view Subresource = "skeletal/node/0/mesh/0/primitive/0";
+		const auto Planned = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == MeshMetadata->ID && Product.Product == CookedAssetProductKind::SkeletalMesh && Product.Subresource == Subresource; });
+		PF_CHECK(Tests, Planned != Plan->Products.end());
+		if (Planned == Plan->Products.end()) return;
+
+		auto Cooked = AssetCookService::Cook(*Plan);
+		if (!Cooked) std::cerr << "Skeletal cook fixture cook failed: " << Cooked.error().Message << "\n";
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		auto Provider = CookedContentProvider::Open(Fixture.Output, Fixture.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		const auto Product = (*Provider)->LoadSkeletalMesh(MeshMetadata->ID, Subresource);
+		PF_CHECK(Tests, Product.has_value());
+		if (Product)
+		{
+			PF_CHECK(Tests, Product->Geometry.Vertices.size() == 3);
+			PF_CHECK(Tests, Product->JointNodeIndices.size() == 1);
+			if (Product->JointNodeIndices.size() == 1 && Product->JointNodeIndices.front() < Product->SkeletonNodes.size())
+				PF_CHECK(Tests, Product->SkeletonNodes[Product->JointNodeIndices.front()].Name == "joint");
+			else PF_CHECK(Tests, false);
+			PF_CHECK(Tests, Product->VertexInfluences.size() == 3);
+		}
+	}
+
 	void TestLinkedPrefabSampleCookAndRuntimeScene(TestRunner& Tests)
 	{
 #if defined(PF_PREFAB_LINKED_SAMPLE_PROJECT)
@@ -1753,6 +1852,7 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 		}
 	}
 	TestLinkedPrefabSampleCookAndRuntimeScene(Tests);
+	TestSkeletalMeshCookedProviderRoundTrip(Tests);
 	TestLuaAuthoringSampleCookAndRuntime(Tests);
 	TestPhysicsQueriesSampleCookedPlayer(Tests);
 	TestRuntimeUISampleCookedPlayer(Tests);

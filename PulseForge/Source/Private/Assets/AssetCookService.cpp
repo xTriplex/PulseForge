@@ -571,10 +571,30 @@ namespace PulseForge
 				return std::unexpected(Error(AssetCookErrorCode::InvalidRoot, "Startup root must identify a scene asset", Record->ProjectRelativePath, Root));
 			if (auto Path = AssetPathResolver::ResolveManagedSourcePath(Request.SourceSnapshot->GetProjectRootPath(), Record->ProjectRelativePath); !Path)
 				return std::unexpected(Error(AssetCookErrorCode::SourceReadFailed, Path.error().Message, Path.error().Path, Root));
-			CookedAssetDependency Product{ Root, *ResolvedProduct, {} };
-			if (Product.Product == CookedAssetProductKind::MeshPrimitive) Product.Subresource = MeshDefaultSubresource;
-			else if (Product.Product == CookedAssetProductKind::Texture) Product.Subresource = std::string(TextureSrgbSubresource);
-			Queue.push_back({ std::move(Product) });
+			if (*ResolvedProduct == CookedAssetProductKind::MeshPrimitive)
+			{
+				bool FoundCookableSubresource = false;
+				for (const AssetSubresourceRecord& Candidate : Request.SourceSnapshot->GetSubresources())
+				{
+					if (Candidate.Identity.Asset != Root || (Candidate.Classification != AssetSubresourceClassification::SupportedCandidate &&
+						Candidate.Classification != AssetSubresourceClassification::Imported)) continue;
+					CookedAssetProductKind ProductKind;
+					if (Candidate.Identity.SubresourceKey.starts_with("mesh/")) ProductKind = CookedAssetProductKind::MeshPrimitive;
+					else if (Candidate.Identity.SubresourceKey.starts_with("skeletal/node/")) ProductKind = CookedAssetProductKind::SkeletalMesh;
+					else continue;
+					Queue.push_back({ CookedAssetDependency{ Root, ProductKind, Candidate.Identity.SubresourceKey } });
+					FoundCookableSubresource = true;
+				}
+				if (!FoundCookableSubresource)
+					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
+						"Mesh root contains no supported static or skeletal primitive", Record->ProjectRelativePath, Root));
+			}
+			else
+			{
+				CookedAssetDependency Product{ Root, *ResolvedProduct, {} };
+				if (Product.Product == CookedAssetProductKind::Texture) Product.Subresource = std::string(TextureSrgbSubresource);
+				Queue.push_back({ std::move(Product) });
+			}
 		}
 
 		std::map<std::string, AssetCookPlannedProduct> Products;
@@ -591,7 +611,9 @@ namespace PulseForge
 			const auto ResolvedProduct = ResolveProduct(*Record);
 			const bool MaterialTextureInterpretation = Type && Current.Product == CookedAssetProductKind::Texture &&
 				*Type == AssetFileType::Environment && (Current.Subresource == TextureSrgbSubresource || Current.Subresource == TextureLinearSubresource);
-			if (!Type || !ResolvedProduct || (*ResolvedProduct != Current.Product && !MaterialTextureInterpretation))
+			const bool SkeletalMeshInterpretation = Type && *Type == AssetFileType::Mesh &&
+				Current.Product == CookedAssetProductKind::SkeletalMesh && Current.Subresource.starts_with("skeletal/node/");
+			if (!Type || !ResolvedProduct || (*ResolvedProduct != Current.Product && !MaterialTextureInterpretation && !SkeletalMeshInterpretation))
 				return std::unexpected(Error(AssetCookErrorCode::InvalidDependency, "Dependency product type does not match its registered source type", Record->ProjectRelativePath, Current.Asset));
 			auto SourcePath = AssetPathResolver::ResolveManagedSourcePath(Request.SourceSnapshot->GetProjectRootPath(), Record->ProjectRelativePath);
 			if (!SourcePath) return std::unexpected(Error(AssetCookErrorCode::SourceReadFailed, SourcePath.error().Message, SourcePath.error().Path, Current.Asset));
@@ -603,10 +625,21 @@ namespace PulseForge
 					[&](const AssetSubresourceRecord& Candidate)
 					{ return Candidate.Identity.Asset == Current.Asset && Candidate.Identity.SubresourceKey == Current.Subresource; });
 				if (Subresource == Request.SourceSnapshot->GetSubresources().end() ||
+					!Current.Subresource.starts_with("mesh/") ||
 					(Subresource->Classification != AssetSubresourceClassification::SupportedCandidate &&
 					 Subresource->Classification != AssetSubresourceClassification::Imported))
 					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
 						"Requested mesh subresource is not classified as a supported static output", *SourcePath, Current.Asset));
+			}
+			else if (Current.Product == CookedAssetProductKind::SkeletalMesh)
+			{
+				const auto Subresource = std::find_if(Request.SourceSnapshot->GetSubresources().begin(),
+					Request.SourceSnapshot->GetSubresources().end(), [&](const AssetSubresourceRecord& Candidate)
+					{ return Candidate.Identity.Asset == Current.Asset && Candidate.Identity.SubresourceKey == Current.Subresource; });
+				if (Subresource == Request.SourceSnapshot->GetSubresources().end() ||
+					Subresource->Classification != AssetSubresourceClassification::SupportedCandidate)
+					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
+						"Requested skeletal subresource is not classified as a supported skinned output", *SourcePath, Current.Asset));
 			}
 
 			for (const AssetDependencyEdge& Edge : Request.SourceSnapshot->GetDirectDependencies({ Current.Asset, {}, {} }))
@@ -643,6 +676,7 @@ namespace PulseForge
 					if (Request.CancellationToken.stop_requested())
 						return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled while enumerating mesh outputs"));
 					if (Candidate.Identity.Asset != Current.Asset || Candidate.Identity.SubresourceKey == Current.Subresource ||
+						!Candidate.Identity.SubresourceKey.starts_with("mesh/") ||
 						(Candidate.Classification != AssetSubresourceClassification::SupportedCandidate &&
 							Candidate.Classification != AssetSubresourceClassification::Imported))
 						continue;
@@ -775,6 +809,36 @@ namespace PulseForge
 				if (!Encoded) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Encoded.error(), Product.SourcePath, Product.Asset));
 				Bytes = std::move(*Encoded);
 				Version = 1;
+			}
+			else if (Product.Product == CookedAssetProductKind::SkeletalMesh)
+			{
+				uint32_t NodeIndex = 0, MeshIndex = 0, PrimitiveIndex = 0;
+				if (std::sscanf(Product.Subresource.c_str(), "skeletal/node/%u/mesh/%u/primitive/%u",
+					&NodeIndex, &MeshIndex, &PrimitiveIndex) != 3)
+					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
+						"Unsupported source-local skeletal mesh locator", Product.SourcePath, Product.Asset));
+				auto Imported = GltfMeshImporter::ProcessSkeletalPrimitive(Product.Asset,
+					Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetRegistry(),
+					NodeIndex, MeshIndex, PrimitiveIndex, Request.CancellationToken);
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled,
+						"Cook was cancelled after skeletal mesh import", Product.SourcePath, Product.Asset));
+				if (!Imported)
+				{
+					if (Imported.error().Code == GltfMeshImportErrorCode::Cancelled)
+						return std::unexpected(Error(AssetCookErrorCode::Cancelled, Imported.error().Message,
+							Imported.error().Path, Product.Asset));
+					return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+						Imported.error().Message, Imported.error().Path, Product.Asset));
+				}
+				auto Encoded = Detail::EncodeSkeletalMeshProduct(Imported->Mesh, Request.CancellationToken);
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled,
+						"Cook was cancelled while encoding a skeletal mesh product", Product.SourcePath, Product.Asset));
+				if (!Encoded) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed,
+					Encoded.error(), Product.SourcePath, Product.Asset));
+				Bytes = std::move(*Encoded);
+				Version = Detail::SkeletalMeshProductSchemaVersion;
 			}
 			else if (Product.Product == CookedAssetProductKind::Texture)
 			{
