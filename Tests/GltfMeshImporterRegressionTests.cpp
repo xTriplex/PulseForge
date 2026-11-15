@@ -73,13 +73,20 @@ namespace
 			return Metadata ? Metadata->ID : AssetID{};
 		}
 
-		[[nodiscard]] AssetID WriteSkinnedSource(std::string_view FileName)
+		[[nodiscard]] AssetID WriteSkinnedSource(
+			std::string_view FileName,
+			bool ZeroWeights = false,
+			bool InvalidJointIndex = false)
 		{
 			const std::filesystem::path Directory = Root / "Assets" / "Models";
 			std::vector<std::byte> Bytes = PositionBytes();
-			for (const uint8_t Joint : std::array<uint8_t, 12>{}) Bytes.push_back(static_cast<std::byte>(Joint));
-			for (const float Weight : std::array<float, 12>{ 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
-				0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f })
+			std::array<uint8_t, 12> JointValues{};
+			if (InvalidJointIndex) JointValues[0] = 1;
+			for (const uint8_t Joint : JointValues) Bytes.push_back(static_cast<std::byte>(Joint));
+			const std::array<float, 12> WeightValues = ZeroWeights
+				? std::array<float, 12>{}
+				: std::array<float, 12>{ 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f };
+			for (const float Weight : WeightValues)
 			{
 				const uint32_t Bits = std::bit_cast<uint32_t>(Weight);
 				for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
@@ -87,6 +94,12 @@ namespace
 			}
 			const std::vector<std::byte> Indices = IndexBytes();
 			Bytes.insert(Bytes.end(), Indices.begin(), Indices.end());
+			for (const float Value : std::array<float, 16>{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 })
+			{
+				const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+				for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+					Bytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+			}
 			const std::filesystem::path BufferPath = Directory / "Skinned.bin";
 			if (!WriteBinary(BufferPath, Bytes)) return {};
 			if (!AssetMetadataSerializer::CreateForNewAsset(BufferPath)) return {};
@@ -96,14 +109,18 @@ namespace
 				std::to_string(Bytes.size()) +
 				"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
 				"{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12},{\"buffer\":0,\"byteOffset\":48,\"byteLength\":48},"
-				"{\"buffer\":0,\"byteOffset\":96,\"byteLength\":6}],\"accessors\":["
+				"{\"buffer\":0,\"byteOffset\":96,\"byteLength\":6},"
+				"{\"buffer\":0,\"byteOffset\":102,\"byteLength\":64}],\"accessors\":["
 				"{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
 				"{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
 				"{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
-				"{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],"
+				"{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
+				"{\"bufferView\":4,\"componentType\":5126,\"count\":1,\"type\":\"MAT4\"}],"
 				"\"meshes\":[{\"name\":\"Original Skinned Fixture\",\"primitives\":[{\"attributes\":"
 				"{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}],"
-				"\"nodes\":[{\"mesh\":0,\"skin\":0},{\"name\":\"root\"}],\"skins\":[{\"joints\":[1]}]}";
+				"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},"
+				"{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"}],"
+				"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]}";
 			const std::filesystem::path SourcePath = Directory / std::string(FileName);
 			if (!WriteText(SourcePath, Document)) return {};
 			const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
@@ -335,6 +352,57 @@ namespace
 		if (Found != Subresources.end())
 			PF_CHECK(Tests, Found->Classification == AssetSubresourceClassification::Unsupported);
 	}
+
+	void TestSkeletalPrimitiveImportPreservesSkinContract(TestRunner& Tests)
+	{
+		RepeatedBufferFixture Fixture;
+		PF_CHECK(Tests, Fixture.Valid);
+		if (!Fixture.Valid) return;
+
+		const AssetID Source = Fixture.WriteSkinnedSource("SkeletalImportFixture.gltf");
+		PF_CHECK(Tests, !Source.IsNil());
+		if (Source.IsNil()) return;
+		const auto Registry = Fixture.BuildRegistry();
+		PF_CHECK(Tests, Registry.has_value());
+		if (!Registry) return;
+
+		const auto Imported = GltfMeshImporter::ProcessSkeletalPrimitive(Source, Fixture.Root, *Registry, 0, 0, 0);
+		PF_CHECK(Tests, Imported.has_value());
+		if (!Imported) return;
+		PF_CHECK(Tests, Imported->Mesh.Geometry.Vertices.size() == 3);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes.size() == 2);
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[0].Name == "root");
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[1].Name == "joint");
+		PF_CHECK(Tests, Imported->Mesh.SkeletonNodes[1].ParentNodeIndex == 0);
+		PF_CHECK(Tests, Imported->Mesh.JointNodeIndices == std::vector<uint16_t>{ 1 });
+		PF_CHECK(Tests, Imported->Mesh.InverseBindMatrices.size() == 1);
+		PF_CHECK(Tests, Imported->Mesh.VertexInfluences.size() == 3);
+		PF_CHECK(Tests, Imported->Mesh.VertexInfluences[0].JointIndices[0] == 0);
+		PF_CHECK(Tests, Imported->Mesh.VertexInfluences[0].Weights[0] == 1.0f);
+		PF_CHECK(Tests, !Imported->Recipe.SubresourceKey.empty());
+
+		const AssetID ZeroWeightSource = Fixture.WriteSkinnedSource("ZeroWeightFixture.gltf", true);
+		const auto ZeroWeightRegistry = Fixture.BuildRegistry();
+		PF_CHECK(Tests, !ZeroWeightSource.IsNil() && ZeroWeightRegistry.has_value());
+		if (!ZeroWeightSource.IsNil() && ZeroWeightRegistry)
+		{
+			const auto Rejected = GltfMeshImporter::ProcessSkeletalPrimitive(
+				ZeroWeightSource, Fixture.Root, *ZeroWeightRegistry, 0, 0, 0);
+			PF_CHECK(Tests, !Rejected.has_value());
+			if (!Rejected) PF_CHECK(Tests, Rejected.error().Code == GltfMeshImportErrorCode::InvalidMesh);
+		}
+
+		const AssetID InvalidJointSource = Fixture.WriteSkinnedSource("InvalidJointFixture.gltf", false, true);
+		const auto InvalidJointRegistry = Fixture.BuildRegistry();
+		PF_CHECK(Tests, !InvalidJointSource.IsNil() && InvalidJointRegistry.has_value());
+		if (!InvalidJointSource.IsNil() && InvalidJointRegistry)
+		{
+			const auto Rejected = GltfMeshImporter::ProcessSkeletalPrimitive(
+				InvalidJointSource, Fixture.Root, *InvalidJointRegistry, 0, 0, 0);
+			PF_CHECK(Tests, !Rejected.has_value());
+			if (!Rejected) PF_CHECK(Tests, Rejected.error().Code == GltfMeshImportErrorCode::InvalidMesh);
+		}
+	}
 } // namespace
 
 void RunGltfMeshImporterRegressionTests(TestRunner& Tests)
@@ -343,4 +411,5 @@ void RunGltfMeshImporterRegressionTests(TestRunner& Tests)
 	TestDistinctBufferInputsRemainDistinct(Tests);
 	TestRecipeInputNormalizationRejectsConflictingObservations(Tests);
 	TestSkinnedPrimitiveRequiresExplicitStaticChoice(Tests);
+	TestSkeletalPrimitiveImportPreservesSkinContract(Tests);
 }

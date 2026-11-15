@@ -39,6 +39,64 @@ namespace PulseForge
 		[[nodiscard]] MeshDesc GetMeshDescription() const;
 	};
 
+	struct GltfVertexInfluences final
+	{
+		std::array<uint16_t, 4> JointIndices{};
+		std::array<float, 4> Weights{};
+	};
+
+	struct ImportedGltfSkeletonNode final
+	{
+		std::string StableKey;
+		std::string Name;
+		int32_t ParentNodeIndex = -1;
+		bool IsJoint = false;
+		// Column-major local bind transform; non-joint ancestors are retained in this node array.
+		std::array<float, 16> LocalBindMatrix{};
+	};
+
+	enum class GltfAnimationPath : uint8_t
+	{
+		Translation,
+		Rotation,
+		Scale
+	};
+
+	enum class GltfAnimationInterpolation : uint8_t
+	{
+		Step,
+		Linear
+	};
+
+	struct ImportedGltfAnimationChannel final
+	{
+		std::string TargetNodeKey;
+		GltfAnimationPath Path = GltfAnimationPath::Translation;
+		GltfAnimationInterpolation Interpolation = GltfAnimationInterpolation::Linear;
+		std::vector<float> Times;
+		std::vector<std::array<float, 4>> Values;
+	};
+
+	struct ImportedGltfAnimationClip final
+	{
+		std::string StableKey;
+		std::string Name;
+		float Duration = 0.0f;
+		std::vector<ImportedGltfAnimationChannel> Channels;
+	};
+
+	struct ImportedGltfSkeletalMesh final
+	{
+		ImportedGltfMesh Geometry;
+		std::vector<ImportedGltfSkeletonNode> SkeletonNodes;
+		// Skin-local joint order maps each JOINTS_0 value into SkeletonNodes.
+		std::vector<uint16_t> JointNodeIndices;
+		// Same order as JointNodeIndices, stored separately from node bind transforms.
+		std::vector<std::array<float, 16>> InverseBindMatrices;
+		std::vector<GltfVertexInfluences> VertexInfluences;
+		std::vector<ImportedGltfAnimationClip> Animations;
+	};
+
 	enum class CubeFace : uint8_t
 	{
 		PositiveX,

@@ -573,6 +573,9 @@ namespace PulseForge
 			else if (Type == "VEC2") ComponentCount = 2;
 			else if (Type == "VEC3") ComponentCount = 3;
 			else if (Type == "VEC4") ComponentCount = 4;
+			else if (Type == "MAT2") ComponentCount = 4;
+			else if (Type == "MAT3") ComponentCount = 9;
+			else if (Type == "MAT4") ComponentCount = 16;
 			else
 			{
 				return std::unexpected(MakeError(
@@ -776,6 +779,36 @@ namespace PulseForge
 			if (!ReadUInt32LE(Data, 0, Value))
 				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, Path, "Could not read glTF index"));
 			return Value;
+		}
+
+		std::expected<uint32_t, GltfMeshImportError> ReadUnsignedVectorComponent(
+			const AccessorView& Accessor, size_t Element, size_t Component, const std::filesystem::path& Path)
+		{
+			if (Element >= Accessor.Count || Component >= Accessor.ComponentCount || Accessor.Normalized ||
+				(Accessor.ComponentType != 5121 && Accessor.ComponentType != 5123))
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, Path,
+					"JOINTS_0 must use unnormalized unsigned byte or unsigned short VEC4 values"));
+			const size_t Offset = Element * Accessor.Stride + Component * Accessor.ComponentSize;
+			const uint8_t* Bytes = reinterpret_cast<const uint8_t*>(Accessor.Data + Offset);
+			if (Accessor.ComponentType == 5121) return Bytes[0];
+			return static_cast<uint32_t>(Bytes[0]) | (static_cast<uint32_t>(Bytes[1]) << 8);
+		}
+
+		std::expected<float, GltfMeshImportError> ReadSkinWeightComponent(
+			const AccessorView& Accessor, size_t Element, size_t Component, const std::filesystem::path& Path)
+		{
+			if (Element >= Accessor.Count || Component >= Accessor.ComponentCount)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, Path, "WEIGHTS_0 accessor index is outside its range"));
+			if (Accessor.ComponentType == 5126 && !Accessor.Normalized)
+				return ReadFloatComponent(Accessor, Element, Component, Path);
+			if (!Accessor.Normalized || (Accessor.ComponentType != 5121 && Accessor.ComponentType != 5123))
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, Path,
+					"WEIGHTS_0 must use float VEC4 or normalized unsigned byte/short VEC4 values"));
+			const size_t Offset = Element * Accessor.Stride + Component * Accessor.ComponentSize;
+			const uint8_t* Bytes = reinterpret_cast<const uint8_t*>(Accessor.Data + Offset);
+			if (Accessor.ComponentType == 5121) return static_cast<float>(Bytes[0]) / 255.0f;
+			const uint32_t Value = static_cast<uint32_t>(Bytes[0]) | (static_cast<uint32_t>(Bytes[1]) << 8);
+			return static_cast<float>(Value) / 65535.0f;
 		}
 
 		std::expected<AccessorView, GltfMeshImportError> ResolveFloatAttribute(
@@ -1754,6 +1787,421 @@ namespace PulseForge
 				GltfMeshImportErrorCode::InvalidDocument,
 				ProjectRoot,
 				std::string("Unexpected error while importing glTF geometry: ") + Exception.what()));
+		}
+	}
+
+	std::expected<GltfSkeletalMeshImportProduct, GltfMeshImportError> GltfMeshImporter::ProcessSkeletalPrimitive(
+		const AssetID& Asset,
+		const std::filesystem::path& ProjectRoot,
+		const AssetRegistry& Registry,
+		uint32_t NodeIndex,
+		uint32_t MeshIndex,
+		uint32_t PrimitiveIndex,
+		std::stop_token CancellationToken)
+	{
+		auto StaticProduct = ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex, CancellationToken);
+		if (!StaticProduct) return std::unexpected(std::move(StaticProduct.error()));
+		const auto Record = Registry.Find(Asset);
+		if (!Record) return std::unexpected(MakeError(GltfMeshImportErrorCode::AssetNotFound, {}, "glTF source asset is no longer registered"));
+		std::error_code PathError;
+		const std::filesystem::path AbsoluteRoot = std::filesystem::absolute(ProjectRoot, PathError).lexically_normal();
+		if (PathError) return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidProjectPath, ProjectRoot,
+			"Could not resolve project root: " + PathError.message()));
+		auto SourcePathResult = AssetPathResolver::ResolveManagedSourcePath(AbsoluteRoot, Record->ProjectRelativePath);
+		if (!SourcePathResult)
+			return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidProjectPath, SourcePathResult.error().Path,
+				SourcePathResult.error().Message));
+		const std::filesystem::path SourcePath = *SourcePathResult;
+		try
+		{
+			ByteVector FileBytes;
+			auto Read = ReadFile(SourcePath, HasExtension(SourcePath, ".glb") ? MaxContainerBytes : MaxJsonBytes, CancellationToken);
+			if (!Read) return std::unexpected(std::move(Read.error()));
+			FileBytes = std::move(*Read);
+			ParsedContainer Container;
+			if (HasExtension(SourcePath, ".glb"))
+			{
+				auto Parsed = ParseGlb(FileBytes, SourcePath, CancellationToken);
+				if (!Parsed) return std::unexpected(std::move(Parsed.error()));
+				Container = std::move(*Parsed);
+			}
+			else Container.JsonText.assign(reinterpret_cast<const char*>(FileBytes.data()), FileBytes.size());
+
+			Json Document;
+			try { Document = Json::parse(Container.JsonText); }
+			catch (const nlohmann::json::exception& Exception)
+			{
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+					std::string("glTF JSON is malformed: ") + Exception.what()));
+			}
+			const auto BinaryLength = Container.BinaryChunk
+				? std::optional<uint64_t>(Container.BinaryChunk->size()) : std::nullopt;
+			auto Buffers = LoadBuffers(Document, SourcePath, AbsoluteRoot, Container.BinaryChunk, CancellationToken);
+			if (!Buffers) return std::unexpected(std::move(Buffers.error()));
+
+			constexpr size_t MaximumNodeCount = 100'000;
+			constexpr size_t MaximumJointCount = 256;
+			constexpr size_t MaximumSkeletonNodeCount = 4096;
+			const Json* Nodes = FindField(Document, "nodes");
+			const Json* Skins = FindField(Document, "skins");
+			const Json* Meshes = FindField(Document, "meshes");
+			if (Nodes == nullptr || !Nodes->is_array() || Nodes->empty() || Nodes->size() > MaximumNodeCount ||
+				Skins == nullptr || !Skins->is_array() || Meshes == nullptr || !Meshes->is_array() || MeshIndex >= Meshes->size())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+					"Skeletal import requires bounded nodes, skins, and mesh arrays"));
+			if (NodeIndex >= Nodes->size())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath,
+					"Selected skinned node index is outside the nodes array"));
+
+			const Json& MeshNode = (*Nodes)[NodeIndex];
+			const auto NodeMesh = ReadUnsignedInteger(FindField(MeshNode, "mesh"), SourcePath, "nodes.mesh");
+			const auto SkinIndex = ReadUnsignedInteger(FindField(MeshNode, "skin"), SourcePath, "nodes.skin");
+			if (!NodeMesh || !SkinIndex || *NodeMesh != MeshIndex || *SkinIndex >= Skins->size())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath,
+					"Selected node must reference the requested mesh and a valid skin"));
+			const Json& Skin = (*Skins)[static_cast<size_t>(*SkinIndex)];
+			const Json* JointValues = FindField(Skin, "joints");
+			if (!Skin.is_object() || JointValues == nullptr || !JointValues->is_array() || JointValues->empty() ||
+				JointValues->size() > MaximumJointCount)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
+					"Skin requires between one and 256 joints"));
+
+			std::vector<int32_t> ParentIndices(Nodes->size(), -1);
+			for (size_t Parent = 0; Parent < Nodes->size(); ++Parent)
+			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, SourcePath, "Node hierarchy validation was cancelled"));
+				const Json* Children = FindField((*Nodes)[Parent], "children");
+				if (Children == nullptr) continue;
+				if (!Children->is_array() || Children->size() > MaximumNodeCount)
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+						"Node children must be a bounded array"));
+				for (const Json& ChildValue : *Children)
+				{
+					auto Child = ReadUnsignedInteger(&ChildValue, SourcePath, "nodes.children");
+					if (!Child || *Child >= Nodes->size() || *Child == Parent || ParentIndices[static_cast<size_t>(*Child)] != -1)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+							"Node hierarchy contains an invalid or multiply-parented child"));
+					ParentIndices[static_cast<size_t>(*Child)] = static_cast<int32_t>(Parent);
+				}
+			}
+			std::vector<uint8_t> NodeStates(Nodes->size(), 0);
+			std::vector<size_t> NodeDepths(Nodes->size(), 0);
+			for (size_t Start = 0; Start < Nodes->size(); ++Start)
+			{
+				std::vector<size_t> Chain;
+				int32_t Current = static_cast<int32_t>(Start);
+				while (Current >= 0 && NodeStates[static_cast<size_t>(Current)] == 0)
+				{
+					NodeStates[static_cast<size_t>(Current)] = 1;
+					Chain.push_back(static_cast<size_t>(Current));
+					Current = ParentIndices[static_cast<size_t>(Current)];
+				}
+				if (Current >= 0 && NodeStates[static_cast<size_t>(Current)] == 1)
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath, "Node hierarchy contains a cycle"));
+				for (auto Iterator = Chain.rbegin(); Iterator != Chain.rend(); ++Iterator)
+				{
+					const size_t Node = *Iterator;
+					const int32_t Parent = ParentIndices[Node];
+					NodeDepths[Node] = Parent < 0 ? 0 : NodeDepths[static_cast<size_t>(Parent)] + 1;
+					NodeStates[Node] = 2;
+				}
+			}
+
+			std::vector<uint32_t> SkinJoints;
+			std::set<uint32_t> UniqueJoints;
+			for (const Json& JointValue : *JointValues)
+			{
+				auto Joint = ReadUnsignedInteger(&JointValue, SourcePath, "skins.joints");
+				if (!Joint || *Joint >= Nodes->size() || !UniqueJoints.insert(static_cast<uint32_t>(*Joint)).second)
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+						"Skin joint is missing, out of range, or duplicated"));
+				SkinJoints.push_back(static_cast<uint32_t>(*Joint));
+			}
+			std::vector<std::vector<size_t>> JointAncestors;
+			for (const uint32_t Joint : SkinJoints)
+			{
+				std::vector<size_t> Ancestors;
+				int32_t Current = static_cast<int32_t>(Joint);
+				while (Current >= 0)
+				{
+					Ancestors.push_back(static_cast<size_t>(Current));
+					Current = ParentIndices[static_cast<size_t>(Current)];
+				}
+				JointAncestors.push_back(std::move(Ancestors));
+			}
+			auto CommonRoot = std::find_if(JointAncestors.front().begin(), JointAncestors.front().end(),
+				[&](size_t Candidate)
+				{
+					return std::all_of(JointAncestors.begin() + 1, JointAncestors.end(), [&](const auto& Ancestors)
+						{ return std::find(Ancestors.begin(), Ancestors.end(), Candidate) != Ancestors.end(); });
+				});
+			if (CommonRoot == JointAncestors.front().end())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+					"Skin joints do not share a common hierarchy root"));
+			const size_t CommonRootIndex = *CommonRoot;
+			std::set<size_t> IncludedNodes;
+			for (const auto& Ancestors : JointAncestors)
+			{
+				for (const size_t Node : Ancestors)
+				{
+					IncludedNodes.insert(Node);
+					if (Node == CommonRootIndex) break;
+				}
+			}
+			if (IncludedNodes.size() > MaximumSkeletonNodeCount)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
+					"Skin joint hierarchy exceeds the 4096-node supported skeleton limit"));
+
+			std::vector<size_t> OrderedNodes(IncludedNodes.begin(), IncludedNodes.end());
+			std::sort(OrderedNodes.begin(), OrderedNodes.end(), [&](size_t First, size_t Second)
+				{ return NodeDepths[First] != NodeDepths[Second] ? NodeDepths[First] < NodeDepths[Second] : First < Second; });
+
+			std::vector<std::string> NodeKeys(Nodes->size());
+			std::set<std::string> UniqueKeys;
+			for (const size_t Node : OrderedNodes)
+			{
+				const Json& SourceNode = (*Nodes)[Node];
+				const Json* NameValue = FindField(SourceNode, "name");
+				if (NameValue == nullptr || !NameValue->is_string() || NameValue->get<std::string>().empty())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+						"Supported skeletal import requires names on joints and their non-joint ancestors for stable reimport keys"));
+				const std::string Name = NameValue->get<std::string>();
+				const int32_t Parent = ParentIndices[Node];
+				AssetFingerprintBuilder KeyBuilder("PulseForge.GltfSkeletonNodePath.v1");
+				if (Parent >= 0 && !NodeKeys[static_cast<size_t>(Parent)].empty())
+					KeyBuilder.UpdateText("parent", NodeKeys[static_cast<size_t>(Parent)]);
+				KeyBuilder.UpdateText("name", Name);
+				NodeKeys[Node] = "node/" + KeyBuilder.Finish().DigestHex;
+				if (!UniqueKeys.insert(NodeKeys[Node]).second)
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+						"Skeleton node path is ambiguous; duplicate names require a stable source key"));
+			}
+
+			ImportedGltfSkeletalMesh Imported;
+			Imported.Geometry = std::move(StaticProduct->Mesh);
+			std::map<size_t, uint16_t> OutputNodeIndices;
+			for (const size_t Node : OrderedNodes)
+			{
+				ImportedGltfSkeletonNode Output;
+				Output.Name = (*Nodes)[Node].at("name").get<std::string>();
+				Output.StableKey = NodeKeys[Node];
+				Output.IsJoint = UniqueJoints.contains(static_cast<uint32_t>(Node));
+				const int32_t SourceParent = ParentIndices[Node];
+				if (SourceParent >= 0 && IncludedNodes.contains(static_cast<size_t>(SourceParent)))
+					Output.ParentNodeIndex = static_cast<int32_t>(OutputNodeIndices.at(static_cast<size_t>(SourceParent)));
+				Output.LocalBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+				const Json& SourceNode = (*Nodes)[Node];
+				if (const Json* Matrix = FindField(SourceNode, "matrix"))
+				{
+					if (!Matrix->is_array() || Matrix->size() != 16 || FindField(SourceNode, "translation") != nullptr ||
+						FindField(SourceNode, "rotation") != nullptr || FindField(SourceNode, "scale") != nullptr)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+							"Node matrix must contain 16 values and cannot be combined with TRS properties"));
+					for (size_t Component = 0; Component < 16; ++Component)
+					{
+						if (!(*Matrix)[Component].is_number())
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+								"Node matrix entries must be finite numbers"));
+						Output.LocalBindMatrix[Component] = (*Matrix)[Component].get<float>();
+						if (!std::isfinite(Output.LocalBindMatrix[Component]))
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+								"Node matrix contains a non-finite value"));
+					}
+					if (std::abs(Output.LocalBindMatrix[3]) > 1.0e-5f || std::abs(Output.LocalBindMatrix[7]) > 1.0e-5f ||
+						std::abs(Output.LocalBindMatrix[11]) > 1.0e-5f || std::abs(Output.LocalBindMatrix[15] - 1.0f) > 1.0e-5f)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+							"Skeleton node matrices must be affine transforms"));
+				}
+				else
+				{
+					const auto ReadTuple = [&](std::string_view Field, std::span<float> Values) -> std::expected<void, GltfMeshImportError>
+					{
+						const Json* Tuple = FindField(SourceNode, Field);
+						if (Tuple == nullptr) return {};
+						if (!Tuple->is_array() || Tuple->size() != Values.size())
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+								"Node " + std::string(Field) + " must have the required number of values"));
+						for (size_t Index = 0; Index < Values.size(); ++Index)
+						{
+							if (!(*Tuple)[Index].is_number())
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+									"Node TRS values must be finite numbers"));
+							Values[Index] = (*Tuple)[Index].get<float>();
+							if (!std::isfinite(Values[Index]))
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+									"Node TRS contains a non-finite value"));
+						}
+						return {};
+					};
+					std::array<float, 3> Translation{};
+					std::array<float, 4> Rotation{ 0, 0, 0, 1 };
+					std::array<float, 3> Scale{ 1, 1, 1 };
+					if (auto Read = ReadTuple("translation", Translation); !Read) return std::unexpected(std::move(Read.error()));
+					if (auto Read = ReadTuple("rotation", Rotation); !Read) return std::unexpected(std::move(Read.error()));
+					if (auto Read = ReadTuple("scale", Scale); !Read) return std::unexpected(std::move(Read.error()));
+					const float QLength = std::sqrt(Rotation[0] * Rotation[0] + Rotation[1] * Rotation[1] +
+						Rotation[2] * Rotation[2] + Rotation[3] * Rotation[3]);
+					if (!std::isfinite(QLength) || QLength < 1.0e-8f)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+							"Node rotation quaternion has zero length"));
+					for (float& Component : Rotation) Component /= QLength;
+					const float X = Rotation[0], Y = Rotation[1], Z = Rotation[2], W = Rotation[3];
+					const std::array<float, 16> R{
+						1 - 2 * (Y * Y + Z * Z), 2 * (X * Y + Z * W), 2 * (X * Z - Y * W), 0,
+						2 * (X * Y - Z * W), 1 - 2 * (X * X + Z * Z), 2 * (Y * Z + X * W), 0,
+						2 * (X * Z + Y * W), 2 * (Y * Z - X * W), 1 - 2 * (X * X + Y * Y), 0,
+						Translation[0], Translation[1], Translation[2], 1 };
+					for (size_t Row = 0; Row < 4; ++Row)
+					{
+						Output.LocalBindMatrix[Row] = R[Row] * Scale[0];
+						Output.LocalBindMatrix[4 + Row] = R[4 + Row] * Scale[1];
+						Output.LocalBindMatrix[8 + Row] = R[8 + Row] * Scale[2];
+						Output.LocalBindMatrix[12 + Row] = R[12 + Row];
+					}
+				}
+				OutputNodeIndices.emplace(Node, static_cast<uint16_t>(Imported.SkeletonNodes.size()));
+				Imported.SkeletonNodes.push_back(std::move(Output));
+			}
+			for (const uint32_t Joint : SkinJoints) Imported.JointNodeIndices.push_back(OutputNodeIndices.at(Joint));
+
+			const Json* InverseBindValue = FindField(Skin, "inverseBindMatrices");
+			if (InverseBindValue == nullptr)
+			{
+				for (size_t Joint = 0; Joint < SkinJoints.size(); ++Joint)
+					Imported.InverseBindMatrices.push_back({ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 });
+			}
+			else
+			{
+				auto AccessorIndex = ReadUnsignedInteger(InverseBindValue, SourcePath, "skins.inverseBindMatrices");
+				if (!AccessorIndex) return std::unexpected(std::move(AccessorIndex.error()));
+				auto Accessor = ResolveAccessor(Document, *Buffers, *AccessorIndex, SourcePath);
+				if (!Accessor) return std::unexpected(std::move(Accessor.error()));
+				if (Accessor->ComponentType != 5126 || Accessor->Normalized || Accessor->ComponentCount != 16 ||
+					Accessor->Count != SkinJoints.size())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, SourcePath,
+						"inverseBindMatrices must be a float MAT4 accessor with at least one entry per joint"));
+				for (size_t Joint = 0; Joint < SkinJoints.size(); ++Joint)
+				{
+					std::array<float, 16> Matrix{};
+					for (size_t Component = 0; Component < 16; ++Component)
+					{
+						auto Value = ReadFloatComponent(*Accessor, Joint, Component, SourcePath);
+						if (!Value) return std::unexpected(std::move(Value.error()));
+						Matrix[Component] = *Value;
+					}
+					if (std::abs(Matrix[3]) > 1.0e-5f || std::abs(Matrix[7]) > 1.0e-5f ||
+						std::abs(Matrix[11]) > 1.0e-5f || std::abs(Matrix[15] - 1.0f) > 1.0e-5f)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, SourcePath,
+							"inverseBindMatrices contains a non-affine matrix"));
+					Imported.InverseBindMatrices.push_back(Matrix);
+				}
+			}
+
+			const Json* MeshesArray = FindField(Document, "meshes");
+			const Json& Mesh = (*MeshesArray)[MeshIndex];
+			const Json* Primitives = FindField(Mesh, "primitives");
+			if (Primitives == nullptr || !Primitives->is_array() || PrimitiveIndex >= Primitives->size())
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath, "Primitive index is outside the selected mesh"));
+			const Json& Primitive = (*Primitives)[PrimitiveIndex];
+			const Json* Attributes = FindField(Primitive, "attributes");
+			if (Attributes == nullptr || !Attributes->is_object() || FindField(*Attributes, "JOINTS_0") == nullptr ||
+				FindField(*Attributes, "WEIGHTS_0") == nullptr)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath,
+					"A skinned primitive requires both JOINTS_0 and WEIGHTS_0"));
+			if (FindField(*Attributes, "JOINTS_1") != nullptr || FindField(*Attributes, "WEIGHTS_1") != nullptr)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+					"Only one set of four joint influences is supported"));
+			auto JointAccessorIndex = ReadUnsignedInteger(FindField(*Attributes, "JOINTS_0"), SourcePath, "attributes.JOINTS_0");
+			auto WeightAccessorIndex = ReadUnsignedInteger(FindField(*Attributes, "WEIGHTS_0"), SourcePath, "attributes.WEIGHTS_0");
+			if (!JointAccessorIndex) return std::unexpected(std::move(JointAccessorIndex.error()));
+			if (!WeightAccessorIndex) return std::unexpected(std::move(WeightAccessorIndex.error()));
+			auto JointAccessor = ResolveAccessor(Document, *Buffers, *JointAccessorIndex, SourcePath);
+			auto WeightAccessor = ResolveAccessor(Document, *Buffers, *WeightAccessorIndex, SourcePath);
+			if (!JointAccessor) return std::unexpected(std::move(JointAccessor.error()));
+			if (!WeightAccessor) return std::unexpected(std::move(WeightAccessor.error()));
+			if (JointAccessor->ComponentCount != 4 || JointAccessor->Count != Imported.Geometry.Vertices.size() ||
+				(JointAccessor->ComponentType != 5121 && JointAccessor->ComponentType != 5123) || JointAccessor->Normalized ||
+				WeightAccessor->ComponentCount != 4 || WeightAccessor->Count != Imported.Geometry.Vertices.size() ||
+				!((WeightAccessor->ComponentType == 5126 && !WeightAccessor->Normalized) ||
+					((WeightAccessor->ComponentType == 5121 || WeightAccessor->ComponentType == 5123) && WeightAccessor->Normalized)))
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+					"JOINTS_0/WEIGHTS_0 require matching VEC4 vertices with supported component types"));
+			Imported.VertexInfluences.reserve(Imported.Geometry.Vertices.size());
+			for (size_t Vertex = 0; Vertex < Imported.Geometry.Vertices.size(); ++Vertex)
+			{
+				if ((Vertex & 0x3ffu) == 0 && CancellationToken.stop_requested())
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, SourcePath, "Skin influence decoding was cancelled"));
+				GltfVertexInfluences Influence;
+				float Sum = 0.0f;
+				for (size_t Component = 0; Component < 4; ++Component)
+				{
+					auto Joint = ReadUnsignedVectorComponent(*JointAccessor, Vertex, Component, SourcePath);
+					auto Weight = ReadSkinWeightComponent(*WeightAccessor, Vertex, Component, SourcePath);
+					if (!Joint) return std::unexpected(std::move(Joint.error()));
+					if (!Weight) return std::unexpected(std::move(Weight.error()));
+					if (*Joint >= SkinJoints.size())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath,
+							"JOINTS_0 references an index outside the selected skin"));
+					if (!std::isfinite(*Weight) || *Weight < 0.0f)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath,
+							"WEIGHTS_0 contains a negative or non-finite influence"));
+					Influence.JointIndices[Component] = static_cast<uint16_t>(*Joint);
+					Influence.Weights[Component] = *Weight;
+					Sum += *Weight;
+				}
+				if (!std::isfinite(Sum) || Sum <= 1.0e-8f)
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidMesh, SourcePath,
+						"Every skinned vertex must have a positive total influence weight"));
+				for (float& Weight : Influence.Weights) Weight /= Sum;
+				Imported.VertexInfluences.push_back(Influence);
+			}
+			if (const Json* Animations = FindField(Document, "animations"); Animations != nullptr &&
+				(!Animations->is_array() || !Animations->empty()))
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+					"This skeletal import slice does not yet decode animation channels"));
+
+			GltfSkeletalMeshImportProduct Product;
+			Product.Mesh = std::move(Imported);
+			Product.Recipe = std::move(StaticProduct->Recipe);
+			Product.Recipe.ImporterID = "PulseForge.SkeletalGltfMeshImporter";
+			Product.Recipe.ImporterVersion = "1";
+			Product.Recipe.OutputSchemaVersion = 1;
+			const std::string PrimitiveJson = Primitive.dump();
+			AssetFingerprintBuilder SubresourceBuilder("PulseForge.GltfSkeletalSubresource.v1");
+			for (const uint32_t Joint : SkinJoints)
+				SubresourceBuilder.UpdateText("joint", NodeKeys[Joint]);
+			SubresourceBuilder.UpdateText("primitive", PrimitiveJson);
+			Product.Recipe.SubresourceKey = "skeletal/" + SubresourceBuilder.Finish().DigestHex;
+			auto InputFingerprint = ComputeAssetImportInputFingerprint(Product.Recipe);
+			if (!InputFingerprint)
+				return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath, InputFingerprint.error()));
+			Product.Recipe.InputFingerprint = std::move(*InputFingerprint);
+			AssetFingerprintBuilder ResultBuilder("PulseForge.GltfSkeletalResult.v1");
+			ResultBuilder.UpdateText("inputs", Product.Recipe.InputFingerprint.DigestHex);
+			ResultBuilder.UpdateText("subresource", Product.Recipe.SubresourceKey);
+			for (const ImportedGltfSkeletonNode& Node : Product.Mesh.SkeletonNodes)
+			{
+				ResultBuilder.UpdateText("node-key", Node.StableKey);
+				ResultBuilder.UpdateBytes("node-transform", std::as_bytes(std::span(Node.LocalBindMatrix)));
+			}
+			for (const GltfVertexInfluences& Influence : Product.Mesh.VertexInfluences)
+			{
+				ResultBuilder.UpdateBytes("influence-joints", std::as_bytes(std::span(Influence.JointIndices)));
+				ResultBuilder.UpdateBytes("influence-weights", std::as_bytes(std::span(Influence.Weights)));
+			}
+			Product.ResultFingerprint = ResultBuilder.Finish();
+			return Product;
+		}
+		catch (const std::bad_alloc&)
+		{
+			return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, ProjectRoot,
+				"Insufficient memory while importing glTF skin data"));
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, ProjectRoot,
+				std::string("Unexpected error while importing glTF skin data: ") + Exception.what()));
 		}
 	}
 }

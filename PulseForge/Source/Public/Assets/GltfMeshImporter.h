@@ -38,6 +38,13 @@ namespace PulseForge
 		AssetContentFingerprint ResultFingerprint;
 	};
 
+	struct GltfSkeletalMeshImportProduct final
+	{
+		ImportedGltfSkeletalMesh Mesh;
+		AssetImportRecipe Recipe;
+		AssetContentFingerprint ResultFingerprint;
+	};
+
 	enum class GltfMeshImportErrorCode : uint8_t
 	{
 		AssetNotFound,
@@ -81,6 +88,16 @@ namespace PulseForge
 			const AssetRegistry& Registry,
 			uint32_t MeshIndex = 0,
 			uint32_t PrimitiveIndex = 0,
+			std::stop_token CancellationToken = {});
+
+		// Imports one explicitly selected glTF node/skin and one of its triangle primitives into immutable CPU data.
+		[[nodiscard]] static std::expected<GltfSkeletalMeshImportProduct, GltfMeshImportError> ProcessSkeletalPrimitive(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry,
+			uint32_t NodeIndex,
+			uint32_t MeshIndex,
+			uint32_t PrimitiveIndex,
 			std::stop_token CancellationToken = {});
 	};
 }
