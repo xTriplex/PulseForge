@@ -73,6 +73,43 @@ namespace
 			return Metadata ? Metadata->ID : AssetID{};
 		}
 
+		[[nodiscard]] AssetID WriteSkinnedSource(std::string_view FileName)
+		{
+			const std::filesystem::path Directory = Root / "Assets" / "Models";
+			std::vector<std::byte> Bytes = PositionBytes();
+			for (const uint8_t Joint : std::array<uint8_t, 12>{}) Bytes.push_back(static_cast<std::byte>(Joint));
+			for (const float Weight : std::array<float, 12>{ 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+				0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f })
+			{
+				const uint32_t Bits = std::bit_cast<uint32_t>(Weight);
+				for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+					Bytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+			}
+			const std::vector<std::byte> Indices = IndexBytes();
+			Bytes.insert(Bytes.end(), Indices.begin(), Indices.end());
+			const std::filesystem::path BufferPath = Directory / "Skinned.bin";
+			if (!WriteBinary(BufferPath, Bytes)) return {};
+			if (!AssetMetadataSerializer::CreateForNewAsset(BufferPath)) return {};
+
+			const std::string Document =
+				"{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"uri\":\"Skinned.bin\",\"byteLength\":" +
+				std::to_string(Bytes.size()) +
+				"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+				"{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12},{\"buffer\":0,\"byteOffset\":48,\"byteLength\":48},"
+				"{\"buffer\":0,\"byteOffset\":96,\"byteLength\":6}],\"accessors\":["
+				"{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+				"{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
+				"{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+				"{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],"
+				"\"meshes\":[{\"name\":\"Original Skinned Fixture\",\"primitives\":[{\"attributes\":"
+				"{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}],"
+				"\"nodes\":[{\"mesh\":0,\"skin\":0},{\"name\":\"root\"}],\"skins\":[{\"joints\":[1]}]}";
+			const std::filesystem::path SourcePath = Directory / std::string(FileName);
+			if (!WriteText(SourcePath, Document)) return {};
+			const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
+			return Metadata ? Metadata->ID : AssetID{};
+		}
+
 		[[nodiscard]] AssetID WriteSharedBuffer()
 		{
 			const std::filesystem::path Path = Root / "Assets" / "Models" / "Shared.bin";
@@ -265,6 +302,39 @@ namespace
 		if (!Normalized)
 			PF_CHECK(Tests, Normalized.error().find("conflicting content") != std::string::npos);
 	}
+
+	void TestSkinnedPrimitiveRequiresExplicitStaticChoice(TestRunner& Tests)
+	{
+		RepeatedBufferFixture Fixture;
+		PF_CHECK(Tests, Fixture.Valid);
+		if (!Fixture.Valid) return;
+
+		const AssetID Source = Fixture.WriteSkinnedSource("OriginalSkinnedFixture.gltf");
+		PF_CHECK(Tests, !Source.IsNil());
+		if (Source.IsNil()) return;
+
+		const auto Registry = Fixture.BuildRegistry();
+		PF_CHECK(Tests, Registry.has_value());
+		if (!Registry) return;
+
+		const auto StaticExtraction = GltfMeshImporter::ProcessStaticPrimitive(Source, Fixture.Root, *Registry);
+		PF_CHECK(Tests, StaticExtraction.has_value());
+		if (StaticExtraction)
+		{
+			PF_CHECK(Tests, StaticExtraction->Mesh.Vertices.size() == 3);
+			PF_CHECK(Tests, StaticExtraction->Recipe.SubresourceKey == "mesh/0/primitive/0");
+		}
+
+		const auto Catalog = AssetDependencyCatalogBuilder::Build(Fixture.Root, Fixture.ProjectID, 1);
+		PF_CHECK(Tests, Catalog.has_value());
+		if (!Catalog) return;
+		const auto Subresources = (*Catalog)->GetSubresources();
+		const auto Found = std::find_if(Subresources.begin(), Subresources.end(), [&](const AssetSubresourceRecord& Entry)
+			{ return Entry.Identity.Asset == Source && Entry.Identity.SubresourceKey == "mesh/0/primitive/0"; });
+		PF_CHECK(Tests, Found != Subresources.end());
+		if (Found != Subresources.end())
+			PF_CHECK(Tests, Found->Classification == AssetSubresourceClassification::Unsupported);
+	}
 } // namespace
 
 void RunGltfMeshImporterRegressionTests(TestRunner& Tests)
@@ -272,4 +342,5 @@ void RunGltfMeshImporterRegressionTests(TestRunner& Tests)
 	TestRepeatedAndEquivalentBufferInputs(Tests);
 	TestDistinctBufferInputsRemainDistinct(Tests);
 	TestRecipeInputNormalizationRejectsConflictingObservations(Tests);
+	TestSkinnedPrimitiveRequiresExplicitStaticChoice(Tests);
 }

@@ -198,7 +198,8 @@ namespace PulseForge::Assets::Detail
 			const Json& Document, std::span<const uint64_t> BufferLengths, uint64_t AccessorIndex, bool Position);
 
 		GltfPrimitiveInspection InspectParsedPrimitive(const Json& Document,
-			std::span<const uint64_t> BufferLengths, uint32_t MeshIndex, uint32_t PrimitiveIndex)
+			std::span<const uint64_t> BufferLengths, uint32_t MeshIndex, uint32_t PrimitiveIndex,
+			bool AllowSkinnedStaticExtraction = false)
 		{
 			const Json* Meshes = Find(Document, "meshes");
 			if (Meshes == nullptr || !Meshes->is_array() || MeshIndex >= Meshes->size())
@@ -225,6 +226,14 @@ namespace PulseForge::Assets::Detail
 			}
 			const Json* Attributes = Find(Primitive, "attributes");
 			if (Attributes == nullptr || !Attributes->is_object()) return Invalid("primitive requires an attributes object");
+			const bool HasJoints0 = Find(*Attributes, "JOINTS_0") != nullptr;
+			const bool HasWeights0 = Find(*Attributes, "WEIGHTS_0") != nullptr;
+			const bool HasJoints1 = Find(*Attributes, "JOINTS_1") != nullptr;
+			const bool HasWeights1 = Find(*Attributes, "WEIGHTS_1") != nullptr;
+			if (HasJoints0 != HasWeights0 || HasJoints1 != HasWeights1 || (HasJoints1 && !HasJoints0))
+				return Invalid("skinned primitive joint and weight attributes must be paired and start at set zero");
+			if ((HasJoints0 || HasWeights0) && !AllowSkinnedStaticExtraction)
+				return Unsupported("skinned primitive requires an explicit skeletal import or static extraction choice");
 			const auto PositionIndex = Unsigned(Find(*Attributes, "POSITION"));
 			if (!PositionIndex) return Invalid("primitive requires a valid POSITION accessor index");
 			const auto PositionCount = ValidateAccessor(Document, BufferLengths, *PositionIndex, true);
@@ -378,10 +387,18 @@ namespace PulseForge::Assets::Detail
 
 	GltfPrimitiveInspection InspectStaticPrimitive(std::string_view JsonText, const std::filesystem::path& SourcePath,
 		const std::filesystem::path& ProjectRoot, uint32_t MeshIndex, uint32_t PrimitiveIndex,
-		std::optional<uint64_t> GlbBinaryByteLength)
+		std::optional<uint64_t> GlbBinaryByteLength, bool AllowSkinnedStaticExtraction)
 	{
-		const std::array<GltfPrimitiveLocator, 1> Locator{ GltfPrimitiveLocator{ MeshIndex, PrimitiveIndex } };
-		auto Results = InspectStaticPrimitives(JsonText, SourcePath, ProjectRoot, Locator, GlbBinaryByteLength);
-		return Results.empty() ? Invalid("glTF primitive inspection produced no result") : std::move(Results.front());
+		try
+		{
+			std::vector<uint64_t> BufferLengths;
+			auto Document = ParseAndValidateDocument(JsonText, SourcePath, ProjectRoot, GlbBinaryByteLength, BufferLengths);
+			if (!Document) return Document.error();
+			return InspectParsedPrimitive(*Document, BufferLengths, MeshIndex, PrimitiveIndex, AllowSkinnedStaticExtraction);
+		}
+		catch (const std::exception& Exception)
+		{
+			return Invalid(std::string("glTF primitive inspection failed: ") + Exception.what());
+		}
 	}
 } // namespace PulseForge::Assets::Detail

@@ -1367,7 +1367,7 @@ namespace PulseForge
 			const std::optional<uint64_t> BinaryLength = Container.BinaryChunk
 				? std::optional<uint64_t>(Container.BinaryChunk->size()) : std::nullopt;
 			const Assets::Detail::GltfPrimitiveInspection Inspection = Assets::Detail::InspectStaticPrimitive(
-				Container.JsonText, *Source, AbsoluteProjectRoot, MeshIndex, PrimitiveIndex, BinaryLength);
+				Container.JsonText, *Source, AbsoluteProjectRoot, MeshIndex, PrimitiveIndex, BinaryLength, true);
 			if (CancellationToken.stop_requested())
 				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, "glTF import was cancelled after structural inspection"));
 			if (const Json* RequiredExtensions = FindField(Document, "extensionsRequired"); RequiredExtensions != nullptr)

@@ -33,7 +33,8 @@ namespace PulseForge::Assets::Detail
 		const std::filesystem::path& ProjectRoot,
 		uint32_t MeshIndex,
 		uint32_t PrimitiveIndex,
-		std::optional<uint64_t> GlbBinaryByteLength);
+		std::optional<uint64_t> GlbBinaryByteLength,
+		bool AllowSkinnedStaticExtraction = false);
 
 	[[nodiscard]] PULSEFORGE_API std::vector<GltfPrimitiveInspection> InspectStaticPrimitives(
 		std::string_view JsonText,
