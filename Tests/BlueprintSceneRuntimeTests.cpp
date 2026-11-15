@@ -338,11 +338,23 @@ namespace
 		if (!ProjectResult) return;
 
 		Scene TestScene;
-		for (uint64_t Index = 0; Index < 17; ++Index)
+		for (uint64_t Index = 0; Index < 15; ++Index)
 		{
 			const UUID EntityId{ 0x5300000000004000ull, 0x8000000000000001ull + Index };
 			PF_CHECK(Tests, TestScene.CreateEntityWithUUID(EntityId, "Action target").has_value());
 		}
+		constexpr UUID TriggerId{ 0x5300000000004000ull, 0x8000000000000100ull };
+		constexpr UUID BodyId{ 0x5300000000004000ull, 0x8000000000000101ull };
+		const auto Trigger = TestScene.CreateEntityWithUUID(TriggerId, "Action budget trigger");
+		const auto Body = TestScene.CreateEntityWithUUID(BodyId, "Action budget body");
+		PF_CHECK(Tests, Trigger.has_value() && Body.has_value());
+		if (!Trigger || !Body) return;
+		PF_CHECK(Tests, Trigger->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		BoxColliderComponent TriggerCollider;
+		TriggerCollider.IsSensor = true;
+		PF_CHECK(Tests, Trigger->SetCollider(TriggerCollider).has_value());
+		PF_CHECK(Tests, Body->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
+		PF_CHECK(Tests, Body->SetBoxCollider(BoxColliderComponent{}).has_value());
 		BlueprintProgramSource Source;
 		Source.Constants = { 1.0f };
 		Source.ScalarPropertyIds = { "hit" };
@@ -358,6 +370,18 @@ namespace
 		PF_CHECK(Tests, Verified.has_value());
 		if (!Verified) return;
 		const auto Program = std::make_shared<const VerifiedBlueprintProgram>(std::move(*Verified));
+		BlueprintProgramSource ContactSource;
+		ContactSource.Constants = { 1.0f };
+		ContactSource.ScalarPropertyIds = { "contact" };
+		ContactSource.Instructions = {
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(58, 10) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(58, 11) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(58, 12) }
+		};
+		const auto VerifiedContact = VerifyBlueprintProgram(std::move(ContactSource));
+		PF_CHECK(Tests, VerifiedContact.has_value());
+		if (!VerifiedContact) return;
+		const auto ContactProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedContact));
 		constexpr AssetID ProgramAsset{ 0x5400000000004000ull, 0x8000000000000001ull };
 		GameplayInputService GameplayInput;
 		GameplayActionMap ActionMap;
@@ -374,18 +398,24 @@ namespace
 		PF_CHECK(Tests, GameplayInput.SetActionMap(std::move(ActionMap)).has_value());
 		SceneRuntimeServices Services;
 		Services.GameplayInput = &GameplayInput;
-		Services.ResolveBlueprintProgram = [&](const Entity&, BlueprintEventKind Event)
+		Services.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
 			-> std::optional<BlueprintProgramBinding>
 		{
-			if (Event != BlueprintEventKind::OnActionPressed) return std::nullopt;
-			return BlueprintProgramBinding{ ProgramAsset, 1, Program };
+			if (Event == BlueprintEventKind::OnActionPressed)
+				return BlueprintProgramBinding{ ProgramAsset, 1, Program };
+			if ((Event == BlueprintEventKind::OnTriggerEnter) &&
+				(Target.GetUUID() == TriggerId || Target.GetUUID() == BodyId))
+				return BlueprintProgramBinding{ ProgramAsset, 2, ContactProgram };
+			return std::nullopt;
 		};
 		uint32_t PropertyWrites = 0;
+		uint32_t ContactWrites = 0;
 		Services.ApplyBlueprintPropertyWrites = [&](const Entity& Target, std::span<const BlueprintScalarPropertyWrite> Writes)
 		{
-			if (!Target.IsValid() || Writes.size() != 1 || Writes[0].PropertyId != "hit" || Writes[0].Value != 1.0f)
-				return false;
-			++PropertyWrites;
+			if (!Target.IsValid() || Writes.size() != 1 || Writes[0].Value != 1.0f) return false;
+			if (Writes[0].PropertyId == "hit") ++PropertyWrites;
+			else if (Writes[0].PropertyId == "contact") ++ContactWrites;
+			else return false;
 			return true;
 		};
 		SceneRuntimeDesc Description;
@@ -404,12 +434,16 @@ namespace
 		PF_CHECK(Tests, Frame && Frame->BlueprintInstructionsExecuted ==
 			17u * 4u + (BlueprintMaximumEventDispatchesPerFrame - 17u) * 2u);
 		PF_CHECK(Tests, PropertyWrites == 17);
+		PF_CHECK(Tests, ContactWrites == 0);
 		const auto Diagnostics = Runtime.GetBlueprintDiagnostics();
 		PF_CHECK(Tests, std::any_of(Diagnostics.begin(), Diagnostics.end(), [](const BlueprintRuntimeDiagnostic& Diagnostic)
 		{
 			return Diagnostic.Event == BlueprintEventKind::OnActionPressed &&
 				Diagnostic.Code == BlueprintProgramErrorCode::EventBudgetExceeded;
 		}));
+		GameplayInput.PublishFrame(Routing);
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ContactWrites == 2);
 		Runtime.Stop();
 	}
 
