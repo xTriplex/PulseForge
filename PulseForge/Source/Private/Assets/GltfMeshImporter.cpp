@@ -2080,7 +2080,7 @@ namespace PulseForge
 				if (Accessor->ComponentType != 5126 || Accessor->Normalized || Accessor->ComponentCount != 16 ||
 					Accessor->Count != SkinJoints.size())
 					return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, SourcePath,
-						"inverseBindMatrices must be a float MAT4 accessor with at least one entry per joint"));
+						"inverseBindMatrices must be a float MAT4 accessor with exactly one entry per joint"));
 				for (size_t Joint = 0; Joint < SkinJoints.size(); ++Joint)
 				{
 					std::array<float, 16> Matrix{};
@@ -2156,10 +2156,125 @@ namespace PulseForge
 				for (float& Weight : Influence.Weights) Weight /= Sum;
 				Imported.VertexInfluences.push_back(Influence);
 			}
-			if (const Json* Animations = FindField(Document, "animations"); Animations != nullptr &&
-				(!Animations->is_array() || !Animations->empty()))
-				return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
-					"This skeletal import slice does not yet decode animation channels"));
+			if (const Json* Animations = FindField(Document, "animations"); Animations != nullptr)
+			{
+				constexpr size_t MaximumAnimationCount = 256;
+				constexpr size_t MaximumAnimationChannels = 4096;
+				constexpr size_t MaximumAnimationKeys = 1'000'000;
+				if (!Animations->is_array() || Animations->size() > MaximumAnimationCount)
+					return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
+						"Animation array exceeds the supported 256-clip limit"));
+				size_t TotalChannels = 0;
+				size_t TotalKeys = 0;
+				std::set<std::string> ClipKeys;
+				for (const Json& Animation : *Animations)
+				{
+					if (CancellationToken.stop_requested())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, SourcePath,
+							"Skeletal animation import was cancelled"));
+					const Json* Samplers = FindField(Animation, "samplers");
+					const Json* Channels = FindField(Animation, "channels");
+					const Json* NameValue = FindField(Animation, "name");
+					if (!Animation.is_object() || Samplers == nullptr || !Samplers->is_array() ||
+						Channels == nullptr || !Channels->is_array() || Channels->empty() ||
+						TotalChannels + Channels->size() > MaximumAnimationChannels ||
+						NameValue == nullptr || !NameValue->is_string() || NameValue->get<std::string>().empty())
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+							"Each supported animation requires a name and a bounded nonempty channel list"));
+					TotalChannels += Channels->size();
+					ImportedGltfAnimationClip Clip;
+					Clip.Name = NameValue->get<std::string>();
+					AssetFingerprintBuilder ClipKeyBuilder("PulseForge.GltfAnimationClip.v1");
+					ClipKeyBuilder.UpdateText("name", Clip.Name);
+					for (const Json& Channel : *Channels)
+					{
+						const auto SamplerIndex = ReadUnsignedInteger(FindField(Channel, "sampler"), SourcePath, "animations.channels.sampler");
+						const Json* Target = FindField(Channel, "target");
+						if (!SamplerIndex || *SamplerIndex >= Samplers->size() || Target == nullptr || !Target->is_object())
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+								"Animation channel references an invalid sampler or target"));
+						const auto TargetNode = ReadUnsignedInteger(FindField(*Target, "node"), SourcePath, "animations.channels.target.node");
+						const Json* PathValue = FindField(*Target, "path");
+						if (!TargetNode || *TargetNode >= NodeKeys.size() || NodeKeys[static_cast<size_t>(*TargetNode)].empty() ||
+							PathValue == nullptr || !PathValue->is_string())
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+								"Animation targets must name a node in the imported skeleton and a supported TRS path"));
+						ImportedGltfAnimationChannel ImportedChannel;
+						ImportedChannel.TargetNodeKey = NodeKeys[static_cast<size_t>(*TargetNode)];
+						const std::string Path = PathValue->get<std::string>();
+						if (Path == "translation") ImportedChannel.Path = GltfAnimationPath::Translation;
+						else if (Path == "rotation") ImportedChannel.Path = GltfAnimationPath::Rotation;
+						else if (Path == "scale") ImportedChannel.Path = GltfAnimationPath::Scale;
+						else return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
+							"Animation weights and non-TRS targets are not supported"));
+
+						const Json& Sampler = (*Samplers)[static_cast<size_t>(*SamplerIndex)];
+						const auto InputIndex = ReadUnsignedInteger(FindField(Sampler, "input"), SourcePath, "animations.samplers.input");
+						const auto OutputIndex = ReadUnsignedInteger(FindField(Sampler, "output"), SourcePath, "animations.samplers.output");
+						if (!InputIndex || !OutputIndex)
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+								"Animation sampler requires input and output accessors"));
+						auto Input = ResolveAccessor(Document, *Buffers, *InputIndex, SourcePath);
+						auto Output = ResolveAccessor(Document, *Buffers, *OutputIndex, SourcePath);
+						if (!Input) return std::unexpected(std::move(Input.error()));
+						if (!Output) return std::unexpected(std::move(Output.error()));
+						const size_t Components = ImportedChannel.Path == GltfAnimationPath::Rotation ? 4 : 3;
+						if (Input->ComponentType != 5126 || Input->Normalized || Input->ComponentCount != 1 || Input->Count == 0 ||
+							Output->ComponentType != 5126 || Output->Normalized || Output->ComponentCount != Components ||
+							Output->Count != Input->Count || TotalKeys + Input->Count > MaximumAnimationKeys)
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, SourcePath,
+								"Animation sampler must use matching bounded float scalar/vector accessors"));
+						TotalKeys += Input->Count;
+						const Json* Interpolation = FindField(Sampler, "interpolation");
+						if (Interpolation != nullptr)
+						{
+							if (!Interpolation->is_string())
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+									"Animation interpolation must be a string"));
+							const std::string Mode = Interpolation->get<std::string>();
+							if (Mode == "STEP") ImportedChannel.Interpolation = GltfAnimationInterpolation::Step;
+							else if (Mode != "LINEAR") return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature,
+								SourcePath, "Only STEP and LINEAR animation interpolation are supported"));
+						}
+						ImportedChannel.Times.reserve(Input->Count);
+						ImportedChannel.Values.reserve(Input->Count);
+						for (size_t Key = 0; Key < Input->Count; ++Key)
+						{
+							auto Time = ReadFloatComponent(*Input, Key, 0, SourcePath);
+							if (!Time || *Time < 0.0f || (!ImportedChannel.Times.empty() && *Time <= ImportedChannel.Times.back()))
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, SourcePath,
+									"Animation input times must be finite, nonnegative, and strictly increasing"));
+							ImportedChannel.Times.push_back(*Time);
+							std::array<float, 4> Value{};
+							for (size_t Component = 0; Component < Components; ++Component)
+							{
+								auto ComponentValue = ReadFloatComponent(*Output, Key, Component, SourcePath);
+								if (!ComponentValue) return std::unexpected(std::move(ComponentValue.error()));
+								Value[Component] = *ComponentValue;
+							}
+							if (ImportedChannel.Path == GltfAnimationPath::Rotation)
+							{
+								const float Length = std::sqrt(Value[0] * Value[0] + Value[1] * Value[1] +
+									Value[2] * Value[2] + Value[3] * Value[3]);
+								if (!std::isfinite(Length) || Length < 1.0e-8f)
+									return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidAccessor, SourcePath,
+										"Animation rotation contains a zero quaternion"));
+								for (float& Component : Value) Component /= Length;
+							}
+							ImportedChannel.Values.push_back(Value);
+							Clip.Duration = std::max(Clip.Duration, *Time);
+						}
+						ClipKeyBuilder.UpdateText("channel-node", ImportedChannel.TargetNodeKey);
+						ClipKeyBuilder.UpdateText("channel-path", Path);
+						Clip.Channels.push_back(std::move(ImportedChannel));
+					}
+					Clip.StableKey = "animation/" + ClipKeyBuilder.Finish().DigestHex;
+					if (!ClipKeys.insert(Clip.StableKey).second)
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+							"Animation clip identity is ambiguous; names and target channels must be unique"));
+					Imported.Animations.push_back(std::move(Clip));
+				}
+			}
 
 			GltfSkeletalMeshImportProduct Product;
 			Product.Mesh = std::move(Imported);

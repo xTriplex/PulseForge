@@ -76,7 +76,8 @@ namespace
 		[[nodiscard]] AssetID WriteSkinnedSource(
 			std::string_view FileName,
 			bool ZeroWeights = false,
-			bool InvalidJointIndex = false)
+			bool InvalidJointIndex = false,
+			bool AddAnimation = false)
 		{
 			const std::filesystem::path Directory = Root / "Assets" / "Models";
 			std::vector<std::byte> Bytes = PositionBytes();
@@ -100,6 +101,15 @@ namespace
 				for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
 					Bytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
 			}
+			if (AddAnimation)
+			{
+				for (const float Value : std::array<float, 8>{ 0.0f, 1.0f, 0,0,0, 0,1,0 })
+				{
+					const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+					for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+						Bytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+				}
+			}
 			const std::filesystem::path BufferPath = Directory / "Skinned.bin";
 			if (!WriteBinary(BufferPath, Bytes)) return {};
 			if (!AssetMetadataSerializer::CreateForNewAsset(BufferPath)) return {};
@@ -110,17 +120,27 @@ namespace
 				"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
 				"{\"buffer\":0,\"byteOffset\":36,\"byteLength\":12},{\"buffer\":0,\"byteOffset\":48,\"byteLength\":48},"
 				"{\"buffer\":0,\"byteOffset\":96,\"byteLength\":6},"
-				"{\"buffer\":0,\"byteOffset\":102,\"byteLength\":64}],\"accessors\":["
+				"{\"buffer\":0,\"byteOffset\":102,\"byteLength\":64}" +
+				(AddAnimation ? ",{\"buffer\":0,\"byteOffset\":166,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":174,\"byteLength\":24}" : "") +
+				"],\"accessors\":["
 				"{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
 				"{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
 				"{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
 				"{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
-				"{\"bufferView\":4,\"componentType\":5126,\"count\":1,\"type\":\"MAT4\"}],"
+				"{\"bufferView\":4,\"componentType\":5126,\"count\":1,\"type\":\"MAT4\"}" +
+				(AddAnimation ? ",{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"},"
+					"{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}" : "") + "],"
 				"\"meshes\":[{\"name\":\"Original Skinned Fixture\",\"primitives\":[{\"attributes\":"
 				"{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}],"
 				"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},"
 				"{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"}],"
 				"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]}";
+			if (AddAnimation)
+			{
+				Document.pop_back();
+				Document += ",\"animations\":[{\"name\":\"move\",\"samplers\":[{\"input\":5,\"output\":6,\"interpolation\":\"LINEAR\"}],"
+					"\"channels\":[{\"sampler\":0,\"target\":{\"node\":2,\"path\":\"translation\"}}]}]}";
+			}
 			const std::filesystem::path SourcePath = Directory / std::string(FileName);
 			if (!WriteText(SourcePath, Document)) return {};
 			const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
@@ -380,6 +400,26 @@ namespace
 		PF_CHECK(Tests, Imported->Mesh.VertexInfluences[0].JointIndices[0] == 0);
 		PF_CHECK(Tests, Imported->Mesh.VertexInfluences[0].Weights[0] == 1.0f);
 		PF_CHECK(Tests, !Imported->Recipe.SubresourceKey.empty());
+
+		const AssetID AnimatedSource = Fixture.WriteSkinnedSource("SkeletalAnimationFixture.gltf", false, false, true);
+		const auto AnimatedRegistry = Fixture.BuildRegistry();
+		PF_CHECK(Tests, !AnimatedSource.IsNil() && AnimatedRegistry.has_value());
+		if (!AnimatedSource.IsNil() && AnimatedRegistry)
+		{
+			const auto Animated = GltfMeshImporter::ProcessSkeletalPrimitive(
+				AnimatedSource, Fixture.Root, *AnimatedRegistry, 0, 0, 0);
+			PF_CHECK(Tests, Animated.has_value());
+			if (Animated)
+			{
+				PF_CHECK(Tests, Animated->Mesh.Animations.size() == 1);
+				PF_CHECK(Tests, Animated->Mesh.Animations[0].Name == "move");
+				PF_CHECK(Tests, Animated->Mesh.Animations[0].Duration == 1.0f);
+				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels.size() == 1);
+				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].TargetNodeKey ==
+					Animated->Mesh.SkeletonNodes[1].StableKey);
+				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].Values[1][1] == 1.0f);
+			}
+		}
 
 		const AssetID ZeroWeightSource = Fixture.WriteSkinnedSource("ZeroWeightFixture.gltf", true);
 		const auto ZeroWeightRegistry = Fixture.BuildRegistry();
