@@ -794,6 +794,15 @@ namespace PulseForge::ScriptEnvironment
 			if (!UserData) return ReturnHostError(State, "entity method requires an Entity value as self");
 			ScriptInstance* Instance = GetScriptInstance(State);
 			if (!Instance || !Instance->SourceScene) return ReturnHostError(State, "scene service is no longer available");
+			if (Instance->Services.QueueEntityDestroy)
+			{
+				bool Queued = false;
+				try { Queued = Instance->Services.QueueEntityDestroy(UserData->Value); }
+				catch (...) { Queued = false; }
+				if (!Queued) return ReturnHostError(State, "the runtime host rejected the entity destruction request");
+				lua_pushboolean(State, true);
+				return 1;
+			}
 
 			std::array<char, 512> Failure{};
 			bool Destroyed = false;

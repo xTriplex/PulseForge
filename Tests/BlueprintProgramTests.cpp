@@ -179,6 +179,20 @@ namespace
 			PF_CHECK(Tests, TransitionResult && TransitionResult->RequestedSceneTransition == TransitionScene &&
 				TransitionResult->SceneTransitionSourceNode == UUID(17, 7));
 		}
+		BlueprintProgramSource DestroyProgram;
+		DestroyProgram.Instructions = {
+			{ BlueprintOpcode::RequestDestroySelf, 0, 0, UUID(17, 11) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(17, 12) }
+		};
+		const auto VerifiedDestroy = VerifyBlueprintProgram(std::move(DestroyProgram));
+		PF_CHECK(Tests, VerifiedDestroy.has_value());
+		if (VerifiedDestroy)
+		{
+			std::array<float, 0> NoState{};
+			const auto DestroyResult = ExecuteBlueprintProgram(*VerifiedDestroy, NoState);
+			PF_CHECK(Tests, DestroyResult && DestroyResult->RequestsEntityDestroy &&
+				DestroyResult->EntityDestroySourceNode == UUID(17, 11));
+		}
 		BlueprintProgramSource InvalidTransition;
 		InvalidTransition.Instructions = {
 			{ BlueprintOpcode::RequestSceneTransition, 0, 0, UUID(17, 9) },

@@ -60,7 +60,8 @@ namespace PulseForge
 		JumpIfAction,
 		RequestStop,
 		RequestPause,
-		RequestSceneTransition
+		RequestSceneTransition,
+		RequestDestroySelf
 	};
 
 	struct BlueprintInstruction
@@ -137,6 +138,8 @@ namespace PulseForge
 		UUID PauseRequestSourceNode;
 		std::optional<AssetID> RequestedSceneTransition;
 		UUID SceneTransitionSourceNode;
+		bool RequestsEntityDestroy = false;
+		UUID EntityDestroySourceNode;
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>

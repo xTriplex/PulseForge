@@ -1437,8 +1437,8 @@ end
 		constexpr AssetID DeferredContactSceneAsset{ 0x6800000000004000ull, 0x8000000000000001ull };
 		const auto DestroyingContactAsset = CreateScriptAsset("destroy_on_trigger.lua", "function OnTriggerEnter(other)\n"
 			"  assert(other:uuid() == '66000000-0000-4000-8000-000000000001')\n"
-			"  local x, message = other:get_translation()\n"
-			"  assert(x == nil and message ~= nil)\n"
+			"  local x = other:get_translation()\n"
+			"  assert(x ~= nil)\n"
 			"  assert(entity:destroy())\n"
 			"  assert(scene.request_transition('" + DeferredContactSceneAsset.ToString() + "'))\n"
 			"end\n");

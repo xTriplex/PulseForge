@@ -189,6 +189,8 @@ namespace PulseForge
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
 						"Blueprint scene transition asset index is out of range"));
 				break;
+			case BlueprintOpcode::RequestDestroySelf:
+				break;
 			case BlueprintOpcode::Return:
 				if (Depth != 0)
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackMismatch, Index, Instruction.SourceNode,
@@ -300,6 +302,11 @@ namespace PulseForge
 			case BlueprintOpcode::RequestSceneTransition:
 				Result.RequestedSceneTransition = Source.SceneTransitionAssets[Instruction.Operand];
 				Result.SceneTransitionSourceNode = Instruction.SourceNode;
+				++ProgramCounter;
+				break;
+			case BlueprintOpcode::RequestDestroySelf:
+				Result.RequestsEntityDestroy = true;
+				Result.EntityDestroySourceNode = Instruction.SourceNode;
 				++ProgramCounter;
 				break;
 			case BlueprintOpcode::Return:

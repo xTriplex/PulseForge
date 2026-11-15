@@ -58,6 +58,7 @@ namespace PulseForge
 			return Value;
 		}
 		constexpr uint32_t MaximumBlueprintInstructionsPerFrame = 50'000;
+		constexpr size_t MaximumQueuedEntityDestructionsPerFrame = 4096;
 
 		std::expected<std::string, std::string> ReadRuntimeUIDocumentBytes(
 			const Project* SourceProject, const std::shared_ptr<const CookedContentProvider>& CookedAssets, const AssetID& Asset)
@@ -136,6 +137,7 @@ namespace PulseForge
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
 		std::unordered_map<UUID, Entity, UUIDHash> BlueprintKnownEntities;
+		std::deque<Entity> PendingEntityDestructions;
 		std::deque<PhysicsContactEvent> PendingContactEvents;
 		std::vector<BlueprintRuntimeDiagnostic> BlueprintDiagnostics;
 		RuntimeUIViewport RuntimeUIView{};
@@ -169,6 +171,41 @@ namespace PulseForge
 			if (BlueprintDiagnostics.size() == 256) BlueprintDiagnostics.erase(BlueprintDiagnostics.begin());
 			BlueprintDiagnostics.push_back({ Target.GetUUID(), Binding ? Binding->Asset : AssetID{}, Event, Code,
 				SourceNode, std::move(Message) });
+		}
+
+		bool QueueEntityDestruction(const Entity& Target)
+		{
+			if ((State != Lifecycle::Starting && State != Lifecycle::Active) || !Source || !Target.IsValid()) return false;
+			const auto Current = Source->FindEntity(Target.GetUUID());
+			if (!Current || *Current != Target) return false;
+			if (std::find(PendingEntityDestructions.begin(), PendingEntityDestructions.end(), Target) !=
+				PendingEntityDestructions.end()) return true;
+			if (PendingEntityDestructions.size() >= MaximumQueuedEntityDestructionsPerFrame) return false;
+			PendingEntityDestructions.push_back(Target);
+			return true;
+		}
+
+		void ApplyQueuedEntityDestructions(Scene& SceneValue)
+		{
+			while (!PendingEntityDestructions.empty())
+			{
+				const Entity Target = PendingEntityDestructions.front();
+				PendingEntityDestructions.pop_front();
+				const auto Current = SceneValue.FindEntity(Target.GetUUID());
+				if (!Current || *Current != Target) continue;
+				DispatchBlueprintEvent(SceneValue, Target, BlueprintEventKind::OnDestroy, Services);
+				const auto Destroyed = SceneValue.DestroyEntity(Target);
+				if (!Destroyed)
+				{
+					RecordBlueprintDiagnostic(Target, nullptr, BlueprintEventKind::OnDestroy,
+						BlueprintProgramErrorCode::HostFailure, {}, "Could not apply the queued entity destruction: " +
+							Destroyed.error().Message);
+					continue;
+				}
+				BlueprintEvents.erase(Target.GetUUID());
+				BlueprintInstances.erase(Target.GetUUID());
+				BlueprintKnownEntities.erase(Target.GetUUID());
+			}
 		}
 
 		void DispatchBlueprintEvent(
@@ -309,6 +346,14 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
+				if (!Result->RequestsStop && !Result->RequestedSceneTransition && Result->RequestsEntityDestroy &&
+					!QueueEntityDestruction(Target))
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						Result->EntityDestroySourceNode, "Scene runtime host rejected the Blueprint entity destruction request");
+					Instance.Faulted = true;
+					return;
+				}
 				ProgramInstance.ScalarState = std::move(CandidateState);
 			}
 			catch (const std::exception& Exception)
@@ -353,6 +398,7 @@ namespace PulseForge
 				BlueprintKnownEntities.emplace(Identifier, EntityValue);
 				DispatchBlueprintEvent(SceneValue, EntityValue, BlueprintEventKind::OnCreate, Services);
 			}
+			ApplyQueuedEntityDestructions(SceneValue);
 		}
 	};
 
@@ -485,6 +531,10 @@ namespace PulseForge
 				.InputState = m_Services.InputState,
 				.Observer = m_Services.ScriptObserver };
 			auto* CandidateOwner = Candidate.get();
+			Services.QueueEntityDestroy = [CandidateOwner](const Entity& Target)
+			{
+				return CandidateOwner->QueueEntityDestruction(Target);
+			};
 			const auto AudioSettingsAvailable = [CandidateOwner]() noexcept
 			{
 				return CandidateOwner->State == Impl::Lifecycle::Active && !CandidateOwner->AudioActivationDeferred &&
@@ -628,6 +678,7 @@ namespace PulseForge
 					"Could not start scene scripting: " + Result.error().Message));
 
 			Candidate->State = Impl::Lifecycle::Active;
+			Candidate->ApplyQueuedEntityDestructions(Source);
 			Candidate->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 			Candidate->BlueprintInstructionsExecuted = 0;
 			Candidate->BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
@@ -638,6 +689,7 @@ namespace PulseForge
 			{
 				Candidate->BlueprintKnownEntities.emplace(EntityValue.GetUUID(), EntityValue);
 				Candidate->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnCreate, Candidate->Services);
+				Candidate->ApplyQueuedEntityDestructions(Source);
 			}
 			m_Impl = std::move(Candidate);
 			return {};
@@ -695,11 +747,11 @@ namespace PulseForge
 			m_Impl->BlueprintInstructionsExecuted = 0;
 			m_Impl->BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
 			m_Impl->BlueprintDispatchLimitReported = false;
+			m_Impl->State = Impl::Lifecycle::Stopping;
 			if (m_Impl->Source)
 				for (const Entity& EntityValue : m_Impl->Source->GetEntities())
 					m_Impl->DispatchBlueprintEvent(*m_Impl->Source, EntityValue, BlueprintEventKind::OnDestroy, m_Impl->Services);
 			m_Impl->PendingContactEvents.clear();
-			m_Impl->State = Impl::Lifecycle::Stopping;
 			m_Impl->BoundaryRequestStatus = Impl::RequestStatus::Cancelled;
 			m_Impl->BoundaryRequest.reset();
 		}
@@ -901,6 +953,7 @@ namespace PulseForge
 		if (auto Result = m_Impl->Scripting->ServicePendingReloads(Source); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
 				"Could not service queued script reloads: " + Result.error().Message));
+		m_Impl->ApplyQueuedEntityDestructions(Source);
 		if (m_Impl->RuntimeUI)
 		{
 			auto& Canvas = *m_Impl->RuntimeUI;
@@ -919,9 +972,12 @@ namespace PulseForge
 			if (CurrentOwner && *CurrentOwner == Canvas.Owner)
 				for (const RuntimeUIAction& Action : Actions)
 				{
-					if (!m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name))
+					const bool ContinueFrame = m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name);
+					m_Impl->ApplyQueuedEntityDestructions(Source);
+					if (!ContinueFrame)
 						return MakeFrameResult();
 					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Impl->Services, Action.Name);
+					m_Impl->ApplyQueuedEntityDestructions(Source);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 						return MakeFrameResult();
@@ -954,6 +1010,7 @@ namespace PulseForge
 					SceneRuntimeSubsystem::Scripting,
 					"Could not update scene scripts: " + Result.error().Message));
 		}
+		m_Impl->ApplyQueuedEntityDestructions(Source);
 		if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 			m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 			return MakeFrameResult();
@@ -977,6 +1034,7 @@ namespace PulseForge
 				{
 					if (m_Impl->BlueprintDispatchesRemaining == 0) break;
 					m_Impl->DispatchBlueprintEvent(Source, EntityValue, *Event, m_Impl->Services, Definition.Id);
+					m_Impl->ApplyQueuedEntityDestructions(Source);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 						return MakeFrameResult();
@@ -993,6 +1051,7 @@ namespace PulseForge
 		{
 			if (m_Impl->BlueprintDispatchesRemaining == 0) break;
 			m_Impl->DispatchBlueprintEvent(Source, EntityValue, BlueprintEventKind::OnUpdate, m_Impl->Services);
+			m_Impl->ApplyQueuedEntityDestructions(Source);
 			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 				return MakeFrameResult();
@@ -1042,8 +1101,12 @@ namespace PulseForge
 			if (m_Impl->BlueprintDispatchesRemaining < 2) break;
 			const PhysicsContactEvent Event = m_Impl->PendingContactEvents.front();
 			m_Impl->PendingContactEvents.pop_front();
-			if (!m_Impl->Scripting->DispatchPhysicsContact(Source, Event))
+			const bool ContinueFrame = m_Impl->Scripting->DispatchPhysicsContact(Source, Event);
+			if (!ContinueFrame)
+			{
+				m_Impl->ApplyQueuedEntityDestructions(Source);
 				return MakeFrameResult(*PhysicsResult);
+			}
 			const BlueprintEventKind BlueprintEvent = Event.IsSensorPair
 				? Event.Phase == PhysicsContactPhase::Begin ? BlueprintEventKind::OnTriggerEnter
 					: Event.Phase == PhysicsContactPhase::Stay ? BlueprintEventKind::OnTriggerStay : BlueprintEventKind::OnTriggerExit
@@ -1052,8 +1115,12 @@ namespace PulseForge
 			m_Impl->DispatchBlueprintEvent(Source, Event.First, BlueprintEvent, m_Impl->Services);
 			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
+			{
+				m_Impl->ApplyQueuedEntityDestructions(Source);
 				return MakeFrameResult(*PhysicsResult);
+			}
 			m_Impl->DispatchBlueprintEvent(Source, Event.Second, BlueprintEvent, m_Impl->Services);
+			m_Impl->ApplyQueuedEntityDestructions(Source);
 			if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 				m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 				return MakeFrameResult(*PhysicsResult);

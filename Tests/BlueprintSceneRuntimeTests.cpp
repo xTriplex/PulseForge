@@ -667,6 +667,32 @@ namespace
 			PF_CHECK(Tests, TransitionRuntime.ResolveBoundaryRequest(
 				*TransitionRequest, SceneRuntimeBoundaryResolution::Rejected));
 		TransitionRuntime.Stop();
+
+		Scene DestroyScene;
+		constexpr UUID DestroyTarget{ 0x5c00000000004000ull, 0x8000000000000001ull };
+		const auto DestroyEntity = DestroyScene.CreateEntityWithUUID(DestroyTarget, "Deferred destruction target");
+		PF_CHECK(Tests, DestroyEntity.has_value());
+		BlueprintProgramSource DestroySource;
+		DestroySource.Instructions = {
+			{ BlueprintOpcode::RequestDestroySelf, 0, 0, UUID(63, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(63, 2) }
+		};
+		const auto VerifiedDestroy = VerifyBlueprintProgram(std::move(DestroySource));
+		PF_CHECK(Tests, VerifiedDestroy.has_value());
+		if (!DestroyEntity || !VerifiedDestroy) return;
+		const auto DestroyProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedDestroy));
+		SceneRuntimeServices DestroyServices;
+		DestroyServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target.GetUUID() != DestroyTarget || Event != BlueprintEventKind::OnUpdate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 5, DestroyProgram };
+		};
+		SceneRuntime DestroyRuntime(*ProjectResult, Description, DestroyServices);
+		PF_CHECK(Tests, DestroyRuntime.Start(DestroyScene).has_value());
+		const auto DestroyFrame = DestroyRuntime.Advance(DestroyScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, DestroyFrame && DestroyFrame->BlueprintInstructionsExecuted == 2 && !DestroyEntity->IsValid());
+		DestroyRuntime.Stop();
 	}
 }
 
