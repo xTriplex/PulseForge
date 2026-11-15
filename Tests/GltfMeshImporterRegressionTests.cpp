@@ -131,9 +131,10 @@ namespace
 				(AddAnimation ? ",{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"},"
 					"{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}" : "") + "],"
 				"\"meshes\":[{\"name\":\"Original Skinned Fixture\",\"primitives\":[{\"attributes\":"
-				"{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]}],"
+				"{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3}]},"
+				"{\"name\":\"Explicit Static Fixture\",\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":3}]}],"
 				"\"nodes\":[{\"mesh\":0,\"skin\":0,\"name\":\"mesh\"},"
-				"{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"}],"
+				"{\"name\":\"root\",\"children\":[2]},{\"name\":\"joint\"},{\"mesh\":1,\"name\":\"static\"}],"
 				"\"skins\":[{\"joints\":[2],\"inverseBindMatrices\":4}]}";
 			if (AddAnimation)
 			{
@@ -354,12 +355,14 @@ namespace
 		PF_CHECK(Tests, Registry.has_value());
 		if (!Registry) return;
 
-		const auto StaticExtraction = GltfMeshImporter::ProcessStaticPrimitive(Source, Fixture.Root, *Registry);
+		const auto RejectedStaticExtraction = GltfMeshImporter::ProcessStaticPrimitive(Source, Fixture.Root, *Registry);
+		PF_CHECK(Tests, !RejectedStaticExtraction);
+		const auto StaticExtraction = GltfMeshImporter::ProcessStaticPrimitive(Source, Fixture.Root, *Registry, 1, 0);
 		PF_CHECK(Tests, StaticExtraction.has_value());
 		if (StaticExtraction)
 		{
 			PF_CHECK(Tests, StaticExtraction->Mesh.Vertices.size() == 3);
-			PF_CHECK(Tests, StaticExtraction->Recipe.SubresourceKey == "mesh/0/primitive/0");
+			PF_CHECK(Tests, StaticExtraction->Recipe.SubresourceKey == "mesh/1/primitive/0");
 		}
 
 		const auto Catalog = AssetDependencyCatalogBuilder::Build(Fixture.Root, Fixture.ProjectID, 1);
@@ -376,6 +379,11 @@ namespace
 		PF_CHECK(Tests, Skeletal != Subresources.end());
 		if (Skeletal != Subresources.end())
 			PF_CHECK(Tests, Skeletal->Classification == AssetSubresourceClassification::SupportedCandidate);
+		const auto ExplicitStatic = std::find_if(Subresources.begin(), Subresources.end(), [&](const AssetSubresourceRecord& Entry)
+			{ return Entry.Identity.Asset == Source && Entry.Identity.SubresourceKey == "mesh/1/primitive/0"; });
+		PF_CHECK(Tests, ExplicitStatic != Subresources.end());
+		if (ExplicitStatic != Subresources.end())
+			PF_CHECK(Tests, ExplicitStatic->Classification == AssetSubresourceClassification::SupportedCandidate);
 	}
 
 	void TestSkeletalPrimitiveImportPreservesSkinContract(TestRunner& Tests)
