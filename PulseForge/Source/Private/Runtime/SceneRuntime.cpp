@@ -293,7 +293,8 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
-				if (Result->RequestedPause && (!Services.QueuePause || !Services.QueuePause(*Result->RequestedPause)))
+				if (!Result->RequestsStop && Result->RequestedPause &&
+					(!Services.QueuePause || !Services.QueuePause(*Result->RequestedPause)))
 				{
 					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
 						Result->PauseRequestSourceNode, "Scene runtime host rejected the Blueprint pause request");

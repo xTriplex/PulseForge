@@ -557,7 +557,8 @@ namespace
 		BlueprintProgramSource Source;
 		Source.Instructions = {
 			{ BlueprintOpcode::RequestStop, 0, 0, UUID(60, 1) },
-			{ BlueprintOpcode::Return, 0, 0, UUID(60, 2) }
+			{ BlueprintOpcode::RequestPause, 1, 0, UUID(60, 2) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(60, 3) }
 		};
 		const auto Verified = VerifyBlueprintProgram(std::move(Source));
 		PF_CHECK(Tests, Verified.has_value());
@@ -585,8 +586,8 @@ namespace
 		SceneRuntime Runtime(*ProjectResult, Description, Services);
 		PF_CHECK(Tests, Runtime.Start(TestScene).has_value());
 		const auto Frame = Runtime.Advance(TestScene, Timestep(1.0 / 60.0));
-		PF_CHECK(Tests, Frame && Frame->BlueprintInstructionsExecuted == 2 && UpdateResolutionAttempts == 1 &&
-			QueueAttempts == 1);
+		PF_CHECK(Tests, Frame && Frame->BlueprintInstructionsExecuted == 3 && UpdateResolutionAttempts == 1 &&
+			QueueAttempts == 1 && !Runtime.IsPaused());
 		const auto Pending = Runtime.GetPendingBoundaryRequest();
 		PF_CHECK(Tests, Pending && Pending->Kind == SceneRuntimeBoundaryRequestKind::Stop && !Pending->Scene);
 		PF_CHECK(Tests, Runtime.ResolveBoundaryRequest(*Pending, SceneRuntimeBoundaryResolution::Cancelled));
