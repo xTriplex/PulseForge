@@ -170,7 +170,8 @@ namespace PulseForge
 			Scene& SceneValue,
 			const Entity& Target,
 			BlueprintEventKind Event,
-			const SceneRuntimeServices& Services)
+			const SceneRuntimeServices& Services,
+			std::string_view UIActionName = {})
 		{
 			if (!Services.ResolveBlueprintProgram || !Target.IsValid()) return;
 			try
@@ -245,7 +246,7 @@ namespace PulseForge
 
 				std::vector<float> CandidateState = ProgramInstance.ScalarState;
 				const uint32_t ExecutionBudget = std::min(BlueprintInstructionsRemaining, BlueprintDefaultInstructionBudget);
-				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState, ExecutionBudget);
+				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState, ExecutionBudget, UIActionName);
 				if (!Result)
 				{
 					if (Result.error().Code == BlueprintProgramErrorCode::InstructionBudgetExceeded)
@@ -869,7 +870,7 @@ namespace PulseForge
 				for (const RuntimeUIAction& Action : Actions)
 				{
 					(void)m_Impl->Scripting->DispatchRuntimeUIAction(Source, Canvas.Owner, Action.Name);
-					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Services);
+					m_Impl->DispatchBlueprintEvent(Source, Canvas.Owner, BlueprintEventKind::OnUIAction, m_Services, Action.Name);
 					if (m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Pending ||
 						m_Impl->BoundaryRequestStatus == Impl::RequestStatus::Committed)
 						return MakeFrameResult();

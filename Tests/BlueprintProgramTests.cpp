@@ -35,7 +35,7 @@ namespace
 			Decoded->GetSource().Instructions[3].SourceNode == UUID(10, 4) &&
 			Decoded->GetSource().ScalarPropertyIds == Verified->GetSource().ScalarPropertyIds);
 		std::vector<std::byte> CorruptBytes = *Encoded;
-		CorruptBytes[4] = std::byte{ 2 };
+		CorruptBytes[4] = std::byte{ 3 };
 		const auto UnsupportedEncoded = DeserializeBlueprintProgram(CorruptBytes);
 		PF_CHECK(Tests, !UnsupportedEncoded && UnsupportedEncoded.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
 		const auto TruncatedEncoded = DeserializeBlueprintProgram(std::span<const std::byte>(*Encoded).first(12));
@@ -45,7 +45,7 @@ namespace
 		const auto TrailingEncoded = DeserializeBlueprintProgram(TrailingBytes);
 		PF_CHECK(Tests, !TrailingEncoded && TrailingEncoded.error().Code == BlueprintProgramErrorCode::InvalidByteStream);
 		std::vector<std::byte> InvalidOpcodeBytes = *Encoded;
-		InvalidOpcodeBytes[20 + 2 * sizeof(uint32_t) + sizeof(uint16_t) + std::string("health").size() + 3 * 25] = std::byte{ 0xff };
+		InvalidOpcodeBytes[24 + 2 * sizeof(uint32_t) + sizeof(uint16_t) + std::string("health").size() + 3 * 25] = std::byte{ 0xff };
 		const auto InvalidOpcodeEncoded = DeserializeBlueprintProgram(InvalidOpcodeBytes);
 		PF_CHECK(Tests, !InvalidOpcodeEncoded && InvalidOpcodeEncoded.error().Code == BlueprintProgramErrorCode::InvalidOpcode &&
 			InvalidOpcodeEncoded.error().Instruction == 3 && InvalidOpcodeEncoded.error().SourceNode == UUID(10, 4));
@@ -54,6 +54,12 @@ namespace
 		PF_CHECK(Tests, Executed && Executed->InstructionsExecuted == 5);
 		PF_CHECK(Tests, Executed->PropertyWrites.size() == 1 && Executed->PropertyWrites[0].PropertyId == "health" &&
 			Executed->PropertyWrites[0].Value == 6.0f);
+		std::vector<std::byte> LegacyProgramBytes = *Encoded;
+		LegacyProgramBytes[4] = std::byte{ 1 };
+		LegacyProgramBytes.erase(LegacyProgramBytes.begin() + 16, LegacyProgramBytes.begin() + 20);
+		const auto LegacyProgram = DeserializeBlueprintProgram(LegacyProgramBytes);
+		PF_CHECK(Tests, LegacyProgram && LegacyProgram->GetSource().Version == BlueprintProgramFormatVersion &&
+			LegacyProgram->GetSource().Instructions.size() == Verified->GetSource().Instructions.size());
 
 		BlueprintProgramSource Unsupported = MakeScalarWriteProgram();
 		Unsupported.Version++;
@@ -87,6 +93,27 @@ namespace
 		BadProperty.ScalarPropertyIds = { "../translation" };
 		const auto BadPropertyResult = VerifyBlueprintProgram(std::move(BadProperty));
 		PF_CHECK(Tests, !BadPropertyResult && BadPropertyResult.error().Code == BlueprintProgramErrorCode::InvalidPropertyIdentifier);
+
+		BlueprintProgramSource UIActionProgram;
+		UIActionProgram.Constants = { 1.0f };
+		UIActionProgram.ScalarPropertyIds = { "activated" };
+		UIActionProgram.UIActionNames = { "Open" };
+		UIActionProgram.Instructions = {
+			{ BlueprintOpcode::JumpIfUIAction, 0, 2, UUID(16, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(16, 2) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(16, 3) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(16, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(16, 5) }
+		};
+		const auto VerifiedUIAction = VerifyBlueprintProgram(std::move(UIActionProgram));
+		PF_CHECK(Tests, VerifiedUIAction.has_value());
+		std::array<float, 1> ActionState{ 0.0f };
+		const auto OpenAction = ExecuteBlueprintProgram(*VerifiedUIAction, ActionState,
+			BlueprintDefaultInstructionBudget, "Open");
+		PF_CHECK(Tests, OpenAction && OpenAction->PropertyWrites.size() == 1 && OpenAction->PropertyWrites[0].Value == 1.0f);
+		const auto OtherAction = ExecuteBlueprintProgram(*VerifiedUIAction, ActionState,
+			BlueprintDefaultInstructionBudget, "Close");
+		PF_CHECK(Tests, OtherAction && OtherAction->PropertyWrites.empty());
 
 		BlueprintProgramSource Loop;
 		Loop.Constants = { 1.0f };

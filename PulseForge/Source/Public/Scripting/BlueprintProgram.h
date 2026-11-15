@@ -8,15 +8,19 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintProgramFormatVersion = 1;
+	inline constexpr uint32_t BlueprintProgramFormatVersion = 2;
+	inline constexpr uint32_t BlueprintLegacyProgramFormatVersion = 1;
 	inline constexpr size_t BlueprintMaximumInstructionCount = 4096;
 	inline constexpr size_t BlueprintMaximumScalarCount = 64;
 	inline constexpr size_t BlueprintMaximumPropertyIdentifierLength = 64;
+	inline constexpr size_t BlueprintMaximumUIActionNameCount = 64;
+	inline constexpr size_t BlueprintMaximumUIActionNameLength = 128;
 	inline constexpr uint32_t BlueprintDefaultInstructionBudget = 10000;
 
 	enum class BlueprintEventKind : uint8_t
@@ -43,7 +47,8 @@ namespace PulseForge
 		Jump,
 		JumpIfZero,
 		WriteScalarProperty,
-		Return
+		Return,
+		JumpIfUIAction
 	};
 
 	struct BlueprintInstruction
@@ -59,6 +64,7 @@ namespace PulseForge
 		uint32_t Version = BlueprintProgramFormatVersion;
 		std::vector<float> Constants;
 		std::vector<std::string> ScalarPropertyIds;
+		std::vector<std::string> UIActionNames;
 		std::vector<BlueprintInstruction> Instructions;
 	};
 
@@ -117,7 +123,8 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<BlueprintExecutionResult, BlueprintProgramError> ExecuteBlueprintProgram(
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
-		uint32_t InstructionBudget = BlueprintDefaultInstructionBudget);
+		uint32_t InstructionBudget = BlueprintDefaultInstructionBudget,
+		std::string_view UIActionName = {});
 	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, BlueprintProgramError>
 		SerializeBlueprintProgram(const BlueprintProgramSource& Source);
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>

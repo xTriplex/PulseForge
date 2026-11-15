@@ -1,5 +1,9 @@
 #include "TestEngineSupport.h"
 
+#include "Assets/AssetOperations.h"
+#include "Scene/Components/RuntimeUICanvasComponent.h"
+#include "UI/RuntimeUI.h"
+
 #include <algorithm>
 #include <array>
 #include <unordered_map>
@@ -79,11 +83,48 @@ namespace
 			if (!Created) return;
 			ActorEntities[Index] = *Created;
 		}
+		RuntimeUIDocument UIDocument;
+		UIDocument.DesignSize = { 100.0f, 100.0f };
+		RuntimeUIElement Button;
+		Button.ID = UUID(0x5200000000004000ull, 0x8000000000000001ull);
+		Button.Kind = RuntimeUIElementKind::Button;
+		Button.OffsetMinimum = { 0.0f, 0.0f };
+		Button.OffsetMaximum = { 100.0f, 100.0f };
+		Button.Action = "Confirm";
+		UIDocument.Elements.push_back(std::move(Button));
+		const auto UISource = SerializeRuntimeUIDocument(UIDocument);
+		PF_CHECK(Tests, UISource.has_value());
+		if (!UISource) return;
+		std::vector<std::byte> UIBytes(UISource->size());
+		std::transform(UISource->begin(), UISource->end(), UIBytes.begin(),
+			[](char Value) { return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
+		const auto UIAsset = AssetOperations::CreateAssetFromBytes(ProjectResult->GetAssetRegistry(),
+			ProjectResult->GetRootPath(), UIBytes, "Assets/BlueprintActions.pfui");
+		PF_CHECK(Tests, UIAsset.has_value());
+		if (!UIAsset) return;
+		PF_CHECK(Tests, ActorEntities[0].SetRuntimeUICanvas(RuntimeUICanvasComponent{
+			UIAsset->ID, true, RuntimeUIInputPolicy::Modal }).has_value());
 
 		const UUID ProgramAsset{ 0x5100000000004000ull, 0x8000000000000001ull };
 		const auto OnCreate = MakeBlueprintProgram(5.0f, true, Tests);
 		const auto OnDestroy = MakeBlueprintProgram(99.0f, true, Tests);
 		auto OnUpdate = MakeBlueprintProgram(1.0f, false, Tests);
+		BlueprintProgramSource UIActionSource;
+		UIActionSource.Constants = { 42.0f };
+		UIActionSource.ScalarPropertyIds = { "health" };
+		UIActionSource.UIActionNames = { "Confirm" };
+		UIActionSource.Instructions = {
+			{ BlueprintOpcode::JumpIfUIAction, 0, 2, UUID(56, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(56, 2) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(56, 3) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(56, 4) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(56, 5) }
+		};
+		const auto VerifiedUIAction = VerifyBlueprintProgram(std::move(UIActionSource));
+		PF_CHECK(Tests, VerifiedUIAction.has_value());
+		const auto UIAction = VerifiedUIAction
+			? std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedUIAction))
+			: std::shared_ptr<const VerifiedBlueprintProgram>{};
 		uint64_t UpdateRevision = 1;
 		uint32_t OnCreateBindings = 0;
 		SceneRuntimeServices Services;
@@ -104,6 +145,8 @@ namespace
 			}
 			if (Event == BlueprintEventKind::OnUpdate)
 				return BlueprintProgramBinding{ ProgramAsset, UpdateRevision, OnUpdate };
+			if (Event == BlueprintEventKind::OnUIAction && Target.GetUUID() == ActorA)
+				return BlueprintProgramBinding{ ProgramAsset, 1, UIAction };
 			return std::nullopt;
 		};
 		Services.GetBlueprintProgramGeneration = [&] { return UpdateRevision; };
@@ -134,6 +177,16 @@ namespace
 		PF_CHECK(Tests, Values[ActorA] == 6.0f && Values[ActorB] == 6.0f);
 		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Values[ActorA] == 7.0f && Values[ActorB] == 7.0f);
+		PF_CHECK(Tests, Runtime.SetPaused(true).has_value());
+		const RuntimeUIViewport Viewport{ { 100.0f, 100.0f }, 100, 100 };
+		for (const RuntimeUIInputKind Kind : { RuntimeUIInputKind::PointerPressed, RuntimeUIInputKind::PointerReleased })
+		{
+			const RuntimeUIInputEvent InputEvent{ Kind, { 50.0f, 50.0f }, {} };
+			PF_CHECK(Tests, Runtime.SubmitRuntimeUIFrame(Viewport, std::span(&InputEvent, 1)));
+			PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		}
+		PF_CHECK(Tests, Values[ActorA] == 42.0f);
+		PF_CHECK(Tests, Runtime.SetPaused(false).has_value());
 
 		OnUpdate = MakeBlueprintProgram(10.0f, false, Tests);
 		++UpdateRevision;
