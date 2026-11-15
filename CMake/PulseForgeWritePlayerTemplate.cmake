@@ -9,6 +9,19 @@ endif()
 if(NOT EXISTS "${PF_PLAYER_FILE}" OR NOT EXISTS "${PF_RESOURCE_DIR}/Shaders")
 	message(FATAL_ERROR "Cooked player template requires its executable and deployed Shaders directory")
 endif()
+set(PF_COOKED_CATALOG_HEADER "${PF_SOURCE_ROOT}/PulseForge/Source/Public/Assets/CookedAssetCatalog.h")
+if(NOT EXISTS "${PF_COOKED_CATALOG_HEADER}")
+	message(FATAL_ERROR "Cooked player template cannot find its cooked catalog schema: ${PF_COOKED_CATALOG_HEADER}")
+endif()
+file(READ "${PF_COOKED_CATALOG_HEADER}" PF_COOKED_CATALOG_HEADER_TEXT)
+string(REGEX MATCH "ManifestVersion[ \t]*=[ \t]*([0-9]+)" PF_COOKED_MANIFEST_VERSION_MATCH "${PF_COOKED_CATALOG_HEADER_TEXT}")
+if(PF_COOKED_MANIFEST_VERSION_MATCH STREQUAL "")
+	message(FATAL_ERROR "Cooked player template cannot read the cooked catalog manifest schema")
+endif()
+set(PF_COOKED_MANIFEST_VERSION "${CMAKE_MATCH_1}")
+if(PF_COOKED_MANIFEST_VERSION LESS 1)
+	message(FATAL_ERROR "Cooked player template found an invalid cooked catalog manifest schema")
+endif()
 set(THIRD_PARTY_NOTICES "PulseForge runtime third-party notices\n")
 set(XXHASH_NOTICE_HEADER "${PF_TRACY_SOURCE_DIR}/server/tracy_xxhash.h")
 if(NOT EXISTS "${XXHASH_NOTICE_HEADER}")
@@ -157,7 +170,7 @@ file(WRITE "${PF_DESCRIPTOR}"
 	"  \"configuration\": \"${PF_CONFIGURATION}\",\n"
 	"  \"renderer\": \"Vulkan\",\n"
 	"  \"runtimeABI\": \"pulseforge-runtime-v1\",\n"
-	"  \"cookManifestSchema\": 6,\n"
+	"  \"cookManifestSchema\": ${PF_COOKED_MANIFEST_VERSION},\n"
 	"  \"entrypoint\": \"${PLAYER_RELATIVE}\",\n"
 	"  \"runtimeFiles\": ${JSON_FILES}\n"
 	"}\n")
