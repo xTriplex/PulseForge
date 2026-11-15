@@ -76,6 +76,7 @@ namespace PulseForge
 		// Accepted requests are committed by the owning host after SceneRuntime::Advance returns.
 		std::function<bool(const AssetID&)> QueueSceneTransition;
 		std::function<bool()> QueueStop;
+		std::function<bool(bool)> QueuePause;
 	};
 
 	enum class SceneRuntimeBoundaryRequestKind : uint8_t

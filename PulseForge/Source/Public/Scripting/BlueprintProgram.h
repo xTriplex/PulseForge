@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -54,7 +55,8 @@ namespace PulseForge
 		WriteScalarProperty,
 		Return,
 		JumpIfAction,
-		RequestStop
+		RequestStop,
+		RequestPause
 	};
 
 	struct BlueprintInstruction
@@ -126,6 +128,8 @@ namespace PulseForge
 		std::vector<BlueprintScalarPropertyWrite> PropertyWrites;
 		bool RequestsStop = false;
 		UUID StopRequestSourceNode;
+	std::optional<bool> RequestedPause;
+	UUID PauseRequestSourceNode;
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>

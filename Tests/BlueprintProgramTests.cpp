@@ -134,6 +134,28 @@ namespace
 			PF_CHECK(Tests, StopResult && StopResult->RequestsStop && StopResult->InstructionsExecuted == 2 &&
 				StopResult->StopRequestSourceNode == UUID(17, 1));
 		}
+		BlueprintProgramSource PauseProgram;
+		PauseProgram.Instructions = {
+			{ BlueprintOpcode::RequestPause, 1, 0, UUID(17, 3) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(17, 4) }
+		};
+		const auto VerifiedPause = VerifyBlueprintProgram(std::move(PauseProgram));
+		PF_CHECK(Tests, VerifiedPause.has_value());
+		if (VerifiedPause)
+		{
+			std::array<float, 0> NoState{};
+			const auto PauseResult = ExecuteBlueprintProgram(*VerifiedPause, NoState);
+			PF_CHECK(Tests, PauseResult && PauseResult->RequestedPause == true &&
+				PauseResult->PauseRequestSourceNode == UUID(17, 3));
+		}
+		BlueprintProgramSource InvalidPause;
+		InvalidPause.Instructions = {
+			{ BlueprintOpcode::RequestPause, 2, 0, UUID(17, 5) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(17, 6) }
+		};
+		const auto RejectedPause = VerifyBlueprintProgram(std::move(InvalidPause));
+		PF_CHECK(Tests, !RejectedPause && RejectedPause.error().Code == BlueprintProgramErrorCode::InvalidOperand &&
+			RejectedPause.error().SourceNode == UUID(17, 5));
 
 		BlueprintProgramSource Loop;
 		Loop.Constants = { 1.0f };

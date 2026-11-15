@@ -168,6 +168,11 @@ namespace PulseForge
 				break;
 			case BlueprintOpcode::RequestStop:
 				break;
+			case BlueprintOpcode::RequestPause:
+				if (Instruction.Operand > 1)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOperand, Index, Instruction.SourceNode,
+						"Blueprint pause request must contain a boolean operand"));
+				break;
 			case BlueprintOpcode::Return:
 				if (Depth != 0)
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackMismatch, Index, Instruction.SourceNode,
@@ -269,6 +274,11 @@ namespace PulseForge
 			case BlueprintOpcode::RequestStop:
 				Result.RequestsStop = true;
 				Result.StopRequestSourceNode = Instruction.SourceNode;
+				++ProgramCounter;
+				break;
+			case BlueprintOpcode::RequestPause:
+				Result.RequestedPause = Instruction.Operand != 0;
+				Result.PauseRequestSourceNode = Instruction.SourceNode;
 				++ProgramCounter;
 				break;
 			case BlueprintOpcode::Return:

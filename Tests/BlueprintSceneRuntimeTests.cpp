@@ -600,6 +600,33 @@ namespace
 			Diagnostics[0].Code == BlueprintProgramErrorCode::HostRejectedDeferredCall &&
 			Diagnostics[0].SourceNode == UUID(60, 1));
 		Runtime.Stop();
+
+		Scene PauseScene;
+		constexpr UUID PauseTarget{ 0x5900000000004000ull, 0x8000000000000001ull };
+		PF_CHECK(Tests, PauseScene.CreateEntityWithUUID(PauseTarget, "Pause request source").has_value());
+		BlueprintProgramSource PauseSource;
+		PauseSource.Instructions = {
+			{ BlueprintOpcode::RequestPause, 1, 0, UUID(61, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(61, 2) }
+		};
+		const auto VerifiedPause = VerifyBlueprintProgram(std::move(PauseSource));
+		PF_CHECK(Tests, VerifiedPause.has_value());
+		if (!VerifiedPause) return;
+		const auto PauseProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedPause));
+		SceneRuntimeServices PauseServices;
+		PauseServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target.GetUUID() != PauseTarget || Event != BlueprintEventKind::OnUpdate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 3, PauseProgram };
+		};
+		SceneRuntime PauseRuntime(*ProjectResult, Description, PauseServices);
+		PF_CHECK(Tests, PauseRuntime.Start(PauseScene).has_value());
+		const auto PauseFrame = PauseRuntime.Advance(PauseScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, PauseFrame && PauseFrame->BlueprintInstructionsExecuted == 2 && PauseRuntime.IsPaused());
+		const auto PausedFrame = PauseRuntime.Advance(PauseScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, PausedFrame && PausedFrame->BlueprintInstructionsExecuted == 0 && PauseRuntime.IsPaused());
+		PauseRuntime.Stop();
 	}
 }
 

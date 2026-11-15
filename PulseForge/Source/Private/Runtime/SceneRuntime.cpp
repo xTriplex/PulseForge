@@ -293,6 +293,13 @@ namespace PulseForge
 					Instance.Faulted = true;
 					return;
 				}
+				if (Result->RequestedPause && (!Services.QueuePause || !Services.QueuePause(*Result->RequestedPause)))
+				{
+					RecordBlueprintDiagnostic(Target, &Binding, Event, BlueprintProgramErrorCode::HostRejectedDeferredCall,
+						Result->PauseRequestSourceNode, "Scene runtime host rejected the Blueprint pause request");
+					Instance.Faulted = true;
+					return;
+				}
 				ProgramInstance.ScalarState = std::move(CandidateState);
 			}
 			catch (const std::exception& Exception)
@@ -598,6 +605,7 @@ namespace PulseForge
 			Candidate->Services = m_Services;
 			Candidate->Services.QueueSceneTransition = Services.QueueSceneTransition;
 			Candidate->Services.QueueStop = Services.QueueStop;
+			Candidate->Services.QueuePause = Services.QueuePause;
 			if (m_CookedAssets)
 				Candidate->Scripting = std::make_unique<ScriptRuntime>(m_CookedAssets, m_Description.Scripting, Services);
 #if !defined(PF_COOKED_RUNTIME_ONLY)
