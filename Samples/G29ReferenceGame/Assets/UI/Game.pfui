@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "designSize": [960.0, 540.0],
+  "elements": [
+    { "id": "b0180000-0000-4000-8000-000000000131", "parent": null, "kind": "image", "order": 0, "offsetMinimum": [24.0, 24.0], "offsetMaximum": [112.0, 112.0], "image": "b0180000-0000-4000-8000-000000000041" },
+    { "id": "b0180000-0000-4000-8000-000000000132", "parent": null, "kind": "text", "order": 1, "offsetMinimum": [130.0, 30.0], "offsetMaximum": [480.0, 90.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 30.0, "text": "Score: 0", "textColor": [0.95, 0.95, 0.8, 1.0] },
+    { "id": "b0180000-0000-4000-8000-000000000133", "parent": null, "kind": "button", "order": 2, "offsetMinimum": [760.0, 28.0], "offsetMaximum": [920.0, 88.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 22.0, "text": "Pause", "action": "pause", "color": [0.15, 0.2, 0.28, 1.0] },
+    { "id": "b0180000-0000-4000-8000-000000000134", "parent": null, "kind": "button", "order": 3, "offsetMinimum": [380.0, 220.0], "offsetMaximum": [580.0, 282.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 24.0, "text": "Resume", "action": "resume", "color": [0.08, 0.35, 0.18, 1.0] },
+    { "id": "b0180000-0000-4000-8000-000000000135", "parent": null, "kind": "button", "order": 4, "offsetMinimum": [380.0, 300.0], "offsetMaximum": [580.0, 362.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 22.0, "text": "Menu", "action": "menu", "color": [0.28, 0.16, 0.18, 1.0] }
+  ]
+}

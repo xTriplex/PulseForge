@@ -1,4 +1,5 @@
 #include "Assets/AssetCookService.h"
+#include "Assets/AssetExportService.h"
 #include "Assets/AssetImportProvenance.h"
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetRegistry.h"
@@ -13,12 +14,15 @@
 #include "Assets/MaterialAssetCache.h"
 #include "Assets/MaterialGraphSource.h"
 #include "Assets/MaterialGraphCompiler.h"
+#include "Assets/ExportBuildProfile.h"
 #include "Assets/DerivedDataArtifactStore.h"
+#include "Assets/GltfMeshImportCoordinator.h"
 #include "Runtime/CookedContentProvider.h"
 #include "Animation/GltfSkinning.h"
 #include "Runtime/PlayerSession.h"
 #include "Scripting/BlueprintAsset.h"
 #include "Scripting/ScriptRuntime.h"
+#include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/SceneSerializer.h"
 #include "TestSupport.h"
 
@@ -29,6 +33,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <span>
 #include <iostream>
@@ -968,6 +973,375 @@ namespace
 #endif
 	}
 
+	void TestG29ReferenceGameCookedPlayer(TestRunner& Tests)
+	{
+#if defined(PF_G29_REFERENCE_GAME_PROJECT)
+		constexpr AssetID MenuScene{ 0xb018000000004000ull, 0x8000000000000010ull };
+		constexpr AssetID GameScene{ 0xb018000000004000ull, 0x8000000000000011ull };
+		constexpr AssetID MenuDocument{ 0xb018000000004000ull, 0x8000000000000030ull };
+		constexpr AssetID GameDocument{ 0xb018000000004000ull, 0x8000000000000031ull };
+		constexpr AssetID GraphMaterial{ 0x1000000000004000ull, 0x8000000000000008ull };
+		constexpr AssetID PrefabOverrideMaterial{ 0xd005000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID BlueprintAsset{ 0xb029000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID SkeletalModel{ 0xb029000000004000ull, 0x8000000000000003ull };
+		constexpr AssetID MenuImage{ 0xb018000000004000ull, 0x8000000000000041ull };
+		constexpr std::string_view SkeletalProductKey = "skeletal/c082e602f501ee8b6e73dffc66fe079d";
+		constexpr std::string_view AnimationClipKey = "animation/1eb3d1f80c02115ce2aff08dade3e146";
+		const auto ID = UUID::Generate();
+		PF_CHECK(Tests, ID.has_value());
+		if (!ID) return;
+		std::error_code Error;
+		const auto TemporaryDirectory = std::filesystem::weakly_canonical(std::filesystem::temp_directory_path(Error), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto SourceRoot = TemporaryDirectory / std::filesystem::u8path("PulseForge-G29-Reference-" + ID->ToString());
+		const auto OutputRoot = TemporaryDirectory / std::filesystem::u8path("PulseForge-G29-Cooked-" + ID->ToString());
+		struct OwnedRoots final
+		{
+			std::filesystem::path Source;
+			std::filesystem::path Output;
+			~OwnedRoots()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Source, CleanupError);
+				CleanupError.clear();
+				std::filesystem::remove_all(Output, CleanupError);
+			}
+		} Cleanup{ SourceRoot, OutputRoot };
+		const std::filesystem::path ProjectPath(PF_G29_REFERENCE_GAME_PROJECT);
+		std::filesystem::copy(ProjectPath.parent_path(), SourceRoot, std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto ProjectValue = Project::Open(SourceRoot / ProjectPath.filename());
+		if (!ProjectValue) std::cerr << "G29_REFERENCE_PROJECT_OPEN_FAILURE " << ProjectValue.error().Message << std::endl;
+		PF_CHECK(Tests, ProjectValue.has_value());
+		if (!ProjectValue) return;
+		PF_CHECK(Tests, ProjectValue->GetDescription().StartScene == MenuScene);
+		auto BeforeImportSnapshot = AssetDependencyCatalogBuilder::Build(
+			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
+		PF_CHECK(Tests, BeforeImportSnapshot.has_value());
+		if (!BeforeImportSnapshot) return;
+		AssetCookRequest MissingReceiptRequest{
+			*BeforeImportSnapshot, ProjectValue->GetFilePath(), MenuScene, {},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			OutputRoot / "MissingSkeletalReceipt"
+		};
+		MissingReceiptRequest.DynamicRoots.push_back(GameScene);
+		const auto MissingReceiptPlan = AssetCookService::Plan(MissingReceiptRequest);
+		PF_CHECK(Tests, !MissingReceiptPlan &&
+			MissingReceiptPlan.error().Code == AssetCookErrorCode::InvalidDependency);
+		auto SkeletalImport = GltfMeshImportCoordinator::ProcessAndRecordSkeletalPrimitive(
+			SkeletalModel, ProjectValue->GetRootPath(), ProjectValue->GetAssetRegistry(), 0, 0, 0);
+		if (!SkeletalImport)
+			std::cerr << "G29_REFERENCE_SKELETAL_IMPORT_FAILURE " << SkeletalImport.error().Message << std::endl;
+		PF_CHECK(Tests, SkeletalImport.has_value());
+		if (!SkeletalImport) return;
+		PF_CHECK(Tests, SkeletalImport->Receipt.Recipe.SubresourceKey == SkeletalProductKey &&
+			SkeletalImport->Receipt.Recipe.SourceLocator == "skeletal/node/0/mesh/0/primitive/0");
+		const std::filesystem::path SkeletalSourcePath = SourceRoot / "Assets/Models/ReferenceRig.gltf";
+		std::ifstream SkeletalSourceStream(SkeletalSourcePath, std::ios::binary);
+		const std::string OriginalSkeletalSource{ std::istreambuf_iterator<char>(SkeletalSourceStream), {} };
+		PF_CHECK(Tests, SkeletalSourceStream.good() || SkeletalSourceStream.eof());
+		SkeletalSourceStream.close();
+		if (OriginalSkeletalSource.empty()) return;
+		{
+			std::ofstream ChangedSource(SkeletalSourcePath, std::ios::binary | std::ios::trunc);
+			ChangedSource.write(OriginalSkeletalSource.data(), static_cast<std::streamsize>(OriginalSkeletalSource.size()));
+			ChangedSource.put('\n');
+			PF_CHECK(Tests, ChangedSource.good());
+		}
+		auto StaleReceiptSnapshot = AssetDependencyCatalogBuilder::Build(
+			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 2);
+		PF_CHECK(Tests, StaleReceiptSnapshot.has_value());
+		if (StaleReceiptSnapshot)
+		{
+			AssetCookRequest StaleReceiptRequest{
+				*StaleReceiptSnapshot, ProjectValue->GetFilePath(), MenuScene, {},
+#if defined(_WIN32)
+				{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+				{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+				{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+				OutputRoot / "StaleSkeletalReceipt"
+			};
+			StaleReceiptRequest.DynamicRoots.push_back(GameScene);
+			const auto StaleReceiptPlan = AssetCookService::Plan(StaleReceiptRequest);
+			PF_CHECK(Tests, !StaleReceiptPlan &&
+				StaleReceiptPlan.error().Code == AssetCookErrorCode::InvalidDependency);
+		}
+		{
+			std::ofstream RestoredSource(SkeletalSourcePath, std::ios::binary | std::ios::trunc);
+			RestoredSource.write(OriginalSkeletalSource.data(), static_cast<std::streamsize>(OriginalSkeletalSource.size()));
+			PF_CHECK(Tests, RestoredSource.good());
+		}
+		auto Snapshot = AssetDependencyCatalogBuilder::Build(
+			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
+		if (!Snapshot) std::cerr << "G29_REFERENCE_CATALOG_FAILURE " << Snapshot.error().Message << std::endl;
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		AssetCookRequest Request{
+			*Snapshot, ProjectValue->GetFilePath(), MenuScene, {},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			OutputRoot
+		};
+		Request.DynamicRoots.push_back(GameScene);
+		Request.DynamicRoots.push_back(SkeletalModel);
+		const auto Plan = AssetCookService::Plan(Request);
+		if (!Plan) std::cerr << "G29_REFERENCE_PLAN_FAILURE " << Plan.error().Message << std::endl;
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto HasProduct = [&](AssetID Asset, CookedAssetProductKind Kind)
+		{
+			return std::any_of(Plan->Products.begin(), Plan->Products.end(), [Asset, Kind](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Asset && Product.Product == Kind; });
+		};
+		PF_CHECK(Tests, HasProduct(MenuDocument, CookedAssetProductKind::RuntimeUI));
+		PF_CHECK(Tests, HasProduct(GameDocument, CookedAssetProductKind::RuntimeUI));
+		PF_CHECK(Tests, HasProduct(GraphMaterial, CookedAssetProductKind::GraphMaterial));
+		PF_CHECK(Tests, HasProduct(BlueprintAsset, CookedAssetProductKind::BlueprintProgram));
+		PF_CHECK(Tests, HasProduct(MenuImage, CookedAssetProductKind::Texture));
+		const auto SkeletalProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [SkeletalModel](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == SkeletalModel && Product.Product == CookedAssetProductKind::SkeletalMesh; });
+		PF_CHECK(Tests, SkeletalProduct != Plan->Products.end());
+		const auto GameProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [GameScene](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == GameScene && Product.Product == CookedAssetProductKind::Scene; });
+		PF_CHECK(Tests, GameProduct != Plan->Products.end());
+		if (GameProduct != Plan->Products.end())
+			PF_CHECK(Tests, std::find(GameProduct->RuntimeDependencies.begin(), GameProduct->RuntimeDependencies.end(),
+				CookedAssetDependency{ GraphMaterial, CookedAssetProductKind::GraphMaterial, {} }) != GameProduct->RuntimeDependencies.end());
+		if (GameProduct != Plan->Products.end())
+			PF_CHECK(Tests, std::find(GameProduct->RuntimeDependencies.begin(), GameProduct->RuntimeDependencies.end(),
+				CookedAssetDependency{ SkeletalModel, CookedAssetProductKind::SkeletalMesh,
+					"skeletal/node/0/mesh/0/primitive/0" }) != GameProduct->RuntimeDependencies.end());
+		auto MissingRootRequest = Request;
+		MissingRootRequest.DynamicRoots.clear();
+		MissingRootRequest.OutputRoot = OutputRoot / "MissingDynamicRoot";
+		const auto MissingRootPlan = AssetCookService::Plan(MissingRootRequest);
+		PF_CHECK(Tests, MissingRootPlan.has_value());
+		if (MissingRootPlan)
+			PF_CHECK(Tests, std::none_of(MissingRootPlan->Products.begin(), MissingRootPlan->Products.end(),
+				[GameScene](const AssetCookPlannedProduct& Product)
+				{ return Product.Asset == GameScene && Product.Product == CookedAssetProductKind::Scene; }));
+		const auto Cooked = AssetCookService::Cook(*Plan);
+		if (!Cooked) std::cerr << "G29_REFERENCE_COOK_FAILURE " << Cooked.error().Message << std::endl;
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		std::filesystem::path PlayerPackage = OutputRoot / "G29PlayerPackage";
+#if defined(PF_G29_PLAYER_TEMPLATE_ROOT) && defined(PF_G29_PLAYER_TEMPLATE_DESCRIPTOR)
+		AssetExportRequest ExportRequest;
+		ExportRequest.SourceProjectFile = ProjectValue->GetFilePath();
+		ExportRequest.Profile.ProfileID = UUID{ 0xc229000000004000ull, 0x8000000000000001ull };
+		ExportRequest.Profile.DisplayName = "G29 Reference Game";
+#if defined(_WIN32)
+		ExportRequest.Profile.TargetPlatform = ExportTargetPlatform::Windows;
+#elif defined(__APPLE__)
+		ExportRequest.Profile.TargetPlatform = ExportTargetPlatform::MacOS;
+#else
+		ExportRequest.Profile.TargetPlatform = ExportTargetPlatform::Linux;
+#endif
+#if defined(__APPLE__)
+		ExportRequest.Profile.Architecture = ExportTargetArchitecture::Arm64;
+#else
+		ExportRequest.Profile.Architecture = ExportTargetArchitecture::X64;
+#endif
+		ExportRequest.Profile.Configuration = CookedBuildConfiguration::Debug;
+		ExportRequest.Profile.Renderer = ExportRendererBackend::Vulkan;
+		ExportRequest.Profile.StartupScene = MenuScene;
+		ExportRequest.Profile.DynamicRoots = { GameScene, SkeletalModel };
+		ExportRequest.Profile.DefaultOutputPath = "Build/Exports/G29ReferenceGame";
+		ExportRequest.Profile.Window = { 960, 540 };
+		ExportRequest.TemplateRoot = std::filesystem::u8path(PF_G29_PLAYER_TEMPLATE_ROOT);
+		ExportRequest.TemplateDescriptor = std::filesystem::u8path(PF_G29_PLAYER_TEMPLATE_DESCRIPTOR);
+		ExportRequest.OutputOverride = PlayerPackage;
+		AssetExportService Exporter;
+		const auto ExportStarted = Exporter.Start(std::move(ExportRequest));
+		PF_CHECK(Tests, ExportStarted.has_value());
+		if (!ExportStarted) return;
+		auto ExportSnapshot = Exporter.GetSnapshot(*ExportStarted);
+		const auto ExportDeadline = std::chrono::steady_clock::now() + std::chrono::minutes(3);
+		while (ExportSnapshot.Running && std::chrono::steady_clock::now() < ExportDeadline)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			ExportSnapshot = Exporter.GetSnapshot(*ExportStarted);
+		}
+		if (ExportSnapshot.Running)
+		{
+			PF_CHECK(Tests, Exporter.RequestCancel(*ExportStarted));
+			const auto CancellationDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+			while (ExportSnapshot.Running && std::chrono::steady_clock::now() < CancellationDeadline)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				ExportSnapshot = Exporter.GetSnapshot(*ExportStarted);
+			}
+		}
+		if (ExportSnapshot.Phase != AssetExportPhase::Complete)
+			std::cerr << "G29_REFERENCE_EXPORT_FAILURE phase=" << static_cast<int>(ExportSnapshot.Phase) <<
+				" message=" << (ExportSnapshot.Error ? ExportSnapshot.Error->Message : ExportSnapshot.Log) << std::endl;
+		PF_CHECK(Tests, !ExportSnapshot.Running && ExportSnapshot.Phase == AssetExportPhase::Complete &&
+			ExportSnapshot.PublishedOutput == PlayerPackage);
+		PF_CHECK(Tests, std::filesystem::is_regular_file(PlayerPackage / "PulseForgeCookedGame.exe") &&
+			std::filesystem::is_regular_file(PlayerPackage / "Content" / "manifest.pfmanifest"));
+#endif
+		std::filesystem::remove_all(SourceRoot, Error);
+		PF_CHECK(Tests, !Error && !std::filesystem::exists(SourceRoot));
+		if (Error || std::filesystem::exists(SourceRoot)) return;
+		auto Provider = CookedContentProvider::Open(PlayerPackage / "Content", Request.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		PF_CHECK(Tests, (*Provider)->ReadRuntimeUI(MenuDocument).has_value());
+		PF_CHECK(Tests, (*Provider)->ReadRuntimeUI(GameDocument).has_value());
+		const auto CookedMaterial = (*Provider)->LoadGraphMaterialProduct(GraphMaterial);
+		PF_CHECK(Tests, CookedMaterial && CookedMaterial->SpirV.size() >= 20 && CookedMaterial->RecipeFingerprint.size() == 32);
+		const auto CookedBlueprint = (*Provider)->LoadBlueprintProgram(BlueprintAsset);
+		PF_CHECK(Tests, CookedBlueprint && CookedBlueprint->GetEvents().size() == 1);
+		if (CookedBlueprint && CookedBlueprint->GetEvents().size() == 1)
+		{
+			std::array<float, 1> BlueprintState{};
+			const auto BlueprintExecution = ExecuteBlueprintProgram(CookedBlueprint->GetEvents().front().Program, BlueprintState);
+			PF_CHECK(Tests, BlueprintExecution && BlueprintExecution->PropertyWrites.size() == 1 &&
+				BlueprintExecution->PropertyWrites.front().Value == 1.0f);
+		}
+		const auto CookedSkeletal = (*Provider)->LoadSkeletalMesh(SkeletalModel, "skeletal/node/0/mesh/0/primitive/0");
+		if (!CookedSkeletal) std::cerr << "G29_REFERENCE_SKELETAL_LOAD_FAILURE " << CookedSkeletal.error().Message << std::endl;
+		PF_CHECK(Tests, CookedSkeletal && CookedSkeletal->Animations.size() == 1);
+		if (CookedSkeletal && CookedSkeletal->Animations.size() == 1)
+		{
+			const CookedAssetEntry* SkeletalEntry = (*Provider)->FindSkeletalMesh(
+				SkeletalModel, "skeletal/node/0/mesh/0/primitive/0");
+			PF_CHECK(Tests, SkeletalEntry && SkeletalEntry->StableProductKey == SkeletalProductKey);
+			PF_CHECK(Tests, CookedSkeletal->Animations.front().StableKey == AnimationClipKey);
+			PF_CHECK(Tests, CookedSkeletal->Animations.front().Name == "Pulse" &&
+				CookedSkeletal->Animations.front().Channels.size() == 1);
+		}
+		const auto CookedGame = (*Provider)->LoadScene(GameScene);
+		PF_CHECK(Tests, CookedGame.has_value());
+		if (CookedGame)
+		{
+			bool HasRuntimeUI = false;
+			bool HasSensor = false;
+			bool HasSpatialAudio = false;
+			bool HasLua = false;
+			bool HasBlueprint = false;
+			bool HasLinkedPrefabInstance = false;
+			bool HasPrefabMaterialOverride = false;
+			bool HasGraphMaterialMesh = false;
+			bool HasAnimatedGraphMaterialMesh = false;
+			for (const Entity& Current : (**CookedGame).GetEntities())
+			{
+				const auto Canvas = Current.GetRuntimeUICanvas();
+				const auto Collider = Current.GetCollider();
+				const auto Audio = Current.GetAudioSource();
+				const auto Script = Current.GetScript();
+				const auto Blueprint = Current.GetBlueprint();
+				const auto PrefabInstance = Current.GetPrefabInstance();
+				HasRuntimeUI = HasRuntimeUI || (Canvas && Canvas->has_value());
+				HasSensor = HasSensor || (Collider && Collider->has_value());
+				HasSpatialAudio = HasSpatialAudio || (Audio && Audio->has_value());
+				HasLua = HasLua || (Script && Script->has_value());
+				HasBlueprint = HasBlueprint || (Blueprint && Blueprint->has_value());
+				HasLinkedPrefabInstance = HasLinkedPrefabInstance || (PrefabInstance && PrefabInstance->has_value());
+				const auto Mesh = Current.GetMeshRenderer();
+				HasPrefabMaterialOverride = HasPrefabMaterialOverride ||
+					(Mesh && Mesh->has_value() && (**Mesh).MeshAsset == AssetID{ 0xd003000000004000ull, 0x8000000000000001ull } &&
+						(**Mesh).MaterialAsset && *(**Mesh).MaterialAsset == PrefabOverrideMaterial);
+				HasGraphMaterialMesh = HasGraphMaterialMesh ||
+					(Mesh && Mesh->has_value() && (**Mesh).MaterialAsset == GraphMaterial);
+				HasAnimatedGraphMaterialMesh = HasAnimatedGraphMaterialMesh ||
+					(Mesh && Mesh->has_value() && (**Mesh).MeshAsset == SkeletalModel &&
+						(**Mesh).SkeletalProductKey && *(**Mesh).SkeletalProductKey == SkeletalProductKey &&
+						(**Mesh).AnimationClipKey && *(**Mesh).AnimationClipKey == AnimationClipKey &&
+						(**Mesh).MaterialAsset == GraphMaterial);
+			}
+			PF_CHECK(Tests, HasRuntimeUI && HasSensor && HasSpatialAudio && HasLua && HasBlueprint &&
+				HasLinkedPrefabInstance && HasPrefabMaterialOverride && HasGraphMaterialMesh && HasAnimatedGraphMaterialMesh);
+		}
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession Session(*Provider, RuntimeDescription);
+		PF_CHECK(Tests, Session.IsCookedSession() && Session.GetProject() == nullptr);
+		PF_CHECK(Tests, Session.Start().has_value());
+		if (!Session.IsRunning()) return;
+		const RuntimeUIViewport Viewport{ { 960.0f, 540.0f }, 960, 540 };
+		for (const RuntimeUIInputKind Kind : { RuntimeUIInputKind::PointerPressed, RuntimeUIInputKind::PointerReleased })
+		{
+			const RuntimeUIInputEvent Event{ Kind, { 480.0f, 260.0f }, {} };
+			PF_CHECK(Tests, Session.SubmitRuntimeUIFrame(Viewport, std::span(&Event, 1)));
+			PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		}
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() && *Session.GetActiveSceneAsset() == GameScene);
+		bool BlueprintExecuted = false;
+		if (const Scene* Active = Session.GetActiveScene())
+			for (const Entity& Current : Active->GetEntities())
+			{
+				const auto Blueprint = Current.GetBlueprint();
+				BlueprintExecuted = BlueprintExecuted || (Blueprint && Blueprint->has_value() &&
+					Blueprint->value().FindFloatProperty("g29.ready") == 1.0f);
+			}
+		PF_CHECK(Tests, BlueprintExecuted);
+		if (!BlueprintExecuted)
+		{
+			std::cerr << "G29_BLUEPRINT_ACTIVE entityCount=" <<
+				(Session.GetActiveScene() ? Session.GetActiveScene()->GetEntities().size() : 0) << std::endl;
+			if (const Scene* Active = Session.GetActiveScene())
+				for (const Entity& Current : Active->GetEntities())
+				{
+					const auto Blueprint = Current.GetBlueprint();
+					if (Blueprint && Blueprint->has_value())
+						std::cerr << "G29_BLUEPRINT_COMPONENT " << Current.GetUUID().ToString() << " " <<
+							(**Blueprint).BlueprintAsset.ToString() << " enabled=" << (**Blueprint).Enabled << " ready=" <<
+							(**Blueprint).FindFloatProperty("g29.ready").value_or(-1.0f) << std::endl;
+				}
+			for (const BlueprintRuntimeDiagnostic& Diagnostic : Session.GetBlueprintDiagnostics())
+				std::cerr << "G29_BLUEPRINT_RUNTIME_FAILURE " << Diagnostic.Message << std::endl;
+		}
+		const auto SubmitPointer = [&](RuntimeUIInputKind Kind, glm::vec2 Position)
+		{
+			const RuntimeUIInputEvent Event{ Kind, Position, {} };
+			if (!Session.SubmitRuntimeUIFrame(Viewport, std::span(&Event, 1))) return false;
+			return Session.Advance(Timestep(1.0 / 60.0)).has_value();
+		};
+		const auto Click = [&](glm::vec2 Position)
+		{
+			return SubmitPointer(RuntimeUIInputKind::PointerPressed, Position) &&
+				SubmitPointer(RuntimeUIInputKind::PointerReleased, Position);
+		};
+		const auto FindScore = [&]() -> std::string
+		{
+			for (const RuntimeUIDrawCommand& Command : Session.GetRuntimeUIDrawCommands())
+				if (Command.Element == UUID(0xb018000000004000ull, 0x8000000000000132ull)) return Command.Text;
+			return {};
+		};
+		for (uint32_t Frame = 0; Frame < 40; ++Frame)
+			PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		const std::string AdvancedScore = FindScore();
+		PF_CHECK(Tests, AdvancedScore.starts_with("Score: ") && AdvancedScore != "Score: 0");
+		PF_CHECK(Tests, Click({ 840.0f, 58.0f }) && Session.IsPaused());
+		for (uint32_t Frame = 0; Frame < 30; ++Frame)
+			PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, FindScore() == AdvancedScore);
+		PF_CHECK(Tests, Click({ 480.0f, 250.0f }) && !Session.IsPaused());
+		PF_CHECK(Tests, Click({ 480.0f, 330.0f }));
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() && *Session.GetActiveSceneAsset() == MenuScene);
+		Session.Stop();
+#endif
+	}
+
 	void TestBlueprintCookedProgramProduct(TestRunner& Tests)
 	{
 		CookFixture Fixture;
@@ -1097,6 +1471,193 @@ namespace
 		PF_CHECK(Tests, RuntimeMaterial && RuntimeMaterial->get().BaseColorTexture == AssetID(0xa100000000004000ull,
 			0x8000000000000001ull) && RuntimeMaterial->get().BaseColorFactor == ExpectedBaseColor);
 #endif
+	}
+
+	void TestCookedReferenceTransitionWithMaterialAndBlueprint(TestRunner& Tests)
+	{
+		CookFixture Fixture;
+		PF_CHECK(Tests, !Fixture.Root.empty());
+		if (Fixture.Root.empty()) return;
+		CookFixture::WriteText(Fixture.Source / "Assets" / "Scripts" / "Dynamic.lua",
+			"function OnUpdate(dt) assert(entity:set_translation(dt, 0, 0)) end\n");
+		const std::filesystem::path SampleMesh = std::filesystem::path(PF_COOK_FIXTURE_PROJECT).parent_path().parent_path() /
+			"PBRMaterials" / "Assets" / "Models" / "PbrTestCube.gltf";
+		const std::filesystem::path FixtureMesh = Fixture.Source / "Assets" / "PbrTestCube.gltf";
+		std::error_code MeshCopyError;
+		std::filesystem::copy_file(SampleMesh, FixtureMesh, std::filesystem::copy_options::overwrite_existing, MeshCopyError);
+		PF_CHECK(Tests, !MeshCopyError);
+		if (MeshCopyError) return;
+		const auto MeshMetadata = AssetMetadataSerializer::CreateForNewAsset(FixtureMesh);
+		PF_CHECK(Tests, MeshMetadata.has_value());
+		if (!MeshMetadata) return;
+
+		Scene StartupScene;
+		PF_CHECK(Tests, SceneSerializer::LoadFromFile(Fixture.SceneSourcePath, StartupScene).has_value());
+		auto StartupEntity = StartupScene.GetEntities().front();
+		PF_CHECK(Tests, StartupEntity.SetScript(ScriptComponent{ Fixture.ScriptAsset }).has_value());
+		PF_CHECK(Tests, StartupEntity.SetMeshRenderer(MeshRendererComponent{ MeshMetadata->ID, Fixture.GraphMaterialAsset }).has_value());
+		const auto StartupSceneText = SceneSerializer::Serialize(StartupScene);
+		PF_CHECK(Tests, StartupSceneText.has_value());
+		if (!StartupSceneText) return;
+		CookFixture::WriteText(Fixture.SceneSourcePath, *StartupSceneText);
+
+		Scene DestinationScene;
+		const auto Destination = DestinationScene.CreateEntity("G29 destination marker");
+		PF_CHECK(Tests, Destination.has_value());
+		if (!Destination) return;
+		const auto DestinationSceneText = SceneSerializer::Serialize(DestinationScene);
+		PF_CHECK(Tests, DestinationSceneText.has_value());
+		if (!DestinationSceneText) return;
+		CookFixture::WriteText(Fixture.Source / "Assets" / "Alternate.scene", *DestinationSceneText);
+
+		BlueprintProgramSource OnCreate;
+		OnCreate.Constants = { 2.0f };
+		OnCreate.ScalarPropertyIds = { "health" };
+		OnCreate.Instructions = {
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(72, 1) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(72, 2) },
+			{ BlueprintOpcode::Add, 0, 0, UUID(72, 3) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(72, 4) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(72, 5) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(72, 6) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(72, 7) }
+		};
+		BlueprintProgramSource OnUpdate;
+		OnUpdate.ScalarPropertyIds = { "health" };
+		OnUpdate.SceneTransitionAssets = { Fixture.AlternateSceneAsset };
+		OnUpdate.Instructions = {
+			{ BlueprintOpcode::RequestSceneTransition, 0, 0, UUID(73, 1) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(73, 2) }
+		};
+		const std::array<BlueprintEventProgramSource, 2> Events{
+			BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, std::move(OnCreate) },
+			BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, std::move(OnUpdate) }
+		};
+		const auto BlueprintBytes = SerializeBlueprintAsset(Events);
+		PF_CHECK(Tests, BlueprintBytes.has_value());
+		if (!BlueprintBytes) return;
+		{
+			std::ofstream BlueprintOutput(Fixture.BlueprintSourcePath, std::ios::binary | std::ios::trunc);
+			BlueprintOutput.write(reinterpret_cast<const char*>(BlueprintBytes->data()),
+				static_cast<std::streamsize>(BlueprintBytes->size()));
+			PF_CHECK(Tests, static_cast<bool>(BlueprintOutput));
+		}
+
+		auto Snapshot = Fixture.Build();
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		auto Request = Fixture.Request(*Snapshot);
+		Request.DynamicRoots = { Fixture.GraphMaterialAsset, Fixture.BlueprintAsset, Fixture.AlternateSceneAsset };
+		Request.OutputRoot = Fixture.Root / "G29Cooked";
+		const auto Plan = AssetCookService::Plan(Request);
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto GraphProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Fixture.GraphMaterialAsset && Product.Product == CookedAssetProductKind::GraphMaterial; });
+		const auto BlueprintProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Fixture.BlueprintAsset && Product.Product == CookedAssetProductKind::BlueprintProgram; });
+		const auto DestinationSceneProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Fixture.AlternateSceneAsset && Product.Product == CookedAssetProductKind::Scene; });
+		const auto StartupSceneProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Fixture.SceneAsset && Product.Product == CookedAssetProductKind::Scene; });
+		PF_CHECK(Tests, GraphProduct != Plan->Products.end());
+		PF_CHECK(Tests, BlueprintProduct != Plan->Products.end());
+		PF_CHECK(Tests, DestinationSceneProduct != Plan->Products.end());
+		PF_CHECK(Tests, StartupSceneProduct != Plan->Products.end());
+		if (StartupSceneProduct != Plan->Products.end())
+			PF_CHECK(Tests, std::find(StartupSceneProduct->RuntimeDependencies.begin(), StartupSceneProduct->RuntimeDependencies.end(),
+				CookedAssetDependency{ Fixture.GraphMaterialAsset, CookedAssetProductKind::GraphMaterial, {} }) !=
+				StartupSceneProduct->RuntimeDependencies.end());
+		const auto Cooked = RunCookWithBoundary("g29-reference-transition", [&] { return AssetCookService::Cook(*Plan); });
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+
+		auto MissingRootRequest = Fixture.Request(*Snapshot);
+		MissingRootRequest.DynamicRoots = { Fixture.GraphMaterialAsset, Fixture.BlueprintAsset };
+		MissingRootRequest.OutputRoot = Fixture.Root / "G29MissingTransitionRootCooked";
+		const auto MissingRootPlan = AssetCookService::Plan(MissingRootRequest);
+		PF_CHECK(Tests, MissingRootPlan.has_value());
+		if (!MissingRootPlan) return;
+		PF_CHECK(Tests, std::none_of(MissingRootPlan->Products.begin(), MissingRootPlan->Products.end(),
+			[&](const AssetCookPlannedProduct& Product)
+			{ return Product.Asset == Fixture.AlternateSceneAsset && Product.Product == CookedAssetProductKind::Scene; }));
+		const auto MissingRootCooked = RunCookWithBoundary("g29-missing-transition-root", [&]
+			{ return AssetCookService::Cook(*MissingRootPlan); });
+		PF_CHECK(Tests, MissingRootCooked.has_value());
+		if (!MissingRootCooked) return;
+
+		std::error_code RemoveError;
+		std::filesystem::remove_all(Fixture.Source, RemoveError);
+		PF_CHECK(Tests, !RemoveError && !std::filesystem::exists(Fixture.Source));
+		if (RemoveError || std::filesystem::exists(Fixture.Source)) return;
+		const auto Provider = CookedContentProvider::Open(Request.OutputRoot, Fixture.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		const auto Graph = (*Provider)->LoadGraphMaterialProduct(Fixture.GraphMaterialAsset);
+		const auto Blueprint = (*Provider)->LoadBlueprintProgram(Fixture.BlueprintAsset);
+		PF_CHECK(Tests, Graph && Graph->SpirV.size() >= 20 && Graph->RecipeFingerprint.size() == 32);
+		PF_CHECK(Tests, Blueprint && Blueprint->GetEvents().size() == 2);
+		if (Blueprint)
+		{
+			const auto TransitionEvent = std::find_if(Blueprint->GetEvents().begin(), Blueprint->GetEvents().end(),
+				[](const BlueprintVerifiedEventProgram& Event) { return Event.Event == BlueprintEventKind::OnUpdate; });
+			PF_CHECK(Tests, TransitionEvent != Blueprint->GetEvents().end());
+			PF_CHECK(Tests, TransitionEvent != Blueprint->GetEvents().end() &&
+				TransitionEvent->Program.GetSource().SceneTransitionAssets == std::vector<AssetID>{ Fixture.AlternateSceneAsset });
+		}
+		PF_CHECK(Tests, (*Provider)->GetDynamicRoots().size() == 3);
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession Session(*Provider, RuntimeDescription);
+		PF_CHECK(Tests, Session.IsCookedSession() && Session.GetProject() == nullptr);
+		PF_CHECK(Tests, Session.Start().has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == Fixture.SceneAsset);
+		if (const Scene* Active = Session.GetActiveScene())
+		{
+			const auto Renderable = Active->GetEntities().front().GetMeshRenderer();
+			PF_CHECK(Tests, Renderable && Renderable->has_value() &&
+				(**Renderable).MeshAsset == MeshMetadata->ID && (**Renderable).MaterialAsset == Fixture.GraphMaterialAsset);
+		}
+		else
+			PF_CHECK(Tests, false);
+		if (const Scene* Active = Session.GetActiveScene())
+		{
+			const auto RuntimeEntity = Active->GetEntities().front();
+			const auto RuntimeBlueprint = RuntimeEntity.GetBlueprint();
+			PF_CHECK(Tests, RuntimeBlueprint && RuntimeBlueprint->has_value() &&
+				RuntimeBlueprint->value().FindFloatProperty("health") == 42.0f);
+		}
+		else
+			PF_CHECK(Tests, false);
+		const auto FirstFrame = Session.Advance(Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, FirstFrame.has_value());
+		PF_CHECK(Tests, FirstFrame && FirstFrame->BlueprintInstructionsExecuted >= 2);
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == Fixture.SceneAsset);
+		if (const Scene* Active = Session.GetActiveScene())
+		{
+			const auto LuaTransform = Active->GetEntities().front().GetTransform();
+			PF_CHECK(Tests, LuaTransform && std::abs(LuaTransform->Translation.x - (1.0f / 60.0f)) < 0.0001f);
+		}
+		else
+			PF_CHECK(Tests, false);
+		const auto SecondFrame = Session.Advance(Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, SecondFrame.has_value());
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == Fixture.AlternateSceneAsset);
+		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntities().size() == 1);
+		if (const Scene* Active = Session.GetActiveScene())
+			PF_CHECK(Tests, Active->GetEntities().front().GetTag()->Name == "G29 destination marker");
+		Session.Stop();
+
+		const auto MissingRootProvider = CookedContentProvider::Open(MissingRootRequest.OutputRoot, Fixture.Compatibility);
+		PF_CHECK(Tests, MissingRootProvider.has_value());
+		if (!MissingRootProvider) return;
+		PlayerSession MissingRootSession(*MissingRootProvider, RuntimeDescription);
+		PF_CHECK(Tests, MissingRootSession.Start().has_value());
+		const auto MissingTransition = MissingRootSession.Advance(Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, !MissingTransition && MissingTransition.error().Code == PlayerSessionErrorCode::SceneLoadFailed);
+		PF_CHECK(Tests, MissingRootSession.GetActiveSceneAsset() == Fixture.SceneAsset);
+		MissingRootSession.Stop();
 	}
 }
 
@@ -1913,6 +2474,8 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	TestLuaAuthoringSampleCookAndRuntime(Tests);
 	TestPhysicsQueriesSampleCookedPlayer(Tests);
 	TestRuntimeUISampleCookedPlayer(Tests);
+	TestG29ReferenceGameCookedPlayer(Tests);
 	TestBlueprintCookedProgramProduct(Tests);
 	TestSavedPbrGraphMaterialCookedProduct(Tests);
+	TestCookedReferenceTransitionWithMaterialAndBlueprint(Tests);
 }

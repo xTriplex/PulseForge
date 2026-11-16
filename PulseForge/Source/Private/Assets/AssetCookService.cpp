@@ -637,7 +637,8 @@ namespace PulseForge
 					Request.SourceSnapshot->GetSubresources().end(), [&](const AssetSubresourceRecord& Candidate)
 					{ return Candidate.Identity.Asset == Current.Asset && Candidate.Identity.SubresourceKey == Current.Subresource; });
 				if (Subresource == Request.SourceSnapshot->GetSubresources().end() ||
-					Subresource->Classification != AssetSubresourceClassification::SupportedCandidate)
+					(Subresource->Classification != AssetSubresourceClassification::SupportedCandidate &&
+					 Subresource->Classification != AssetSubresourceClassification::Imported))
 					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
 						"Requested skeletal subresource is not classified as a supported skinned output", *SourcePath, Current.Asset));
 			}
@@ -660,7 +661,34 @@ namespace PulseForge
 					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct,
 						"Reachable runtime dependency has no cook adapter at " + Edge.Location,
 						TargetRecord->ProjectRelativePath, Edge.Target.Asset));
-				CookedAssetDependency Dependency = ProductDependencyForEdge(Edge, *TargetProduct);
+				CookedAssetDependency Dependency;
+				if (Edge.Target.SubresourceKey.starts_with("skeletal/"))
+				{
+					const auto& Observations = Request.SourceSnapshot->GetImportObservations();
+					const AssetImportObservation* MatchingObservation = nullptr;
+					for (const AssetImportObservation& Observation : Observations)
+					{
+						if (Observation.Asset != Edge.Target.Asset ||
+							Observation.ImporterID != "PulseForge.SkeletalGltfMeshImporter" ||
+							Observation.ResultState != AssetImportResultState::SuccessfulInputsMatch ||
+							!Observation.LastSuccessfulResult ||
+							Observation.LastSuccessfulResult->Recipe.SubresourceKey != Edge.Target.SubresourceKey ||
+							!Observation.LastSuccessfulResult->Recipe.SourceLocator.starts_with("skeletal/node/"))
+							continue;
+						if (MatchingObservation)
+							return std::unexpected(Error(AssetCookErrorCode::InvalidDependency,
+								"Stable skeletal product key resolves to multiple current source locators at " + Edge.Location,
+								TargetRecord->ProjectRelativePath, Edge.Target.Asset));
+						MatchingObservation = &Observation;
+					}
+					if (!MatchingObservation)
+						return std::unexpected(Error(AssetCookErrorCode::InvalidDependency,
+							"Stable skeletal product key has no successful current import receipt at " + Edge.Location,
+							TargetRecord->ProjectRelativePath, Edge.Target.Asset));
+					Dependency = { Edge.Target.Asset, CookedAssetProductKind::SkeletalMesh,
+						MatchingObservation->LastSuccessfulResult->Recipe.SourceLocator };
+				}
+				else Dependency = ProductDependencyForEdge(Edge, *TargetProduct);
 				Product.RuntimeDependencies.push_back(Dependency);
 				Queue.push_back({ std::move(Dependency) });
 			}

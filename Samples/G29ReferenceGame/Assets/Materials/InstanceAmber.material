@@ -1,0 +1,10 @@
+{
+  "format": "PulseForgeMaterial",
+  "version": 3,
+  "baseColorFactor": [0.92, 0.36, 0.08, 1.0],
+  "metallicFactor": 0.02,
+  "roughnessFactor": 0.48,
+  "normalScale": 1.0,
+  "occlusionStrength": 1.0,
+  "emissiveFactor": [0.0, 0.0, 0.0]
+}

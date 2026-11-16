@@ -250,10 +250,10 @@ namespace PulseForge
 
 		void AddRuntimeReference(AssetDependencyExtraction& Output, const AssetRegistry& Registry, const AssetDependencyNode& Referrer,
 			const AssetID& TargetID, AssetFileType ExpectedType, std::string Location, bool Optional, std::string OriginalReference = {},
-			std::optional<AssetDependencyStatus> ValidatedStatus = std::nullopt)
+			std::optional<AssetDependencyStatus> ValidatedStatus = std::nullopt, std::string SubresourceKey = {})
 		{
 			if (TargetID.IsNil() && Optional) return;
-			const AssetDependencyNode Target{ TargetID, {}, {} };
+			const AssetDependencyNode Target{ TargetID, {}, std::move(SubresourceKey) };
 			AssetDependencyStatus Status = ValidatedStatus.value_or(
 				TargetID.IsNil() ? AssetDependencyStatus::Invalid : ResolveAssetReference(Registry, TargetID, ExpectedType));
 			Output.Edges.push_back({ Referrer, Target, AssetDependencyEdgeKind::RuntimeReference, Status, Location, OriginalReference });
@@ -311,7 +311,8 @@ namespace PulseForge
 					const MeshRendererComponent& Component = Mesh->value();
 					AddRuntimeReference(Output, Registry, Referrer, Component.MeshAsset, AssetFileType::Mesh,
 						"entities/" + EntityKey.substr(7) + "/meshRenderer.meshAsset", false, Component.MeshAsset.ToString(),
-						FindValidationStatus(EntityValue.GetUUID(), Component.MeshAsset, AssetReferenceKind::Mesh));
+						FindValidationStatus(EntityValue.GetUUID(), Component.MeshAsset, AssetReferenceKind::Mesh),
+						Component.SkeletalProductKey.value_or(std::string{}));
 					if (Component.MaterialAsset)
 						AddRuntimeReference(Output, Registry, Referrer, *Component.MaterialAsset, AssetFileType::Material,
 							"entities/" + EntityKey.substr(7) + "/meshRenderer.materialAsset", true, Component.MaterialAsset->ToString(),

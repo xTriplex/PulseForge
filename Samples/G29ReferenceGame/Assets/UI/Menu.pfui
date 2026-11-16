@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "designSize": [960.0, 540.0],
+  "elements": [
+    { "id": "b0180000-0000-4000-8000-000000000101", "parent": null, "kind": "image", "order": 0, "offsetMinimum": [348.0, 68.0], "offsetMaximum": [612.0, 332.0], "image": "b0180000-0000-4000-8000-000000000041" },
+    { "id": "b0180000-0000-4000-8000-000000000102", "parent": null, "kind": "text", "order": 1, "offsetMinimum": [300.0, 90.0], "offsetMaximum": [660.0, 150.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 42.0, "text": "Café PulseForge", "textColor": [1.0, 0.9, 0.65, 1.0] },
+    { "id": "b0180000-0000-4000-8000-000000000105", "parent": null, "kind": "text", "order": 1, "offsetMinimum": [310.0, 155.0], "offsetMaximum": [650.0, 190.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 18.0, "text": "Unsupported glyph: 雪 is shown as ?", "textColor": [0.9, 0.9, 0.9, 1.0] },
+    { "id": "b0180000-0000-4000-8000-000000000103", "parent": null, "kind": "button", "order": 2, "offsetMinimum": [390.0, 230.0], "offsetMaximum": [570.0, 290.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 26.0, "text": "Start", "action": "start", "color": [0.08, 0.28, 0.42, 1.0], "textColor": [1.0, 1.0, 1.0, 1.0] },
+    { "id": "b0180000-0000-4000-8000-000000000104", "parent": null, "kind": "button", "order": 3, "offsetMinimum": [390.0, 315.0], "offsetMaximum": [570.0, 375.0], "font": "b0180000-0000-4000-8000-000000000040", "fontSize": 22.0, "text": "Pause", "action": "pause", "color": [0.18, 0.24, 0.3, 1.0] }
+  ]
+}

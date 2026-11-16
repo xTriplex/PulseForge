@@ -281,13 +281,13 @@ namespace PulseForge
 			return std::unexpected(
 				MakeError(PlayerSessionErrorCode::SceneLoadFailed, "Could not prepare player scene transition: " + Loaded.error().Message));
 
-		Candidate->Asset = SceneAsset;
 		if (!m_CookedAssets) Candidate->Value = std::move(CandidateScene);
 #else
 		else
 			return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
 				"Cooked scene transitions require a cooked content provider"));
 #endif
+		Candidate->Asset = SceneAsset;
 		m_PendingScene = std::move(Candidate);
 		return {};
 	}
@@ -315,10 +315,12 @@ namespace PulseForge
 #if defined(PF_COOKED_RUNTIME_ONLY)
 			auto CandidateServices = m_RuntimeServices;
 			CandidateServices.AudioSessionState = m_AudioSession.get();
+			BindSceneBlueprintServices(CandidateServices, m_CookedAssets, nullptr);
 			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, CandidateServices);
 #else
 			auto CandidateServices = m_RuntimeServices;
 			CandidateServices.AudioSessionState = m_AudioSession.get();
+			BindSceneBlueprintServices(CandidateServices, m_CookedAssets, m_Project.get());
 			auto CandidateRuntime = m_CookedAssets
 				? std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, CandidateServices)
 				: std::make_unique<SceneRuntime>(*m_Project, m_RuntimeDescription, CandidateServices);
