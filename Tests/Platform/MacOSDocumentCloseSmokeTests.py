@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import deque
+import io
 import json
 import os
 import queue
@@ -53,6 +54,21 @@ class FakeCapture:
 
     def recent_telemetry(self, expected: dict[str, str]) -> list[dict[str, str]]:
         return []
+
+
+class FakePointerInputSession:
+    def __init__(self, pointer_driver: Path, target_pid: int, action_id: str,
+                 point: tuple[int, int], timeout: float):
+        self.arguments = (pointer_driver, target_pid, action_id, point)
+        self.closed = False
+
+    def dispatch(self, phase: str, timeout: float) -> tuple[int, str, str]:
+        command = [str(self.arguments[0]), str(self.arguments[1]), self.arguments[2],
+                   str(self.arguments[3][0]), str(self.arguments[3][1]), phase]
+        return smoke.run_bounded_command(command, timeout=timeout)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class MacOSBundleRuntimeEnvironmentTests(unittest.TestCase):
@@ -298,6 +314,22 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
         self.assertTrue(scene_viewport_smoke.wheel_delta_consumed(fields, "a" * 32, 9))
         self.assertTrue(scene_viewport_smoke.wheel_speed_changed(fields, "a" * 32, 5.0))
 
+    def test_detached_owner_wheel_must_change_camera_position(self) -> None:
+        fields = {
+            "wheel_action_id": "a" * 32,
+            "scroll_consumed_sequence": "9",
+            "scroll_consumed_delta": "1.0",
+            "owner_scroll_delta": "1.0",
+            "wheel_action": "zoom",
+            "camera_position": "1.0,2.0,2.5",
+        }
+        self.assertTrue(scene_viewport_smoke.wheel_camera_zoomed(fields, "a" * 32, 9, (1.0, 2.0, 3.0)))
+        self.assertFalse(scene_viewport_smoke.wheel_camera_zoomed(fields, "b" * 32, 9, (1.0, 2.0, 3.0)))
+        self.assertFalse(scene_viewport_smoke.wheel_camera_zoomed(fields, "a" * 32, 9, (1.0, 2.0, 2.5)))
+        self.assertFalse(scene_viewport_smoke.wheel_camera_zoomed(
+            {**fields, "wheel_action": "adjust-fly-speed"}, "a" * 32, 9, (1.0, 2.0, 3.0)
+        ))
+
     def test_camera_input_uses_only_the_visible_intersection_of_a_detached_image(self) -> None:
         display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
             (832.2, 425.0),
@@ -423,6 +455,54 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
 class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = smoke.MarkerProtocol("cancel-save", "host-a", "asset-a", 0)
+        self.pointer_sessions: list[FakePointerInputSession] = []
+
+        def create_pointer_session(*arguments):
+            session = FakePointerInputSession(*arguments)
+            self.pointer_sessions.append(session)
+            return session
+
+        self.pointer_session_factory = Mock(side_effect=create_pointer_session)
+        self.pointer_session_patcher = patch.object(
+            smoke, "create_pointer_input_session", self.pointer_session_factory
+        )
+        self.pointer_session_patcher.start()
+
+    def tearDown(self) -> None:
+        self.pointer_session_patcher.stop()
+
+    def test_quartz_driver_keeps_one_hid_source_alive_for_press_and_release(self) -> None:
+        pointer_source = smoke.POINTER_DRIVER_SOURCE[
+            smoke.POINTER_DRIVER_SOURCE.index("let location = CGPoint(x: x, y: y)"):
+        ]
+        server_start = pointer_source.index('if phase == "server" {')
+        server_end = pointer_source.index('if phase == "click" || phase == "down" {', server_start)
+        server = pointer_source[server_start:server_end]
+        self.assertEqual(1, pointer_source.count("CGEventSource(stateID: .hidSystemState)"))
+        self.assertIn('if command == "down"', server)
+        self.assertIn('} else if command == "up" {', server)
+        self.assertIn('post(.leftMouseDown, "down", 1)', server)
+        self.assertIn('post(.leftMouseUp, "up", 1)', server)
+        self.assertIn("fflush(stdout)", server)
+
+    def test_pointer_helper_startup_reports_a_surviving_process_group(self) -> None:
+        process = Mock(pid=4321)
+        process.stdin = io.BytesIO()
+        process.stdout = io.BytesIO()
+        startup_error = TimeoutError("helper did not announce readiness")
+
+        with (
+            patch.object(smoke.subprocess, "Popen", return_value=process),
+            patch.object(smoke.QuartzPointerInputSession, "_read_line", side_effect=startup_error),
+            patch.object(smoke, "stop_process_group", return_value=False) as stop,
+        ):
+            with self.assertRaises(smoke.UnsafeChildCleanupError) as raised:
+                smoke.QuartzPointerInputSession(Path("pointer-driver"), 1234, "action", (10, 20), 1.0)
+
+        self.assertIs(raised.exception.__cause__, startup_error)
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+        stop.assert_called_once_with(process)
 
     def test_native_main_close_requires_the_direct_ax_result_and_orderly_exit(self) -> None:
         class Process:
@@ -1288,12 +1368,14 @@ class DirtyCloseProtocolTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
-            ), patch.object(automation.os, "killpg") as kill_group:
+            ), patch.object(automation.os, "killpg", create=True) as kill_group, patch.object(
+                automation.signal, "SIGKILL", 9, create=True
+            ):
                 state, pid, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("PROBE_TIMED_OUT", state)
         self.assertEqual(127, pid)
-        kill_group.assert_called_once_with(127, automation.signal.SIGKILL)
+        kill_group.assert_called_once_with(127, 9)
         self.assertEqual(2, Probe.communicate.call_count)
         self.assertIn("osascript", detail)
 
@@ -1317,7 +1399,9 @@ class DirtyCloseProtocolTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
-            ), patch.object(automation.os, "killpg"):
+            ), patch.object(automation.os, "killpg", create=True), patch.object(
+                automation.signal, "SIGKILL", 9, create=True
+            ):
                 state, pid, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("PROBE_CLEANUP_FAILED", state)
@@ -1368,7 +1452,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
         )
         with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")) as activate, patch.object(
-            smoke, "run_bounded_command", return_value=(0, "Quartz event posted", "")
+            smoke, "run_bounded_command", side_effect=[(0, "Quartz down posted", ""), (0, "Quartz up posted", "")]
         ) as dispatch, patch.object(
             smoke,
             "wait_for_pointer_edge",
@@ -1388,16 +1472,128 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual(42, activate.call_args.args[0])
         self.assertEqual("activate-window", activate.call_args.kwargs["operation"])
         self.assertEqual(smoke.FIXTURE_TITLE, activate.call_args.kwargs["window_title"])
-        self.assertEqual(1, dispatch.call_count)
-        self.assertEqual(6, len(dispatch.call_args_list[0].args[0]))
-        self.assertEqual("click", dispatch.call_args_list[0].args[0][-1])
-        self.assertEqual(evidence.action_id, dispatch.call_args_list[0].args[0][2])
+        self.assertEqual(2, dispatch.call_count)
+        self.assertEqual(1, self.pointer_session_factory.call_count)
+        self.assertTrue(self.pointer_sessions[0].closed)
+        self.assertEqual(["down", "up"], [call.args[0][-1] for call in dispatch.call_args_list])
+        self.assertTrue(all(len(call.args[0]) == 6 for call in dispatch.call_args_list))
+        self.assertTrue(all(call.args[0][2] == evidence.action_id for call in dispatch.call_args_list))
         self.assertEqual(["press", "release"], [call.args[3] for call in wait_edge.call_args_list])
         self.assertEqual(
             [evidence.output_watermark, 5],
             [call.args[4] for call in wait_edge.call_args_list],
             "the release barrier must start after this click's observed press before another gesture",
         )
+
+    def test_nonzero_down_status_still_waits_for_press_and_balances_observed_edge(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        activation_output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=42; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")), patch.object(
+            smoke,
+            "run_bounded_command",
+            side_effect=[(1, "event posted before helper reported failure", "late helper status"), (0, "up posted", "")],
+        ) as dispatch, patch.object(
+            smoke,
+            "wait_for_pointer_edge",
+            side_effect=[
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "press", "_capture_index": "5", "raw": "press"},
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "release", "_capture_index": "6", "raw": "release"},
+            ],
+        ) as wait_edge:
+            evidence = smoke.click_point(
+                Process(), FakeCapture(), Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Close",
+                {"scenario": "close-retry", "host": "host-a", "asset": "asset-a", "generation": "0"},
+            )
+
+        self.assertTrue(evidence.dispatch_attempted)
+        self.assertEqual(1, evidence.api_exit_code)
+        self.assertFalse(evidence.application_edge_error)
+        self.assertIn("application-observed press and release", evidence.api_result)
+        self.assertEqual(["down", "up"], [call.args[0][-1] for call in dispatch.call_args_list])
+        self.assertEqual(["press", "release"], [call.args[3] for call in wait_edge.call_args_list])
+
+    def test_timed_out_down_result_still_sends_up_after_application_observes_press(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        activation_output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=42; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")), patch.object(
+            smoke,
+            "run_bounded_command",
+            side_effect=[(124, "event posted before timeout", "command timed out after 5.0s"), (0, "up posted", "")],
+        ) as dispatch, patch.object(
+            smoke,
+            "wait_for_pointer_edge",
+            side_effect=[
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "press", "_capture_index": "5", "raw": "press"},
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "release", "_capture_index": "6", "raw": "release"},
+            ],
+        ) as wait_edge:
+            evidence = smoke.click_point(
+                Process(), FakeCapture(), Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Close",
+                {"scenario": "close-retry", "host": "host-a", "asset": "asset-a", "generation": "0"},
+            )
+
+        self.assertTrue(evidence.dispatch_attempted)
+        self.assertTrue(evidence.transport_uncertain)
+        self.assertFalse(evidence.application_edge_error)
+        self.assertIn("Quartz button-down returned 124", evidence.api_result)
+        self.assertIn("application-observed press and release", evidence.api_result)
+        self.assertEqual(["down", "up"], [call.args[0][-1] for call in dispatch.call_args_list])
+        self.assertEqual(["press", "release"], [call.args[3] for call in wait_edge.call_args_list])
+
+    def test_missing_release_gets_one_bounded_cleanup_release_and_requires_app_observation(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        activation_output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=42; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")), patch.object(
+            smoke,
+            "run_bounded_command",
+            side_effect=[(0, "down posted", ""), (0, "up posted", ""), (0, "cleanup up posted", "")],
+        ) as dispatch, patch.object(
+            smoke,
+            "wait_for_pointer_edge",
+            side_effect=[
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "press", "_capture_index": "5", "raw": "press"},
+                RuntimeError("timed out waiting for application-observed left-button release"),
+                {"kind": "DIAG_GLFW_MOUSE_BUTTON", "action": "release", "_capture_index": "7", "raw": "release"},
+            ],
+        ) as wait_edge:
+            evidence = smoke.click_point(
+                Process(), FakeCapture(), Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Close",
+                {"scenario": "close-retry", "host": "host-a", "asset": "asset-a", "generation": "0"},
+            )
+
+        self.assertTrue(evidence.transport_uncertain)
+        self.assertFalse(evidence.application_edge_error)
+        self.assertIn("cleanup-up exit=0", evidence.api_result)
+        self.assertIn("app_release=release", evidence.api_result)
+        self.assertEqual(["down", "up", "up"], [call.args[0][-1] for call in dispatch.call_args_list])
+        self.assertEqual(["press", "release", "release"], [call.args[3] for call in wait_edge.call_args_list])
 
     def test_click_retries_only_a_timed_out_activation_that_identified_its_window(self) -> None:
         class Process:
@@ -1424,7 +1620,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "run_direct_ax",
             side_effect=[(124, timed_out_activation, ""), (0, focused_activation, "")],
         ) as activate, patch.object(
-            smoke, "run_bounded_command", return_value=(0, "Quartz event posted", "")
+            smoke, "run_bounded_command", side_effect=[(0, "Quartz down posted", ""), (0, "Quartz up posted", "")]
         ) as dispatch, patch.object(
             smoke,
             "wait_for_pointer_edge",
@@ -1441,7 +1637,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertTrue(evidence.dispatch_attempted)
         self.assertEqual(2, activate.call_count)
         self.assertLessEqual(activate.call_args_list[1].kwargs["timeout"], 4.0)
-        self.assertEqual(1, dispatch.call_count)
+        self.assertEqual(2, dispatch.call_count)
 
     def test_timed_out_activation_without_unique_target_observation_does_not_retry_or_dispatch(self) -> None:
         class Process:
@@ -1470,6 +1666,38 @@ class DirtyCloseProtocolTests(unittest.TestCase):
 
         activate.assert_called_once()
         dispatch.assert_not_called()
+
+    def test_click_balances_unobserved_down_with_cleanup_up_without_claiming_success(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        activation_output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=42; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")), patch.object(
+            smoke,
+            "run_bounded_command",
+            side_effect=[(0, "Quartz down posted", ""), (0, "Quartz cleanup up posted", "")],
+        ) as dispatch, patch.object(
+            smoke,
+            "wait_for_pointer_edge",
+            side_effect=RuntimeError("timed out waiting for application-observed left-button press"),
+        ):
+            evidence = smoke.click_point(
+                Process(), FakeCapture(), Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Discard",
+                {"scenario": "discard", "host": "host-a", "asset": "asset-a", "generation": "1"},
+            )
+
+        self.assertTrue(evidence.dispatch_attempted)
+        self.assertIsNotNone(evidence.application_edge_error)
+        self.assertIn("button-down was not application-observed", evidence.api_result)
+        self.assertEqual(["down", "up"], [call.args[0][-1] for call in dispatch.call_args_list])
+        self.assertEqual(2, dispatch.call_count)
 
     def test_pointer_edge_wait_uses_current_document_and_requires_release_evidence(self) -> None:
         class Capture:

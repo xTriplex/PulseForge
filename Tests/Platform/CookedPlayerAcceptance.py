@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -44,6 +46,14 @@ def require_markers(output: str, markers: tuple[str, ...], log: Path, product: s
         raise RuntimeError(f"{product} omitted evidence markers {absent}; inspect {log}\n{read_log_tail(log)}")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def make_package_read_only(package_root: Path, executable: Path) -> None:
     """Remove package write permission without stripping the entrypoint's execute bit."""
     for package_path in sorted(package_root.rglob("*"), reverse=True):
@@ -63,13 +73,179 @@ def capture_package_tree(package_root: Path) -> dict[str, str]:
     for package_path in sorted(package_root.rglob("*")):
         if package_path.is_symlink():
             raise RuntimeError(f"refusing a linked path in the standalone package: {package_path}")
+        relative_path = package_path.relative_to(package_root).as_posix()
+        mode = stat.S_IMODE(package_path.stat().st_mode)
+        if package_path.is_dir():
+            result[relative_path + "/"] = f"dir:{mode:04o}"
+            continue
         if package_path.is_file():
-            digest = hashlib.sha256()
-            with package_path.open("rb") as package_file:
-                for block in iter(lambda: package_file.read(1024 * 1024), b""):
-                    digest.update(block)
-            result[package_path.relative_to(package_root).as_posix()] = digest.hexdigest()
+            result[relative_path] = f"file:{mode:04o}:{sha256_file(package_path)}"
+    result["."] = f"dir:{stat.S_IMODE(package_root.stat().st_mode):04o}"
     return result
+
+
+def package_tree_fingerprint(package_tree: dict[str, str]) -> str:
+    canonical = json.dumps(package_tree, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def write_release_evidence(package_root: Path, template_root: Path, template_descriptor: Path, output: Path,
+                           source_tree: str, target: str, backend: str, configuration: str,
+                           toolchain: dict[str, str]) -> dict[str, object]:
+    if len(source_tree) != 40 or any(character not in "0123456789abcdef" for character in source_tree):
+        raise RuntimeError("release evidence requires an exact lower-case source tree SHA")
+    if template_descriptor.is_symlink():
+        raise RuntimeError("player template descriptor may not be a symbolic link")
+    template_root = template_root.resolve(strict=True)
+    package_root = package_root.resolve(strict=True)
+    template_descriptor = template_descriptor.resolve(strict=True)
+    try:
+        descriptor_relative = template_descriptor.relative_to(template_root)
+    except ValueError as error:
+        raise RuntimeError("player template descriptor must be inside its template root") from error
+    template_bytes = template_descriptor.read_bytes()
+    template = json.loads(template_bytes.decode("utf-8"))
+    required_template_fields = ("targetPlatform", "architecture", "configuration", "renderer", "runtimeABI")
+    if any(not isinstance(template.get(field), str) or not template[field] for field in required_template_fields):
+        raise RuntimeError("player template descriptor is missing release identity fields")
+    if template["targetPlatform"] != target or template["configuration"] != configuration or template["renderer"] != backend:
+        raise RuntimeError("player template identity does not match the acceptance target")
+    try:
+        output.resolve().relative_to(package_root)
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("release evidence output must remain outside the package being fingerprinted")
+    runtime_files = template.get("runtimeFiles")
+    if not isinstance(runtime_files, list) or not runtime_files:
+        raise RuntimeError("player template descriptor has no runtime file list")
+    for relative_text in runtime_files:
+        if not isinstance(relative_text, str) or not relative_text:
+            raise RuntimeError("player template descriptor contains an invalid runtime file path")
+        relative = Path(relative_text)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("player template descriptor contains an unsafe runtime file path")
+        template_file = template_root / relative
+        package_file = package_root / relative
+        if template_file.is_symlink() or package_file.is_symlink() or not template_file.is_file() or not package_file.is_file():
+            raise RuntimeError(f"template runtime file is missing or linked in the exported package: {relative_text}")
+        if sha256_file(template_file) != sha256_file(package_file):
+            raise RuntimeError(f"exported package runtime file differs from its template source: {relative_text}")
+    package_tree = capture_package_tree(package_root)
+    if not package_tree:
+        raise RuntimeError("cannot record release evidence for an empty package")
+    evidence: dict[str, object] = {
+        "format": "PulseForgeReleaseEvidence",
+        "version": 1,
+        "sourceTree": source_tree,
+        "platform": target,
+        "architecture": template["architecture"],
+        "backend": backend,
+        "configuration": configuration,
+        "runtimeABI": template["runtimeABI"],
+        "templateDescriptorSha256": hashlib.sha256(template_bytes).hexdigest(),
+        "templateDescriptorRelativePath": descriptor_relative.as_posix(),
+        "toolchain": toolchain,
+        "packageFileCount": sum(not path.endswith("/") and path != "." for path in package_tree),
+        "packageEntryCount": len(package_tree),
+        "packageFiles": package_tree,
+        "packageTreeFingerprintSha256": package_tree_fingerprint(package_tree),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return evidence
+
+
+def resolve_source_tree_identity() -> str:
+    explicit = os.environ.get("PULSEFORGE_SOURCE_TREE", "").strip().lower()
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    identity_path = Path(runner_temp) / "patch-validation-identity.json" if runner_temp else None
+    if identity_path and identity_path.is_file():
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        if identity.get("validation_kind") == "EXPERIMENTAL_PATCHED_SOURCE":
+            tree = str(identity.get("resulting_tree", "")).lower()
+            if len(tree) != 40 or any(character not in "0123456789abcdef" for character in tree):
+                raise RuntimeError("patch validation identity contains an invalid resulting tree")
+            if explicit:
+                if len(explicit) != 40 or any(character not in "0123456789abcdef" for character in explicit):
+                    raise RuntimeError("PULSEFORGE_SOURCE_TREE is not a full Git tree SHA")
+                if explicit != tree:
+                    raise RuntimeError("PULSEFORGE_SOURCE_TREE disagrees with the applied patch validation identity")
+            return tree
+    if explicit:
+        if len(explicit) != 40 or any(character not in "0123456789abcdef" for character in explicit):
+            raise RuntimeError("PULSEFORGE_SOURCE_TREE is not a full Git tree SHA")
+        return explicit
+    result = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], check=False, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=10)
+    tree = result.stdout.strip().lower()
+    if result.returncode != 0 or len(tree) != 40 or any(character not in "0123456789abcdef" for character in tree):
+        raise RuntimeError("could not resolve an exact source tree for release evidence")
+    return tree
+
+
+def capture_toolchain_identity(build_root: Path | None = None) -> dict[str, str]:
+    records: dict[str, str] = {"host": platform.platform(), "python": platform.python_version()}
+    cache: dict[str, str] = {}
+    cache_path = None
+    if build_root:
+        candidate = build_root.resolve()
+        for _ in range(5):
+            possible_cache = candidate / "CMakeCache.txt"
+            if possible_cache.is_file():
+                cache_path = possible_cache
+                break
+            if candidate.parent == candidate:
+                break
+            candidate = candidate.parent
+    if cache_path:
+        for line in cache_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("//") or line.startswith("#") or ":" not in line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            name = key.split(":", 1)[0]
+            if name in {"CMAKE_CXX_COMPILER", "CMAKE_CXX_COMPILER_ID", "CMAKE_CXX_COMPILER_VERSION", "CMAKE_GENERATOR"}:
+                cache[name] = value
+        # CMake caches the generator, but commonly writes compiler path, ID, and version
+        # to the generated compiler description instead of CMakeCache.txt.
+        compiler_descriptions = sorted((cache_path.parent / "CMakeFiles").glob("*/CMakeCXXCompiler.cmake"))
+        for compiler_description in compiler_descriptions:
+            compiler_description_text = compiler_description.read_text(encoding="utf-8", errors="replace")
+            for name in ("CMAKE_CXX_COMPILER", "CMAKE_CXX_COMPILER_ID", "CMAKE_CXX_COMPILER_VERSION"):
+                match = re.search(r"set\(" + re.escape(name) + r'\s+"([^\"]*)"\)', compiler_description_text)
+                if name not in cache and match:
+                    cache[name] = match.group(1)
+            if cache.get("CMAKE_CXX_COMPILER_ID") and cache.get("CMAKE_CXX_COMPILER_VERSION"):
+                break
+    compiler_fields = ("CMAKE_CXX_COMPILER", "CMAKE_CXX_COMPILER_ID", "CMAKE_CXX_COMPILER_VERSION", "CMAKE_GENERATOR")
+    if all(cache.get(field) for field in compiler_fields):
+        records["compilerPath"] = cache["CMAKE_CXX_COMPILER"]
+        records["compilerId"] = cache["CMAKE_CXX_COMPILER_ID"]
+        records["compilerVersion"] = cache["CMAKE_CXX_COMPILER_VERSION"]
+        records["generator"] = cache["CMAKE_GENERATOR"]
+    else:
+        compiler = ["cl", "/Bv"] if os.name == "nt" else ["c++", "--version"]
+        records["compilerCommand"] = " ".join(compiler)
+        try:
+            result = subprocess.run(compiler, check=False, capture_output=True, text=True, encoding="utf-8",
+                                    errors="replace", timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"could not capture compiler identity for release evidence: {error}") from error
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode != 0 or not output:
+            raise RuntimeError(f"compiler identity command failed for release evidence: {' '.join(compiler)}")
+        records["compiler"] = output[:4096]
+    for label, command in (("cmake", ["cmake", "--version"]),):
+        try:
+            result = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8",
+                                    errors="replace", timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"could not capture {label} identity for release evidence: {error}") from error
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode != 0 or not output:
+            raise RuntimeError(f"{label} identity command failed for release evidence: {' '.join(command)}")
+        records[label] = output[:4096]
+    return records
 
 
 def remove_owned_acceptance_root(root: Path, parent: Path) -> None:
@@ -354,6 +530,8 @@ def main() -> int:
         if args.export_only:
             if exported_package is None or not exported_package.is_dir() or args.retain_export_to is None:
                 raise RuntimeError("export-only acceptance did not produce a package")
+            source_tree = resolve_source_tree_identity()
+            toolchain = capture_toolchain_identity(args.template_root.resolve(strict=True))
             if args.target == "macOS":
                 executable = exported_package / "Contents" / "MacOS" / "PulseForgeCookedGame"
             else:
@@ -374,6 +552,15 @@ def main() -> int:
             shutil.copytree(exported_package, retain_path, symlinks=False)
             if any(path.is_symlink() for path in retain_path.rglob("*")):
                 raise RuntimeError(f"refusing to retain a package containing a linked entry: {retain_path}")
+            evidence = write_release_evidence(retain_path, args.template_root.resolve(strict=True),
+                args.template_descriptor.resolve(strict=True),
+                logs / "release-acceptance-evidence.json", source_tree, args.target, args.backend,
+                args.configuration, toolchain)
+            print(f"RELEASE_ACCEPTANCE_EVIDENCE=PASS; source_tree={source_tree}; "
+                  f"package_tree_fingerprint_sha256={evidence['packageTreeFingerprintSha256']}; "
+                  f"manifest={logs / 'release-acceptance-evidence.json'}")
+            print("RELEASE_ACCEPTANCE_EVIDENCE_JSON=" + json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                                                                   separators=(",", ":")))
             print(f"STANDALONE_PACKAGE_RETAINED={retain_path}")
             print(f"STANDALONE_PACKAGE_PRODUCTION=PASS; configuration={args.configuration}; source removed; external launch pending")
             remove_owned_acceptance_root(root, parent)
@@ -427,6 +614,8 @@ def main() -> int:
                 raise RuntimeError(f"exported executable is missing from the relocated package: {executable}")
             make_package_read_only(relocated_package, executable)
             package_before_launch = capture_package_tree(relocated_package)
+            source_tree = resolve_source_tree_identity()
+            toolchain = capture_toolchain_identity(args.template_root.resolve(strict=True))
             if os.name == "nt":
                 system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
                 standalone_environment = {"PATH": str(system_root / "System32"), "SystemRoot": str(system_root)}
@@ -492,6 +681,15 @@ def main() -> int:
                     raise RuntimeError("standalone Player did not load MoltenVK from its relocated app bundle")
             if capture_package_tree(relocated_package) != package_before_launch:
                 raise RuntimeError("standalone Player changed content in its read-only package")
+            evidence = write_release_evidence(relocated_package, args.template_root.resolve(strict=True),
+                args.template_descriptor.resolve(strict=True),
+                logs / "release-acceptance-evidence.json", source_tree, args.target, args.backend,
+                args.configuration, toolchain)
+            print(f"RELEASE_ACCEPTANCE_EVIDENCE=PASS; source_tree={source_tree}; "
+                  f"package_tree_fingerprint_sha256={evidence['packageTreeFingerprintSha256']}; "
+                  f"manifest={logs / 'release-acceptance-evidence.json'}")
+            print("RELEASE_ACCEPTANCE_EVIDENCE_JSON=" + json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                                                                   separators=(",", ":")))
             print("STANDALONE_PACKAGE_ACCEPTANCE=PASS; relocated export ran with source/cache removed and developer Vulkan overrides absent")
             if args.retain_export_to:
                 retain_path = args.retain_export_to.absolute()

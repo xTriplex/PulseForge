@@ -11,6 +11,7 @@ import math
 import os
 import queue
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -249,7 +250,7 @@ guard x.isFinite, y.isFinite else {
     fail("CGEvent input coordinates are not finite", 2)
 }
 let phase = CommandLine.arguments[5]
-guard ["click", "down", "up"].contains(phase) else {
+guard ["click", "down", "up", "server"].contains(phase) else {
     fail("CGEvent pointer phase must be click, down, or up", 2)
 }
 guard CGPreflightPostEventAccess() else {
@@ -275,6 +276,29 @@ func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
           "returned_uptime=\(returnedUptime); source_pid=\(sourcePID); source_name=\(sourceName); target_pid=\(targetPID); " +
           "point=\(Int(x.rounded())),\(Int(y.rounded())); click_state=\(clickState); source_state=hid-system; " +
           "post_returned=1; route=global-hid-event-stream")
+}
+
+if phase == "server" {
+    print("CGEventPost=READY; source_pid=\(sourcePID); source_name=\(sourceName); target_pid=\(targetPID); " +
+          "source_state=hid-system; access=preflight-approved")
+    fflush(stdout)
+    while let command = readLine() {
+        if command == "quit" { break }
+        if command == "down" {
+            post(.mouseMoved, "move", 0)
+            Thread.sleep(forTimeInterval: 0.05)
+            post(.leftMouseDown, "down", 1)
+        } else if command == "up" {
+            post(.leftMouseUp, "up", 1)
+        } else {
+            fail("unknown persistent pointer-driver command: \(command)", 2)
+        }
+        print("CGEventPost=SEQUENCE_RETURNED; phase=\(command); click_id=\(actionID); source_pid=\(sourcePID); " +
+              "source_name=\(sourceName); target_pid=\(targetPID); access=preflight-approved; " +
+              "post_return_is_not_application_acknowledgement")
+        fflush(stdout)
+    }
+    exit(0)
 }
 
 if phase == "click" || phase == "down" {
@@ -747,6 +771,90 @@ def run_bounded_command(command: list[str], timeout: float) -> tuple[int, str, s
             raise UnsafeChildCleanupError(f"timed-out child process group remains active: PID {process.pid}") from error
         return 124, stdout[-4096:], (stderr + f"\ncommand timed out after {timeout:.1f}s").strip()[-4096:]
     return process.returncode, stdout[-4096:], stderr[-4096:]
+
+
+class QuartzPointerInputSession:
+    """Post a gesture's press and release through one Quartz source and helper process."""
+
+    def __init__(self, pointer_driver: Path, target_pid: int, action_id: str,
+                 point: tuple[int, int], timeout: float):
+        command = [str(pointer_driver), str(target_pid), action_id, str(point[0]), str(point[1]), "server"]
+        self.process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=0, start_new_session=True,
+        )
+        self.buffer = bytearray()
+        try:
+            ready = self._read_line(timeout)
+            if not ready.startswith(b"CGEventPost=READY;"):
+                raise RuntimeError(f"Quartz pointer helper did not become ready: {ready.decode('utf-8', errors='replace')!r}")
+        except BaseException as error:
+            stopped = stop_process_group(self.process)
+            for stream in (self.process.stdin, self.process.stdout):
+                if stream is not None:
+                    stream.close()
+            if not stopped:
+                raise UnsafeChildCleanupError(
+                    f"Quartz pointer helper process group PID {self.process.pid} survived startup cleanup"
+                ) from error
+            raise
+
+    def _read_line(self, timeout: float) -> bytes:
+        assert self.process.stdout is not None
+        deadline = time.monotonic() + max(0.1, timeout)
+        while time.monotonic() < deadline:
+            newline = self.buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(self.buffer[:newline]).rstrip(b"\r")
+                del self.buffer[:newline + 1]
+                return line
+            remaining = deadline - time.monotonic()
+            ready, _, _ = select.select([self.process.stdout.fileno()], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(self.process.stdout.fileno(), 4096)
+            if not chunk:
+                output = bytes(self.buffer).decode("utf-8", errors="replace")
+                raise RuntimeError(f"Quartz pointer helper exited before replying; exit={self.process.poll()}; output={output!r}")
+            self.buffer.extend(chunk)
+        raise TimeoutError(f"Quartz pointer helper did not reply within {timeout:.1f}s")
+
+    def dispatch(self, phase: str, timeout: float) -> tuple[int, str, str]:
+        if phase not in {"down", "up"}:
+            raise ValueError(f"unsupported persistent pointer phase: {phase}")
+        if self.process.poll() is not None or self.process.stdin is None:
+            raise RuntimeError(f"Quartz pointer helper is not running; exit={self.process.returncode}")
+        self.process.stdin.write((phase + "\n").encode("ascii"))
+        self.process.stdin.flush()
+        lines: list[str] = []
+        marker = f"CGEventPost=SEQUENCE_RETURNED; phase={phase};".encode("ascii")
+        deadline = time.monotonic() + max(0.1, timeout)
+        while True:
+            line = self._read_line(max(0.1, deadline - time.monotonic()))
+            lines.append(line.decode("utf-8", errors="replace"))
+            if line.startswith(marker):
+                return 0, "\n".join(lines), ""
+
+    def close(self) -> None:
+        if self.process.poll() is None and self.process.stdin is not None:
+            try:
+                self.process.stdin.write(b"quit\n")
+                self.process.stdin.flush()
+                self.process.wait(timeout=2.0)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                if not stop_process_group(self.process):
+                    raise UnsafeChildCleanupError(
+                        f"persistent Quartz pointer helper process group PID {self.process.pid} survived cleanup"
+                    )
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+        if self.process.stdout is not None:
+            self.process.stdout.close()
+
+
+def create_pointer_input_session(pointer_driver: Path, target_pid: int, action_id: str,
+                                 point: tuple[int, int], timeout: float) -> QuartzPointerInputSession:
+    return QuartzPointerInputSession(pointer_driver, target_pid, action_id, point, timeout)
 
 
 def bounded_timeout(deadline: float, cap: float = 8.0) -> float:
@@ -1262,26 +1370,117 @@ def click_point(
     )
 
     evidence.output_watermark = capture.watermark()
+    pointer_input: QuartzPointerInputSession | None = None
     try:
-        click_exit, click_stdout, click_stderr = run_bounded_command(
-            [str(pointer_driver), str(process.pid), evidence.action_id, str(point[0]), str(point[1]), "click"],
-            timeout=bounded_timeout(deadline, 5.0),
-        )
+        pointer_input = create_pointer_input_session(
+            pointer_driver, process.pid, evidence.action_id, point, bounded_timeout(deadline, 5.0))
         evidence.dispatch_attempted = True
-        evidence.api_exit_code = click_exit
-        if click_exit != 0:
-            evidence.api_result = f"Quartz click dispatch failed; stdout={click_stdout[-1000:]!r}; stderr={click_stderr[-1000:]!r}"
-            return evidence
+        down_exit: int | None = None
+        down_stdout = ""
+        down_stderr = ""
+        down_diagnostic = ""
+        try:
+            down_exit, down_stdout, down_stderr = pointer_input.dispatch("down", bounded_timeout(deadline, 5.0))
+            evidence.api_exit_code = down_exit
+            if down_exit != 0:
+                down_diagnostic = (
+                    f"Quartz button-down returned {down_exit}; stdout={down_stdout[-1000:]!r}; "
+                    f"stderr={down_stderr[-1000:]!r}"
+                )
+        except UnsafeChildCleanupError:
+            raise
+        except (OSError, RuntimeError) as down_error:
+            evidence.transport_uncertain = True
+            down_diagnostic = f"Quartz button-down result is uncertain: {down_error}"
 
-        press = wait_for_pointer_edge(
-            capture, process, evidence, "press", evidence.output_watermark, deadline
-        )
-        release = wait_for_pointer_edge(
-            capture, process, evidence, "release", int(press["_capture_index"]), deadline
-        )
+        try:
+            press = wait_for_pointer_edge(
+                capture, process, evidence, "press", evidence.output_watermark, deadline
+            )
+        except (OSError, RuntimeError) as press_error:
+            # Always balance a posted down edge, even when the app could not confirm it.
+            # This is cleanup only; it must not turn an unobserved press into a valid click.
+            try:
+                cleanup_exit, cleanup_stdout, cleanup_stderr = pointer_input.dispatch("up", bounded_timeout(deadline, 3.0))
+                evidence.api_result = (
+                    f"button-down was not application-observed: {press_error}; {down_diagnostic}; "
+                    f"cleanup-up exit={cleanup_exit}; "
+                    f"stdout={cleanup_stdout[-500:]!r}; stderr={cleanup_stderr[-500:]!r}"
+                )
+            except (OSError, RuntimeError) as cleanup_error:
+                evidence.api_result = (
+                    f"button-down was not application-observed: {press_error}; {down_diagnostic}; "
+                    f"best-effort cleanup-up failed: {cleanup_error}"
+                )
+            raise
+
+        up_exit: int | None = None
+        up_stdout = ""
+        up_stderr = ""
+        up_diagnostic = ""
+        try:
+            up_exit, up_stdout, up_stderr = pointer_input.dispatch("up", bounded_timeout(deadline, 5.0))
+            if up_exit != 0:
+                up_diagnostic = (
+                    f"Quartz button-up returned {up_exit}; stdout={up_stdout[-1000:]!r}; "
+                    f"stderr={up_stderr[-1000:]!r}"
+                )
+        except UnsafeChildCleanupError:
+            raise
+        except (OSError, RuntimeError) as up_error:
+            evidence.transport_uncertain = True
+            up_diagnostic = f"Quartz button-up result is uncertain: {up_error}"
+        press_index = int(press["_capture_index"])
+        release_recovery = ""
+        try:
+            release = wait_for_pointer_edge(capture, process, evidence, "release", press_index, deadline)
+        except (OSError, RuntimeError) as release_error:
+            expected = evidence.expected_marker_fields or {}
+            release = next((
+                event for event in capture.recent_telemetry(expected)
+                if event.get("kind") == "DIAG_GLFW_MOUSE_BUTTON"
+                and event.get("button") == "left"
+                and event.get("action") == "release"
+                and int(event.get("_capture_index", "-1")) > press_index
+                and event.get("native_focused") == "1"
+            ), None)
+            if release is None:
+                # A press was confirmed but its release was not. Issue one bounded balancing release,
+                # then require a fresh app-observed release before treating the gesture as complete.
+                try:
+                    recovery_exit, recovery_stdout, recovery_stderr = pointer_input.dispatch(
+                        "up", bounded_timeout(deadline, 3.0))
+                    release_recovery = (
+                        f"initial release was not observed ({release_error}); cleanup-up exit={recovery_exit}; "
+                        f"stdout={recovery_stdout[-500:]!r}; stderr={recovery_stderr[-500:]!r}"
+                    )
+                except UnsafeChildCleanupError:
+                    raise
+                except (OSError, RuntimeError) as recovery_error:
+                    release_recovery = (
+                        f"initial release was not observed ({release_error}); "
+                        f"cleanup-up dispatch failed: {recovery_error}"
+                    )
+                try:
+                    release = wait_for_pointer_edge(capture, process, evidence, "release", press_index, deadline)
+                except (OSError, RuntimeError) as recovery_error:
+                    evidence.api_result = f"{release_recovery}; cleanup release remained unobserved: {recovery_error}"
+                    raise
+                evidence.transport_uncertain = True
+            else:
+                release_recovery = f"release arrived while reconciling the bounded wait: {release_error}"
+                evidence.transport_uncertain = True
         evidence.api_result = (
-            f"click={click_stdout.strip()}; app_press={press.get('raw', '')}; app_release={release.get('raw', '')}"
+            f"button_down_exit={down_exit}; button_down={down_stdout.strip()}; "
+            f"button_up_exit={up_exit}; button_up={up_stdout.strip()}; "
+            f"app_press={press.get('raw', '')}; app_release={release.get('raw', '')}"
         )
+        diagnostics = [item for item in (down_diagnostic, up_diagnostic, release_recovery) if item]
+        if diagnostics:
+            evidence.api_result = "; ".join(diagnostics) + "; application-observed press and release; " + evidence.api_result
+            evidence.transport_uncertain = True
+            if up_exit not in (None, 0):
+                evidence.api_exit_code = up_exit
     except UnsafeChildCleanupError as error:
         evidence.dispatch_attempted = True
         evidence.api_exit_code = 124
@@ -1290,8 +1489,14 @@ def click_point(
     except (OSError, RuntimeError) as error:
         evidence.api_exit_code = 124 if isinstance(error, TimeoutError) else 1
         evidence.transport_uncertain = evidence.dispatch_attempted
+        previous_result = evidence.api_result if evidence.api_result != "not attempted" else ""
         evidence.api_result = f"Native pointer edge was not fully observed: {error}"
+        if previous_result:
+            evidence.api_result += f"; prior dispatch detail: {previous_result}"
         evidence.application_edge_error = evidence.api_result
+    finally:
+        if pointer_input is not None:
+            pointer_input.close()
     print(
         f"MACOS_DOC_CLOSE_POINTER_INPUT=RESULT; {evidence.summary()}; api_detail={evidence.api_result!r}; "
         "both application-observed button edges are required"

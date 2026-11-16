@@ -218,6 +218,18 @@ namespace
 		PF_CHECK(Tests, LegacyManifestThree.has_value());
 		if (LegacyManifestThree)
 			PF_CHECK(Tests, (*LegacyManifestThree)->GetAudioMixDefaults() == AudioMixGains{});
+		auto LegacyVersionFive = nlohmann::ordered_json::parse(*Baseline);
+		LegacyVersionFive["version"] = 5;
+		for (auto& Entry : LegacyVersionFive["entries"])
+			Entry.erase("stableProductKey");
+		Fixture.WriteManifest(LegacyVersionFive.dump(2) + "\n");
+		const auto LegacyManifestFive = Fixture.Open();
+		PF_CHECK(Tests, LegacyManifestFive.has_value());
+		if (LegacyManifestFive)
+		{
+			PF_CHECK(Tests, (*LegacyManifestFive)->GetAudioMixDefaults() == Fixture.AudioMixDefaults);
+			PF_CHECK(Tests, (*LegacyManifestFive)->GetCompatibility().TargetPlatform == Compatibility.TargetPlatform);
+		}
 		auto LegacyVersionSix = nlohmann::ordered_json::parse(*Baseline);
 		LegacyVersionSix["version"] = 6;
 		for (auto& Entry : LegacyVersionSix["entries"])

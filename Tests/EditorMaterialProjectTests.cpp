@@ -5,9 +5,19 @@
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "Editor/EditorMaterialDocumentEditor.h"
 #include "Editor/EditorStyle.h"
+#include "Assets/AssetCookService.h"
+#include "Assets/AssetDependencyCatalog.h"
 #include "Assets/MaterialAssetService.h"
+#include "Assets/CookedAssetCatalog.h"
+#include "Assets/AssetMetadata.h"
+#include "Assets/MaterialAssetCache.h"
+#include "Runtime/CookedContentProvider.h"
+#include "Runtime/PlayerSession.h"
+#include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/SceneSerializer.h"
 
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 
@@ -464,8 +474,11 @@ namespace
 		if (!Identifier) return;
 
 		std::error_code Error;
-		const std::filesystem::path Root =
-			std::filesystem::temp_directory_path(Error) / ("PulseForgeMaterialDraft-" + Identifier->ToString());
+		const std::filesystem::path TemporaryRoot = std::filesystem::weakly_canonical(
+			std::filesystem::temp_directory_path(Error), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const std::filesystem::path Root = TemporaryRoot / ("PulseForgeMaterialDraft-" + Identifier->ToString());
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		struct Cleanup final
@@ -488,6 +501,17 @@ namespace
 		std::filesystem::create_directories(Root / "Assets" / "Textures", Error);
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
+		const std::filesystem::path CookMeshPath = Root / "Assets" / "Models" / "WorkflowCube.gltf";
+		std::filesystem::create_directories(CookMeshPath.parent_path(), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		std::filesystem::copy_file(std::filesystem::path(PF_EDITOR_WORKFLOW_GLTF), CookMeshPath,
+			std::filesystem::copy_options::overwrite_existing, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto CookMeshMetadata = AssetMetadataSerializer::CreateForNewAsset(CookMeshPath);
+		PF_CHECK(Tests, CookMeshMetadata.has_value());
+		if (!CookMeshMetadata) return;
 		const std::filesystem::path GraphTexturePath = Root / "Assets" / "Textures" / "GraphBaseColor.ppm";
 		{
 			std::ofstream Texture(GraphTexturePath, std::ios::binary | std::ios::trunc);
@@ -593,17 +617,17 @@ namespace
 		PulseForge::MaterialGraphSource Graph;
 		Graph.GraphID = PulseForge::UUID(20, 1);
 		Graph.Nodes = {
-			{ PulseForge::UUID(20, 2), PulseForge::MaterialGraphNodeKind::UV0, 0.0f, {} },
-			{ PulseForge::UUID(20, 3), PulseForge::MaterialGraphNodeKind::BaseColorTextureSample, 0.0f, {} },
+			{ PulseForge::UUID(20, 2), PulseForge::MaterialGraphNodeKind::ColorConstant, 0.0f, {} },
 			{ PulseForge::UUID(20, 5), PulseForge::MaterialGraphNodeKind::PbrOutput, 0.0f, {} }
 		};
+		Graph.Nodes.front().Color = { 0.2f, 0.3f, 0.4f };
 		Graph.Connections = {
-			{ PulseForge::UUID(21, 1), PulseForge::UUID(20, 2), PulseForge::UUID(20, 3), 0 },
-			{ PulseForge::UUID(21, 3), PulseForge::UUID(20, 3), PulseForge::UUID(20, 5), 0 }
+			{ PulseForge::UUID(21, 3), PulseForge::UUID(20, 2), PulseForge::UUID(20, 5), 0 }
 		};
 		const auto BeforeGraph = *Drafts.FindDraft(ProjectValue, Material->ID);
 		const bool GraphEditStarted = Drafts.BeginEdit(ProjectValue, Material->ID, BeforeGraph);
 		Drafts.FindDraft(ProjectValue, Material->ID)->Graph = Graph;
+		Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorTexture = {};
 		if (GraphEditStarted) PF_CHECK(Tests, Documents.MarkEdited(Identity));
 		Drafts.FinalizePendingEdits(false);
 		PF_CHECK(Tests, MaterialSession->IsDirty() && Drafts.IsDirty(ProjectValue, Material->ID));
@@ -615,7 +639,125 @@ namespace
 		auto SavedGraphSource = MaterialAssetService::LoadSourceSnapshot(
 			Material->ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
 		PF_CHECK(Tests, SavedGraphSource && SavedGraphSource->Description.Graph == Graph &&
-			SavedGraphSource->Description.BaseColorTexture == GraphTextureMetadata->ID);
+			SavedGraphSource->Description.BaseColorTexture.IsNil());
+		// Cook the source saved by the real Material document and load its typed product with the source hidden.
+		const std::filesystem::path CookScenePath = Root / "Assets" / "Scenes" / "MaterialCook.scene";
+		const std::filesystem::path CookOutput = Root.parent_path() / (Root.filename().string() + "-CookedGraph");
+		std::filesystem::create_directories(CookScenePath.parent_path(), Error);
+		PF_CHECK(Tests, !Error);
+		Scene CookScene;
+		auto CookEntity = CookScene.CreateEntity("Saved material graph cook consumer");
+		PF_CHECK(Tests, CookEntity.has_value());
+		if (CookEntity)
+		{
+			MeshRendererComponent Renderer;
+			Renderer.MeshAsset = CookMeshMetadata->ID;
+			Renderer.MaterialAsset = Material->ID;
+			PF_CHECK(Tests, CookEntity->SetMeshRenderer(Renderer).has_value());
+		}
+		PF_CHECK(Tests, SceneSerializer::SaveToFile(CookScene, CookScenePath).has_value());
+		const auto CookSceneMetadata = AssetMetadataSerializer::CreateForNewAsset(CookScenePath);
+		PF_CHECK(Tests, CookSceneMetadata.has_value());
+		if (CookSceneMetadata)
+		{
+			PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
+			PF_CHECK(Tests, ProjectValue.SetStartScene(CookSceneMetadata->ID).has_value());
+			auto CookSnapshot = AssetDependencyCatalogBuilder::Build(
+				Root, ProjectValue.GetDescription().ID, 1);
+			PF_CHECK(Tests, CookSnapshot.has_value());
+			if (CookSnapshot)
+			{
+#if defined(_WIN32)
+				const CookedAssetCompatibility Compatibility{ "Windows", "Vulkan", "pulseforge-runtime-v1" };
+#elif defined(__APPLE__)
+				const CookedAssetCompatibility Compatibility{ "macOS", "Vulkan", "pulseforge-runtime-v1" };
+#else
+				const CookedAssetCompatibility Compatibility{ "Linux", "Vulkan", "pulseforge-runtime-v1" };
+#endif
+				AssetCookRequest CookRequest{ *CookSnapshot, ProjectValue.GetFilePath(), CookSceneMetadata->ID,
+					{ CookSceneMetadata->ID }, Compatibility, CookOutput };
+				const auto Cooked = AssetCookService::Cook(CookRequest);
+				if (!Cooked) std::cerr << "Saved Material graph cook failed: " << Cooked.error().Message << "\n";
+				PF_CHECK(Tests, Cooked.has_value());
+				if (Cooked)
+				{
+					const std::filesystem::path SavedSourcePath = Root / Material->ProjectRelativePath;
+					const std::filesystem::path SavedSidecarPath = AssetMetadataSerializer::GetSidecarPath(SavedSourcePath);
+					const std::filesystem::path HiddenSourcePath = SavedSourcePath.string() + ".hidden";
+					const std::filesystem::path HiddenSidecarPath = SavedSidecarPath.string() + ".hidden";
+					struct RestoreHiddenFile final
+					{
+						std::filesystem::path Original;
+						std::filesystem::path Hidden;
+						std::error_code Error;
+						bool Hide()
+						{
+							std::filesystem::rename(Original, Hidden, Error);
+							return !Error;
+						}
+						bool Restore()
+						{
+							if (std::filesystem::exists(Hidden, Error) && !Error)
+								std::filesystem::rename(Hidden, Original, Error);
+							return !Error;
+						}
+						~RestoreHiddenFile()
+						{
+							if (!Error && std::filesystem::exists(Hidden, Error) && !Error)
+								std::filesystem::rename(Hidden, Original, Error);
+						}
+					} SourceRestore{ SavedSourcePath, HiddenSourcePath }, SidecarRestore{ SavedSidecarPath, HiddenSidecarPath };
+					PF_CHECK(Tests, SourceRestore.Hide());
+					if (!SourceRestore.Error)
+					{
+						PF_CHECK(Tests, SidecarRestore.Hide());
+						if (!SidecarRestore.Error)
+						{
+							auto Provider = CookedContentProvider::Open(CookOutput, Compatibility);
+							PF_CHECK(Tests, Provider.has_value());
+							if (Provider)
+							{
+								const auto Product = (*Provider)->LoadGraphMaterialProduct(Material->ID);
+								PF_CHECK(Tests, Product && Product->RecipeFingerprint.size() == 32 &&
+									!Product->SpirV.empty());
+								SceneRuntimeDesc RuntimeDescription;
+								RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+								PlayerSession CookedSession(*Provider, RuntimeDescription);
+								PF_CHECK(Tests, CookedSession.Start().has_value() && CookedSession.IsCookedSession() &&
+									CookedSession.GetProject() == nullptr);
+								if (CookedSession.GetActiveScene())
+								{
+									const auto CookedEntity = CookedSession.GetActiveScene()->FindEntity(CookEntity->GetUUID());
+									PF_CHECK(Tests, CookedEntity.has_value());
+									if (CookedEntity)
+									{
+										const auto CookedRenderer = CookedEntity->GetMeshRenderer();
+										PF_CHECK(Tests, CookedRenderer && CookedRenderer->has_value() &&
+											(**CookedRenderer).MaterialAsset == std::optional<AssetID>(Material->ID));
+									}
+								}
+								else PF_CHECK(Tests, false);
+								MaterialAssetCache MaterialCache(*Provider);
+								const auto RuntimeMaterial = MaterialCache.GetOrLoad(Material->ID);
+								PF_CHECK(Tests, RuntimeMaterial.has_value());
+								if (RuntimeMaterial)
+								{
+									const auto& BaseColor = RuntimeMaterial->get().BaseColorFactor;
+									PF_CHECK(Tests, std::abs(BaseColor.r - 0.2f) < 1.0e-5f &&
+										std::abs(BaseColor.g - 0.3f) < 1.0e-5f &&
+										std::abs(BaseColor.b - 0.4f) < 1.0e-5f);
+								}
+								CookedSession.Stop();
+							}
+						}
+						PF_CHECK(Tests, SidecarRestore.Restore());
+					}
+					PF_CHECK(Tests, SourceRestore.Restore());
+				}
+			}
+		}
+		std::filesystem::remove_all(CookOutput, Error);
+		PF_CHECK(Tests, !Error);
 		auto SecondMaterial = MaterialAssetService::Create(ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(),
 			"Assets/Materials/Independent.material", Initial);
 		PF_CHECK(Tests, SecondMaterial.has_value());

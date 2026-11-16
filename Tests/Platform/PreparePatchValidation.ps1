@@ -52,7 +52,9 @@ function Get-TransferRun
 	param([string]$Title, [string]$Root)
 	$gh = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue
 	if (-not $gh) { throw 'GitHub CLI (gh) is not installed or not on PATH.' }
-	$deadline = [DateTime]::UtcNow.AddMinutes(3)
+	# Standard free-hosted runners can leave dispatched jobs queued for several minutes.
+	# Keep waiting for the unique run instead of abandoning an upload that may still execute.
+	$deadline = [DateTime]::UtcNow.AddMinutes(15)
 	do
 	{
 		$json = & $gh.Source run list --workflow portable-editor-ci.yml --event workflow_dispatch --limit 100 `

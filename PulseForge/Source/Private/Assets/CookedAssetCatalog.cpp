@@ -437,7 +437,7 @@ namespace PulseForge
 			if (!Root.is_object() || !Root.contains("version") || !Root["version"].is_number_integer())
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest version is missing or invalid"));
 			const int64_t Version = Root["version"].get<int64_t>();
-			if (Version != 2 && Version != 3 && Version != 4 && Version != 6 && Version != ManifestVersion)
+			if (Version != 2 && Version != 3 && Version != 4 && Version != 5 && Version != 6 && Version != ManifestVersion)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedVersion, ManifestPath, "Cook manifest version is unsupported"));
 			const bool HasScriptPaths = Version >= 3;
 			const bool HasAudioMixDefaults = Version >= 4;

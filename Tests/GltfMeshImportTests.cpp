@@ -157,9 +157,13 @@ namespace
 			Imported->Vertices[0].Normal[0] == 0.0f && Imported->Vertices[0].Normal[1] == 0.0f && Imported->Vertices[0].Normal[2] == 1.0f);
 		for (const GltfMeshVertex& Vertex : Imported->Vertices)
 			PF_CHECK(Tests, std::abs(glm::length(glm::vec3(Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2])) - 1.0f) < 1.0e-6f);
-		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes.size() == 5);
-		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes[3].Semantic == VertexSemantic::Normal);
-		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes[4].Semantic == VertexSemantic::Tangent);
+		const auto& VertexAttributes = Imported->GetMeshDescription().VertexLayout.Attributes;
+		PF_CHECK(Tests, VertexAttributes.size() == 5);
+		if (VertexAttributes.size() == 5)
+		{
+			PF_CHECK(Tests, VertexAttributes[3].Semantic == VertexSemantic::Normal);
+			PF_CHECK(Tests, VertexAttributes[4].Semantic == VertexSemantic::Tangent);
+		}
 		for (const GltfMeshVertex& Vertex : Imported->Vertices)
 		{
 			PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f && std::abs(Vertex.Tangent[1]) < 1.0e-5f &&

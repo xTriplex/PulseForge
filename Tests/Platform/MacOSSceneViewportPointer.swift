@@ -146,6 +146,8 @@ case "key-hold":
     up.post(tap: .cghidEventTap)
     print("SCENE_VIEWPORT_CG_EVENT=POSTED; action_id=\(actionID); target_pid=\(targetPID); source_pid=\(getpid()); event=key-up; keycode=\(keyCode); route=global-hid-event-stream; post_return_is_not_application_acknowledgement")
 case "scroll":
+    post(.mouseMoved, start, 0, "scroll-move-to-target")
+    Thread.sleep(forTimeInterval: 0.05)
     guard let event = CGEvent(scrollWheelEvent2Source: source, units: .line, wheelCount: 1,
                               wheel1: Int32(end.x), wheel2: 0, wheel3: 0) else {
         fail("CGEvent creation failed for scroll; no event was posted", 3)

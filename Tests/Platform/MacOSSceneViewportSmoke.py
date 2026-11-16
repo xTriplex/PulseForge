@@ -158,6 +158,19 @@ def wheel_speed_changed(fields: dict[str, str], action_id: str, speed_before: fl
         return False
 
 
+def wheel_camera_zoomed(fields: dict[str, str], action_id: str, callback_sequence: int,
+                       position_before: tuple[float, float, float]) -> bool:
+    try:
+        position_after = coordinate(fields, "camera_position", 3)
+        return (
+            wheel_delta_consumed(fields, action_id, callback_sequence)
+            and fields.get("wheel_action") == "zoom"
+            and sum((after - before) ** 2 for after, before in zip(position_after, position_before)) > 1.0e-8
+        )
+    except (KeyError, ValueError):
+        return False
+
+
 def find_fresh_state(
     observations: list[tuple[int, float, str]],
     dropped_through: int,
@@ -597,32 +610,19 @@ def main() -> int:
               f"usable={visible_minimum[0]:.1f},{visible_minimum[1]:.1f}.."
               f"{visible_maximum[0]:.1f},{visible_maximum[1]:.1f}")
 
-        press_id = uuid.uuid4().hex
-        code, stdout, stderr = run_bounded_command(
-            [str(driver), "press-right", str(process.pid), press_id, str(image_center_x), str(image_center_y)],
-            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
-        )
-        right_press_attempted = code in (0, 124)
-        print(f"MACOS_SCENE_VIEWPORT_CAMERA_PRESS=action_id={press_id}; focused_window={focused_title!r}; "
-              f"exit_code={code}; output={stdout[-1200:]!r}; error={stderr[-800:]!r}")
-        if code != 0:
-            raise RuntimeError("the intended right-button press was not posted")
-        wait_for(CAPTURED, "camera capture started on the detached native owner")
-
-        capture_state_line = wait_for_state(
-            latest_state_sequence(), "detached owner capture state",
-            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
+        wheel_before_line = wait_for_state(
+            max(0, latest_state_sequence() - 1), "focused detached owner before wheel input",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0" and
             fields.get("owner_viewport") == detached.get("owner_viewport") and
             fields.get("owner_window") == detached.get("owner_window"),
         )
-        capture_state = marker_fields(capture_state_line, STATE)
-        capture_state_sample = int(capture_state["sequence"])
-        speed_before_wheel = float(capture_state["camera_speed"])
-        previous_callback_sequence = int(capture_state.get("scroll_callback_sequence", "0"))
+        wheel_before = marker_fields(wheel_before_line, STATE)
+        position_before_wheel = coordinate(wheel_before, "camera_position", 3)
+        previous_callback_sequence = int(wheel_before.get("scroll_callback_sequence", "0"))
         wheel_baseline = latest_state_sequence()
         print(f"MACOS_SCENE_VIEWPORT_OWNER_WHEEL_ARMED=action_id={wheel_id}; after_sequence={wheel_baseline}; "
               f"prior_callback_sequence={previous_callback_sequence}; owner_viewport={detached['owner_viewport']}; "
-              f"owner_window={detached['owner_window']}; speed_before={speed_before_wheel:.4f}")
+              f"owner_window={detached['owner_window']}; camera_position_before={position_before_wheel}")
         code, stdout, stderr = run_bounded_command(
             [str(driver), "scroll", str(process.pid), wheel_id, str(image_center_x), str(image_center_y), "1"],
             timeout=min(8.0, max(0.1, deadline - time.monotonic())),
@@ -655,16 +655,38 @@ def main() -> int:
             )
             consumed_state = marker_fields(consumed_state_line, STATE)
 
-        if wheel_speed_changed(consumed_state, wheel_id, speed_before_wheel):
+        if wheel_camera_zoomed(consumed_state, wheel_id, callback_sequence, position_before_wheel):
             wheel_state_line = consumed_state_line
         else:
             wheel_state_line = wait_for_state(
-                int(consumed_state["sequence"]), "detached-owner fly speed changed from owner wheel input",
-                lambda fields: wheel_speed_changed(fields, wheel_id, speed_before_wheel),
+                int(consumed_state["sequence"]), "detached-owner camera zoom changed from owner wheel input",
+                lambda fields: wheel_camera_zoomed(fields, wheel_id, callback_sequence, position_before_wheel),
                 timeout_seconds=5.0,
             )
         wheel_state = marker_fields(wheel_state_line, STATE)
         wheel_state_sample = int(wheel_state["sequence"])
+        print(f"MACOS_SCENE_VIEWPORT_OBSERVED=detached owner wheel zoom; {wheel_state_line}")
+
+        press_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "press-right", str(process.pid), press_id, str(image_center_x), str(image_center_y)],
+            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+        )
+        right_press_attempted = code in (0, 124)
+        print(f"MACOS_SCENE_VIEWPORT_CAMERA_PRESS=action_id={press_id}; focused_window={focused_title!r}; "
+              f"exit_code={code}; output={stdout[-1200:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the intended right-button press was not posted")
+        wait_for(CAPTURED, "camera capture started on the detached native owner")
+
+        capture_state_line = wait_for_state(
+            wheel_state_sample, "detached owner capture state",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
+            fields.get("owner_viewport") == detached.get("owner_viewport") and
+            fields.get("owner_window") == detached.get("owner_window"),
+        )
+        capture_state = marker_fields(capture_state_line, STATE)
+        capture_state_sample = int(capture_state["sequence"])
 
         end_camera_x = min(visible_maximum[0] - 8.0, image_center_x + 70.0)
         end_camera_y = min(visible_maximum[1] - 8.0, image_center_y + 45.0)

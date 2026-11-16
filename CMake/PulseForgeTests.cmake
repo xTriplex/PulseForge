@@ -437,12 +437,15 @@ if(BUILD_TESTING)
 			PulseForge/Vendor/json/include
 		)
 		target_compile_definitions(PulseForgeEditorTests PRIVATE
-			"PF_AUDIO_MIXING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj\"")
+			"PF_AUDIO_MIXING_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj\""
+			"PF_EDITOR_WORKFLOW_GLTF=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/Assets/Models/WorkflowCube.gltf\"")
 		if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 			target_compile_definitions(PulseForgeEditorTests PRIVATE PF_EDITOR_RENDERER_OPENGL)
 		endif()
 		target_link_libraries(PulseForgeEditorTests PRIVATE
 			PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES} PulseForgeImGui spdlog::spdlog)
+		target_link_libraries(PulseForgeEditorTests PRIVATE
+			PulseForgeAssetCookService PulseForgeAssetServices PulseForgeCookedRuntimeProvider PulseForgeRuntime)
 		if(WIN32)
 			target_link_libraries(PulseForgeEditorTests PRIVATE shell32 dwmapi)
 		endif()
