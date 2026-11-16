@@ -1142,6 +1142,10 @@ namespace
 		PF_CHECK(Tests, Cooked.has_value());
 		if (!Cooked) return;
 		std::filesystem::path PlayerPackage = OutputRoot / "G29PlayerPackage";
+		std::filesystem::path CookedContentRoot = PlayerPackage;
+#if defined(__APPLE__)
+		CookedContentRoot /= "Contents/Resources";
+#endif
 #if defined(PF_G29_PLAYER_TEMPLATE_ROOT) && defined(PF_G29_PLAYER_TEMPLATE_DESCRIPTOR)
 		AssetExportRequest ExportRequest;
 		ExportRequest.SourceProjectFile = ProjectValue->GetFilePath();
@@ -1201,13 +1205,14 @@ namespace
 				" message=" << (ExportSnapshot.Error ? ExportSnapshot.Error->Message : ExportSnapshot.Log) << std::endl;
 		PF_CHECK(Tests, !ExportSnapshot.Running && ExportSnapshot.Phase == AssetExportPhase::Complete &&
 			ExportSnapshot.PublishedOutput == PlayerPackage);
-		PF_CHECK(Tests, std::filesystem::is_regular_file(PlayerPackage / std::filesystem::u8path(TemplateDescriptor->Entrypoint)) &&
-			std::filesystem::is_regular_file(PlayerPackage / "Content" / "manifest.pfmanifest"));
+		PF_CHECK(Tests, std::filesystem::is_regular_file(PlayerPackage / std::filesystem::u8path(TemplateDescriptor->Entrypoint)));
+		const auto CookedManifestPath = CookedContentRoot / "Content" / "manifest.pfmanifest";
+		PF_CHECK(Tests, std::filesystem::is_regular_file(CookedManifestPath));
 #endif
 		std::filesystem::remove_all(SourceRoot, Error);
 		PF_CHECK(Tests, !Error && !std::filesystem::exists(SourceRoot));
 		if (Error || std::filesystem::exists(SourceRoot)) return;
-		auto Provider = CookedContentProvider::Open(PlayerPackage / "Content", Request.Compatibility);
+		auto Provider = CookedContentProvider::Open(CookedContentRoot / "Content", Request.Compatibility);
 		PF_CHECK(Tests, Provider.has_value());
 		if (!Provider) return;
 		PF_CHECK(Tests, (*Provider)->ReadRuntimeUI(MenuDocument).has_value());
