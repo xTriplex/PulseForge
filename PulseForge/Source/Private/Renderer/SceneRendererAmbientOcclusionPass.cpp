@@ -427,6 +427,8 @@ namespace PulseForge
 		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_Targets[0], PrepassClear); !Begin)
 			return std::unexpected(MakeAmbientOcclusionDrawError("Could not begin SSAO normal-depth prepass: " + Begin.error().Message));
 		RenderTargetScope PrepassScope(m_Runtime);
+		if (auto Updated = Inputs.ApplyPendingSkeletalUpdates(); !Updated)
+			return std::unexpected(std::move(Updated.error()));
 		for (const SceneMeshInstance& Instance : Inputs.Snapshot.Meshes)
 		{
 			auto Material = Inputs.ResolveMaterial(Instance);
@@ -517,6 +519,11 @@ namespace PulseForge
 	const Texture* SceneRenderer::AmbientOcclusionPass::GetPrepassDepthTextureForValidation() const noexcept
 	{
 		return m_Targets[0] ? m_Targets[0]->GetDepthTexture() : nullptr;
+	}
+
+	const Texture* SceneRenderer::AmbientOcclusionPass::GetFinalOcclusionTextureForValidation() const noexcept
+	{
+		return m_FrameAvailable && m_Targets[3] ? m_Targets[3]->GetColorTexture() : nullptr;
 	}
 
 	const BindingSet* SceneRenderer::AmbientOcclusionPass::GetSceneBindingSet() const noexcept

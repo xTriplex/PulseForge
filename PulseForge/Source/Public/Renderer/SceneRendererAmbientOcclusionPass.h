@@ -26,6 +26,7 @@ namespace PulseForge
 			const Buffer& FullscreenTriangle;
 			const MaterialResolver& ResolveMaterial;
 			const BindingResolver& ResolveBindings;
+			const std::function<std::expected<void, SceneRendererError>()>& ApplyPendingSkeletalUpdates;
 		};
 
 		explicit AmbientOcclusionPass(RenderDevice& Runtime) noexcept;
@@ -36,6 +37,7 @@ namespace PulseForge
 		[[nodiscard]] const AmbientOcclusionSettings& GetSettings() const noexcept { return m_Settings; }
 		[[nodiscard]] const Texture* GetFallbackOcclusionTexture() const noexcept;
 		[[nodiscard]] const Texture* GetPrepassDepthTextureForValidation() const noexcept;
+		[[nodiscard]] const Texture* GetFinalOcclusionTextureForValidation() const noexcept;
 		[[nodiscard]] const BindingLayoutHandle& GetFinalLayout() const noexcept { return m_FinalLayout; }
 		[[nodiscard]] const BindingSet* GetSceneBindingSet() const noexcept;
 		void InvalidateFrame() noexcept { m_FrameAvailable = false; }

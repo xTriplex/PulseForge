@@ -107,6 +107,8 @@ namespace PulseForge
 			const GraphicsResult Begin = Resources.Runtime.BeginRenderTarget(Resources.Targets.DirectionalTarget(CascadeIndex));
 			if (!Begin) return std::unexpected(MakeShadowDrawError("Could not begin shadow cascade: " + Begin.error().Message));
 			RenderTargetFrameScope TargetScope(Resources.Runtime);
+			if (auto Updated = Resources.ApplyPendingSkeletalUpdates(); !Updated)
+				return std::unexpected(std::move(Updated.error()));
 			for (const SceneMeshInstance& Instance : Resources.Snapshot->Meshes)
 			{
 				auto Material = Resources.MaterialBindings.ResolveMaterialDescription(Instance);
@@ -154,6 +156,8 @@ namespace PulseForge
 			const GraphicsResult Begin = Resources.Runtime.BeginRenderTarget(*Resources.Targets.SpotlightTarget(Slot));
 			if (!Begin) return std::unexpected(MakeShadowDrawError("Could not begin spotlight shadow target: " + Begin.error().Message));
 			RenderTargetFrameScope TargetScope(Resources.Runtime);
+			if (auto Updated = Resources.ApplyPendingSkeletalUpdates(); !Updated)
+				return std::unexpected(std::move(Updated.error()));
 			for (const SceneMeshInstance& Instance : Resources.Snapshot->Meshes)
 			{
 				auto Material = Resources.MaterialBindings.ResolveMaterialDescription(Instance);
@@ -224,6 +228,8 @@ namespace PulseForge
 				if (!Begin)
 					return std::unexpected(MakeShadowDrawError("Could not begin point-shadow cubemap face: " + Begin.error().Message));
 				RenderTargetFrameScope TargetScope(Resources.Runtime);
+				if (auto Updated = Resources.ApplyPendingSkeletalUpdates(); !Updated)
+					return std::unexpected(std::move(Updated.error()));
 				for (const SceneMeshInstance& Instance : Resources.Snapshot->Meshes)
 				{
 					auto Material = Resources.MaterialBindings.ResolveMaterialDescription(Instance);

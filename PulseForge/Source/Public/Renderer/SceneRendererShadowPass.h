@@ -2,6 +2,7 @@
 
 #include "Renderer/SceneRenderer.h"
 
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,7 @@ namespace PulseForge
 			const BindingSetHandle& ShadowObjectBindings;
 			const BufferHandle& PointShadowObjectConstants;
 			const BindingSetHandle& PointShadowObjectBindings;
+			const std::function<std::expected<void, SceneRendererError>()>& ApplyPendingSkeletalUpdates;
 		};
 
 		[[nodiscard]] std::expected<void, SceneRendererError> Render(const Resources& Resources);

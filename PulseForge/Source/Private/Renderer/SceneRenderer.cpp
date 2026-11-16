@@ -297,6 +297,7 @@ namespace PulseForge
 		std::string ProductKey;
 		std::shared_ptr<const ImportedGltfSkeletalMesh> Product;
 		std::vector<std::array<float, 16>> LastLocalTransforms;
+		std::vector<std::byte> PendingVertexData;
 		MeshHandle Resource;
 	};
 
@@ -359,6 +360,26 @@ namespace PulseForge
 			{ m_ProjectAssetCaches->SessionKey, RecipeKey }, AssetPreparationPriority::Interactive, 1, std::move(Processor));
 	}
 #endif
+	std::expected<void, SceneRendererError> SceneRenderer::SeedSkeletalProductForValidation(
+		const AssetID& SourceAsset,
+		std::string_view ProductKey,
+		std::shared_ptr<const ImportedGltfSkeletalMesh> Product)
+	{
+		if (SourceAsset.IsNil() || !IsValidGltfSkeletalProductKey(ProductKey) || !Product || m_PreparedSnapshot)
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, std::nullopt, SourceAsset,
+				"Validation skeletal product identity, payload, or renderer preparation state is invalid" });
+		const auto EstimatedBytes = EstimateSkeletalProductBytes(*Product);
+		if (!EstimatedBytes || *EstimatedBytes > MaximumRendererSkeletalProductBytes - m_SkeletalProductBytes)
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, std::nullopt, SourceAsset,
+				"Validation skeletal product exceeds the renderer's 256 MiB immutable product budget" });
+		const std::string CacheKey = MakeSkeletalProductCacheKey(SourceAsset, ProductKey);
+		if (m_SkeletalProducts.contains(CacheKey))
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, std::nullopt, SourceAsset,
+				"Validation skeletal product key was already seeded" });
+		m_SkeletalProducts.emplace(CacheKey, std::pair{ std::move(Product), *EstimatedBytes });
+		m_SkeletalProductBytes += *EstimatedBytes;
+		return {};
+	}
 #endif
 
 	const Texture* SceneRenderer::GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept
@@ -379,6 +400,11 @@ namespace PulseForge
 	const Texture* SceneRenderer::GetAmbientOcclusionDepthTextureForValidation() const noexcept
 	{
 		return m_AmbientOcclusionPass->GetPrepassDepthTextureForValidation();
+	}
+
+	const Texture* SceneRenderer::GetAmbientOcclusionTextureForValidation() const noexcept
+	{
+		return m_AmbientOcclusionPass->GetFinalOcclusionTextureForValidation();
 	}
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
@@ -1076,11 +1102,7 @@ namespace PulseForge
 					Description.VertexData = std::as_bytes(std::span(*SkinnedVertices));
 					if (Skeletal.Resource)
 					{
-						auto Updated = m_Runtime.UpdateDynamicMeshVertices(
-							*Skeletal.Resource, Description.VertexLayout, Description.VertexData);
-						if (!Updated)
-							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Instance.Entity,
-								Instance.MeshAsset, "Could not update skinned mesh vertices: " + Updated.error().Message });
+						Skeletal.PendingVertexData.assign(Description.VertexData.begin(), Description.VertexData.end());
 					}
 					else
 					{
@@ -1276,6 +1298,26 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::ApplyPendingSkeletalMeshUpdates()
+	{
+		for (auto& [Entity, Skeletal] : m_SkeletalMeshResources)
+		{
+			if (Skeletal->PendingVertexData.empty()) continue;
+			if (!Skeletal->Resource || !Skeletal->Product)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Entity,
+					Skeletal->SourceAsset, "A pending skinned vertex update has no retained mesh resource" });
+
+			const MeshDesc Description = Skeletal->Product->Geometry.GetMeshDescription();
+			auto Updated = m_Runtime.UpdateDynamicMeshVertices(
+				*Skeletal->Resource, Description.VertexLayout, Skeletal->PendingVertexData);
+			if (!Updated)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Entity,
+					Skeletal->SourceAsset, "Could not update skinned mesh vertices: " + Updated.error().Message });
+			Skeletal->PendingVertexData.clear();
+		}
+		return {};
+	}
+
 	void SceneRenderer::SetTransientPreviewMesh(const AssetID& Identity, const Mesh* Geometry) noexcept
 	{
 		m_TransientPreviewMeshIdentity = Geometry ? std::optional<AssetID>(Identity) : std::nullopt;
@@ -1309,13 +1351,14 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderShadowCascades()
 	{
+		const auto ApplyPendingSkeletalUpdates = [this] { return ApplyPendingSkeletalMeshUpdates(); };
 		const ShadowPass::Resources Resources{ m_Runtime, m_PreparedSnapshot ? &*m_PreparedSnapshot : nullptr,
 			m_PreparedCascades ? &*m_PreparedCascades : nullptr,
 			*m_LocalLightingState, *m_ShadowTargetCache,
 			*m_PipelineCache, *m_MaterialBindingCache, m_PreparedMeshResources, m_PreparedMaterialBindings,
 			m_ShadowBindingLayout, m_PointShadowBindingLayout,
 			*m_ShadowSampler, m_ShadowObjectConstantsBuffer, m_ShadowObjectBindingSet, m_PointShadowObjectConstantsBuffer,
-			m_PointShadowObjectBindingSet };
+			m_PointShadowObjectBindingSet, ApplyPendingSkeletalUpdates };
 		return m_ShadowPass->Render(Resources);
 	}
 
@@ -1349,9 +1392,10 @@ namespace PulseForge
 			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
 			return *Bindings;
 		};
+		const auto ApplyPendingSkeletalUpdates = [this] { return ApplyPendingSkeletalMeshUpdates(); };
 
 		const AmbientOcclusionPass::RenderInputs Inputs{ *m_PreparedSnapshot, m_PipelineCache->GetVertexLayout(), m_BindingLayout,
-			m_PreparedMeshResources, *m_BackgroundTriangleBuffer, ResolveMaterial, ResolveBindings };
+			m_PreparedMeshResources, *m_BackgroundTriangleBuffer, ResolveMaterial, ResolveBindings, ApplyPendingSkeletalUpdates };
 		return m_AmbientOcclusionPass->Render(Inputs, Width, Height);
 	}
 	bool SceneRenderer::SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept
@@ -1686,6 +1730,7 @@ namespace PulseForge
 
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene()
 	{
+		if (auto Updated = ApplyPendingSkeletalMeshUpdates(); !Updated) return std::unexpected(std::move(Updated.error()));
 		if (auto Shadows = RenderShadowCascades(); !Shadows)
 			return std::unexpected(std::move(Shadows.error()));
 		const auto [Width, Height] = m_Runtime.GetOutputFramebufferSize();
@@ -1724,6 +1769,8 @@ namespace PulseForge
 			return std::unexpected(MakeDrawError("Could not begin scene render target: " + BeginResult.error().Message));
 
 		RenderTargetFrameScope TargetScope(m_Runtime);
+		if (auto Updated = ApplyPendingSkeletalMeshUpdates(); !Updated)
+			return std::unexpected(std::move(Updated.error()));
 		auto Rendered = RenderPreparedSceneForFormat(
 			ColorFormat, Target.GetDescription().Width, Target.GetDescription().Height);
 		const GraphicsResult EndResult = TargetScope.End();

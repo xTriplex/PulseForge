@@ -20,10 +20,12 @@
 #include <expected>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -222,6 +224,10 @@ namespace PulseForge
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
 		[[nodiscard]] std::expected<AssetPreparationService::Subscription, AssetPreparationError>
 			EnqueuePreparationForValidation(AssetPreparationService::Processor Processor);
+		[[nodiscard]] std::expected<void, SceneRendererError> SeedSkeletalProductForValidation(
+			const AssetID& SourceAsset,
+			std::string_view ProductKey,
+			std::shared_ptr<const ImportedGltfSkeletalMesh> Product);
 #endif
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 #if defined(PF_DEBUG)
@@ -233,6 +239,7 @@ namespace PulseForge
 		[[nodiscard]] const Texture* GetDirectionalShadowTextureForValidation(size_t Cascade) const noexcept;
 		[[nodiscard]] const Texture* GetSpotlightShadowTextureForValidation(size_t Slot) const noexcept;
 		[[nodiscard]] const Texture* GetAmbientOcclusionDepthTextureForValidation() const noexcept;
+		[[nodiscard]] const Texture* GetAmbientOcclusionTextureForValidation() const noexcept;
 
 	private:
 		struct ProjectAssetCaches;
@@ -260,6 +267,7 @@ namespace PulseForge
 		[[nodiscard]] const BindingSet* FindPreparedMaterialBinding(UUID Entity) const noexcept;
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
+		[[nodiscard]] std::expected<void, SceneRendererError> ApplyPendingSkeletalMeshUpdates();
 		[[nodiscard]] std::expected<const Texture*, SceneRendererError> PrepareRuntimeUIOverlay(uint32_t Width, uint32_t Height);
 		[[nodiscard]] RuntimeUIOverlayFrameStats GetRuntimeUIOverlayFrame(const Texture& BoundTexture) const noexcept;
 

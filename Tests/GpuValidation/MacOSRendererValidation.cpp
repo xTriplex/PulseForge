@@ -16,8 +16,10 @@
 #include <imgui.h>
 
 #include <glm/gtc/packing.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -89,6 +91,7 @@ namespace
 	{
 		InitialFrame,
 		GraphMaterialFrame,
+		SkinnedPoseFrame,
 		WaitForResize,
 		ResizedFrame,
 		ExposureFrame,
@@ -161,6 +164,7 @@ namespace
 					PulseForge::SceneRenderer::Create(App, *m_Project, std::filesystem::path(PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY));
 				if (!CreatedRenderer) throw std::runtime_error("Could not create SceneRenderer: " + CreatedRenderer.error().Message);
 				m_SceneRenderer = std::move(*CreatedRenderer);
+				if (!TestMode || std::string_view(TestMode) == "normal") PrepareSkinnedRendererFixture();
 				if (!m_SceneRenderer->SetToneMappingSettings({ 0.0f }))
 					throw std::runtime_error("SceneRenderer rejected the baseline HDR exposure");
 				CreateOutputTarget(m_InitialExtent.first, m_InitialExtent.second);
@@ -202,6 +206,14 @@ namespace
 					m_InitialHdrGeneration = m_CapturedHdrGeneration;
 					m_InitialExtent = App.GetWindow().GetFramebufferSize();
 					m_FixedMaterialBaseline = m_CapturedColor;
+					m_ExpectedGeometryDrawCount = m_InitialSceneMeshCount + 1;
+					if (m_CapturedGeometryDraws != m_ExpectedGeometryDrawCount)
+					{
+						Fail("The baseline renderer did not submit each authored mesh and the seeded skeletal mesh "
+							"(expected draws=" + std::to_string(m_ExpectedGeometryDrawCount) + ", actual=" +
+							std::to_string(m_CapturedGeometryDraws) + ")");
+						return;
+					}
 					PF_INFO("MACOS_RENDERER_INITIAL_OUTPUT=PASS; extent={}x{}; geometry_draws={}; written_depth_pixels={}; shadow_depth_pixels={}",
 						m_InitialExtent.first, m_InitialExtent.second, m_CapturedGeometryDraws, m_CapturedSceneDepthPixels,
 						m_CapturedShadowDepthPixels);
@@ -230,6 +242,44 @@ namespace
 					}
 					PF_INFO("MACOS_GRAPH_MATERIAL_FIXED_PBR_EQUIVALENCE=PASS; changed_pixels={}; extent={}x{}",
 						ChangedPixels, m_CapturedColor.Width, m_CapturedColor.Height);
+					if (!m_SkinnedValidationEntity)
+					{
+						Fail("The renderer fixture did not create its skeletal validation entity");
+						return;
+					}
+					auto Pose = MakeBindPose();
+					Pose[1][13] += 0.65f;
+					if (auto Updated = m_Scene.SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), std::move(Pose)); !Updated)
+					{
+						Fail("Could not update the runtime skeletal validation pose: " + Updated.error().Message);
+						return;
+					}
+					m_Phase = ValidationPhase::SkinnedPoseFrame;
+					return;
+				}
+				if (m_Phase == ValidationPhase::SkinnedPoseFrame)
+				{
+					const size_t ColorChanges = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_FixedMaterialBaseline, m_CapturedColor);
+					const bool SceneDepthChanged = HasChangedReadback(m_FixedMaterialDepthBaseline, m_CapturedSceneDepth);
+					const bool ShadowDepthChanged = HasChangedReadback(m_FixedMaterialShadowBaseline, m_CapturedShadowReadback);
+					const bool AoDepthChanged = HasChangedReadback(m_FixedMaterialAoDepthBaseline, m_CapturedAoDepth);
+					const bool AoOutputChanged = HasChangedReadback(m_FixedMaterialAoOutputBaseline, m_CapturedAoOutput);
+					if (ColorChanges < 8 || m_CapturedGeometryDraws != m_ExpectedGeometryDrawCount || !SceneDepthChanged ||
+						!ShadowDepthChanged || !AoDepthChanged || !AoOutputChanged)
+					{
+						Fail("The moved skeletal pose did not reach color, scene depth, AO input/output, and shadow depth "
+							"(color pixels=" + std::to_string(ColorChanges) + ", scene depth=" +
+							(SceneDepthChanged ? "changed" : "unchanged") + ", AO depth=" +
+							(AoDepthChanged ? "changed" : "unchanged") + ", shadow depth=" +
+							(ShadowDepthChanged ? "changed" : "unchanged") + ", AO output=" +
+							(AoOutputChanged ? "changed" : "unchanged") + ", geometry draws=" +
+							std::to_string(m_CapturedGeometryDraws) + ")");
+						return;
+					}
+					PF_INFO("G26_SKINNED_RENDER_READBACK=PASS; color_pixels={}; geometry_draws={}; scene_depth=changed; ao_input=changed; "
+							"ao_output=changed; shadow_depth=changed; static_scene_meshes=present; graph_material_override=active",
+						ColorChanges, m_CapturedGeometryDraws);
 					glfwSetWindowSize(m_NativeWindow, 960, 640);
 					m_Phase = ValidationPhase::WaitForResize;
 					return;
@@ -301,6 +351,7 @@ namespace
 			}
 
 			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
+				m_Phase == ValidationPhase::SkinnedPoseFrame ||
 				m_Phase == ValidationPhase::ResizedFrame ||
 				m_Phase == ValidationPhase::ExposureFrame)
 			{
@@ -377,6 +428,13 @@ namespace
 				if (!m_CapturedShadowDepth)
 				{
 					Fail("The PBR scene reported shadow rendering but exposed no corresponding depth texture");
+					return;
+				}
+				m_CapturedAoDepthTexture = m_SceneRenderer->GetAmbientOcclusionDepthTextureForValidation();
+				m_CapturedAoOutputTexture = m_SceneRenderer->GetAmbientOcclusionTextureForValidation();
+				if (!m_CapturedAoDepthTexture || !m_CapturedAoOutputTexture)
+				{
+					Fail("The PBR scene did not expose its enabled ambient-occlusion prepass and final texture");
 					return;
 				}
 				m_ScenePrepared = false;
@@ -476,6 +534,7 @@ namespace
 					throw std::runtime_error("Could not load the fixed PBR material for graph equivalence: " + Description.error().Message);
 				if (Description->BaseColorTexture.IsNil()) continue;
 				m_GraphValidationMaterial = MaterialID;
+				m_GraphValidationSourceMesh = (**MeshRenderer).MeshAsset;
 				m_GraphValidationDescription = std::move(*Description);
 				break;
 			}
@@ -512,6 +571,95 @@ namespace
 				Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
 			Product.SpirV = std::move(Compiled->SpirV);
 			m_GraphValidationProduct.emplace(std::move(Product));
+		}
+
+		static std::array<float, 16> IdentityTransform()
+		{
+			return { 1.0f, 0.0f, 0.0f, 0.0f,
+				0.0f, 1.0f, 0.0f, 0.0f,
+				0.0f, 0.0f, 1.0f, 0.0f,
+				0.0f, 0.0f, 0.0f, 1.0f };
+		}
+
+		static std::vector<std::array<float, 16>> MakeBindPose()
+		{
+			return { IdentityTransform(), IdentityTransform() };
+		}
+
+		static bool HasChangedReadback(
+			const PulseForge::TextureReadback& Baseline,
+			const PulseForge::TextureReadback& Current)
+		{
+			return Baseline.Format == Current.Format && Baseline.Width == Current.Width && Baseline.Height == Current.Height &&
+				Baseline.Pixels.size() == Current.Pixels.size() && Baseline.Pixels != Current.Pixels;
+		}
+
+		void PrepareSkinnedRendererFixture()
+		{
+			if (!m_GraphValidationMaterial || !m_GraphValidationSourceMesh)
+				throw std::runtime_error("The graph material fixture did not retain its source mesh identity");
+
+			PulseForge::ImportedGltfSkeletalMesh Product;
+			Product.Geometry.Name = "G26 dynamic skinned renderer validation";
+			Product.Geometry.Vertices = {
+				{ { -0.45f, -0.40f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+				{ { 0.45f, -0.40f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+				{ { 0.0f, 0.45f, 0.0f }, { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.5f, 1.0f } }
+			};
+			Product.Geometry.Indices = { 0, 1, 2 };
+			const auto Identity = IdentityTransform();
+			Product.SkeletonNodes = {
+				{ "node/0", "mesh", -1, false, Identity },
+				{ "node/1", "joint", 0, true, Identity }
+			};
+			Product.MeshNodeIndex = 0;
+			Product.JointNodeIndices = { 1 };
+			Product.InverseBindMatrices = { Identity };
+			Product.VertexInfluences.resize(Product.Geometry.Vertices.size());
+			for (auto& Influence : Product.VertexInfluences)
+			{
+				Influence.JointIndices[0] = 0;
+				Influence.Weights[0] = 1.0f;
+			}
+			constexpr std::string_view ProductKey = "skeletal/26262626262626262626262626262626";
+			if (auto Seeded = m_SceneRenderer->SeedSkeletalProductForValidation(
+					*m_GraphValidationSourceMesh, ProductKey, std::make_shared<const PulseForge::ImportedGltfSkeletalMesh>(std::move(Product))); !Seeded)
+				throw std::runtime_error("Could not seed the skeletal renderer fixture: " + Seeded.error().Message);
+
+			for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+			{
+				auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer) throw std::runtime_error("Could not count authored meshes for the skeletal fixture");
+				if (MeshRenderer->has_value()) ++m_InitialSceneMeshCount;
+			}
+			glm::mat4 CameraWorld(1.0f);
+			bool FoundPrimaryCamera = false;
+			for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+			{
+				auto Camera = Entity.GetCamera();
+				if (!Camera || !Camera->has_value() || !(**Camera).IsPrimary) continue;
+				auto World = Entity.GetWorldMatrix();
+				if (!World) throw std::runtime_error("Could not resolve the primary camera transform for the skeletal fixture");
+				CameraWorld = *World;
+				FoundPrimaryCamera = true;
+				break;
+			}
+			if (!FoundPrimaryCamera) throw std::runtime_error("The PBR fixture has no primary camera for skeletal placement");
+			const glm::quat CameraRotation = glm::normalize(glm::quat_cast(glm::mat3(CameraWorld)));
+			PulseForge::TransformComponent Transform;
+			Transform.Rotation = CameraRotation;
+			Transform.Translation = glm::vec3(CameraWorld[3]) + CameraRotation * glm::vec3(0.0f, 0.0f, -3.0f);
+			Transform.Scale = { -1.0f, 1.0f, 1.0f };
+			auto Created = m_Scene.CreateEntity("G26 skeletal renderer validation");
+			if (!Created) throw std::runtime_error("Could not create the skeletal renderer fixture entity: " + Created.error().Message);
+			m_SkinnedValidationEntity = *Created;
+			if (auto Set = m_SkinnedValidationEntity->SetTransform(Transform); !Set)
+				throw std::runtime_error("Could not place the skeletal renderer fixture: " + Set.error().Message);
+			if (auto Set = m_SkinnedValidationEntity->SetMeshRenderer({
+					*m_GraphValidationSourceMesh, m_GraphValidationMaterial, std::string(ProductKey), std::nullopt }); !Set)
+				throw std::runtime_error("Could not assign the skeletal renderer fixture: " + Set.error().Message);
+			if (auto Set = m_Scene.SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), MakeBindPose()); !Set)
+				throw std::runtime_error("Could not publish the skeletal renderer bind pose: " + Set.error().Message);
 		}
 
 		bool CaptureRenderedOutput()
@@ -597,6 +745,39 @@ namespace
 				m_FixedMaterialHdrBaseline = *HdrReadback;
 				m_FixedMaterialDepthBaseline = *SceneDepth;
 				m_FixedMaterialShadowBaseline = *ShadowDepth;
+				auto AoDepth = App.ReadTextureForValidation(*m_CapturedAoDepthTexture);
+				if (!AoDepth)
+				{
+					Fail("Could not read back the rendered ambient-occlusion prepass depth: " + AoDepth.error().Message);
+					return false;
+				}
+				m_FixedMaterialAoDepthBaseline = *AoDepth;
+				auto AoOutput = App.ReadTextureForValidation(*m_CapturedAoOutputTexture);
+				if (!AoOutput)
+				{
+					Fail("Could not read back the final ambient-occlusion texture: " + AoOutput.error().Message);
+					return false;
+				}
+				m_FixedMaterialAoOutputBaseline = *AoOutput;
+			}
+			else if (m_Phase == ValidationPhase::SkinnedPoseFrame)
+			{
+				m_CapturedSceneDepth = *SceneDepth;
+				m_CapturedShadowReadback = *ShadowDepth;
+				auto AoDepth = App.ReadTextureForValidation(*m_CapturedAoDepthTexture);
+				if (!AoDepth)
+				{
+					Fail("Could not read back the moved skeletal ambient-occlusion depth: " + AoDepth.error().Message);
+					return false;
+				}
+				m_CapturedAoDepth = *AoDepth;
+				auto AoOutput = App.ReadTextureForValidation(*m_CapturedAoOutputTexture);
+				if (!AoOutput)
+				{
+					Fail("Could not read back the moved skeletal final ambient-occlusion texture: " + AoOutput.error().Message);
+					return false;
+				}
+				m_CapturedAoOutput = *AoOutput;
 			}
 			else if (m_Phase == ValidationPhase::GraphMaterialFrame)
 			{
@@ -671,17 +852,27 @@ namespace
 		PulseForge::Scene m_Scene;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		std::optional<PulseForge::AssetID> m_GraphValidationMaterial;
+		std::optional<PulseForge::AssetID> m_GraphValidationSourceMesh;
+		std::optional<PulseForge::Entity> m_SkinnedValidationEntity;
 		PulseForge::MaterialAssetDesc m_GraphValidationDescription;
 		std::optional<PulseForge::CookedGraphMaterialProduct> m_GraphValidationProduct;
 		PulseForge::RenderTargetHandle m_OutputTarget;
 		const PulseForge::Texture* m_CapturedHdrColor = nullptr;
 		const PulseForge::Texture* m_CapturedHdrDepth = nullptr;
 		const PulseForge::Texture* m_CapturedShadowDepth = nullptr;
+		const PulseForge::Texture* m_CapturedAoDepthTexture = nullptr;
+		const PulseForge::Texture* m_CapturedAoOutputTexture = nullptr;
 		PulseForge::TextureReadback m_CapturedColor;
 		PulseForge::TextureReadback m_FixedMaterialBaseline;
 		PulseForge::TextureReadback m_FixedMaterialHdrBaseline;
 		PulseForge::TextureReadback m_FixedMaterialDepthBaseline;
 		PulseForge::TextureReadback m_FixedMaterialShadowBaseline;
+		PulseForge::TextureReadback m_FixedMaterialAoDepthBaseline;
+		PulseForge::TextureReadback m_FixedMaterialAoOutputBaseline;
+		PulseForge::TextureReadback m_CapturedSceneDepth;
+		PulseForge::TextureReadback m_CapturedShadowReadback;
+		PulseForge::TextureReadback m_CapturedAoDepth;
+		PulseForge::TextureReadback m_CapturedAoOutput;
 		PulseForge::TextureReadback m_ResizedColorReadback;
 		std::pair<unsigned int, unsigned int> m_InitialExtent{};
 		std::pair<unsigned int, unsigned int> m_InitialLogicalExtent{};
@@ -692,6 +883,8 @@ namespace
 		uint64_t m_InitialHdrGeneration = 0;
 		uint64_t m_ResizedHdrGeneration = 0;
 		size_t m_CapturedGeometryDraws = 0;
+		size_t m_InitialSceneMeshCount = 0;
+		size_t m_ExpectedGeometryDrawCount = 0;
 		size_t m_CapturedSceneDepthPixels = 0;
 		size_t m_CapturedShadowDepthPixels = 0;
 		size_t m_ImGuiVerticesSubmitted = 0;
