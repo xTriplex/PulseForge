@@ -61,6 +61,7 @@ if(BUILD_TESTING)
 
 	add_executable(PulseForgeRendererTests
 		Tests/PulseForgeRendererTests.cpp
+		Tests/AssetCacheInventoryStatsTests.cpp
 		Tests/RendererPolicyTests.cpp
 		Tests/RendererContractTests.cpp
 		Tests/RendererTests.cpp
@@ -447,6 +448,7 @@ if(BUILD_TESTING)
 			Tests/EditorWorkspacePresentationTestMain.cpp
 			Tests/EditorWorkspacePresentationTests.cpp
 			Tests/EditorPerformanceTraceTests.cpp
+			Tests/EditorResourceInventoryTests.cpp
 		)
 		target_include_directories(PulseForgeEditorWorkspacePresentationTests PRIVATE
 			Tests

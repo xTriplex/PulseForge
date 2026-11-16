@@ -789,6 +789,42 @@ namespace PulseForge
 		return Found == m_Entries.end() ? 0 : Found->second->ResourceRevision;
 	}
 
+	AssetCacheInventoryStats EnvironmentLightingCache::GetInventoryStats() const noexcept
+	{
+		AssetCacheInventoryStats Stats;
+		Stats.Entries = m_Entries.size();
+		for (const auto& [Asset, StatePointer] : m_Entries)
+		{
+			(void)Asset;
+			const Entry& State = *StatePointer;
+			Stats.PublishedResources += State.GpuTextures.has_value() ? 1 : 0;
+			Stats.PendingResources += State.Pending.has_value() || State.AdmissionDeferred ? 1 : 0;
+			Stats.FailedResources += State.UploadFailed || !State.Error.empty() ? 1 : 0;
+			if (!State.GpuTextures) continue;
+			const std::array<const Texture*, 4> Textures = {
+				State.GpuTextures->Environment.get(),
+				State.GpuTextures->DiffuseIrradiance.get(),
+				State.GpuTextures->PrefilteredSpecular.get(),
+				State.GpuTextures->BrdfIntegrationLut.get() };
+			for (const Texture* Current : Textures)
+			{
+				if (!Current)
+				{
+					++Stats.UnknownLogicalPayloads;
+					continue;
+				}
+				const std::optional<uint64_t> Bytes = EstimateTextureLogicalPayloadBytes(Current->GetDescription());
+				if (!Bytes)
+				{
+					++Stats.UnknownLogicalPayloads;
+					continue;
+				}
+				Stats.LogicalPayloadBytes = SaturatingAddResourceBytes(Stats.LogicalPayloadBytes, *Bytes);
+			}
+		}
+		return Stats;
+	}
+
 	bool EnvironmentLightingCache::HasPendingWork() const noexcept
 	{
 		return std::ranges::any_of(m_Entries, [this](const auto& Pair)

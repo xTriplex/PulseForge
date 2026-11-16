@@ -546,6 +546,28 @@ namespace PulseForge
 		return Count;
 	}
 
+	AssetCacheInventoryStats TextureAssetCache::GetInventoryStats() const noexcept
+	{
+		AssetCacheInventoryStats Stats;
+		Stats.Entries = m_Textures.size();
+		for (const auto& [Key, Entry] : m_Textures)
+		{
+			(void)Key;
+			Stats.PublishedResources += Entry.Current ? 1 : 0;
+			Stats.PendingResources += Entry.Pending.has_value() || Entry.AdmissionDeferred ? 1 : 0;
+			Stats.FailedResources += Entry.TerminalFailure ? 1 : 0;
+			if (!Entry.Current) continue;
+			const std::optional<uint64_t> Bytes = EstimateTextureLogicalPayloadBytes(Entry.Current->GetDescription());
+			if (!Bytes)
+			{
+				++Stats.UnknownLogicalPayloads;
+				continue;
+			}
+			Stats.LogicalPayloadBytes = SaturatingAddResourceBytes(Stats.LogicalPayloadBytes, *Bytes);
+		}
+		return Stats;
+	}
+
 	size_t TextureAssetCache::CacheKeyHash::operator()(const CacheKey& Key) const noexcept
 	{
 		const size_t AssetHash = UUIDHash{}(Key.Asset);

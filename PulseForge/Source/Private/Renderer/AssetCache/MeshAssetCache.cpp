@@ -466,6 +466,37 @@ namespace PulseForge
 		return Count;
 	}
 
+	AssetCacheInventoryStats MeshAssetCache::GetInventoryStats() const noexcept
+	{
+		AssetCacheInventoryStats Stats;
+		Stats.Entries = m_Meshes.size();
+		for (const auto& [Asset, Entry] : m_Meshes)
+		{
+			(void)Asset;
+			Stats.PublishedResources += Entry.Current ? 1 : 0;
+			Stats.PendingResources += Entry.Pending.has_value() || Entry.AdmissionDeferred ? 1 : 0;
+			Stats.FailedResources += Entry.TerminalFailure ? 1 : 0;
+			if (!Entry.Current) continue;
+			const uint64_t VertexCount = Entry.Current->GetVertexCount();
+			const uint64_t Stride = Entry.Current->GetVertexLayout().Stride;
+			if (Stride != 0 && VertexCount > std::numeric_limits<uint64_t>::max() / Stride)
+			{
+				++Stats.UnknownLogicalPayloads;
+				continue;
+			}
+			uint64_t Bytes = VertexCount * Stride;
+			const uint64_t IndexCount = Entry.Current->HasIndices() ? Entry.Current->GetIndexCount() : 0;
+			if (IndexCount > std::numeric_limits<uint64_t>::max() / sizeof(uint32_t))
+			{
+				++Stats.UnknownLogicalPayloads;
+				continue;
+			}
+			Bytes = SaturatingAddResourceBytes(Bytes, IndexCount * sizeof(uint32_t));
+			Stats.LogicalPayloadBytes = SaturatingAddResourceBytes(Stats.LogicalPayloadBytes, Bytes);
+		}
+		return Stats;
+	}
+
 	bool MeshAssetCache::HasPendingWork() const noexcept
 	{
 #if defined(PF_COOKED_RUNTIME_ONLY)

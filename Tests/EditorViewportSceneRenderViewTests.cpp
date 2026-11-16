@@ -581,6 +581,12 @@ namespace
 		auto Original = Meshes.GetOrLoad(Metadata->ID);
 		PF_CHECK(Tests, Original.has_value());
 		if (!Original) return;
+		const AssetCacheInventoryStats MeshInventory = Meshes.GetInventoryStats();
+		PF_CHECK(Tests, MeshInventory.Entries == 1 && MeshInventory.PublishedResources == 1 &&
+			MeshInventory.PendingResources == 0 && MeshInventory.FailedResources == 0);
+		PF_CHECK(Tests, MeshInventory.LogicalPayloadBytes ==
+			static_cast<uint64_t>(Original->get().GetVertexCount()) * Original->get().GetVertexLayout().Stride +
+			static_cast<uint64_t>(Original->get().GetIndexCount()) * sizeof(uint32_t));
 		const Mesh* OldMesh = &Original->get();
 		const std::weak_ptr<FakeBufferLifetime> OldVertexBuffer = Runtime.BufferLifetimes[0];
 		PF_CHECK(Tests, !OldVertexBuffer.expired());
@@ -593,6 +599,9 @@ namespace
 		// Model two instances resolved during one preparation pass after worker completion.
 		auto SecondInstance = Meshes.GetOrLoad(Metadata->ID);
 		PF_CHECK(Tests, SecondInstance && &SecondInstance->get() == OldMesh);
+		const AssetCacheInventoryStats SharedMeshInventory = Meshes.GetInventoryStats();
+		PF_CHECK(Tests, SharedMeshInventory.Entries == 1 && SharedMeshInventory.PublishedResources == 1 &&
+			SharedMeshInventory.LogicalPayloadBytes == MeshInventory.LogicalPayloadBytes);
 		PF_CHECK(Tests, !OldVertexBuffer.expired() && OldVertexBuffer.lock()->Alive);
 		PF_CHECK(Tests, Runtime.BufferLifetimes.size() == 2);
 
@@ -678,7 +687,17 @@ namespace
 		auto OldTextureResult = Textures.GetOrLoad(TextureMetadata->ID);
 		PF_CHECK(Tests, OldTextureResult.has_value());
 		if (!OldTextureResult) return;
+		const AssetCacheInventoryStats TextureInventory = Textures.GetInventoryStats();
+		PF_CHECK(Tests, TextureInventory.Entries == 1 && TextureInventory.PublishedResources == 1 &&
+			TextureInventory.PendingResources == 0 && TextureInventory.FailedResources == 0);
+		PF_CHECK(Tests, TextureInventory.LogicalPayloadBytes ==
+			EstimateTextureLogicalPayloadBytes(OldTextureResult->get().GetDescription()).value_or(0));
 		const Texture* OldTexture = &OldTextureResult->get();
+		auto SharedTextureResult = Textures.GetOrLoad(TextureMetadata->ID);
+		PF_CHECK(Tests, SharedTextureResult && &SharedTextureResult->get() == OldTexture);
+		const AssetCacheInventoryStats SharedTextureInventory = Textures.GetInventoryStats();
+		PF_CHECK(Tests, SharedTextureInventory.Entries == 1 && SharedTextureInventory.PublishedResources == 1 &&
+			SharedTextureInventory.LogicalPayloadBytes == TextureInventory.LogicalPayloadBytes);
 		const std::weak_ptr<FakeTextureLifetime> OldTextureLifetime =
 			dynamic_cast<const FakeTexture*>(OldTexture)->GetLifetime();
 

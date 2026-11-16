@@ -1,8 +1,12 @@
 #include "Editor/EditorPerformancePanel.h"
 
 #include "Editor/EditorStyle.h"
+#include "Renderer/SceneRendererResourceCacheStats.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <string>
 
 namespace PulseForgeEditor
 {
@@ -157,6 +161,163 @@ namespace PulseForgeEditor
 			ImGui::EndTable();
 		}
 
+		[[nodiscard]] bool ContainsInsensitive(std::string_view Text, std::string_view Query) noexcept
+		{
+			if (Query.empty()) return true;
+			return std::search(Text.begin(), Text.end(), Query.begin(), Query.end(), [](char Left, char Right)
+			{
+				return std::tolower(static_cast<unsigned char>(Left)) == std::tolower(static_cast<unsigned char>(Right));
+			}) != Text.end();
+		}
+
+		void DrawResourceInventory(const EditorResourceInventorySnapshot* Snapshot, EditorStyle& Style,
+			EditorPerformanceAction& Action, char* Filter, size_t FilterCapacity)
+		{
+			if (ImGui::Button("Refresh inventory"))
+				Action.Kind = EditorPerformanceActionKind::RefreshResourceInventory;
+			if (!Snapshot)
+			{
+				Style.TextMuted("Resource inventory is loading, or no project is open.");
+				return;
+			}
+			ImGui::SameLine();
+			ImGui::Text("Generation %llu | %zu entries | %llu bytes across unique paths | %zu unavailable",
+				static_cast<unsigned long long>(Snapshot->Generation), Snapshot->Entries.size(),
+				static_cast<unsigned long long>(Snapshot->KnownUniquePathBytes), Snapshot->UnavailableStorageCount);
+			if (Snapshot->OmittedSourceAssets != 0 || Snapshot->DerivedArtifactsTruncated || Snapshot->DependencyEdgesTruncated)
+				ImGui::TextColored(Style.GetColor(EditorColorToken::TextMuted),
+					"Inventory is bounded: %zu source assets omitted; %zu dependency edges omitted%s",
+					Snapshot->OmittedSourceAssets,
+					Snapshot->OmittedDependencyEdges,
+					Snapshot->DerivedArtifactsTruncated ? "; derived data scan reached its entry limit" : "");
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputText("Filter inventory", Filter, FilterCapacity);
+			if (Snapshot->Cancelled)
+			{
+				Style.TextMuted("Inventory refresh was cancelled; no partial snapshot is shown.");
+				return;
+			}
+			std::array<const EditorResourceInventoryEntry*, EditorPerformancePanel::MaximumVisibleInventoryEntries> Visible{};
+			const std::string_view Query(Filter);
+			size_t MatchingCount = 0;
+			size_t VisibleCount = 0;
+			for (const EditorResourceInventoryEntry& Entry : Snapshot->Entries)
+			{
+				const bool Matches = ContainsInsensitive(Entry.Identity, Query) || ContainsInsensitive(Entry.Owner, Query) ||
+					ContainsInsensitive(Entry.State, Query) || std::ranges::any_of(Entry.Dependencies,
+						[Query](const std::string& Dependency) { return ContainsInsensitive(Dependency, Query); });
+				if (!Matches) continue;
+				++MatchingCount;
+				if (VisibleCount < Visible.size()) Visible[VisibleCount++] = &Entry;
+			}
+			if (MatchingCount > VisibleCount)
+				ImGui::TextColored(Style.GetColor(EditorColorToken::TextMuted), "Showing %zu of %zu matching inventory rows",
+					VisibleCount, MatchingCount);
+			else
+				ImGui::Text("%zu matching inventory rows", MatchingCount);
+			if (!ImGui::BeginTable("ResourceInventory", 5,
+				ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_RowBg |
+					ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY,
+				ImVec2(0.0f, 240.0f)))
+				return;
+
+			ImGui::TableSetupColumn("Identity / path", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+			ImGui::TableSetupColumn("Owner", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+			ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 116.0f);
+			ImGui::TableSetupColumn("Storage bytes", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+			ImGui::TableSetupColumn("Dependencies", ImGuiTableColumnFlags_WidthFixed, 94.0f);
+			ImGui::TableHeadersRow();
+			for (size_t Index = 0; Index < VisibleCount; ++Index)
+			{
+				const EditorResourceInventoryEntry& Entry = *Visible[Index];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(Entry.Identity.c_str());
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s", Entry.StorageIdentity.c_str());
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(Entry.Owner.c_str());
+				ImGui::TableSetColumnIndex(2);
+				ImGui::TextUnformatted(Entry.State.c_str());
+				ImGui::TableSetColumnIndex(3);
+				if (Entry.StorageBytes)
+					ImGui::Text("%llu", static_cast<unsigned long long>(*Entry.StorageBytes));
+				else
+					ImGui::TextUnformatted("Unavailable");
+				if (!Entry.AvailabilityReason.empty() && ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s", Entry.AvailabilityReason.c_str());
+				ImGui::TableSetColumnIndex(4);
+				if (Entry.OmittedDependencies > 0)
+					ImGui::Text("%zu+", Entry.Dependencies.size());
+				else
+					ImGui::Text("%zu", Entry.Dependencies.size());
+				if (!Entry.Dependencies.empty() && ImGui::IsItemHovered())
+				{
+					std::string Tooltip;
+					for (const std::string& Dependency : Entry.Dependencies)
+					{
+						if (!Tooltip.empty()) Tooltip += '\n';
+						Tooltip += Dependency;
+					}
+					ImGui::SetTooltip("%s", Tooltip.c_str());
+				}
+				else if (Entry.OmittedDependencies > 0 && ImGui::IsItemHovered())
+					ImGui::SetTooltip("%zu additional dependencies omitted by the inventory limit", Entry.OmittedDependencies);
+			}
+			ImGui::EndTable();
+		}
+
+		void DrawRendererCacheStatsRow(const char* Label, const PulseForge::AssetCacheInventoryStats& Stats)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(Label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::Text("%zu", Stats.Entries);
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text("%zu", Stats.PublishedResources);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%zu", Stats.PendingResources);
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text("%zu", Stats.FailedResources);
+			ImGui::TableSetColumnIndex(5);
+			if (Stats.UnknownLogicalPayloads == 0)
+				ImGui::Text("%llu", static_cast<unsigned long long>(Stats.LogicalPayloadBytes));
+			else
+				ImGui::Text("%llu (+%zu unavailable)", static_cast<unsigned long long>(Stats.LogicalPayloadBytes),
+					Stats.UnknownLogicalPayloads);
+		}
+
+		void DrawRendererCacheInventory(const PulseForge::SceneRendererResourceCacheStats* Snapshot, EditorStyle& Style)
+		{
+			if (!Snapshot)
+			{
+				Style.TextMuted("Viewport renderer cache is unavailable until a scene renderer is active.");
+				return;
+			}
+			ImGui::Text("Viewport renderer | project %s | generation %llu",
+				Snapshot->ProjectID.ToString().c_str(), static_cast<unsigned long long>(Snapshot->Generation));
+			if (ImGui::BeginTable("ViewportRendererResources", 6,
+				ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_RowBg |
+					ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("Owner");
+				ImGui::TableSetupColumn("Entries");
+				ImGui::TableSetupColumn("Published");
+				ImGui::TableSetupColumn("Pending");
+				ImGui::TableSetupColumn("Failed");
+				ImGui::TableSetupColumn("Logical payload bytes");
+				ImGui::TableHeadersRow();
+				DrawRendererCacheStatsRow("MeshAssetCache", Snapshot->Meshes);
+				DrawRendererCacheStatsRow("TextureAssetCache", Snapshot->Textures);
+				DrawRendererCacheStatsRow("EnvironmentLightingCache", Snapshot->EnvironmentLighting);
+				ImGui::EndTable();
+			}
+			ImGui::Text("Material descriptions: %zu | Graph material resources: %zu | Skeletal mesh resources: %zu",
+				Snapshot->MaterialDescriptions, Snapshot->GraphMaterialResources, Snapshot->SkeletalMeshResources);
+			Style.TextMuted("Logical payload is estimated from published resource descriptions. Device allocation, retired bytes, and heap use are unavailable.");
+		}
+
 		void DrawGpuTimings(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style)
 		{
 			if (Snapshot.Timing.RendererQueueOverwriteCount != 0 || Snapshot.Timing.CaptureHistoryEvictionCount != 0 ||
@@ -236,7 +397,11 @@ namespace PulseForgeEditor
 		}
 	} // namespace
 
-	EditorPerformanceAction EditorPerformancePanel::DrawContents(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style) const
+	EditorPerformanceAction EditorPerformancePanel::DrawContents(
+		const EditorPerformanceSnapshot& Snapshot,
+		const EditorResourceInventorySnapshot* Inventory,
+		const PulseForge::SceneRendererResourceCacheStats* RendererResources,
+		EditorStyle& Style) const
 	{
 		EditorPerformanceAction Action;
 
@@ -269,6 +434,10 @@ namespace PulseForgeEditor
 
 		if (ImGui::CollapsingHeader("Resource metrics", ImGuiTreeNodeFlags_DefaultOpen))
 			DrawResourceMetrics(Snapshot, Style);
+		if (ImGui::CollapsingHeader("Resource inventory", ImGuiTreeNodeFlags_DefaultOpen))
+			DrawResourceInventory(Inventory, Style, Action, m_ResourceInventoryFilter.data(), m_ResourceInventoryFilter.size());
+		if (ImGui::CollapsingHeader("Viewport renderer caches", ImGuiTreeNodeFlags_DefaultOpen))
+			DrawRendererCacheInventory(RendererResources, Style);
 		if (ImGui::CollapsingHeader("GPU timings", ImGuiTreeNodeFlags_DefaultOpen))
 			DrawGpuTimings(Snapshot, Style);
 		if (ImGui::CollapsingHeader("CPU and resource events", ImGuiTreeNodeFlags_DefaultOpen))

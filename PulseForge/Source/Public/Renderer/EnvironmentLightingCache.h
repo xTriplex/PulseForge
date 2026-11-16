@@ -4,6 +4,7 @@
 #include "Assets/AssetPreparationService.h"
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Renderer/EnvironmentLighting.h"
+#include "Renderer/AssetCache/AssetCacheInventoryStats.h"
 #include "Renderer/AssetCache/AssetUploadBudget.h"
 #include "Renderer/RenderDevice.h"
 #include "Renderer/EnvironmentLightingTextures.h"
@@ -126,6 +127,7 @@ namespace PulseForge
 		void SetSessionKey(std::string SessionKey);
 		void SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept { return m_Entries.size(); }
+		[[nodiscard]] AssetCacheInventoryStats GetInventoryStats() const noexcept;
 		void Clear() noexcept;
 
 	private:

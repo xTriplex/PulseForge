@@ -63,6 +63,7 @@
 #include "Editor/EditorMainMenuPanel.h"
 #include "Editor/EditorPerformancePanel.h"
 #include "Editor/EditorPerformanceCaptureService.h"
+#include "Editor/EditorResourceInventoryService.h"
 #include "Editor/EditorBuildProfilePanel.h"
 #include "Editor/EditorBuildProfileController.h"
 #include "Editor/EditorViewportCamera.h"
@@ -6265,9 +6266,19 @@ namespace
 		void DrawPerformancePanel()
 		{
 			bool* IsOpen = m_Layout.GetPanelVisibility(PulseForgeEditor::EditorPanel::Performance);
-			if (!IsOpen) return;
+			if (!IsOpen)
+			{
+				m_ResourceInventoryService.Cancel();
+				m_RequestedResourceInventoryProject.clear();
+				return;
+			}
 			if (m_DiagnosticsCaptureSmokeOutput) *IsOpen = true;
-			if (!*IsOpen) return;
+			if (!*IsOpen)
+			{
+				m_ResourceInventoryService.Cancel();
+				m_RequestedResourceInventoryProject.clear();
+				return;
+			}
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DiagnosticsCaptureSmokeOutput) ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
 #endif
@@ -6281,6 +6292,49 @@ namespace
 			const ImVec2 Size = ImGui::GetWindowSize();
 			const bool DockingDomainValid = PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
 				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			const PulseForgeEditor::EditorResourceInventorySnapshot* Inventory = nullptr;
+			if (ContentsVisible && DockingDomainValid && m_Project)
+			{
+				const std::string ProjectIdentity = PulseForgeEditor::GetEditorResourceInventoryProjectIdentity(
+					m_Project->GetRootPath(), m_Project->GetDescription().ID);
+				if (auto Completed = m_ResourceInventoryService.Poll())
+				{
+					if (Completed->ProjectIdentity == ProjectIdentity && Completed->Generation == m_AssetOperationGeneration)
+					{
+						if (Completed->Snapshot)
+							m_CachedResourceInventory = std::move(Completed->Snapshot);
+						else if (!Completed->Error.empty())
+						{
+							PulseForgeEditor::EditorResourceInventorySnapshot Unavailable;
+							Unavailable.ProjectIdentity = ProjectIdentity;
+							Unavailable.Generation = m_AssetOperationGeneration;
+							Unavailable.Entries.push_back({ "project-inventory", "AssetDependencyCatalog", "unavailable", {}, {},
+								0, std::nullopt, PulseForgeEditor::EditorResourceInventoryState::Unavailable, Completed->Error });
+							Unavailable.UnavailableStorageCount = 1;
+							m_CachedResourceInventory = std::move(Unavailable);
+						}
+					}
+				}
+				if (!m_CachedResourceInventory || m_CachedResourceInventory->ProjectIdentity != ProjectIdentity ||
+					m_CachedResourceInventory->Generation != m_AssetOperationGeneration)
+				{
+					if (m_RequestedResourceInventoryProject != ProjectIdentity ||
+						m_RequestedResourceInventoryGeneration != m_AssetOperationGeneration)
+					{
+						m_ResourceInventoryService.RequestRefresh(
+							m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration);
+						m_RequestedResourceInventoryProject = ProjectIdentity;
+						m_RequestedResourceInventoryGeneration = m_AssetOperationGeneration;
+					}
+				}
+				else
+					Inventory = &*m_CachedResourceInventory;
+			}
+			else if (!m_Project)
+			{
+				m_ResourceInventoryService.Cancel();
+				m_RequestedResourceInventoryProject.clear();
+			}
 			PulseForgeEditor::EditorPerformanceSnapshot LiveSnapshot;
 			const PulseForgeEditor::EditorPerformanceSnapshot* Snapshot =
 				m_PerformanceCaptureService.GetPresentationSnapshot();
@@ -6301,8 +6355,11 @@ namespace
 					Snapshot = &LiveSnapshot;
 				}
 			}
+			const auto RendererResources = m_ViewportRenderView.GetResourceCacheStats();
 			const PulseForgeEditor::EditorPerformanceAction Action = ContentsVisible && DockingDomainValid && Snapshot
-				? m_PerformancePanel.DrawContents(*Snapshot, m_EditorStyle) : PulseForgeEditor::EditorPerformanceAction{};
+				? m_PerformancePanel.DrawContents(*Snapshot, Inventory,
+					RendererResources ? &*RendererResources : nullptr, m_EditorStyle)
+				: PulseForgeEditor::EditorPerformanceAction{};
 			ImGui::End();
 			if (m_DiagnosticsCaptureSmokeOutput && !ContentsVisible && !m_DiagnosticsPerformancePanelActivationRequested)
 			{
@@ -6342,6 +6399,12 @@ namespace
 				break;
 			case PulseForgeEditor::EditorPerformanceActionKind::ExportCapture:
 				ExportPerformanceCapture();
+				break;
+			case PulseForgeEditor::EditorPerformanceActionKind::RefreshResourceInventory:
+				m_CachedResourceInventory.reset();
+				m_ResourceInventoryService.Cancel();
+				m_RequestedResourceInventoryProject.clear();
+				SetStatus("Resource inventory will refresh from read-only owner snapshots.");
 				break;
 			case PulseForgeEditor::EditorPerformanceActionKind::None:
 				break;
@@ -10379,6 +10442,10 @@ namespace
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
 		PulseForgeEditor::EditorPerformanceCaptureService m_PerformanceCaptureService;
+		std::optional<PulseForgeEditor::EditorResourceInventorySnapshot> m_CachedResourceInventory;
+		PulseForgeEditor::EditorResourceInventoryService m_ResourceInventoryService;
+		std::string m_RequestedResourceInventoryProject;
+		uint64_t m_RequestedResourceInventoryGeneration = 0;
 		bool m_PerformanceGpuTimingRequested = false;
 		std::chrono::steady_clock::time_point m_PerformanceLastContextRefresh{};
 		std::filesystem::path m_CachedFingerprintProjectPath;

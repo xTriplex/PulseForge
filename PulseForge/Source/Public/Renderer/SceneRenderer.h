@@ -3,6 +3,8 @@
 #include "Assets/AssetPreparationService.h"
 #include "Core/Core.h"
 #include "Renderer/Graphics.h"
+#include "Renderer/AssetCache/AssetCacheInventoryStats.h"
+#include "Renderer/SceneRendererResourceCacheStats.h"
 #include "Renderer/Binding.h"
 #include "Renderer/EnvironmentLightingTextures.h"
 #include "Renderer/RenderDevice.h"
@@ -176,6 +178,14 @@ namespace PulseForge
 			float NearClipPlane,
 			float FarClipPlane,
 			std::span<const UUID> ExcludedEntities);
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		// Validation-only entry point for separating snapshot construction from renderer resource preparation timings.
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshotForValidation(
+			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot)
+		{
+			return PrepareSnapshot(std::move(Snapshot));
+		}
+#endif
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
 		// Begins, clears, renders to, and ends Target during the active renderer frame.
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(
@@ -221,6 +231,10 @@ namespace PulseForge
 			return m_PreparedSnapshot ? m_PreparedSnapshot->Meshes.size() : 0;
 		}
 		[[nodiscard]] AssetPreparationServiceStats GetAssetPreparationStats() const noexcept;
+		// Read-only point-in-time cache accounting. Call on the renderer owner thread.
+#ifndef PF_COOKED_RUNTIME_ONLY
+		[[nodiscard]] SceneRendererResourceCacheStats GetResourceCacheStats() const noexcept;
+#endif
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
 		[[nodiscard]] std::expected<AssetPreparationService::Subscription, AssetPreparationError>
 			EnqueuePreparationForValidation(AssetPreparationService::Processor Processor);

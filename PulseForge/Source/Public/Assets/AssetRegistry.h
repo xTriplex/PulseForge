@@ -61,6 +61,8 @@ namespace PulseForge
 		[[nodiscard]] std::optional<AssetRecord> Find(const AssetID& ID) const;
 		// Returns a copy ordered by project-relative path for deterministic browser and tooling views.
 		[[nodiscard]] std::vector<AssetRecord> GetAssets() const;
+		// Returns the first project-relative paths with bounded retained memory. The registry still scans its records.
+		[[nodiscard]] std::vector<AssetRecord> GetAssets(size_t MaximumCount) const;
 		[[nodiscard]] size_t GetAssetCount() const noexcept { return m_Assets.size(); }
 		[[nodiscard]] AssetSourceByteAccounting GetSourceByteAccounting() const noexcept { return m_SourceByteAccounting; }
 

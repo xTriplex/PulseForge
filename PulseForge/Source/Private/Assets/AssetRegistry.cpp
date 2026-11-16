@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <queue>
 #include <system_error>
 #include <unordered_map>
 
@@ -283,6 +284,37 @@ namespace PulseForge
 		{
 			return First.ProjectRelativePath < Second.ProjectRelativePath;
 		});
+		return Assets;
+	}
+
+	std::vector<AssetRecord> AssetRegistry::GetAssets(size_t MaximumCount) const
+	{
+		if (MaximumCount >= m_Assets.size()) return GetAssets();
+		std::vector<AssetRecord> Assets;
+		if (MaximumCount == 0) return Assets;
+		Assets.reserve(MaximumCount);
+		const auto PathLess = [](const AssetRecord& First, const AssetRecord& Second)
+		{
+			return First.ProjectRelativePath < Second.ProjectRelativePath;
+		};
+		std::priority_queue<AssetRecord, std::vector<AssetRecord>, decltype(PathLess)> LargestPaths(PathLess);
+		for (const auto& [Asset, Record] : m_Assets)
+		{
+			(void)Asset;
+			if (LargestPaths.size() < MaximumCount)
+				LargestPaths.push(Record);
+			else if (PathLess(Record, LargestPaths.top()))
+			{
+				LargestPaths.pop();
+				LargestPaths.push(Record);
+			}
+		}
+		while (!LargestPaths.empty())
+		{
+			Assets.push_back(LargestPaths.top());
+			LargestPaths.pop();
+		}
+		std::sort(Assets.begin(), Assets.end(), PathLess);
 		return Assets;
 	}
 }

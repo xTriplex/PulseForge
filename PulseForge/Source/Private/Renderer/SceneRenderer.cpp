@@ -207,6 +207,14 @@ namespace PulseForge
 
 	struct SceneRenderer::ProjectAssetCaches final
 	{
+		static uint64_t AllocateGeneration() noexcept
+		{
+			static std::atomic<uint64_t> Next{ 1 };
+			uint64_t Generation = Next.fetch_add(1, std::memory_order_relaxed);
+			if (Generation == 0) Generation = Next.fetch_add(1, std::memory_order_relaxed);
+			return Generation;
+		}
+
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		DerivedDataArtifactStore Artifacts;
 		AssetPreparationService Preparation;
@@ -217,6 +225,8 @@ namespace PulseForge
 		std::shared_ptr<const AssetRegistry> Registry;
 #endif
 		std::shared_ptr<const CookedContentProvider> CookedContent;
+		UUID ProjectID;
+		uint64_t Generation = 0;
 		MeshAssetCache Meshes;
 		TextureAssetCache Textures;
 		MaterialAssetCache Materials;
@@ -234,6 +244,7 @@ namespace PulseForge
 			: Artifacts(DerivedDataArtifactStoreOptions{ SourceProject.GetRootPath() / ".pulseforge" / "DerivedData" }),
 			  SessionKey(MakeSessionKey(SourceProject.GetRootPath())),
 			  Registry(std::make_shared<const AssetRegistry>(SourceProject.GetAssetRegistry())),
+			  ProjectID(SourceProject.GetDescription().ID), Generation(AllocateGeneration()),
 			  Meshes(Runtime, SourceProject.GetRootPath(), Registry, Preparation, &UploadBudget,
 				  Artifacts, SessionKey,
 				  Runtime.GetDiagnosticRecorder()),
@@ -250,6 +261,7 @@ namespace PulseForge
 			: Artifacts(DerivedDataArtifactStoreOptions{ .Enabled = false }),
 			  SessionKey(Content ? Content->GetProjectID().ToString() : std::string{}),
 			  Registry(std::make_shared<const AssetRegistry>()), CookedContent(std::move(Content)),
+			  ProjectID(CookedContent ? CookedContent->GetProjectID() : UUID{}), Generation(AllocateGeneration()),
 			  Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
 			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
 			  Materials(CookedContent, Runtime.GetDiagnosticRecorder()),
@@ -274,6 +286,7 @@ namespace PulseForge
 			Textures.SetRegistrySnapshot(Registry);
 			EnvironmentLighting.SetRegistrySnapshot(Registry);
 			SessionKey = MakeSessionKey(Artifacts.GetOptions().Root.parent_path().parent_path());
+			Generation = AllocateGeneration();
 			Meshes.SetSessionKey(SessionKey);
 			Textures.SetSessionKey(SessionKey);
 			EnvironmentLighting.SetSessionKey(SessionKey);
@@ -281,7 +294,8 @@ namespace PulseForge
 		}
 #else
 		ProjectAssetCaches(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content)
-			: CookedContent(std::move(Content)), Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
+			: CookedContent(std::move(Content)), ProjectID(CookedContent ? CookedContent->GetProjectID() : UUID{}),
+			  Generation(AllocateGeneration()), Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
 			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()), Materials(CookedContent, Runtime.GetDiagnosticRecorder()),
 			  EnvironmentLighting(Runtime, CookedContent, Runtime.GetDiagnosticRecorder())
 		{
@@ -335,6 +349,23 @@ namespace PulseForge
 		return m_ProjectAssetCaches->Preparation.GetStats();
 #endif
 	}
+
+#ifndef PF_COOKED_RUNTIME_ONLY
+	SceneRendererResourceCacheStats SceneRenderer::GetResourceCacheStats() const noexcept
+	{
+		SceneRendererResourceCacheStats Stats;
+		if (!m_ProjectAssetCaches) return Stats;
+		Stats.ProjectID = m_ProjectAssetCaches->ProjectID;
+		Stats.Generation = m_ProjectAssetCaches->Generation;
+		Stats.Meshes = m_ProjectAssetCaches->Meshes.GetInventoryStats();
+		Stats.Textures = m_ProjectAssetCaches->Textures.GetInventoryStats();
+		Stats.EnvironmentLighting = m_ProjectAssetCaches->EnvironmentLighting.GetInventoryStats();
+		Stats.MaterialDescriptions = m_ProjectAssetCaches->Materials.GetLoadedCount();
+		Stats.GraphMaterialResources = m_GraphMaterialResources.size();
+		Stats.SkeletalMeshResources = m_SkeletalMeshResources.size();
+		return Stats;
+	}
+#endif
 
 #if defined(PF_DEBUG)
 	const Texture* SceneRenderer::GetHdrColorTextureForValidation() const noexcept

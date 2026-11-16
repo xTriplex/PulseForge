@@ -3,6 +3,7 @@
 #include "Assets/AssetPreparationService.h"
 #include "Assets/AssetRegistry.h"
 #include "Renderer/AssetCache/AssetUploadBudget.h"
+#include "Renderer/AssetCache/AssetCacheInventoryStats.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/RenderDevice.h"
 
@@ -87,6 +88,7 @@ namespace PulseForge
 		[[nodiscard]] bool HasPendingWork() const noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
+		[[nodiscard]] AssetCacheInventoryStats GetInventoryStats() const noexcept;
 
 	private:
 		[[nodiscard]] std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> GetOrLoadInternal(

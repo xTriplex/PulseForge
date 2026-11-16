@@ -45,6 +45,8 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorPrefabInstanceController.cpp
 		PulseForgeEditor/Source/Private/EditorPrefabInstancePanel.cpp
 		PulseForgeEditor/Source/Private/EditorPerformancePanel.cpp
+		PulseForgeEditor/Source/Private/EditorResourceInventory.cpp
+		PulseForgeEditor/Source/Private/EditorResourceInventoryService.cpp
 		PulseForgeEditor/Source/Private/EditorBuildProfilePanel.cpp
 		PulseForgeEditor/Source/Private/EditorBuildProfileController.cpp
 		PulseForgeEditor/Source/Private/EditorPerformanceCaptureService.cpp

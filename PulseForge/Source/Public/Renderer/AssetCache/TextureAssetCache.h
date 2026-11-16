@@ -3,6 +3,7 @@
 #include "Assets/AssetPreparationService.h"
 #include "Assets/AssetRegistry.h"
 #include "Renderer/AssetCache/AssetUploadBudget.h"
+#include "Renderer/AssetCache/AssetCacheInventoryStats.h"
 #include "Renderer/RenderDevice.h"
 #include "Renderer/Texture.h"
 
@@ -91,6 +92,7 @@ namespace PulseForge
 		void SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
+		[[nodiscard]] AssetCacheInventoryStats GetInventoryStats() const noexcept;
 
 	private:
 		[[nodiscard]] std::expected<std::reference_wrapper<const Texture>, TextureAssetError> GetOrLoadInternal(

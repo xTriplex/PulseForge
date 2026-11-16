@@ -4,6 +4,7 @@
 #include "Assets/AssetID.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/RenderDevice.h"
+#include "Renderer/SceneRendererResourceCacheStats.h"
 #include "Scene/UUID.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorTextureRegistry.h"
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +69,7 @@ namespace PulseForgeEditor
 		{
 			return m_AssetPreparationStats;
 		}
+		[[nodiscard]] std::optional<PulseForge::SceneRendererResourceCacheStats> GetResourceCacheStats() const noexcept;
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept;
 		[[nodiscard]] const glm::mat4& GetViewProjection() const noexcept { return m_ViewProjection; }
 		[[nodiscard]] const std::string& GetTargetError() const noexcept { return m_TargetError; }

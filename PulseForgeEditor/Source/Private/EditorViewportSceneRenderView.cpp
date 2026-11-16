@@ -269,6 +269,12 @@ namespace PulseForgeEditor
 		ClearTargetError();
 	}
 
+	std::optional<PulseForge::SceneRendererResourceCacheStats> EditorViewportSceneRenderView::GetResourceCacheStats() const noexcept
+	{
+		if (!m_SceneRenderer) return std::nullopt;
+		return m_SceneRenderer->GetResourceCacheStats();
+	}
+
 	bool EditorViewportSceneRenderView::HasPreparedEnvironmentLighting() const noexcept
 	{
 		return m_SceneRenderer && m_SceneRenderer->HasPreparedEnvironmentLighting();
