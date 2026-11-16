@@ -1158,6 +1158,10 @@ namespace
 #else
 		ExportRequest.Profile.Architecture = ExportTargetArchitecture::X64;
 #endif
+		const std::filesystem::path TemplateDescriptorPath = std::filesystem::u8path(PF_G29_PLAYER_TEMPLATE_DESCRIPTOR);
+		auto TemplateDescriptor = LoadExportTemplateDescriptor(TemplateDescriptorPath);
+		PF_CHECK(Tests, TemplateDescriptor.has_value());
+		if (!TemplateDescriptor) return;
 		auto TestBuildConfiguration = ParseCookedBuildConfiguration(PF_G29_TEST_BUILD_CONFIGURATION);
 		PF_CHECK(Tests, TestBuildConfiguration.has_value());
 		if (!TestBuildConfiguration) return;
@@ -1168,7 +1172,7 @@ namespace
 		ExportRequest.Profile.DefaultOutputPath = "Build/Exports/G29ReferenceGame";
 		ExportRequest.Profile.Window = { 960, 540 };
 		ExportRequest.TemplateRoot = std::filesystem::u8path(PF_G29_PLAYER_TEMPLATE_ROOT);
-		ExportRequest.TemplateDescriptor = std::filesystem::u8path(PF_G29_PLAYER_TEMPLATE_DESCRIPTOR);
+		ExportRequest.TemplateDescriptor = TemplateDescriptorPath;
 		ExportRequest.OutputOverride = PlayerPackage;
 		AssetExportService Exporter;
 		const auto ExportStarted = Exporter.Start(std::move(ExportRequest));
@@ -1196,7 +1200,7 @@ namespace
 				" message=" << (ExportSnapshot.Error ? ExportSnapshot.Error->Message : ExportSnapshot.Log) << std::endl;
 		PF_CHECK(Tests, !ExportSnapshot.Running && ExportSnapshot.Phase == AssetExportPhase::Complete &&
 			ExportSnapshot.PublishedOutput == PlayerPackage);
-		PF_CHECK(Tests, std::filesystem::is_regular_file(PlayerPackage / "PulseForgeCookedGame.exe") &&
+		PF_CHECK(Tests, std::filesystem::is_regular_file(PlayerPackage / std::filesystem::u8path(TemplateDescriptor->Entrypoint)) &&
 			std::filesystem::is_regular_file(PlayerPackage / "Content" / "manifest.pfmanifest"));
 #endif
 		std::filesystem::remove_all(SourceRoot, Error);
