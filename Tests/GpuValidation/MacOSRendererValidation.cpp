@@ -3,6 +3,17 @@
 #include "Assets/MaterialAssetService.h"
 #include "Assets/MaterialGraphCompiler.h"
 #include "Assets/SceneAssetService.h"
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+#include "Assets/AssetCookService.h"
+#include "Assets/CookedAssetCatalog.h"
+#include "Editor/EditorAssetSelector.h"
+#include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorMaterialDetailsPanel.h"
+#include "Editor/EditorMaterialDocumentEditor.h"
+#include "Editor/EditorMaterialDraftController.h"
+#include "Editor/EditorStyle.h"
+#include "Runtime/CookedContentProvider.h"
+#endif
 #include "Core/Application.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
@@ -126,13 +137,29 @@ namespace
 				PF_INFO("MACOS_RENDERER_WINDOW_SCALE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}", LogicalExtent.first,
 					LogicalExtent.second, m_InitialExtent.first, m_InitialExtent.second, ContentScale.first, ContentScale.second);
 
-				auto OpenedProject = PulseForge::Project::Open(std::filesystem::path(PF_MACOS_RENDERER_PROJECT_FILE));
+				std::filesystem::path ProjectPath(PF_MACOS_RENDERER_PROJECT_FILE);
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+				auto FixtureID = PulseForge::UUID::Generate();
+				if (!FixtureID) throw std::runtime_error("Could not allocate a unique cooked graph renderer fixture identity");
+				m_TestProjectRoot = std::filesystem::temp_directory_path() /
+					("PulseForge-MacOS-CookedGraph-" + FixtureID->ToString());
+				const std::filesystem::path SourceProjectRoot = ProjectPath.parent_path();
+				const std::filesystem::path CopiedProjectRoot = m_TestProjectRoot / SourceProjectRoot.filename();
+				std::error_code CopyError;
+				std::filesystem::create_directories(m_TestProjectRoot, CopyError);
+				if (CopyError) throw std::runtime_error("Could not create the isolated PBR renderer fixture root: " + CopyError.message());
+				std::filesystem::copy(SourceProjectRoot, CopiedProjectRoot, std::filesystem::copy_options::recursive, CopyError);
+				if (CopyError) throw std::runtime_error("Could not isolate the PBR renderer fixture project: " + CopyError.message());
+				ProjectPath = CopiedProjectRoot / ProjectPath.filename();
+#endif
+				auto OpenedProject = PulseForge::Project::Open(ProjectPath);
 				if (!OpenedProject) throw std::runtime_error("Could not open the PBR validation project: " + OpenedProject.error().Message);
 				m_Project.emplace(std::move(*OpenedProject));
 				if (!m_Project->GetDescription().StartScene)
 					throw std::runtime_error("The PBR validation project has no startup scene");
+				m_Scene = std::make_unique<PulseForge::Scene>();
 				const auto Loaded = PulseForge::SceneAssetService::Load(
-					*m_Project->GetDescription().StartScene, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), m_Scene);
+					*m_Project->GetDescription().StartScene, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *m_Scene);
 				if (!Loaded) throw std::runtime_error("Could not load the PBR startup scene: " + Loaded.error().Message);
 				const char* TestMode = std::getenv("PULSEFORGE_MACOS_RENDERER_TEST_MODE");
 				if (!TestMode || std::string_view(TestMode) == "normal") PrepareGraphMaterialEquivalence();
@@ -141,7 +168,7 @@ namespace
 					if (std::string_view(TestMode) == "suppress-geometry")
 					{
 						size_t RemovedMeshes = 0;
-						for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+						for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
 						{
 							auto MeshRenderer = Entity.GetMeshRenderer();
 							if (!MeshRenderer)
@@ -217,7 +244,23 @@ namespace
 					PF_INFO("MACOS_RENDERER_INITIAL_OUTPUT=PASS; extent={}x{}; geometry_draws={}; written_depth_pixels={}; shadow_depth_pixels={}",
 						m_InitialExtent.first, m_InitialExtent.second, m_CapturedGeometryDraws, m_CapturedSceneDepthPixels,
 						m_CapturedShadowDepthPixels);
-					if (!m_GraphValidationMaterial || !m_GraphValidationProduct)
+					if (!m_GraphValidationMaterial)
+					{
+						Fail("The fixed-PBR baseline completed without a graph-material asset identity");
+						return;
+					}
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+					try
+					{
+						CookAndActivateSavedGraphMaterial();
+					}
+					catch (const std::exception& Exception)
+					{
+						Fail(std::string("Could not create the saved-source cooked graph renderer fixture: ") + Exception.what());
+						return;
+					}
+#else
+					if (!m_GraphValidationProduct)
 					{
 						Fail("The fixed-PBR baseline completed without a prepared graph-material equivalence fixture");
 						return;
@@ -228,11 +271,17 @@ namespace
 						Fail("Could not install the graph-material readback equivalence fixture: " + Override.error().Message);
 						return;
 					}
+#endif
 					m_Phase = ValidationPhase::GraphMaterialFrame;
 					return;
 				}
 				if (m_Phase == ValidationPhase::GraphMaterialFrame)
 				{
+					if (!m_CookedGraphMaterialDrawObserved)
+					{
+						Fail("Cooked graph material renderer branch did not submit before readback acceptance");
+						return;
+					}
 					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
 						m_FixedMaterialBaseline, m_CapturedColor);
 					if (ChangedPixels != 0)
@@ -242,6 +291,11 @@ namespace
 					}
 					PF_INFO("MACOS_GRAPH_MATERIAL_FIXED_PBR_EQUIVALENCE=PASS; changed_pixels={}; extent={}x{}",
 						ChangedPixels, m_CapturedColor.Width, m_CapturedColor.Height);
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+					PF_INFO("MACOS_COOKED_GRAPH_MATERIAL_RENDER=PASS; asset_id={}; graph_material_resources={}; indexed_draws={}; readback_pixels={}",
+						m_GraphValidationMaterial->ToString(), m_SceneRenderer->GetResourceCacheStats().GraphMaterialResources,
+						m_CapturedGeometryDraws, ChangedPixels);
+#endif
 					if (!m_SkinnedValidationEntity)
 					{
 						Fail("The renderer fixture did not create its skeletal validation entity");
@@ -249,7 +303,7 @@ namespace
 					}
 					auto Pose = MakeBindPose();
 					Pose[1][13] += 0.65f;
-					if (auto Updated = m_Scene.SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), std::move(Pose)); !Updated)
+					if (auto Updated = m_Scene->SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), std::move(Pose)); !Updated)
 					{
 						Fail("Could not update the runtime skeletal validation pose: " + Updated.error().Message);
 						return;
@@ -358,7 +412,7 @@ namespace
 				const auto Extent = App.GetWindow().GetFramebufferSize();
 				if (Extent.first == 0 || Extent.second == 0) return;
 				const auto Prepared = m_SceneRenderer->PrepareScene(
-					m_Scene, static_cast<float>(Extent.first) / static_cast<float>(Extent.second));
+					*m_Scene, static_cast<float>(Extent.first) / static_cast<float>(Extent.second));
 				if (!Prepared)
 				{
 					Fail("Could not prepare the PBR scene: " + Prepared.error().Message);
@@ -412,6 +466,18 @@ namespace
 					Fail("Could not tone-map the PBR scene to its readback target: " + Rendered.error().Message);
 					return;
 				}
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+				if (m_Phase == ValidationPhase::GraphMaterialFrame)
+				{
+					const PulseForge::SceneRendererResourceCacheStats ResourceStats = m_SceneRenderer->GetResourceCacheStats();
+					if (ResourceStats.GraphMaterialResources == 0 || Rendered->GeometryDrawCount == 0)
+					{
+						Fail("The cooked-provider render submitted no graph material resource and indexed geometry draw");
+						return;
+					}
+					m_CookedGraphMaterialDrawObserved = true;
+				}
+#endif
 				if (Rendered->GeometryDrawCount == 0 ||
 					(Rendered->SpotlightShadowPassCount == 0 && Rendered->PointShadowPassCount == 0 &&
 						!m_SceneRenderer->GetDirectionalShadowTextureForValidation(0)))
@@ -494,11 +560,30 @@ namespace
 			}
 			m_OutputTarget.reset();
 			m_SceneRenderer.reset();
+			m_Scene.reset();
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+			m_GraphContent.reset();
+#endif
 			m_Project.reset();
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+			if (!m_TestProjectRoot.empty())
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(m_TestProjectRoot, CleanupError);
+				if (CleanupError)
+					PF_ERROR("Could not clean isolated cooked graph renderer fixture {}: {}",
+						m_TestProjectRoot.string(), CleanupError.message());
+				else
+					m_TestProjectRoot.clear();
+			}
+#endif
 			m_CapturedHdrColor = nullptr;
 			m_CapturedHdrDepth = nullptr;
 			m_CapturedShadowDepth = nullptr;
-			m_ShutdownComplete = !m_ImGuiRenderer && !m_ImGuiContext && !m_OutputTarget && !m_SceneRenderer && !m_Project;
+			m_ShutdownComplete = !m_ImGuiRenderer && !m_ImGuiContext && !m_OutputTarget && !m_SceneRenderer && !m_Scene && !m_Project;
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+			m_ShutdownComplete = m_ShutdownComplete && !m_GraphContent && m_TestProjectRoot.empty();
+#endif
 			if (m_ValidationSucceeded && !m_ShutdownComplete)
 				Fail("Renderer fixture resources remained alive after explicit orderly shutdown");
 		}
@@ -521,7 +606,7 @@ namespace
 
 		void PrepareGraphMaterialEquivalence()
 		{
-			for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
 			{
 				auto MeshRenderer = Entity.GetMeshRenderer();
 				if (!MeshRenderer)
@@ -541,6 +626,7 @@ namespace
 			if (!m_GraphValidationMaterial)
 				throw std::runtime_error("The PBR scene has no textured mesh material for graph equivalence");
 
+#if !defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
 			PulseForge::MaterialGraphSource Source;
 			Source.GraphID = PulseForge::UUID(0x475055, 1);
 			Source.Nodes = {
@@ -571,7 +657,153 @@ namespace
 				Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
 			Product.SpirV = std::move(Compiled->SpirV);
 			m_GraphValidationProduct.emplace(std::move(Product));
+#endif
 		}
+
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+		void SaveGraphThroughMaterialDocument()
+		{
+			using namespace PulseForge;
+			using namespace PulseForgeEditor;
+			const auto MaterialRecord = m_Project->GetAssetRegistry().Find(*m_GraphValidationMaterial);
+			if (!MaterialRecord) throw std::runtime_error("The selected PBR material disappeared from the isolated project copy");
+			EditorDocumentManager Documents;
+			const EditorDocumentIdentity Identity{ m_Project->GetDescription().ID, *m_GraphValidationMaterial,
+				EditorDocumentKind::Material };
+			auto Opened = Documents.Open(Identity, MaterialRecord->ProjectRelativePath,
+				MaterialRecord->ProjectRelativePath.filename().string(), EditorDocumentOpenPreference::MainDocumentStrip);
+			if (!Opened) throw std::runtime_error("Could not open the PBR material document: " + Opened.error());
+			EditorMaterialDraftController Drafts;
+			auto Loaded = Drafts.LoadDraft(*m_Project, *m_GraphValidationMaterial);
+			if (!Loaded) throw std::runtime_error("Could not load the PBR Material document draft: " + Loaded.error());
+			struct MaterialActions final : EditorMaterialDetailsActionSink
+			{
+				Project& SourceProject;
+				EditorMaterialDraftController& Drafts;
+				EditorDocumentManager& Documents;
+				MaterialActions(Project& ProjectValue, EditorMaterialDraftController& DraftsValue,
+					EditorDocumentManager& DocumentsValue)
+					: SourceProject(ProjectValue), Drafts(DraftsValue), Documents(DocumentsValue) {}
+				bool SaveMaterialFromDetails(const AssetID& Asset) override
+					{ return Drafts.Save(SourceProject, Asset, Documents).has_value(); }
+				bool RevertMaterialFromDetails(const AssetID& Asset) override
+					{ return Drafts.Reload(SourceProject, Asset, Documents).has_value(); }
+				void MaterialDetailsDraftEdited(const UUID& ProjectID, const AssetID& Asset) override
+				{
+					const EditorDocumentIdentity Document{ ProjectID, Asset, EditorDocumentKind::Material };
+					if (Documents.Find(Document)) (void)Documents.MarkEdited(Document);
+				}
+			} Actions{ *m_Project, Drafts, Documents };
+			EditorDocumentEditorRegistry Registry;
+			EditorMaterialDetailsPanel MaterialPanel;
+			EditorAssetSelector AssetSelector;
+			EditorStyle Style;
+			EditorMaterialDocumentEditor MaterialEditor(Documents, Registry, Drafts, MaterialPanel, AssetSelector, Style, Actions,
+				[this] { return m_Project ? &*m_Project : nullptr; },
+				[this] { return m_Project ? m_Project->GetAssetRegistry().GetAssets() : std::vector<AssetRecord>{}; });
+			if (auto Registered = MaterialEditor.Register(); !Registered)
+				throw std::runtime_error("Could not register the production Material document editor: " + Registered.error());
+			auto* Session = Documents.Find(Identity);
+			const EditorDocumentEditorContext Context{ Identity, m_Project->GetRootPath(), MaterialRecord->ProjectRelativePath,
+				MaterialRecord->ProjectRelativePath.filename().string(), &m_Project->GetAssetRegistry() };
+			if (!Session || !MaterialEditor.Open(*Session, Context))
+				throw std::runtime_error("Could not initialize the registered Material document editor");
+			auto* Draft = Drafts.FindDraft(*m_Project, *m_GraphValidationMaterial);
+			if (!Draft) throw std::runtime_error("The registered Material document editor did not create its draft");
+			MaterialGraphSource Graph;
+			Graph.GraphID = UUID(0x475055, 1);
+			Graph.Nodes = {
+				{ UUID(0x475055, 2), MaterialGraphNodeKind::UV0, 0.0f, {} },
+				{ UUID(0x475055, 3), MaterialGraphNodeKind::BaseColorTextureSample, 0.0f, {} },
+				{ UUID(0x475055, 4), MaterialGraphNodeKind::PbrOutput, 0.0f, {} },
+				{ UUID(0x475055, 7), MaterialGraphNodeKind::FloatConstant, m_GraphValidationDescription.MetallicFactor },
+				{ UUID(0x475055, 8), MaterialGraphNodeKind::FloatConstant, m_GraphValidationDescription.RoughnessFactor }
+			};
+			Graph.Connections = {
+				{ UUID(0x475055, 5), UUID(0x475055, 2), UUID(0x475055, 3), 0 },
+				{ UUID(0x475055, 6), UUID(0x475055, 3), UUID(0x475055, 4), 0 },
+				{ UUID(0x475055, 9), UUID(0x475055, 7), UUID(0x475055, 4), 1 },
+				{ UUID(0x475055, 10), UUID(0x475055, 8), UUID(0x475055, 4), 2 }
+			};
+			if (!ValidateMaterialGraphSource(Graph).IsValid())
+				throw std::runtime_error("The saved graph fixture failed Material schema validation");
+			const MaterialAssetDesc Before = *Draft;
+			if (!Drafts.BeginEdit(*m_Project, *m_GraphValidationMaterial, Before))
+				throw std::runtime_error("The Material draft owner did not begin the graph edit transaction");
+			Draft->Graph = std::move(Graph);
+			Actions.MaterialDetailsDraftEdited(m_Project->GetDescription().ID, *m_GraphValidationMaterial);
+			Drafts.FinalizePendingEdits(false);
+			if (!Registry.Save(*Session)) throw std::runtime_error("The registered Material document editor failed to save the graph draft");
+			const auto SavedSource = MaterialAssetService::LoadSourceSnapshot(
+				*m_GraphValidationMaterial, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!SavedSource || !SavedSource->Description.Graph ||
+				SavedSource->Description.Graph->GraphID != UUID(0x475055, 1) ||
+				SavedSource->Description.BaseColorTexture != m_GraphValidationDescription.BaseColorTexture)
+				throw std::runtime_error("The saved Material source no longer matches the edited graph or stable asset reference");
+			m_GraphValidationDescription = SavedSource->Description;
+		}
+
+		void CookAndActivateSavedGraphMaterial()
+		{
+			using namespace PulseForge;
+			SaveGraphThroughMaterialDocument();
+			if (!m_Project->GetDescription().StartScene)
+				throw std::runtime_error("The isolated PBR project has no startup scene for the graph cook");
+			const auto SavedSource = MaterialAssetService::LoadSourceSnapshot(
+				*m_GraphValidationMaterial, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!SavedSource || !SavedSource->Description.Graph)
+				throw std::runtime_error("The saved Material graph source could not be reloaded for cooking");
+			MaterialGraphCompileRequest CompileRequest;
+			CompileRequest.Source = *SavedSource->Description.Graph;
+			CompileRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
+			auto ExpectedProduct = MaterialGraphCompiler::Compile(CompileRequest);
+			if (!ExpectedProduct) throw std::runtime_error("The saved graph failed independent host validation: " +
+				ExpectedProduct.error().Message);
+			auto SourceSnapshot = AssetDependencyCatalogBuilder::Build(
+				m_Project->GetRootPath(), m_Project->GetDescription().ID, 1);
+			if (!SourceSnapshot) throw std::runtime_error("Could not snapshot the edited PBR project for cooking: " +
+				SourceSnapshot.error().Message);
+#if defined(_WIN32)
+			const CookedAssetCompatibility Compatibility{ "Windows", "Vulkan", "pulseforge-runtime-v1" };
+#elif defined(__APPLE__)
+			const CookedAssetCompatibility Compatibility{ "macOS", "Vulkan", "pulseforge-runtime-v1" };
+#else
+			const CookedAssetCompatibility Compatibility{ "Linux", "Vulkan", "pulseforge-runtime-v1" };
+#endif
+			const std::filesystem::path CookRoot = m_TestProjectRoot / "CookedContent";
+			AssetCookRequest Request{ *SourceSnapshot, m_Project->GetFilePath(), *m_Project->GetDescription().StartScene,
+				{ *m_Project->GetDescription().StartScene, *m_GraphValidationMaterial }, Compatibility, CookRoot };
+			auto Plan = AssetCookService::Plan(Request);
+			if (!Plan) throw std::runtime_error("Could not plan the edited PBR graph cook: " + Plan.error().Message);
+			auto Cooked = AssetCookService::Cook(*Plan);
+			if (!Cooked) throw std::runtime_error("Could not cook the edited PBR graph: " + Cooked.error().Message);
+			auto OpenedContent = CookedContentProvider::Open(CookRoot, Compatibility);
+			if (!OpenedContent) throw std::runtime_error("Could not open the graph cook from the cooked-only provider: " +
+				OpenedContent.error().Message);
+			if (!(*OpenedContent)->FindGraphMaterial(*m_GraphValidationMaterial))
+				throw std::runtime_error("The cooked catalog did not retain the authored Material asset ID as a graph product");
+			auto Product = (*OpenedContent)->LoadGraphMaterialProduct(*m_GraphValidationMaterial);
+			uint32_t SpirVMagic = 0;
+			if (Product && Product->SpirV.size() >= sizeof(SpirVMagic))
+				std::memcpy(&SpirVMagic, Product->SpirV.data(), sizeof(SpirVMagic));
+			if (!Product || Product->RecipeFingerprint != ExpectedProduct->RecipeFingerprint || SpirVMagic != 0x07230203u)
+				throw std::runtime_error("The cooked provider graph product differs from the validated saved source recipe");
+			PF_INFO("MACOS_GRAPH_MATERIAL_COOKED_SOURCE=PASS; asset_id={}; recipe={}; spirv_bytes={}",
+				m_GraphValidationMaterial->ToString(), Product->RecipeFingerprint, Product->SpirV.size());
+			m_GraphValidationProduct = std::move(*Product);
+			auto CookedScene = (*OpenedContent)->LoadScene(*m_Project->GetDescription().StartScene);
+			if (!CookedScene) throw std::runtime_error("The cooked PBR startup scene could not be loaded: " + CookedScene.error().Message);
+			m_Scene = std::move(*CookedScene);
+			m_GraphContent = *OpenedContent;
+			auto Renderer = SceneRenderer::Create(Application::Get(), m_GraphContent,
+				std::filesystem::path(PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY));
+			if (!Renderer) throw std::runtime_error("Could not create the cooked-provider SceneRenderer: " + Renderer.error().Message);
+			m_SceneRenderer = std::move(*Renderer);
+			if (!m_SceneRenderer->SetToneMappingSettings({ 0.0f }))
+				throw std::runtime_error("Cooked-provider renderer rejected the baseline HDR exposure");
+			PrepareSkinnedRendererFixture();
+		}
+#endif
 
 		static std::array<float, 16> IdentityTransform()
 		{
@@ -598,6 +830,7 @@ namespace
 		{
 			if (!m_GraphValidationMaterial || !m_GraphValidationSourceMesh)
 				throw std::runtime_error("The graph material fixture did not retain its source mesh identity");
+			m_InitialSceneMeshCount = 0;
 
 			PulseForge::ImportedGltfSkeletalMesh Product;
 			Product.Geometry.Name = "G26 dynamic skinned renderer validation";
@@ -626,7 +859,7 @@ namespace
 					*m_GraphValidationSourceMesh, ProductKey, std::make_shared<const PulseForge::ImportedGltfSkeletalMesh>(std::move(Product))); !Seeded)
 				throw std::runtime_error("Could not seed the skeletal renderer fixture: " + Seeded.error().Message);
 
-			for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
 			{
 				auto MeshRenderer = Entity.GetMeshRenderer();
 				if (!MeshRenderer) throw std::runtime_error("Could not count authored meshes for the skeletal fixture");
@@ -634,7 +867,7 @@ namespace
 			}
 			glm::mat4 CameraWorld(1.0f);
 			bool FoundPrimaryCamera = false;
-			for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
 			{
 				auto Camera = Entity.GetCamera();
 				if (!Camera || !Camera->has_value() || !(**Camera).IsPrimary) continue;
@@ -650,7 +883,7 @@ namespace
 			Transform.Rotation = CameraRotation;
 			Transform.Translation = glm::vec3(CameraWorld[3]) + CameraRotation * glm::vec3(0.0f, 0.0f, -3.0f);
 			Transform.Scale = { -1.0f, 1.0f, 1.0f };
-			auto Created = m_Scene.CreateEntity("G26 skeletal renderer validation");
+			auto Created = m_Scene->CreateEntity("G26 skeletal renderer validation");
 			if (!Created) throw std::runtime_error("Could not create the skeletal renderer fixture entity: " + Created.error().Message);
 			m_SkinnedValidationEntity = *Created;
 			if (auto Set = m_SkinnedValidationEntity->SetTransform(Transform); !Set)
@@ -658,7 +891,7 @@ namespace
 			if (auto Set = m_SkinnedValidationEntity->SetMeshRenderer({
 					*m_GraphValidationSourceMesh, m_GraphValidationMaterial, std::string(ProductKey), std::nullopt }); !Set)
 				throw std::runtime_error("Could not assign the skeletal renderer fixture: " + Set.error().Message);
-			if (auto Set = m_Scene.SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), MakeBindPose()); !Set)
+			if (auto Set = m_Scene->SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), MakeBindPose()); !Set)
 				throw std::runtime_error("Could not publish the skeletal renderer bind pose: " + Set.error().Message);
 		}
 
@@ -849,7 +1082,12 @@ namespace
 		ImGuiContext* m_ImGuiContext = nullptr;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		std::optional<PulseForge::Project> m_Project;
-		PulseForge::Scene m_Scene;
+#if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+		std::filesystem::path m_TestProjectRoot;
+		std::shared_ptr<const PulseForge::CookedContentProvider> m_GraphContent;
+		bool m_CookedGraphMaterialDrawObserved = false;
+#endif
+		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		std::optional<PulseForge::AssetID> m_GraphValidationMaterial;
 		std::optional<PulseForge::AssetID> m_GraphValidationSourceMesh;

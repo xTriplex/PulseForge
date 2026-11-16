@@ -89,9 +89,193 @@ def package_tree_fingerprint(package_tree: dict[str, str]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _unavailable(reason: str) -> dict[str, str]:
+    return {"status": "unavailable", "reason": reason}
+
+
+def capture_selected_renderer_identity(output: str, backend: str, required: bool = False) -> dict[str, str]:
+    if backend != "Vulkan":
+        return _unavailable(f"runtime does not report selected {backend} device and driver identity")
+    match = re.search(r"Selected Vulkan GPU: (.*?) \(API (.*?), driver (.*?), maxBoundDescriptorSets", output)
+    if not match:
+        if required:
+            raise RuntimeError(
+                "release evidence requires the selected Vulkan GPU/API/driver record from the launched Player output")
+        return _unavailable("the cooked Player output did not contain its selected Vulkan GPU record")
+    return {
+        "status": "observed",
+        "backend": backend,
+        "deviceName": match.group(1).strip(),
+        "apiVersion": match.group(2).strip(),
+        "driverVersion": match.group(3).strip(),
+    }
+
+
+def capture_selected_renderer_identity_from_log(log: Path, backend: str, required: bool = False) -> dict[str, str]:
+    if backend != "Vulkan":
+        return _unavailable(f"runtime does not report selected {backend} device and driver identity")
+    if log.is_symlink() or not log.is_file():
+        if required:
+            raise RuntimeError(f"release evidence requires the retained Player log for Vulkan device identity: {log}")
+        return _unavailable("the retained Player log is missing or linked")
+
+    marker = b"Selected Vulkan GPU:"
+    carry = b""
+    try:
+        with log.open("rb") as stream:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                data = carry + chunk
+                marker_offset = data.find(marker)
+                if marker_offset >= 0:
+                    record = data[marker_offset:].decode("utf-8", errors="replace")
+                    identity = capture_selected_renderer_identity(record, backend)
+                    if identity["status"] == "observed":
+                        return identity
+                    if "\n" in record or len(record) > 64 * 1024:
+                        break
+                    carry = data[marker_offset:]
+                else:
+                    carry = data[-(len(marker) - 1):]
+    except OSError as error:
+        if required:
+            raise RuntimeError(f"could not read the retained Player log for Vulkan device identity: {error}") from error
+        return _unavailable(f"could not read the retained Player log: {error}")
+
+    if required:
+        raise RuntimeError(
+            f"release evidence requires the selected Vulkan GPU/API/driver record in the retained Player log: {log}")
+    return _unavailable("the retained Player log did not contain a complete selected Vulkan GPU record")
+
+
+def capture_vulkan_sdk_identity(environment: dict[str, str] | None = None) -> dict[str, str]:
+    selected_environment = os.environ if environment is None else environment
+    sdk_value = selected_environment.get("VULKAN_SDK", "").strip()
+    if not sdk_value:
+        return _unavailable("VULKAN_SDK was not set in the acceptance process environment")
+    sdk_root = Path(sdk_value).expanduser()
+    if not sdk_root.is_dir():
+        return _unavailable("VULKAN_SDK was set but did not identify an accessible directory")
+    resolved_sdk_root = sdk_root.resolve(strict=True)
+    for version_file in (sdk_root / "version.txt", sdk_root / "version.json"):
+        if not version_file.is_file() or version_file.is_symlink():
+            continue
+        try:
+            contents = version_file.read_text(encoding="utf-8", errors="replace").strip()
+            if version_file.suffix.lower() == ".json":
+                parsed = json.loads(contents)
+                version = parsed.get("version") if isinstance(parsed, dict) else None
+                if isinstance(version, (str, int, float)) and str(version).strip():
+                    return {"status": "observed", "root": str(resolved_sdk_root), "version": str(version),
+                            "versionSource": version_file.name}
+            elif contents:
+                return {"status": "observed", "root": str(resolved_sdk_root), "version": contents,
+                        "versionSource": version_file.name}
+        except (OSError, json.JSONDecodeError):
+            continue
+    if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", resolved_sdk_root.name):
+        return {"status": "observed", "root": str(resolved_sdk_root), "version": resolved_sdk_root.name,
+                "versionSource": "rootDirectoryName"}
+    return {"status": "observed", "root": str(resolved_sdk_root),
+            "versionStatus": "unavailable", "versionReason": "SDK root has no readable version.txt or version.json"}
+
+
+def _find_dxc(build_root: Path | None, sdk_root: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    if build_root:
+        candidate_root = build_root.resolve()
+        for _ in range(5):
+            cache = candidate_root / "CMakeCache.txt"
+            if cache.is_file():
+                for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.startswith("PULSEFORGE_DXC_EXECUTABLE:") and "=" in line:
+                        value = line.split("=", 1)[1].strip()
+                        if value:
+                            candidates.append(Path(value))
+                tools_root = candidate_root / "_tools"
+                if tools_root.is_dir():
+                    for tool_root in sorted(tools_root.glob("dxc-*")):
+                        candidates.extend((tool_root / "bin" / "x64" / "dxc.exe", tool_root / "bin" / "dxc"))
+                break
+            if candidate_root.parent == candidate_root:
+                break
+            candidate_root = candidate_root.parent
+    if sdk_root:
+        candidates.extend((sdk_root / "Bin" / "dxc.exe", sdk_root / "bin" / "dxc.exe", sdk_root / "bin" / "dxc"))
+    path_candidate = shutil.which("dxc")
+    if path_candidate:
+        candidates.append(Path(path_candidate))
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                return candidate.resolve(strict=True)
+        except OSError:
+            continue
+    return None
+
+
+def capture_dxc_identity(build_root: Path | None = None, environment: dict[str, str] | None = None,
+                         run=subprocess.run) -> dict[str, str]:
+    selected_environment = dict(os.environ if environment is None else environment)
+    sdk_value = selected_environment.get("VULKAN_SDK", "").strip()
+    sdk_root = Path(sdk_value).expanduser() if sdk_value else None
+    executable = _find_dxc(build_root, sdk_root)
+    if executable is None:
+        return _unavailable("no configured, SDK-provided, or PATH DXC executable was found")
+    try:
+        result = run([str(executable), "--version"], check=False, capture_output=True, text=True,
+                     encoding="utf-8", errors="replace", timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"status": "unavailable", "path": str(executable), "reason": f"DXC version query failed: {error}"}
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if result.returncode != 0 or not output:
+        return {"status": "unavailable", "path": str(executable),
+                "reason": f"DXC --version exited with status {result.returncode} or returned no version"}
+    return {"status": "observed", "path": str(executable), "versionOutput": output[:4096]}
+
+
+def capture_cooked_content_identity(manifest_path: Path) -> dict[str, object]:
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return _unavailable("the cooked manifest is missing or linked")
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw.decode("utf-8"))
+    fields = ("format", "version", "projectId", "startupScene", "targetPlatform", "rendererBackend",
+              "runtimeABI", "configuration")
+    if not isinstance(manifest, dict) or any(field not in manifest for field in fields):
+        return _unavailable("the cooked manifest lacks required format/version identity fields")
+    return {
+        "status": "observed",
+        "manifestFile": manifest_path.name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        **{field: manifest[field] for field in fields},
+    }
+
+
+def capture_release_runtime_identity(renderer_output: str, backend: str, manifest_path: Path,
+                                     build_root: Path | None = None,
+                                     environment: dict[str, str] | None = None,
+                                     run=subprocess.run, *, player_launched: bool,
+                                     renderer_log: Path | None = None) -> dict[str, object]:
+    selected_environment = dict(os.environ if environment is None else environment)
+    if player_launched and renderer_log is not None:
+        selected_renderer = capture_selected_renderer_identity_from_log(renderer_log, backend, required=True)
+    elif player_launched:
+        selected_renderer = capture_selected_renderer_identity(renderer_output, backend, required=True)
+    else:
+        selected_renderer = _unavailable("export-only acceptance did not launch a Player process")
+    return {
+        "selectedRenderer": selected_renderer,
+        "vulkanSdk": capture_vulkan_sdk_identity(selected_environment),
+        "dxc": capture_dxc_identity(build_root, selected_environment, run),
+        "cookedContent": capture_cooked_content_identity(manifest_path),
+    }
+
+
 def write_release_evidence(package_root: Path, template_root: Path, template_descriptor: Path, output: Path,
                            source_tree: str, target: str, backend: str, configuration: str,
-                           toolchain: dict[str, str]) -> dict[str, object]:
+                           toolchain: dict[str, str], runtime_identity: dict[str, object]) -> dict[str, object]:
     if len(source_tree) != 40 or any(character not in "0123456789abcdef" for character in source_tree):
         raise RuntimeError("release evidence requires an exact lower-case source tree SHA")
     if template_descriptor.is_symlink():
@@ -136,7 +320,7 @@ def write_release_evidence(package_root: Path, template_root: Path, template_des
         raise RuntimeError("cannot record release evidence for an empty package")
     evidence: dict[str, object] = {
         "format": "PulseForgeReleaseEvidence",
-        "version": 1,
+        "version": 2,
         "sourceTree": source_tree,
         "platform": target,
         "architecture": template["architecture"],
@@ -146,6 +330,7 @@ def write_release_evidence(package_root: Path, template_root: Path, template_des
         "templateDescriptorSha256": hashlib.sha256(template_bytes).hexdigest(),
         "templateDescriptorRelativePath": descriptor_relative.as_posix(),
         "toolchain": toolchain,
+        "runtimeIdentity": runtime_identity,
         "packageFileCount": sum(not path.endswith("/") and path != "." for path in package_tree),
         "packageEntryCount": len(package_tree),
         "packageFiles": package_tree,
@@ -555,7 +740,9 @@ def main() -> int:
             evidence = write_release_evidence(retain_path, args.template_root.resolve(strict=True),
                 args.template_descriptor.resolve(strict=True),
                 logs / "release-acceptance-evidence.json", source_tree, args.target, args.backend,
-                args.configuration, toolchain)
+                args.configuration, toolchain, capture_release_runtime_identity(
+                    "", args.backend, manifest_path, args.template_root.resolve(strict=True),
+                    player_launched=False))
             print(f"RELEASE_ACCEPTANCE_EVIDENCE=PASS; source_tree={source_tree}; "
                   f"package_tree_fingerprint_sha256={evidence['packageTreeFingerprintSha256']}; "
                   f"manifest={logs / 'release-acceptance-evidence.json'}")
@@ -567,6 +754,7 @@ def main() -> int:
             return 0
         relocated_content = root / "Relocated Cooked Content Ω"
         cooked_root.rename(relocated_content)
+        manifest_path = relocated_content / "manifest.pfmanifest"
 
         environment = os.environ.copy()
         environment["PULSEFORGE_COOKED_PLAYER_ACCEPTANCE"] = "1"
@@ -684,7 +872,9 @@ def main() -> int:
             evidence = write_release_evidence(relocated_package, args.template_root.resolve(strict=True),
                 args.template_descriptor.resolve(strict=True),
                 logs / "release-acceptance-evidence.json", source_tree, args.target, args.backend,
-                args.configuration, toolchain)
+                args.configuration, toolchain, capture_release_runtime_identity(
+                    package_output, args.backend, manifest_path, args.template_root.resolve(strict=True),
+                    player_launched=True, renderer_log=logs / "standalone-package-player.log"))
             print(f"RELEASE_ACCEPTANCE_EVIDENCE=PASS; source_tree={source_tree}; "
                   f"package_tree_fingerprint_sha256={evidence['packageTreeFingerprintSha256']}; "
                   f"manifest={logs / 'release-acceptance-evidence.json'}")

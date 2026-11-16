@@ -1,4 +1,5 @@
 #include "Assets/AssetCookService.h"
+#include "Assets/Detail/AssetCookServiceTestAccess.h"
 #include "Assets/AssetExportService.h"
 #include "Assets/AssetImportProvenance.h"
 #include "Assets/AssetMetadata.h"
@@ -2126,6 +2127,42 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	const std::string FirstManifest{ std::istreambuf_iterator<char>(FirstManifestStream), std::istreambuf_iterator<char>() };
 	FirstManifestStream.close();
 	PF_CHECK(Tests, !FirstManifest.empty());
+	std::atomic_size_t LowDiskWriteAttempts = 0;
+	const auto LowDiskFailure = [&LowDiskWriteAttempts](const std::filesystem::path&, size_t)
+	{
+		++LowDiskWriteAttempts;
+		return std::make_error_code(std::errc::no_space_on_device);
+	};
+	const auto LowDiskCook = RunCookWithBoundary("low-disk-staged-write", [&]
+		{ return Assets::Detail::CookWithStagedWriteFailureForTesting(Request, LowDiskFailure); });
+	PF_CHECK(Tests, !LowDiskCook);
+	if (!LowDiskCook)
+	{
+		PF_CHECK(Tests, LowDiskCook.error().Code == AssetCookErrorCode::StagingFailed);
+		PF_CHECK(Tests, !LowDiskCook.error().Path.empty());
+		PF_CHECK(Tests, LowDiskCook.error().Message.find("Insufficient free disk space") != std::string::npos &&
+			LowDiskCook.error().Message.find(std::make_error_code(std::errc::no_space_on_device).message()) != std::string::npos);
+	}
+	PF_CHECK(Tests, LowDiskWriteAttempts == 1);
+	std::ifstream PreservedManifestStream(FirstManifestPath, std::ios::binary);
+	const std::string PreservedManifest{ std::istreambuf_iterator<char>(PreservedManifestStream), std::istreambuf_iterator<char>() };
+	PreservedManifestStream.close();
+	PF_CHECK(Tests, PreservedManifest == FirstManifest);
+	auto PreservedProvider = CookedContentProvider::Open(Request.OutputRoot, Fixture.Compatibility);
+	PF_CHECK(Tests, PreservedProvider.has_value());
+	if (PreservedProvider)
+		PF_CHECK(Tests, (*PreservedProvider)->ReadScene(Fixture.SceneAsset).has_value());
+	const auto LowDiskRetry = RunCookWithBoundary("low-disk-retry", [&]
+		{ return AssetCookService::Cook(Request); });
+	PF_CHECK(Tests, LowDiskRetry.has_value());
+	if (LowDiskRetry)
+	{
+		PF_CHECK(Tests, LowDiskRetry->GenerationIdentity == First->GenerationIdentity);
+		auto RetryProvider = CookedContentProvider::Open(Request.OutputRoot, Fixture.Compatibility);
+		PF_CHECK(Tests, RetryProvider.has_value());
+		if (RetryProvider)
+			PF_CHECK(Tests, (*RetryProvider)->ReadScene(Fixture.SceneAsset).has_value());
+	}
 	auto Second = RunCookWithBoundary("repeat-same-generation", [&] { return AssetCookService::Cook(Request); });
 	if (!Second) std::cerr << "Second cook fixture failed: " << Second.error().Message << "\n";
 	PF_CHECK(Tests, Second.has_value());

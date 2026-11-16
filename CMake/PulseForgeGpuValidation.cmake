@@ -61,6 +61,9 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		if(PULSEFORGE_BUILD_EDITOR)
 			target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
 				PulseForge PulseForgeSceneRenderer PulseForgeEditorUI PulseForgeImGui glfw)
+			target_compile_definitions(PulseForgeMacOSRendererValidation PRIVATE PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
+			target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
+				PulseForgeAssetCookService PulseForgeAssetDependencyCatalog PulseForgeAssetServices PulseForgeCookedRuntimeProvider)
 		else()
 			target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
 				PulseForge PulseForgeSceneRenderer PulseForgeEditorImGuiProofRenderer PulseForgeImGui glfw)

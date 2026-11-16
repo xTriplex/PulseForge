@@ -1,4 +1,5 @@
 #include "Assets/AssetCookService.h"
+#include "Assets/Detail/AssetCookServiceTestAccess.h"
 #include "Core/Log.h"
 
 #include "Assets/AssetDependencyExtractor.h"
@@ -24,8 +25,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -125,10 +128,22 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetCookError> WriteFile(
-			const std::filesystem::path& Path, std::span<const std::byte> Bytes, std::stop_token CancellationToken = {})
+			const std::filesystem::path& Path, std::span<const std::byte> Bytes, std::stop_token CancellationToken,
+			const Assets::Detail::CookStagedWriteFailureForTesting* WriteFailurePolicy)
 		{
 			if (CancellationToken.stop_requested())
 				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before staging a file", Path));
+			if (WriteFailurePolicy && *WriteFailurePolicy)
+			{
+				const std::error_code Failure = (*WriteFailurePolicy)(Path, 0);
+				if (Failure)
+				{
+					const std::string Message = Failure == std::errc::no_space_on_device
+						? "Insufficient free disk space while staging cooked payload: " + Failure.message()
+						: "Could not stage cooked payload: " + Failure.message();
+					return std::unexpected(Error(AssetCookErrorCode::StagingFailed, Message, Path));
+				}
+			}
 			std::error_code CreateError;
 			std::filesystem::create_directories(Path.parent_path(), CreateError);
 			if (CreateError) return std::unexpected(Error(AssetCookErrorCode::StagingFailed, "Could not create staging directory: " + CreateError.message(), Path.parent_path()));
@@ -139,6 +154,17 @@ namespace PulseForge
 			{
 				if (CancellationToken.stop_requested())
 					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled while staging a file", Path));
+				if (Offset != 0 && WriteFailurePolicy && *WriteFailurePolicy)
+				{
+					const std::error_code Failure = (*WriteFailurePolicy)(Path, Offset);
+					if (Failure)
+					{
+						const std::string Message = Failure == std::errc::no_space_on_device
+							? "Insufficient free disk space while staging cooked payload: " + Failure.message()
+							: "Could not stage cooked payload: " + Failure.message();
+						return std::unexpected(Error(AssetCookErrorCode::StagingFailed, Message, Path));
+					}
+				}
 				const size_t Count = std::min(ChunkBytes, Bytes.size() - Offset);
 				Output.write(reinterpret_cast<const char*>(Bytes.data() + Offset), static_cast<std::streamsize>(Count));
 				if (!Output) return std::unexpected(Error(AssetCookErrorCode::StagingFailed, "Could not write complete staged payload", Path));
@@ -756,7 +782,8 @@ namespace PulseForge
 		return Cook(*Planned);
 	}
 
-	std::expected<AssetCookReport, AssetCookError> AssetCookService::Cook(const AssetCookPlan& Plan)
+	static std::expected<AssetCookReport, AssetCookError> CookPlanWithWritePolicy(
+		const AssetCookPlan& Plan, const Assets::Detail::CookStagedWriteFailureForTesting* WriteFailurePolicy)
 	{
 		if (Plan.Request.CancellationToken.stop_requested())
 			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before processing began"));
@@ -1192,7 +1219,7 @@ namespace PulseForge
 			if (Index == 0)
 				PF_INFO("Staging first cooked payload ({} bytes, {} path characters)",
 					Payloads[Index].size(), Destination.native().size());
-			if (auto Written = WriteFile(Destination, Payloads[Index], Request.CancellationToken); !Written)
+			if (auto Written = WriteFile(Destination, Payloads[Index], Request.CancellationToken, WriteFailurePolicy); !Written)
 				return std::unexpected(Written.error());
 			if (Index == 0)
 				PF_INFO("First cooked payload staged");
@@ -1263,7 +1290,7 @@ namespace PulseForge
 		const auto ManifestBytes = std::as_bytes(std::span(Manifest->data(), Manifest->size()));
 		StagedFiles.push_back(ManifestTemporary);
 		StagedExpectedBytes.emplace_back(ManifestBytes);
-		if (auto Written = WriteFile(ManifestTemporary, ManifestBytes, Request.CancellationToken); !Written)
+		if (auto Written = WriteFile(ManifestTemporary, ManifestBytes, Request.CancellationToken, WriteFailurePolicy); !Written)
 			return std::unexpected(Written.error());
 		PF_INFO("Staged cooked manifest");
 		if (auto Freshness = ValidateCookSourceFresh(Plan); !Freshness)
@@ -1321,5 +1348,21 @@ namespace PulseForge
 			}
 		}
 		return Report;
+	}
+
+	std::expected<AssetCookReport, AssetCookError> AssetCookService::Cook(const AssetCookPlan& Plan)
+	{
+		return CookPlanWithWritePolicy(Plan, nullptr);
+	}
+
+	namespace Assets::Detail
+	{
+		std::expected<AssetCookReport, AssetCookError> CookWithStagedWriteFailureForTesting(
+			const AssetCookRequest& Request, const CookStagedWriteFailureForTesting& WriteFailure)
+		{
+			auto Planned = AssetCookService::Plan(Request);
+			if (!Planned) return std::unexpected(Planned.error());
+			return CookPlanWithWritePolicy(*Planned, &WriteFailure);
+		}
 	}
 } // namespace PulseForge

@@ -140,9 +140,14 @@ if(BUILD_TESTING)
 			"PF_RUNTIME_UI_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj\""
 			"PF_G29_REFERENCE_GAME_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/G29ReferenceGame/G29ReferenceGame.pfproj\"")
 	if(TARGET PulseForgeCookedGame)
+		if(PULSEFORGE_PLATFORM_MACOS)
+			set(PF_COOKED_PLAYER_TEMPLATE_ROOT "$<TARGET_BUNDLE_DIR:PulseForgeCookedGame>")
+		else()
+			set(PF_COOKED_PLAYER_TEMPLATE_ROOT "$<TARGET_FILE_DIR:PulseForgeCookedGame>")
+		endif()
 		target_compile_definitions(PulseForgeAssetTests PRIVATE
 			"PF_G29_TEST_BUILD_CONFIGURATION=\"$<CONFIG>\""
-			"PF_G29_PLAYER_TEMPLATE_ROOT=\"$<TARGET_FILE_DIR:PulseForgeCookedGame>\""
+			"PF_G29_PLAYER_TEMPLATE_ROOT=\"${PF_COOKED_PLAYER_TEMPLATE_ROOT}\""
 			"PF_G29_PLAYER_TEMPLATE_DESCRIPTOR=\"$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json\"")
 	endif()
 	target_compile_definitions(PulseForgeAssetTests PRIVATE
@@ -572,14 +577,14 @@ if(BUILD_TESTING)
 			add_test(NAME PulseForge.RuntimeUI.ExportedPackageInteraction
 				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
 					--export "$<TARGET_FILE:PulseForgeExport>"
-					--template-root "$<TARGET_FILE_DIR:PulseForgeCookedGame>"
+				--template-root "${PF_COOKED_PLAYER_TEMPLATE_ROOT}"
 					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
 					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
 			set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
 			add_test(NAME PulseForge.AudioMixing.ExportedPackageInteraction
 				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/AudioMixingPackageAcceptance.py"
 					--export "$<TARGET_FILE:PulseForgeExport>"
-					--template-root "$<TARGET_FILE_DIR:PulseForgeCookedGame>"
+				--template-root "${PF_COOKED_PLAYER_TEMPLATE_ROOT}"
 					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
 					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj")
 			set_tests_properties(PulseForge.AudioMixing.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
