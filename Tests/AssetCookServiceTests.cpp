@@ -1158,7 +1158,10 @@ namespace
 #else
 		ExportRequest.Profile.Architecture = ExportTargetArchitecture::X64;
 #endif
-		ExportRequest.Profile.Configuration = CookedBuildConfiguration::Debug;
+		auto TestBuildConfiguration = ParseCookedBuildConfiguration(PF_G29_TEST_BUILD_CONFIGURATION);
+		PF_CHECK(Tests, TestBuildConfiguration.has_value());
+		if (!TestBuildConfiguration) return;
+		ExportRequest.Profile.Configuration = *TestBuildConfiguration;
 		ExportRequest.Profile.Renderer = ExportRendererBackend::Vulkan;
 		ExportRequest.Profile.StartupScene = MenuScene;
 		ExportRequest.Profile.DynamicRoots = { GameScene, SkeletalModel };

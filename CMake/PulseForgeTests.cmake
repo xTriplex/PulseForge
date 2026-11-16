@@ -141,6 +141,7 @@ if(BUILD_TESTING)
 			"PF_G29_REFERENCE_GAME_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/G29ReferenceGame/G29ReferenceGame.pfproj\"")
 	if(TARGET PulseForgeCookedGame)
 		target_compile_definitions(PulseForgeAssetTests PRIVATE
+			"PF_G29_TEST_BUILD_CONFIGURATION=\"$<CONFIG>\""
 			"PF_G29_PLAYER_TEMPLATE_ROOT=\"$<TARGET_FILE_DIR:PulseForgeCookedGame>\""
 			"PF_G29_PLAYER_TEMPLATE_DESCRIPTOR=\"$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json\"")
 	endif()
