@@ -11,13 +11,24 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		Tests/GpuValidation/MirroredWindingValidation.cpp
 		Tests/GpuValidation/ValidationShader.cpp)
 	add_executable(PulseForgeRuntimeUIGpuValidation Tests/GpuValidation/RuntimeUIGpuValidation.cpp)
+	add_executable(PulseForgeRendererScalingBaseline
+		Tests/GpuValidation/RendererScalingBaseline.cpp
+		Tests/GpuValidation/RendererScalingBaselineMain.cpp)
 	target_include_directories(PulseForgeRuntimeUIGpuValidation PRIVATE Tests)
+	target_include_directories(PulseForgeRendererScalingBaseline PRIVATE Tests)
 	target_compile_definitions(PulseForgeRuntimeUIGpuValidation PRIVATE
 		PF_RUNTIME_UI_GPU_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}"
 		PF_RUNTIME_UI_GPU_FONT="${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/Assets/Fonts/Inter-Regular.ttf")
 	target_link_libraries(PulseForgeRuntimeUIGpuValidation PRIVATE PulseForge)
+	target_link_libraries(PulseForgeRendererScalingBaseline PRIVATE PulseForge)
 	add_dependencies(PulseForgeRuntimeUIGpuValidation PulseForgeSceneShaderAssets)
+	add_dependencies(PulseForgeRendererScalingBaseline PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeRuntimeUIGpuValidation)
+	pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeRendererScalingBaseline)
+	target_compile_definitions(PulseForgeRendererScalingBaseline PRIVATE
+		PF_PBR_DEMO_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj"
+		PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}")
+	target_compile_definitions(PulseForgeRendererScalingBaseline PRIVATE "$<$<CONFIG:Debug>:PF_G11_GPU_VALIDATION_TESTS>")
 	target_include_directories(PulseForgeGpuValidation PRIVATE Tests)
 	target_compile_definitions(PulseForgeGpuValidation PRIVATE
 		PF_GPU_VALIDATION_SHADER_DIRECTORY="${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
@@ -55,6 +66,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 				PulseForge PulseForgeSceneRenderer PulseForgeEditorImGuiProofRenderer PulseForgeImGui glfw)
 		endif()
 		add_dependencies(PulseForgeMacOSRendererValidation PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets)
+		add_dependencies(PulseForgeMacOSRendererValidation PulseForgeRendererScalingBaseline)
 		pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeMacOSRendererValidation)
 	endif()
 	if(PULSEFORGE_PLATFORM_LINUX)
@@ -68,6 +80,14 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		add_test(NAME PulseForge.GPU.RuntimeUI COMMAND PulseForgeRuntimeUIGpuValidation)
 		if(PULSEFORGE_BUILD_MACOS_DESKTOP AND TARGET PulseForgeMacOSRendererValidation)
 			add_dependencies(PulseForgeMacOSRendererValidation PulseForgeRuntimeUIGpuValidation)
+			add_test(NAME PulseForge.GPU.MacOSRenderer.ScalingBaseline.Small
+				COMMAND PulseForgeRendererScalingBaseline 0)
+			add_test(NAME PulseForge.GPU.MacOSRenderer.ScalingBaseline.Many
+				COMMAND PulseForgeRendererScalingBaseline 256)
+			set_tests_properties(
+				PulseForge.GPU.MacOSRenderer.ScalingBaseline.Small
+				PulseForge.GPU.MacOSRenderer.ScalingBaseline.Many
+				PROPERTIES RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer;macos;moltenvk;scaling")
 			add_test(NAME PulseForge.GPU.MacOSRenderer.RuntimeUI COMMAND PulseForgeRuntimeUIGpuValidation)
 			set_tests_properties(PulseForge.GPU.MacOSRenderer.RuntimeUI PROPERTIES
 				RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer;macos;moltenvk")

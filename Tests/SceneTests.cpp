@@ -219,6 +219,39 @@ namespace
 		const auto OrderedEntities = TestScene.GetEntities();
 		PF_CHECK(Tests, std::is_sorted(OrderedEntities.begin(), OrderedEntities.end(),
 							[](const Entity& First, const Entity& Second) { return First.GetUUID() < Second.GetUUID(); }));
+
+		Scene OrderedScene;
+		const UUID MiddleID{ 0x2730000000000000ull, 2 };
+		const UUID LastID{ 0x2730000000000000ull, 3 };
+		const UUID FirstID{ 0x2730000000000000ull, 1 };
+		auto Middle = OrderedScene.CreateEntityWithUUID(MiddleID, "Middle");
+		auto Last = OrderedScene.CreateEntityWithUUID(LastID, "Last");
+		PF_CHECK(Tests, Middle.has_value() && Last.has_value());
+		const auto FirstOrder = OrderedScene.GetEntities();
+		const auto ReusedOrder = OrderedScene.GetEntities();
+		PF_CHECK(Tests, FirstOrder.size() == 2 && ReusedOrder.size() == FirstOrder.size());
+		if (FirstOrder.size() == 2 && ReusedOrder.size() == 2)
+		{
+			PF_CHECK(Tests, FirstOrder[0].GetUUID() == MiddleID && FirstOrder[1].GetUUID() == LastID);
+			PF_CHECK(Tests, ReusedOrder[0].GetUUID() == FirstOrder[0].GetUUID() &&
+				ReusedOrder[1].GetUUID() == FirstOrder[1].GetUUID());
+		}
+		auto First = OrderedScene.CreateEntityWithUUID(FirstID, "First");
+		PF_CHECK(Tests, First.has_value());
+		const auto ExpandedOrder = OrderedScene.GetEntities();
+		PF_CHECK(Tests, ExpandedOrder.size() == 3 && ExpandedOrder.front().GetUUID() == FirstID);
+		if (First)
+		{
+			const Entity OldFirst = *First;
+			PF_CHECK(Tests, OrderedScene.DestroyEntity(*First).has_value());
+			PF_CHECK(Tests, !OldFirst.IsValid());
+			auto RecreatedFirst = OrderedScene.CreateEntityWithUUID(FirstID, "First incarnation two");
+			PF_CHECK(Tests, RecreatedFirst.has_value() && RecreatedFirst->IsValid());
+			const auto RecreatedOrder = OrderedScene.GetEntities();
+			PF_CHECK(Tests, RecreatedOrder.size() == 3 && RecreatedOrder.front().GetUUID() == FirstID);
+			if (RecreatedOrder.size() == 3)
+				PF_CHECK(Tests, RecreatedOrder[0] == *RecreatedFirst);
+		}
 	}
 
 	void TestPhysicsComponentsAndPersistence(TestRunner& Tests)

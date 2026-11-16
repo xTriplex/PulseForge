@@ -35,6 +35,7 @@ namespace PulseForge::Detail
 	{
 		entt::registry Registry;
 		std::unordered_map<UUID, entt::entity, UUIDHash> Entities;
+		std::optional<std::vector<UUID>> SortedEntityIdentifiers;
 		std::unordered_map<UUID, std::vector<RuntimeSkeletalLocalTransform>, UUIDHash> RuntimeSkeletalPoses;
 		size_t RuntimeSkeletalPoseNodeCount = 0;
 	};
@@ -242,6 +243,7 @@ namespace PulseForge
 				m_Storage->Registry.destroy(Native);
 				return std::unexpected(MakeSceneError(SceneErrorCode::DuplicateUUID, "An entity with this UUID already exists in the scene"));
 			}
+			m_Storage->SortedEntityIdentifiers.reset();
 			return Entity{
 				m_Storage,
 				Identifier,
@@ -449,6 +451,7 @@ namespace PulseForge
 		}
 
 		m_Storage->Entities.erase(Target.GetUUID());
+		m_Storage->SortedEntityIdentifiers.reset();
 		ClearRuntimeSkeletalPose(Target.GetUUID());
 		m_Storage->Registry.destroy(*Native);
 		return {};
@@ -464,20 +467,28 @@ namespace PulseForge
 
 	std::vector<Entity> Scene::GetEntities() const
 	{
-		std::vector<Entity> Entities;
-		Entities.reserve(m_Storage->Entities.size());
-		for (const auto& [Identifier, Native] : m_Storage->Entities)
+		if (!m_Storage->SortedEntityIdentifiers)
 		{
-			if (m_Storage->Registry.valid(Native))
+			std::vector<UUID> Identifiers;
+			Identifiers.reserve(m_Storage->Entities.size());
+			for (const auto& [Identifier, Native] : m_Storage->Entities)
+				if (m_Storage->Registry.valid(Native))
+					Identifiers.push_back(Identifier);
+			std::sort(Identifiers.begin(), Identifiers.end());
+			m_Storage->SortedEntityIdentifiers.emplace(std::move(Identifiers));
+		}
+
+		std::vector<Entity> Entities;
+		Entities.reserve(m_Storage->SortedEntityIdentifiers->size());
+		for (const UUID Identifier : *m_Storage->SortedEntityIdentifiers)
+		{
+			const auto Found = m_Storage->Entities.find(Identifier);
+			if (Found != m_Storage->Entities.end() && m_Storage->Registry.valid(Found->second))
 				Entities.push_back(Entity{
 					m_Storage,
 					Identifier,
-					m_Storage->Registry.get<Detail::EntityIncarnationComponent>(Native).Value });
+					m_Storage->Registry.get<Detail::EntityIncarnationComponent>(Found->second).Value });
 		}
-		std::sort(Entities.begin(), Entities.end(), [](const Entity& First, const Entity& Second)
-		{
-			return First.GetUUID() < Second.GetUUID();
-		});
 		return Entities;
 	}
 
