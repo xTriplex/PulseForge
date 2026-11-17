@@ -315,6 +315,17 @@ namespace
 		BlueprintComponent Blueprint{ UUID{ 23, 19 }, true };
 		PF_CHECK(Tests, Blueprint.SetFloatProperty("health", 42.0f).has_value());
 		PF_CHECK(Tests, Body->SetBlueprint(Blueprint).has_value());
+		MeshRendererComponent AnimatedMesh{ UUID{ 24, 20 } };
+		AnimatedMesh.SkeletalProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		AnimatedMesh.AnimationClipKey = "animation/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		AnimatedMesh.AnimationLooping = false;
+		AnimatedMesh.AnimationSpeed = 1.75f;
+		PF_CHECK(Tests, Body->SetMeshRenderer(AnimatedMesh).has_value());
+		auto InvalidAnimationSpeed = AnimatedMesh;
+		InvalidAnimationSpeed.AnimationSpeed = std::numeric_limits<float>::infinity();
+		const auto InvalidAnimationSpeedResult = Body->SetMeshRenderer(InvalidAnimationSpeed);
+		PF_CHECK(Tests, !InvalidAnimationSpeedResult &&
+			InvalidAnimationSpeedResult.error().Code == SceneErrorCode::InvalidAssetReference);
 		const auto CameraEntity = Source.CreateEntity("Orthographic UI camera");
 		PF_CHECK(Tests, CameraEntity.has_value());
 		CameraComponent OrthographicCamera;
@@ -368,6 +379,10 @@ namespace
 			PF_CHECK(Tests, LoadedBlueprint && LoadedBlueprint->has_value() &&
 				LoadedBlueprint->value().BlueprintAsset == Blueprint.BlueprintAsset &&
 				LoadedBlueprint->value().FindFloatProperty("health") == 42.0f);
+			const auto LoadedMesh = LoadedBody->GetMeshRenderer();
+			PF_CHECK(Tests, LoadedMesh && LoadedMesh->has_value() &&
+				LoadedMesh->value().AnimationClipKey == AnimatedMesh.AnimationClipKey &&
+				!LoadedMesh->value().AnimationLooping && LoadedMesh->value().AnimationSpeed == 1.75f);
 		}
 		nlohmann::json LegacyCanvasDocument = nlohmann::json::parse(*Serialized);
 		LegacyCanvasDocument["version"] = 11;
@@ -377,6 +392,11 @@ namespace
 			EntityRecord.erase("blueprint");
 			PF_CHECK(Tests, !EntityRecord.contains("blueprint"));
 			if (EntityRecord.value("uuid", std::string{}) != Body->GetUUID().ToString()) continue;
+			if (auto MeshRecord = EntityRecord.find("meshRenderer"); MeshRecord != EntityRecord.end())
+			{
+				MeshRecord->erase("animationLooping");
+				MeshRecord->erase("animationSpeed");
+			}
 			auto CanvasRecord = EntityRecord.find("runtimeUICanvas");
 			if (CanvasRecord == EntityRecord.end() || !CanvasRecord->is_object()) continue;
 			RemovedLegacyInputPolicy = CanvasRecord->erase("inputPolicy") == 1;
@@ -395,6 +415,9 @@ namespace
 			const auto LegacyComponent = LegacyCanvasEntity->GetRuntimeUICanvas();
 			PF_CHECK(Tests, LegacyComponent && LegacyComponent->has_value() &&
 				LegacyComponent->value().InputPolicy == RuntimeUIInputPolicy::Modal);
+			const auto LegacyMesh = LegacyCanvasEntity->GetMeshRenderer();
+			PF_CHECK(Tests, LegacyMesh && LegacyMesh->has_value() &&
+				LegacyMesh->value().AnimationLooping && LegacyMesh->value().AnimationSpeed == 1.0f);
 		}
 		if (CameraEntity)
 		{

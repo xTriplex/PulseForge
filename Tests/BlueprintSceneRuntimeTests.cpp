@@ -1278,6 +1278,202 @@ namespace
 		PF_CHECK(Tests, AudioControlRuntime.GetBlueprintDiagnostics().empty());
 		AudioControlRuntime.Stop();
 	}
+
+	void TestSceneRuntimeBlueprintPhysicsRaycastParity(TestRunner& Tests)
+	{
+		std::error_code Error;
+		const auto ProjectId = UUID::Generate();
+		PF_CHECK(Tests, ProjectId.has_value());
+		if (!ProjectId) return;
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForgeBlueprintRaycastParity-" + ProjectId->ToString());
+		struct Cleanup final
+		{
+			std::filesystem::path Root;
+			~Cleanup() { std::error_code Ignore; std::filesystem::remove_all(Root, Ignore); }
+		} Cleanup{ Root };
+		auto ProjectResult = Project::Create(Root / "BlueprintRaycastParity.pfproj", "Blueprint Raycast Parity");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult) return;
+
+		constexpr UUID TargetID{ 0x5700000000004000ull, 0x8000000000000001ull };
+		constexpr UUID BlueprintCallerID{ 0x5700000000004000ull, 0x8000000000000002ull };
+		constexpr UUID LuaCallerID{ 0x5700000000004000ull, 0x8000000000000003ull };
+		Scene TestScene;
+		const auto Target = TestScene.CreateEntityWithUUID(TargetID, "Blueprint raycast target");
+		const auto LuaTarget = TestScene.CreateEntityWithUUID(UUID(0x5700000000004000ull, 4), "Lua raycast target");
+		const auto BlueprintCaller = TestScene.CreateEntityWithUUID(BlueprintCallerID, "Blueprint raycast caller");
+		const auto LuaCaller = TestScene.CreateEntityWithUUID(LuaCallerID, "Lua raycast caller");
+		PF_CHECK(Tests, Target && LuaTarget && BlueprintCaller && LuaCaller);
+		if (!Target || !LuaTarget || !BlueprintCaller || !LuaCaller) return;
+		TransformComponent TargetTransform;
+		TargetTransform.Translation.x = 4.0f;
+		PF_CHECK(Tests, Target->SetTransform(TargetTransform).has_value());
+		PF_CHECK(Tests, Target->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, Target->SetCollider(BoxColliderComponent{}).has_value());
+		TransformComponent LuaTargetTransform;
+		LuaTargetTransform.Translation.x = 104.0f;
+		PF_CHECK(Tests, LuaTarget->SetTransform(LuaTargetTransform).has_value());
+		PF_CHECK(Tests, LuaTarget->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, LuaTarget->SetCollider(BoxColliderComponent{}).has_value());
+		TransformComponent LuaCallerTransform;
+		LuaCallerTransform.Translation.x = 100.0f;
+		PF_CHECK(Tests, LuaCaller->SetTransform(LuaCallerTransform).has_value());
+		PF_CHECK(Tests, LuaCaller->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, LuaCaller->SetCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, BlueprintCaller->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, BlueprintCaller->SetCollider(BoxColliderComponent{}).has_value());
+
+		const std::string LuaSource = "function OnUpdate()\n"
+			"  local hit = physics.raycast(100, 0, 0, 1, 0, 0, 20)\n"
+			"  assert(hit ~= nil and hit.uuid == '" + LuaTarget->GetUUID().ToString() + "')\n"
+			"  assert(hit.entity:uuid() == hit.uuid and hit.fraction > 0)\n"
+			"  assert(entity:set_translation(42, 0, 0))\n"
+			"end\n";
+		std::vector<std::byte> LuaBytes(LuaSource.size());
+		std::transform(LuaSource.begin(), LuaSource.end(), LuaBytes.begin(),
+			[](char Value) { return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
+		const auto LuaAsset = AssetOperations::CreateAssetFromBytes(ProjectResult->GetAssetRegistry(),
+			ProjectResult->GetRootPath(), LuaBytes, "Assets/BlueprintRaycastParity.lua");
+		PF_CHECK(Tests, LuaAsset.has_value());
+		if (!LuaAsset) return;
+		PF_CHECK(Tests, LuaCaller->SetScript(ScriptComponent{ LuaAsset->ID }).has_value());
+
+		BlueprintProgramSource Source;
+		Source.Constants = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 20.0f,
+			0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 20.0f };
+		Source.ScalarPropertyIds = { "raycast-target-hit", "raycast-self-excluded" };
+		for (uint32_t Index = 0; Index < 7; ++Index)
+			Source.Instructions.push_back({ BlueprintOpcode::PushConstant, Index, 0, UUID(71, Index + 1) });
+		Source.Instructions.insert(Source.Instructions.end(), {
+			{ BlueprintOpcode::Raycast, 0, 0, UUID(71, 8) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(71, 9) }
+		});
+		for (uint32_t Index = 7; Index < 14; ++Index)
+			Source.Instructions.push_back({ BlueprintOpcode::PushConstant, Index, 0, UUID(71, Index + 1) });
+		Source.Instructions.insert(Source.Instructions.end(), {
+			{ BlueprintOpcode::Raycast, 0, 0, UUID(71, 15) },
+			{ BlueprintOpcode::StoreScalar, 1, 0, UUID(71, 16) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(71, 17) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(71, 18) },
+			{ BlueprintOpcode::LoadScalar, 1, 0, UUID(71, 19) },
+			{ BlueprintOpcode::WriteScalarProperty, 1, 0, UUID(71, 20) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(71, 21) }
+		});
+		const auto Verified = VerifyBlueprintProgram(std::move(Source));
+		PF_CHECK(Tests, Verified.has_value());
+		if (!Verified) return;
+		const auto Program = std::make_shared<const VerifiedBlueprintProgram>(std::move(*Verified));
+		constexpr AssetID ProgramAsset{ 0x5800000000004000ull, 0x8000000000000001ull };
+		float BlueprintTargetHitValue = 0.0f;
+		float BlueprintSelfExcludedValue = 1.0f;
+		uint32_t BlueprintPropertyTransactions = 0;
+		SceneRuntimeServices Services;
+		Services.ResolveBlueprintProgram = [&](const Entity& EntityValue, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (EntityValue.GetUUID() != BlueprintCallerID || Event != BlueprintEventKind::OnUpdate) return std::nullopt;
+			return BlueprintProgramBinding{ ProgramAsset, 1, Program };
+		};
+		Services.ApplyBlueprintPropertyWrites = [&](const Entity& EntityValue,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (EntityValue.GetUUID() != BlueprintCallerID || Writes.size() != 2 ||
+				Writes[0].PropertyId != "raycast-target-hit" || Writes[1].PropertyId != "raycast-self-excluded") return false;
+			BlueprintTargetHitValue = Writes[0].Value;
+			BlueprintSelfExcludedValue = Writes[1].Value;
+			++BlueprintPropertyTransactions;
+			return true;
+		};
+		SceneRuntimeDesc Description;
+		Description.Audio.OutputBackend = AudioOutputBackend::Null;
+		Description.Physics.Gravity = glm::vec3(0.0f);
+		SceneRuntime Runtime(*ProjectResult, Description, Services);
+		PF_CHECK(Tests, Runtime.Start(TestScene).has_value());
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
+		const auto LuaPosition = LuaCaller->GetTransform();
+		PF_CHECK(Tests, LuaPosition && LuaPosition->Translation.x == 42.0f);
+		PF_CHECK(Tests, BlueprintPropertyTransactions == 1 && BlueprintTargetHitValue == 1.0f &&
+			BlueprintSelfExcludedValue == 0.0f);
+		PF_CHECK(Tests, Runtime.GetScriptDiagnostics().empty() && Runtime.GetBlueprintDiagnostics().empty());
+		Runtime.Stop();
+
+		BlueprintProgramSource BudgetSource;
+		BudgetSource.Constants = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f };
+		BudgetSource.ScalarPropertyIds = { "raycast-budget" };
+		for (uint32_t Index = 0; Index < 7; ++Index)
+			BudgetSource.Instructions.push_back({ BlueprintOpcode::PushConstant, Index, 0, UUID(72, Index + 1) });
+		BudgetSource.Instructions.insert(BudgetSource.Instructions.end(), {
+			{ BlueprintOpcode::Raycast, 0, 0, UUID(72, 8) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(72, 9) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(72, 10) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(72, 11) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(72, 12) }
+		});
+		const auto VerifiedBudgetProgram = VerifyBlueprintProgram(std::move(BudgetSource));
+		PF_CHECK(Tests, VerifiedBudgetProgram.has_value());
+		if (!VerifiedBudgetProgram) return;
+		const auto BudgetProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedBudgetProgram));
+		constexpr AssetID BudgetProgramAsset{ 0x5800000000004000ull, 0x8000000000000002ull };
+		std::vector<Entity> BudgetActors;
+		BudgetActors.reserve(BlueprintMaximumPhysicsQueriesPerFrame + 1);
+		Scene BudgetScene;
+		for (uint32_t Index = 0; Index < BlueprintMaximumPhysicsQueriesPerFrame + 1; ++Index)
+		{
+			const UUID Identifier{ 0x5900000000004000ull, 0x8000000000000001ull + Index };
+			const auto Actor = BudgetScene.CreateEntityWithUUID(Identifier, "Blueprint raycast budget actor");
+			PF_CHECK(Tests, Actor && Actor->SetBlueprint(BlueprintComponent{ BudgetProgramAsset, true }));
+			if (!Actor) return;
+			BudgetActors.push_back(*Actor);
+		}
+		uint32_t BudgetPropertyTransactions = 0;
+		SceneRuntimeServices BudgetServices;
+		BudgetServices.ResolveBlueprintProgram = [&](const Entity&, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Event != BlueprintEventKind::OnUpdate) return std::nullopt;
+			return BlueprintProgramBinding{ BudgetProgramAsset, 1, BudgetProgram };
+		};
+		BudgetServices.ApplyBlueprintPropertyWrites = [&](const Entity&,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Writes.size() != 1 || Writes.front().PropertyId != "raycast-budget") return false;
+			++BudgetPropertyTransactions;
+			return true;
+		};
+		SceneRuntime BudgetRuntime(*ProjectResult, Description, BudgetServices);
+		PF_CHECK(Tests, BudgetRuntime.Start(BudgetScene).has_value());
+		const auto SaturatedFrame = BudgetRuntime.Advance(BudgetScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, SaturatedFrame.has_value());
+		PF_CHECK(Tests, BudgetPropertyTransactions == BlueprintMaximumPhysicsQueriesPerFrame);
+		PF_CHECK(Tests, SaturatedFrame &&
+			SaturatedFrame->BlueprintInstructionsExecuted == BlueprintMaximumPhysicsQueriesPerFrame * 12 + 8);
+		const auto SaturatedDiagnostics = BudgetRuntime.GetBlueprintDiagnostics();
+		const auto ExhaustedActor = std::find_if(SaturatedDiagnostics.begin(), SaturatedDiagnostics.end(),
+			[](const BlueprintRuntimeDiagnostic& Diagnostic)
+			{
+				return Diagnostic.Code == BlueprintProgramErrorCode::EventBudgetExceeded &&
+				Diagnostic.SourceNode == UUID(72, 8);
+			});
+		PF_CHECK(Tests, SaturatedDiagnostics.size() == 1 && ExhaustedActor != SaturatedDiagnostics.end());
+		if (ExhaustedActor != SaturatedDiagnostics.end())
+		{
+			for (const Entity& Actor : BudgetActors)
+			{
+				if (Actor.GetUUID() == ExhaustedActor->Entity) continue;
+				PF_CHECK(Tests, BudgetScene.DestroyEntity(Actor).has_value());
+			}
+			const auto RecoveredFrame = BudgetRuntime.Advance(BudgetScene, Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, RecoveredFrame.has_value());
+			PF_CHECK(Tests, BudgetPropertyTransactions == BlueprintMaximumPhysicsQueriesPerFrame + 1);
+			PF_CHECK(Tests, RecoveredFrame && RecoveredFrame->BlueprintInstructionsExecuted == 12);
+			const auto RecoveredDiagnostics = BudgetRuntime.GetBlueprintDiagnostics();
+			PF_CHECK(Tests, RecoveredDiagnostics.size() == 1 &&
+				RecoveredDiagnostics.front().Entity == ExhaustedActor->Entity &&
+				RecoveredDiagnostics.front().Code == BlueprintProgramErrorCode::EventBudgetExceeded);
+		}
+		BudgetRuntime.Stop();
+	}
 }
 
 void RunBlueprintSceneRuntimeTests(TestRunner& Tests)
@@ -1286,4 +1482,5 @@ void RunBlueprintSceneRuntimeTests(TestRunner& Tests)
 	TestSceneRuntimeBoundsGameplayActionFanout(Tests);
 	TestSceneRuntimeBlueprintContactEvents(Tests);
 	TestSceneRuntimeBlueprintDeferredStop(Tests);
+	TestSceneRuntimeBlueprintPhysicsRaycastParity(Tests);
 }

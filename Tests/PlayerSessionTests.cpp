@@ -549,6 +549,8 @@ namespace
 		SkeletalComponent.MeshAsset = SkeletalAssetIdentifier;
 		SkeletalComponent.SkeletalProductKey = std::string(SkeletalProductKey);
 		SkeletalComponent.AnimationClipKey = std::string(AnimationClipKey);
+		SkeletalComponent.AnimationLooping = false;
+		SkeletalComponent.AnimationSpeed = 2.0f;
 		PF_CHECK(Tests, AuthoredEntity->SetMeshRenderer(SkeletalComponent).has_value());
 
 		ImportedGltfSkeletalMesh SkeletalProduct;
@@ -716,7 +718,7 @@ namespace
 		const auto FirstRuntimePose = Session.GetActiveScene()->GetRuntimeSkeletalPose(AuthoredEntity->GetUUID());
 		PF_CHECK(Tests, FirstRuntimePose.has_value() && FirstRuntimePose->size() == 2);
 		if (FirstRuntimePose && FirstRuntimePose->size() == 2)
-			PF_CHECK(Tests, std::abs((*FirstRuntimePose)[1][13] - (1.0f / 60.0f)) < 1.0e-4f);
+			PF_CHECK(Tests, std::abs((*FirstRuntimePose)[1][13] - (2.0f / 60.0f)) < 1.0e-4f);
 		PF_CHECK(Tests, !AuthoredScene.GetRuntimeSkeletalPose(AuthoredEntity->GetUUID()).has_value());
 		auto ReadRuntimeValue = [&Tests, &Session, &AuthoredEntity](float ExpectedValue)
 		{
@@ -747,7 +749,7 @@ namespace
 		const auto SecondRuntimePose = Session.GetActiveScene()->GetRuntimeSkeletalPose(AuthoredEntity->GetUUID());
 		PF_CHECK(Tests, SecondRuntimePose.has_value() && SecondRuntimePose->size() == 2);
 		if (SecondRuntimePose && SecondRuntimePose->size() == 2)
-			PF_CHECK(Tests, std::abs((*SecondRuntimePose)[1][13] - (2.0f / 60.0f)) < 1.0e-4f);
+			PF_CHECK(Tests, std::abs((*SecondRuntimePose)[1][13] - (4.0f / 60.0f)) < 1.0e-4f);
 		PF_CHECK(Tests, !AuthoredScene.GetRuntimeSkeletalPose(AuthoredEntity->GetUUID()).has_value());
 		ReadRuntimeValue(11.0f);
 		const auto CookedBlueprintAfterRebind = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());

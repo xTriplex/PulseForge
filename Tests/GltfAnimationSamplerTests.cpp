@@ -299,6 +299,22 @@ namespace
 			!FirstActor.Crossfade.Active);
 		PF_CHECK(Tests, SecondActor.CurrentClipKey == "idle" && SecondActor.CurrentClock.TimeSeconds == 0.5f);
 
+		GltfAnimationInstancePlayback TransitionSpeedActor;
+		PF_CHECK(Tests, PlayGltfAnimationInstance(TransitionSpeedActor, Mesh, "idle"));
+		PF_CHECK(Tests, SetGltfAnimationPlaybackSpeed(TransitionSpeedActor.CurrentClock, 1.25f));
+		PF_CHECK(Tests, TransitionGltfAnimationInstance(TransitionSpeedActor, Mesh, RestPose, "walk", 1.0f));
+		PF_CHECK(Tests, TransitionSpeedActor.TargetClock.Speed == 1.25f && !TransitionSpeedActor.TargetClock.Paused);
+		TransitionSpeedActor.CurrentClock.Paused = true;
+		TransitionSpeedActor.TargetClock.Paused = true;
+		const auto PausedTransition = AdvanceGltfAnimationInstance(TransitionSpeedActor, Mesh, RestPose, 0.5f);
+		PF_CHECK(Tests, PausedTransition && TransitionSpeedActor.CurrentClock.TimeSeconds == 0.0f &&
+			TransitionSpeedActor.TargetClock.TimeSeconds == 0.0f && TransitionSpeedActor.Crossfade.ElapsedSeconds == 0.0f);
+		TransitionSpeedActor.CurrentClock.Paused = false;
+		TransitionSpeedActor.TargetClock.Paused = false;
+		const auto ResumedTransition = AdvanceGltfAnimationInstance(TransitionSpeedActor, Mesh, RestPose, 0.5f);
+		PF_CHECK(Tests, ResumedTransition && std::abs(TransitionSpeedActor.TargetClock.TimeSeconds - 0.625f) < 1.0e-5f &&
+			TransitionSpeedActor.Crossfade.ElapsedSeconds == 0.5f);
+
 		const GltfAnimationInstancePlayback BeforeInvalidTransition = SecondActor;
 		const auto InvalidTarget = TransitionGltfAnimationInstance(SecondActor, Mesh, RestPose, "missing", 1.0f);
 		PF_CHECK(Tests, !InvalidTarget && InvalidTarget.error().Code == GltfAnimationPlaybackErrorCode::InvalidClip);

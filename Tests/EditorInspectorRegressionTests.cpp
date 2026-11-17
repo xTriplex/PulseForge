@@ -383,7 +383,7 @@ namespace
 	void DrawInspectorFrame(TestRunner& Tests, PulseForgeEditor::EditorInspectorPanel& Panel,
 		PulseForgeEditor::EditorSceneWorkspaceState& Workspace, PulseForgeEditor::EditorStyle& Style,
 		PulseForgeEditor::EditorAssetSelector& AssetSelector, PulseForge::Scene& Scene, InspectorActions& Actions,
-		const std::vector<PulseForge::AssetRecord>& NoAssets, int ExpectedFloatRows)
+		const std::vector<PulseForge::AssetRecord>& NoAssets, int ExpectedFloatRows, int ExpectedMeshRows = 2)
 	{
 		ImGui::GetIO().DisplaySize = ImVec2(960.0f, 720.0f);
 		ImGui::NewFrame();
@@ -404,7 +404,7 @@ namespace
 		ImGuiWindow* MeshBody = FindActiveChildWindow(Context, "/MeshRendererComponentBody_");
 		ImGuiTable* MeshTable = MeshBody ? Context.Tables.GetByKey(MeshBody->GetID("MeshRendererProperties")) : nullptr;
 		PF_CHECK(Tests, MeshTable && MeshTable->LastFrameActive == Context.FrameCount && MeshTable->ColumnsCount == 2 &&
-							MeshTable->CurrentRow == 1); // Both Mesh Asset and Material rows were submitted by the panel.
+							MeshTable->CurrentRow == ExpectedMeshRows - 1);
 
 		ImGuiWindow* ScriptBody = FindActiveChildWindow(Context, "/ScriptComponentBody_");
 		ImGuiTable* FloatTable = ScriptBody ? Context.Tables.GetByKey(ScriptBody->GetID("ScriptFloatProperties")) : nullptr;
@@ -479,8 +479,15 @@ void RunEditorInspectorRegressionTests(TestRunner& Tests)
 	const PulseForge::AssetID ScriptAsset{ 1, 1 };
 	const PulseForge::AssetID MeshAsset{ 2, 2 };
 	PF_CHECK(Tests, Entity.SetScript(PulseForge::ScriptComponent{ ScriptAsset }).has_value());
-	PF_CHECK(Tests, Entity.SetMeshRenderer(PulseForge::MeshRendererComponent{ MeshAsset, std::nullopt }).has_value());
+	PulseForge::MeshRendererComponent MeshComponent{ MeshAsset, std::nullopt };
+	MeshComponent.SkeletalProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	MeshComponent.AnimationClipKey = "animation/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+	PF_CHECK(Tests, Entity.SetMeshRenderer(MeshComponent).has_value());
 
+	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 0, 4);
+	MeshComponent.SkeletalProductKey.reset();
+	MeshComponent.AnimationClipKey.reset();
+	PF_CHECK(Tests, Entity.SetMeshRenderer(MeshComponent).has_value());
 	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 0);
 	SetScriptFloatProperties(Entity, { { "speed", 1.0f } });
 	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 1);

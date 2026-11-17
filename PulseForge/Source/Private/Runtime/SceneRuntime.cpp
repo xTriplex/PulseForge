@@ -25,6 +25,7 @@
 #include <deque>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <unordered_map>
 
 namespace PulseForge
@@ -326,6 +327,7 @@ namespace PulseForge
 		uint32_t BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 		uint32_t BlueprintInstructionsExecuted = 0;
 		uint32_t BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
+		uint32_t BlueprintPhysicsQueriesRemaining = BlueprintMaximumPhysicsQueriesPerFrame;
 		bool BlueprintDispatchLimitReported = false;
 
 		[[nodiscard]] std::expected<void, std::string> AdvanceSkeletalAnimations(
@@ -401,11 +403,14 @@ namespace PulseForge
 					{
 					GltfAnimationInstancePlayback CandidatePlayback;
 					if (auto Started = PlayGltfAnimationInstance(CandidatePlayback, State.Product,
-							*Component.AnimationClipKey, true); !Started)
+								*Component.AnimationClipKey, Component.AnimationLooping); !Started)
 						return std::unexpected("Could not start skeletal animation clip: " + Started.error().Message);
 					State.Playback = std::move(CandidatePlayback);
 					State.ClipKey = *Component.AnimationClipKey;
 				}
+				State.Playback.CurrentClock.Looping = Component.AnimationLooping;
+				if (auto Speed = SetGltfAnimationPlaybackSpeed(State.Playback.CurrentClock, Component.AnimationSpeed); !Speed)
+					return std::unexpected("Could not set skeletal animation speed: " + Speed.error().Message);
 				auto Advanced = AdvanceGltfAnimationInstance(
 					State.Playback, State.Product, State.RestPose, DeltaSeconds);
 				if (!Advanced) return std::unexpected("Could not advance skeletal animation: " + Advanced.error().Message);
@@ -816,7 +821,26 @@ namespace PulseForge
 
 				std::vector<float> CandidateState = ProgramInstance.ScalarState;
 				const uint32_t ExecutionBudget = std::min(BlueprintInstructionsRemaining, BlueprintDefaultInstructionBudget);
-				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState, ExecutionBudget, UIActionName);
+				BlueprintExecutionServices ExecutionServices;
+				const UUID SourceEntity = Target.GetUUID();
+				ExecutionServices.Raycast = [this, SourceEntity](const BlueprintRaycastQuery& Query)
+					-> std::expected<bool, BlueprintProgramError>
+				{
+					if (BlueprintPhysicsQueriesRemaining == 0)
+						return std::unexpected(BlueprintProgramError{ BlueprintProgramErrorCode::EventBudgetExceeded, 0,
+							Query.SourceNode, "Scene Blueprint physics query budget was exhausted for this frame" });
+					--BlueprintPhysicsQueriesRemaining;
+					PhysicsQueryFilter Filter;
+					Filter.ExcludedEntities = std::span<const UUID>(&SourceEntity, 1);
+					auto Hit = Physics->Raycast(glm::vec3(Query.OriginX, Query.OriginY, Query.OriginZ),
+						glm::vec3(Query.DirectionX, Query.DirectionY, Query.DirectionZ), Query.MaxDistance, Filter);
+					if (!Hit)
+						return std::unexpected(BlueprintProgramError{ BlueprintProgramErrorCode::HostFailure, 0,
+							Query.SourceNode, "Scene Blueprint raycast failed: " + Hit.error().Message });
+					return Hit->has_value();
+				};
+				auto Result = ExecuteBlueprintProgram(*Instance.Program, CandidateState, ExecutionBudget, UIActionName,
+					ExecutionServices);
 				if (!Result)
 				{
 					if (Result.error().Code == BlueprintProgramErrorCode::InstructionBudgetExceeded)
@@ -824,9 +848,17 @@ namespace PulseForge
 						BlueprintInstructionsRemaining -= ExecutionBudget;
 						BlueprintInstructionsExecuted += ExecutionBudget;
 					}
+					else
+					{
+						BlueprintInstructionsRemaining -= std::min(BlueprintInstructionsRemaining,
+							Result.error().InstructionsExecuted);
+						BlueprintInstructionsExecuted += Result.error().InstructionsExecuted;
+					}
+					const BlueprintProgramErrorCode ErrorCode = Result.error().Code;
 					RecordBlueprintDiagnostic(Target, &Binding, Event, Result.error().Code, Result.error().SourceNode,
 						std::move(Result.error().Message));
-					Instance.Faulted = true;
+					if (ErrorCode != BlueprintProgramErrorCode::EventBudgetExceeded)
+						Instance.Faulted = true;
 					return;
 				}
 				BlueprintInstructionsRemaining -= std::min(BlueprintInstructionsRemaining, Result->InstructionsExecuted);
@@ -1589,6 +1621,7 @@ namespace PulseForge
 		m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;
 		m_Impl->BlueprintInstructionsExecuted = 0;
 		m_Impl->BlueprintDispatchesRemaining = BlueprintMaximumEventDispatchesPerFrame;
+		m_Impl->BlueprintPhysicsQueriesRemaining = BlueprintMaximumPhysicsQueriesPerFrame;
 		m_Impl->BlueprintDispatchLimitReported = false;
 		const auto MakeFrameResult = [&](uint32_t PhysicsSteps = 0)
 		{

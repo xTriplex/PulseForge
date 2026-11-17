@@ -244,6 +244,12 @@ namespace PulseForge
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::ProgramTooLarge, Index, Instruction.SourceNode,
 						"Blueprint entity spawn requests exceed the per-event limit"));
 				break;
+			case BlueprintOpcode::Raycast:
+				if (Depth < 7)
+					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackUnderflow, Index, Instruction.SourceNode,
+						"Blueprint physics raycast requires origin, direction, and distance values"));
+				Depth -= 6;
+				break;
 			case BlueprintOpcode::Return:
 				if (Depth != 0)
 					return std::unexpected(MakeError(BlueprintProgramErrorCode::StackMismatch, Index, Instruction.SourceNode,
@@ -276,7 +282,8 @@ namespace PulseForge
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
 		uint32_t InstructionBudget,
-		std::string_view EventName)
+		std::string_view EventName,
+		const BlueprintExecutionServices& Services)
 	{
 		const BlueprintProgramSource& Source = Program.GetSource();
 		if (ScalarState.size() != Source.ScalarPropertyIds.size() || ScalarState.size() > BlueprintMaximumScalarCount)
@@ -292,10 +299,18 @@ namespace PulseForge
 		BlueprintExecutionResult Result;
 		Result.PropertyWrites.reserve((std::min)(Source.Instructions.size(), size_t{ 32 }));
 		Result.ExecutedNodes.reserve((std::min)(Source.Instructions.size(), BlueprintMaximumTraceNodesPerEvent));
+		uint32_t PhysicsQueriesExecuted = 0;
+		const auto MakeExecutionError = [&](BlueprintProgramErrorCode Code, uint32_t Instruction, UUID SourceNode,
+			std::string Message)
+		{
+			BlueprintProgramError Error = MakeError(Code, Instruction, SourceNode, std::move(Message));
+			Error.InstructionsExecuted = Result.InstructionsExecuted;
+			return Error;
+		};
 		while (ProgramCounter < Source.Instructions.size())
 		{
 			if (Result.InstructionsExecuted >= InstructionBudget)
-				return std::unexpected(MakeError(BlueprintProgramErrorCode::InstructionBudgetExceeded, ProgramCounter,
+				return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::InstructionBudgetExceeded, ProgramCounter,
 					Source.Instructions[ProgramCounter].SourceNode, "Blueprint event exceeded its instruction budget"));
 			++Result.InstructionsExecuted;
 			const BlueprintInstruction& Instruction = Source.Instructions[ProgramCounter];
@@ -318,7 +333,7 @@ namespace PulseForge
 				const float Left = Stack.back(); Stack.pop_back();
 				const float Value = Left + Right;
 				if (!std::isfinite(Value))
-					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidConstant, ProgramCounter,
+					return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::InvalidConstant, ProgramCounter,
 						Instruction.SourceNode, "Blueprint arithmetic produced a non-finite value"));
 				Stack.push_back(Value); ++ProgramCounter; break;
 			}
@@ -328,7 +343,7 @@ namespace PulseForge
 				const float Left = Stack.back(); Stack.pop_back();
 				const float Value = Left * Right;
 				if (!std::isfinite(Value))
-					return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidConstant, ProgramCounter,
+					return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::InvalidConstant, ProgramCounter,
 						Instruction.SourceNode, "Blueprint arithmetic produced a non-finite value"));
 				Stack.push_back(Value); ++ProgramCounter; break;
 			}
@@ -402,15 +417,54 @@ namespace PulseForge
 				++ProgramCounter;
 				break;
 			}
+			case BlueprintOpcode::Raycast:
+			{
+				BlueprintRaycastQuery Query;
+				Query.MaxDistance = Stack.back(); Stack.pop_back();
+				Query.DirectionZ = Stack.back(); Stack.pop_back();
+				Query.DirectionY = Stack.back(); Stack.pop_back();
+				Query.DirectionX = Stack.back(); Stack.pop_back();
+				Query.OriginZ = Stack.back(); Stack.pop_back();
+				Query.OriginY = Stack.back(); Stack.pop_back();
+				Query.OriginX = Stack.back(); Stack.pop_back();
+				Query.SourceNode = Instruction.SourceNode;
+				if (PhysicsQueriesExecuted >= BlueprintMaximumPhysicsQueriesPerEvent)
+					return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::EventBudgetExceeded, ProgramCounter,
+						Instruction.SourceNode, "Blueprint physics query budget was exhausted for this event"));
+				++PhysicsQueriesExecuted;
+				const std::array<float, 7> Values{ Query.OriginX, Query.OriginY, Query.OriginZ,
+					Query.DirectionX, Query.DirectionY, Query.DirectionZ, Query.MaxDistance };
+				if (!std::all_of(Values.begin(), Values.end(), [](float Value) { return std::isfinite(Value); }) ||
+					Query.MaxDistance <= 0.0f ||
+					Query.DirectionX * Query.DirectionX + Query.DirectionY * Query.DirectionY +
+						Query.DirectionZ * Query.DirectionZ <= 1.0e-12f)
+					return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::InvalidOperand, ProgramCounter,
+						Instruction.SourceNode, "Blueprint physics raycast input is invalid"));
+				if (!Services.Raycast)
+					return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::HostFailure, ProgramCounter,
+						Instruction.SourceNode, "Blueprint physics raycast service is unavailable"));
+				auto Hit = Services.Raycast(Query);
+				if (!Hit)
+				{
+					BlueprintProgramError Error = std::move(Hit.error());
+					Error.Instruction = ProgramCounter;
+					Error.SourceNode = Instruction.SourceNode;
+					Error.InstructionsExecuted = Result.InstructionsExecuted;
+					return std::unexpected(std::move(Error));
+				}
+				Stack.push_back(*Hit ? 1.0f : 0.0f);
+				++ProgramCounter;
+				break;
+			}
 			case BlueprintOpcode::Return:
 				std::copy(CandidateState.begin(), CandidateState.end(), ScalarState.begin());
 				return Result;
 			default:
-				return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidOpcode, ProgramCounter,
+				return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::InvalidOpcode, ProgramCounter,
 					Instruction.SourceNode, "Verified Blueprint program contains an unknown opcode"));
 			}
 		}
-		return std::unexpected(MakeError(BlueprintProgramErrorCode::InvalidControlFlow, ProgramCounter, {},
+		return std::unexpected(MakeExecutionError(BlueprintProgramErrorCode::InvalidControlFlow, ProgramCounter, {},
 			"Blueprint execution left the verified instruction range"));
 	}
 
@@ -590,6 +644,9 @@ namespace PulseForge
 			if (EncodedVersion < BlueprintSpawnProgramFormatVersion && Instruction.Opcode == BlueprintOpcode::RequestSpawnEntity)
 				return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, Index,
 					Instruction.SourceNode, "Blueprint entity spawn opcode requires a newer program version"));
+			if (EncodedVersion < BlueprintRaycastProgramFormatVersion && Instruction.Opcode == BlueprintOpcode::Raycast)
+				return std::unexpected(MakeError(BlueprintProgramErrorCode::UnsupportedVersion, Index,
+					Instruction.SourceNode, "Blueprint physics query opcode requires a newer program version"));
 			Source.Instructions.push_back(Instruction);
 		}
 		if (Offset != Bytes.size())

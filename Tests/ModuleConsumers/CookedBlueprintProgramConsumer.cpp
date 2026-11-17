@@ -1,6 +1,9 @@
 #include "Assets/CookedAssetCatalog.h"
 #include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
+#include "Scene/Components/BoxColliderComponent.h"
+#include "Scene/Components/RigidbodyComponent.h"
+#include "Scene/Components/TransformComponent.h"
 #include "Scene/SceneSerializer.h"
 
 #include <array>
@@ -126,7 +129,7 @@ int main()
 	BlueprintProgramSource StartTimer;
 	StartTimer.Version = BlueprintProgramFormatVersion;
 	StartTimer.Constants = { 0.05f };
-	StartTimer.ScalarPropertyIds = { "health" };
+	StartTimer.ScalarPropertyIds = { "health", "raycast-hit" };
 	StartTimer.TimerNames = { "cooldown" };
 	StartTimer.Instructions = {
 		{ BlueprintOpcode::RequestTimerSelf, 0, 0, UUID(71, 1) },
@@ -135,7 +138,7 @@ int main()
 	BlueprintProgramSource TimerCallback;
 	TimerCallback.Version = BlueprintProgramFormatVersion;
 	TimerCallback.Constants = { 7.0f };
-	TimerCallback.ScalarPropertyIds = { "health" };
+	TimerCallback.ScalarPropertyIds = { "health", "raycast-hit" };
 	TimerCallback.TimerNames = { "cooldown" };
 	TimerCallback.Instructions = {
 		{ BlueprintOpcode::JumpIfTimer, 0, 2, UUID(72, 1) },
@@ -150,14 +153,21 @@ int main()
 	};
 	BlueprintProgramSource SpawnOnUpdate;
 	SpawnOnUpdate.Version = BlueprintProgramFormatVersion;
-	SpawnOnUpdate.Constants = { 8.0f, 9.0f, 10.0f };
-	SpawnOnUpdate.Instructions = {
-		{ BlueprintOpcode::PushConstant, 0, 0, UUID(74, 1) },
-		{ BlueprintOpcode::PushConstant, 1, 0, UUID(74, 2) },
-		{ BlueprintOpcode::PushConstant, 2, 0, UUID(74, 3) },
-		{ BlueprintOpcode::RequestSpawnEntity, 0, 0, UUID(74, 4) },
-		{ BlueprintOpcode::Return, 0, 0, UUID(74, 5) }
-	};
+	SpawnOnUpdate.Constants = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 20.0f, 8.0f, 9.0f, 10.0f };
+	SpawnOnUpdate.ScalarPropertyIds = { "health", "raycast-hit" };
+	for (uint32_t Index = 0; Index < 7; ++Index)
+		SpawnOnUpdate.Instructions.push_back({ BlueprintOpcode::PushConstant, Index, 0, UUID(74, Index + 1) });
+	SpawnOnUpdate.Instructions.insert(SpawnOnUpdate.Instructions.end(), {
+		{ BlueprintOpcode::Raycast, 0, 0, UUID(74, 8) },
+		{ BlueprintOpcode::StoreScalar, 1, 0, UUID(74, 9) },
+		{ BlueprintOpcode::LoadScalar, 1, 0, UUID(74, 10) },
+		{ BlueprintOpcode::WriteScalarProperty, 1, 0, UUID(74, 11) },
+		{ BlueprintOpcode::PushConstant, 7, 0, UUID(74, 1) },
+		{ BlueprintOpcode::PushConstant, 8, 0, UUID(74, 2) },
+		{ BlueprintOpcode::PushConstant, 9, 0, UUID(74, 3) },
+		{ BlueprintOpcode::RequestSpawnEntity, 0, 0, UUID(74, 12) },
+		{ BlueprintOpcode::Return, 0, 0, UUID(74, 13) }
+	});
 	const std::array<BlueprintEventProgramSource, 3> BlueprintEventsWithSpawn{
 		BlueprintEvents[0], BlueprintEvents[1],
 		BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, SpawnOnUpdate }
@@ -181,6 +191,15 @@ int main()
 	const auto AuthoredEntity = AuthoredScene.CreateEntityWithUUID(EntityID, "Cooked Blueprint timer");
 	if (!AuthoredEntity || !AuthoredEntity->SetBlueprint(BlueprintComponent{ BlueprintID, true, {} }))
 		return Fail(4, "author scene Blueprint reference");
+	constexpr UUID RaycastTargetID{ 0x7000000000004000ull, 0x8000000000000008ull };
+	const auto RaycastTarget = AuthoredScene.CreateEntityWithUUID(RaycastTargetID, "Cooked Blueprint query target");
+	if (!RaycastTarget) return Fail(4, "author cooked Blueprint raycast target");
+	TransformComponent RaycastTargetTransform;
+	RaycastTargetTransform.Translation.x = 4.0f;
+	if (!RaycastTarget->SetTransform(RaycastTargetTransform) ||
+		!RaycastTarget->SetRigidbody({ RigidbodyMotionType::Static }) ||
+		!RaycastTarget->SetCollider(BoxColliderComponent{}))
+		return Fail(4, "author cooked Blueprint raycast collider");
 	const auto TransitionEntity = AuthoredScene.CreateEntityWithUUID(TransitionEntityID, "Cooked Blueprint transition");
 	if (!TransitionEntity || !TransitionEntity->SetBlueprint(BlueprintComponent{ TransitionBlueprintID, true, {} }))
 		return Fail(4, "author scene transition Blueprint reference");
@@ -235,7 +254,7 @@ int main()
 	const VerifiedBlueprintProgram* OnTimer = FindEventProgram(Blueprint, BlueprintEventKind::OnTimer);
 	const VerifiedBlueprintProgram* OnUpdate = FindEventProgram(Blueprint, BlueprintEventKind::OnUpdate);
 	if (!OnCreate || !OnTimer || !OnUpdate) return Fail(13, "resolve cooked event bytecode");
-	std::vector<float> ScalarState{ 0.0f };
+	std::vector<float> ScalarState{ 0.0f, 0.0f };
 	auto Scheduled = ExecuteBlueprintProgram(*OnCreate, ScalarState, BlueprintDefaultInstructionBudget);
 	if (!Scheduled || Scheduled->TimerRequests.size() != 1 || Scheduled->TimerRequests.front().Name != "cooldown" ||
 		Scheduled->TimerRequests.front().DelaySeconds != 0.05f)
@@ -247,11 +266,21 @@ int main()
 	if (!Fired || Fired->PropertyWrites.size() != 1 || Fired->PropertyWrites.front().PropertyId != "health" ||
 		Fired->PropertyWrites.front().Value != 7.0f)
 		return Fail(16, "execute cooked timer callback bytecode");
-	std::vector<float> EmptySpawnState;
-	auto Spawned = ExecuteBlueprintProgram(*OnUpdate, EmptySpawnState, BlueprintDefaultInstructionBudget);
+	std::vector<float> EmptySpawnState{ 0.0f, 0.0f };
+	BlueprintExecutionServices CookedQueryServices;
+	CookedQueryServices.Raycast = [](const BlueprintRaycastQuery& Query) -> std::expected<bool, BlueprintProgramError>
+	{
+		return Query.OriginX == 0.0f && Query.OriginY == 0.0f && Query.OriginZ == 0.0f &&
+			Query.DirectionX == 1.0f && Query.DirectionY == 0.0f && Query.DirectionZ == 0.0f &&
+			Query.MaxDistance == 20.0f;
+	};
+	auto Spawned = ExecuteBlueprintProgram(*OnUpdate, EmptySpawnState, BlueprintDefaultInstructionBudget, {},
+		CookedQueryServices);
 	if (!Spawned || Spawned->EntitySpawnRequests.size() != 1 || Spawned->EntitySpawnRequests.front().X != 8.0f ||
-		Spawned->EntitySpawnRequests.front().Y != 9.0f || Spawned->EntitySpawnRequests.front().Z != 10.0f)
-		return Fail(17, "execute cooked entity spawn bytecode");
+		Spawned->EntitySpawnRequests.front().Y != 9.0f || Spawned->EntitySpawnRequests.front().Z != 10.0f ||
+		Spawned->PropertyWrites.size() != 1 || Spawned->PropertyWrites.front().PropertyId != "raycast-hit" ||
+		Spawned->PropertyWrites.front().Value != 1.0f)
+		return Fail(17, "execute cooked Blueprint raycast and entity spawn bytecode");
 	SceneRuntimeDesc RuntimeDescription;
 	RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
 	PlayerSession Session(*Provider, RuntimeDescription);
@@ -272,6 +301,23 @@ int main()
 	}
 	if (!Session.Advance(Timestep(1.0 / 60.0)) || Session.GetActiveSceneAsset() != SceneID)
 		return Fail(19, "queue cooked Blueprint transition at frame boundary");
+	const Scene* StartupScene = Session.GetActiveScene();
+	const auto RuntimeEntity = StartupScene ? StartupScene->FindEntity(EntityID) : std::nullopt;
+	const auto RuntimeBlueprint = RuntimeEntity ? RuntimeEntity->GetBlueprint() :
+		std::expected<std::optional<BlueprintComponent>, SceneError>(std::optional<BlueprintComponent>{});
+	if (!RuntimeBlueprint || !RuntimeBlueprint->has_value() ||
+		RuntimeBlueprint->value().FindFloatProperty("raycast-hit") != 1.0f)
+	{
+		const auto PropertyValue = RuntimeBlueprint && RuntimeBlueprint->has_value()
+			? RuntimeBlueprint->value().FindFloatProperty("raycast-hit") : std::nullopt;
+		std::cerr << "Cooked Blueprint raycast result expected=1 actual=" <<
+			(PropertyValue ? std::to_string(*PropertyValue) : std::string("missing")) <<
+			" runtime_entity=" << RuntimeEntity.has_value() << " diagnostics=" << Session.GetBlueprintDiagnostics().size() << "\n";
+		for (const BlueprintRuntimeDiagnostic& Diagnostic : Session.GetBlueprintDiagnostics())
+			std::cerr << "Blueprint diagnostic entity=" << Diagnostic.Entity.ToString() << " code=" <<
+				static_cast<uint32_t>(Diagnostic.Code) << " message=" << Diagnostic.Message << "\n";
+		return Fail(19, "execute cooked Blueprint raycast in the Player runtime");
+	}
 	if (!Session.Advance(Timestep(1.0 / 60.0)) || Session.GetActiveSceneAsset() != DestinationSceneID)
 		return Fail(20, "activate cooked Blueprint transition destination");
 	const Scene* ActiveScene = Session.GetActiveScene();

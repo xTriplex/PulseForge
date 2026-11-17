@@ -55,6 +55,8 @@ void RunPropertyMetadataTests(TestRunner& Tests)
 
 	MeshRendererComponent Mesh;
 	Mesh.MeshAsset = UUID{ 0xabcdef0123456789ull, 0xabcdef0123456789ull };
+	Mesh.SkeletalProductKey = "skeletal/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+	Mesh.AnimationClipKey = "animation/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 	PF_CHECK(Tests, Target.SetMeshRenderer(Mesh).has_value());
 	auto Material = ReadProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
 	PF_CHECK(Tests, Material && std::get<std::optional<AssetID>>(*Material) == std::nullopt);
@@ -63,6 +65,15 @@ void RunPropertyMetadataTests(TestRunner& Tests)
 						PropertyValue{ std::optional<AssetID>{ MaterialId } }));
 	Material = ReadProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
 	PF_CHECK(Tests, Material && std::get<std::optional<AssetID>>(*Material) == MaterialId);
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::AnimationLooping, PropertyValue{ false }));
+	PF_CHECK(Tests, WriteProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::AnimationSpeed, PropertyValue{ -1.5f }));
+	auto AnimationLooping = ReadProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::AnimationLooping);
+	auto AnimationSpeed = ReadProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::AnimationSpeed);
+	PF_CHECK(Tests, AnimationLooping && !std::get<bool>(*AnimationLooping));
+	PF_CHECK(Tests, AnimationSpeed && std::get<float>(*AnimationSpeed) == -1.5f);
+	PF_CHECK(Tests, !WriteProperty(Target, PropertyComponentIds::MeshRenderer, PropertyIds::AnimationSpeed,
+		PropertyValue{ std::numeric_limits<float>::infinity() }));
+	PF_CHECK(Tests, !WriteProperty(Target, PropertyComponentIds::MeshRenderer, "unknown", PropertyValue{ 2.0f }));
 
 	BoxColliderComponent Collider;
 	Collider.Shape = ColliderShape::Sphere;

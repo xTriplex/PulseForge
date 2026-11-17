@@ -603,6 +603,8 @@ namespace PulseForge
 						MeshRendererRecord["skeletalProduct"] = *MeshRenderer->value().SkeletalProductKey;
 					if (MeshRenderer->value().AnimationClipKey)
 						MeshRendererRecord["animationClip"] = *MeshRenderer->value().AnimationClipKey;
+					MeshRendererRecord["animationLooping"] = MeshRenderer->value().AnimationLooping;
+					MeshRendererRecord["animationSpeed"] = MeshRenderer->value().AnimationSpeed;
 					Record["meshRenderer"] = std::move(MeshRendererRecord);
 				}
 				if (Rigidbody->has_value())
@@ -1067,7 +1069,7 @@ namespace PulseForge
 							SceneSerializationErrorCode::InvalidEntityData,
 							"Entity meshRenderer must be an object"));
 					if (auto Fields = ValidateKnownFields(*SerializedMeshRenderer,
-							{ "meshAsset", "materialAsset", "skeletalProduct", "animationClip" },
+							{ "meshAsset", "materialAsset", "skeletalProduct", "animationClip", "animationLooping", "animationSpeed" },
 							"Mesh renderer component", SceneSerializationErrorCode::InvalidEntityData);
 						!Fields)
 						return std::unexpected(Fields.error());
@@ -1119,9 +1121,31 @@ namespace PulseForge
 								"Mesh renderer animationClip requires a stable skeletal product and clip fingerprint"));
 						AnimationClipKey = SerializedAnimationClip->get<std::string>();
 					}
+					bool AnimationLooping = true;
+					const auto SerializedAnimationLooping = SerializedMeshRenderer->find("animationLooping");
+					if (SerializedAnimationLooping != SerializedMeshRenderer->end())
+					{
+						if (!SerializedAnimationLooping->is_boolean())
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Mesh renderer animationLooping must be a boolean when present"));
+						AnimationLooping = SerializedAnimationLooping->get<bool>();
+					}
+					float AnimationSpeed = 1.0f;
+					const auto SerializedAnimationSpeed = SerializedMeshRenderer->find("animationSpeed");
+					if (SerializedAnimationSpeed != SerializedMeshRenderer->end())
+					{
+						if (!SerializedAnimationSpeed->is_number())
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Mesh renderer animationSpeed must be a finite number when present"));
+						AnimationSpeed = SerializedAnimationSpeed->get<float>();
+						if (!std::isfinite(AnimationSpeed) || std::abs(AnimationSpeed) > MaximumGltfAnimationSpeed)
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Mesh renderer animationSpeed is outside the supported playback range"));
+					}
 
 					MeshRendererData = MeshRendererComponent{
-						*ParsedMeshAsset, MaterialAsset, std::move(SkeletalProductKey), std::move(AnimationClipKey) };
+						*ParsedMeshAsset, MaterialAsset, std::move(SkeletalProductKey), std::move(AnimationClipKey),
+						AnimationLooping, AnimationSpeed };
 				}
 
 				std::optional<RigidbodyComponent> RigidbodyData;

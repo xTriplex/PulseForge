@@ -1021,6 +1021,7 @@ namespace PulseForgeEditor
 	{
 		const auto Result = Entity.GetMeshRenderer();
 		if (!Result || !Result->has_value()) return;
+		const PulseForge::MeshRendererComponent& Component = **Result;
 
 		const bool IsExpanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::Cube, "Mesh Renderer");
 		ImGui::SameLine();
@@ -1047,6 +1048,24 @@ namespace PulseForgeEditor
 						*Mesh = *Selected;
 						return true;
 					});
+			if (Component.SkeletalProductKey && Component.AnimationClipKey)
+			{
+				if (Inspector.Style.BeginPropertyRow("Animation Looping"))
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::MeshRenderer,
+						PulseForge::PropertyIds::AnimationLooping, [](PulseForge::PropertyValue& Value)
+						{
+							auto* Looping = std::get_if<bool>(&Value);
+							return Looping && ImGui::Checkbox("##MeshAnimationLooping", Looping);
+						});
+				if (Inspector.Style.BeginPropertyRow("Animation Speed"))
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::MeshRenderer,
+						PulseForge::PropertyIds::AnimationSpeed, [](PulseForge::PropertyValue& Value)
+						{
+							auto* Speed = std::get_if<float>(&Value);
+							return Speed && ImGui::DragFloat("##MeshAnimationSpeed", Speed, 0.05f,
+								-PulseForge::MaximumGltfAnimationSpeed, PulseForge::MaximumGltfAnimationSpeed, "%.2fx");
+						});
+			}
 			if (Inspector.Style.BeginPropertyRow("Material"))
 				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::MeshRenderer, PulseForge::PropertyIds::MaterialAsset,
 					[&Inspector, this](PulseForge::PropertyValue& Value)

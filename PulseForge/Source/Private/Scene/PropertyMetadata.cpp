@@ -58,6 +58,9 @@ namespace PulseForge
 			PropertyDescriptor{ MeshRendererId, "materialAsset", "Material", std::optional<AssetID>{}, "", true, true, {}, {},
 				PropertyReferenceKind::MaterialAsset },
 			PropertyDescriptor{ MeshRendererId, "meshAsset", "Mesh", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::MeshAsset },
+			PropertyDescriptor{ MeshRendererId, PropertyIds::AnimationLooping, "Animation looping", true, "" },
+			PropertyDescriptor{ MeshRendererId, PropertyIds::AnimationSpeed, "Animation speed", 1.0f, "x", true, true,
+				-MaximumGltfAnimationSpeed, MaximumGltfAnimationSpeed },
 			PropertyDescriptor{ BlueprintId, "enabled", "Enabled", true, "" },
 			PropertyDescriptor{ BlueprintId, "asset", "Blueprint", AssetID{}, "", true, true, {}, {},
 				PropertyReferenceKind::BlueprintAsset },
@@ -262,7 +265,11 @@ namespace PulseForge
 		{
 			const auto Mesh = RequireComponent(Target.GetMeshRenderer(), ComponentId);
 			if (!Mesh) return std::unexpected(Mesh.error());
-			return PropertyId == PropertyIds::MeshAsset ? PropertyValue{ Mesh->MeshAsset } : PropertyValue{ Mesh->MaterialAsset };
+			if (PropertyId == PropertyIds::MeshAsset) return PropertyValue{ Mesh->MeshAsset };
+			if (PropertyId == PropertyIds::MaterialAsset) return PropertyValue{ Mesh->MaterialAsset };
+			if (PropertyId == PropertyIds::AnimationLooping) return PropertyValue{ Mesh->AnimationLooping };
+			if (PropertyId == PropertyIds::AnimationSpeed) return PropertyValue{ Mesh->AnimationSpeed };
+			return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
 		}
 		if (ComponentId == BlueprintId)
 		{
@@ -405,6 +412,7 @@ namespace PulseForge
 
 		if (ComponentId == MeshRendererId)
 		{
+			if (!Descriptor) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
 			auto Current = RequireComponent(Target.GetMeshRenderer(), ComponentId);
 			if (!Current) return std::unexpected(Current.error());
 			if (PropertyId == PropertyIds::MeshAsset)
@@ -413,11 +421,23 @@ namespace PulseForge
 				if (!Typed) return std::unexpected(Typed.error());
 				Current->MeshAsset = *Typed;
 			}
-			else
+			else if (PropertyId == PropertyIds::MaterialAsset)
 			{
 				auto Typed = RequireValue<std::optional<AssetID>>(Value, PropertyId);
 				if (!Typed) return std::unexpected(Typed.error());
 				Current->MaterialAsset = *Typed;
+			}
+			else if (PropertyId == PropertyIds::AnimationLooping)
+			{
+				auto Typed = RequireValue<bool>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->AnimationLooping = *Typed;
+			}
+			else
+			{
+				auto Typed = RequireValue<float>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->AnimationSpeed = *Typed;
 			}
 			const auto Result = Target.SetMeshRenderer(*Current);
 			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());

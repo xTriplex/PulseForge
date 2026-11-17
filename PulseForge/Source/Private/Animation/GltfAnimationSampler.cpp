@@ -570,6 +570,8 @@ namespace PulseForge
 			Next.TargetClipKey = TargetClipKey;
 			Next.TargetClock = {};
 			Next.TargetClock.Looping = Looping;
+			Next.TargetClock.Speed = Next.CurrentClock.Speed;
+			Next.TargetClock.Paused = Next.CurrentClock.Paused;
 			if (auto Fade = BeginGltfAnimationCrossfade(Next.Crossfade, DurationSeconds, CancellationToken); !Fade)
 				return std::unexpected(Fade.error());
 			Next.TransitionSourcePose = std::move(SourcePose);
@@ -634,7 +636,8 @@ namespace PulseForge
 			if (auto Advanced = AdvanceGltfAnimationPlayback(Next.TargetClock, TargetClip->Duration,
 				DeltaSeconds, CancellationToken); !Advanced)
 				return std::unexpected(Advanced.error());
-			auto Weight = AdvanceGltfAnimationCrossfade(Next.Crossfade, DeltaSeconds, CancellationToken);
+			auto Weight = AdvanceGltfAnimationCrossfade(
+				Next.Crossfade, Next.CurrentClock.Paused ? 0.0f : DeltaSeconds, CancellationToken);
 			if (!Weight) return std::unexpected(Weight.error());
 			auto TargetPose = SampleGltfAnimationPose(*TargetClip, RestPose, Next.TargetClock, CancellationToken);
 			if (!TargetPose) return std::unexpected(TargetPose.error());

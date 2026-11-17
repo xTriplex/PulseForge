@@ -68,6 +68,8 @@ namespace PulseForge
 		inline constexpr std::string_view OuterConeAngleDegrees = "outerConeAngleDegrees";
 		inline constexpr std::string_view MaterialAsset = "materialAsset";
 		inline constexpr std::string_view MeshAsset = "meshAsset";
+		inline constexpr std::string_view AnimationLooping = "animationLooping";
+		inline constexpr std::string_view AnimationSpeed = "animationSpeed";
 		inline constexpr std::string_view Enabled = "enabled";
 		inline constexpr std::string_view Asset = "asset";
 		inline constexpr std::string_view Shape = "shape";

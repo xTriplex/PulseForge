@@ -901,6 +901,10 @@ namespace PulseForge
 			!IsValidGltfAnimationClipKey(*MeshRenderer.AnimationClipKey)))
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidAssetReference,
 				"Mesh renderer animation clip key requires a stable skeletal product and clip fingerprint"));
+		if (!std::isfinite(MeshRenderer.AnimationSpeed) ||
+			std::abs(MeshRenderer.AnimationSpeed) > MaximumGltfAnimationSpeed)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidAssetReference,
+				"Mesh renderer animation speed must be finite and within the supported playback range"));
 
 		try
 		{

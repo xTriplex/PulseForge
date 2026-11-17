@@ -440,9 +440,75 @@ namespace
 					(void)EditorGraphDocumentEditorTestAccess::Process(GraphEditor, *ManagedSession,
 						{ { PropertyPinID, std::string("health"), true, true, false },
 							{ PropertyPinID, std::string("health"), false, true, true } });
+					auto SecondManagedBlueprint = GraphEditor.CreateBlueprintAsset(Project->GetAssetRegistry(),
+						Project->GetRootPath(), std::filesystem::path("Assets") / "Mana.pfblueprint");
+					PF_CHECK(Tests, SecondManagedBlueprint.has_value());
+					EditorDocumentSession* SecondManagedSession = nullptr;
+					if (SecondManagedBlueprint)
+					{
+						const EditorDocumentIdentity SecondIdentity{ Project->GetDescription().ID,
+							SecondManagedBlueprint->GraphID, EditorDocumentKind::Graph };
+						const auto SecondOpen = Documents.Open(SecondIdentity, SecondManagedBlueprint->ProjectRelativePath,
+							SecondManagedBlueprint->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+						SecondManagedSession = Documents.Find(SecondIdentity);
+						const EditorDocumentEditorContext SecondContext{ SecondIdentity, Project->GetRootPath(),
+							SecondManagedBlueprint->ProjectRelativePath, SecondManagedBlueprint->DisplayName,
+							&Project->GetAssetRegistry() };
+						PF_CHECK(Tests, SecondOpen && SecondManagedSession &&
+							GraphEditor.Open(*SecondManagedSession, SecondContext));
+						if (SecondManagedSession)
+						{
+							const auto SecondGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor,
+								*SecondManagedSession);
+						const auto* SecondPropertyPin = FindPin(SecondGraph,
+							"blueprint.action.write_scalar", "property");
+						PF_CHECK(Tests, SecondPropertyPin != nullptr);
+						if (SecondPropertyPin)
+						{
+							const UUID SecondPropertyPinID = SecondPropertyPin->ID;
+							(void)EditorGraphDocumentEditorTestAccess::Process(GraphEditor, *SecondManagedSession,
+								{ { SecondPropertyPinID, std::string("mana"), true, true, false },
+									{ SecondPropertyPinID, std::string("mana"), false, true, true } });
+							PF_CHECK(Tests, SecondManagedSession->IsDirty());
+							PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor,
+								*SecondManagedSession).ID == SecondManagedBlueprint->GraphID);
+						}
+					}
+					}
 					PF_CHECK(Tests, GraphEditor.Save(*ManagedSession) && !ManagedSession->IsDirty());
-					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == 2 && PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
+					PF_CHECK(Tests, SecondManagedSession == nullptr || SecondManagedSession->IsDirty());
+					PF_CHECK(Tests, PublishedBlueprintPrograms.size() ==
+						(SecondManagedBlueprint ? 3u : 2u) && PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
+					if (SecondManagedSession)
+					{
+						const auto OtherGraphBeforeSave = EditorGraphDocumentEditorTestAccess::GetGraph(
+							GraphEditor, *SecondManagedSession);
+						PF_CHECK(Tests, GraphEditor.Save(*SecondManagedSession) && !SecondManagedSession->IsDirty());
+						const auto OtherGraphAfterSave = EditorGraphDocumentEditorTestAccess::GetGraph(
+							GraphEditor, *SecondManagedSession);
+						const auto OtherProgram = ReadBytes(Project->GetRootPath() /
+							SecondManagedBlueprint->ProjectRelativePath);
+						const auto OtherGraphBytes = ReadBytes(Project->GetRootPath() /
+							EditorGraphDocumentEditor::GetBlueprintGraphPath(SecondManagedBlueprint->GraphID));
+						PF_CHECK(Tests, OtherGraphBeforeSave.ID == SecondManagedBlueprint->GraphID &&
+							OtherGraphAfterSave == OtherGraphBeforeSave && OtherProgram && OtherGraphBytes &&
+							PublishedBlueprintPrograms.size() == 4 &&
+							PublishedBlueprintPrograms.back() == SecondManagedBlueprint->GraphID);
+						if (OtherProgram && OtherGraphBytes)
+						{
+							const auto OtherVerified = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+								std::span<const char>(OtherProgram->data(), OtherProgram->size())));
+							const auto OtherSource = DeserializeEditorGraph(*OtherGraphBytes,
+								MakeBlueprintAuthoringSchema());
+							PF_CHECK(Tests, OtherVerified && OtherVerified->GetEvents().size() == 1 &&
+								OtherSource && OtherSource->ID == SecondManagedBlueprint->GraphID);
+						}
+					}
 					PF_CHECK(Tests, Editors.Discard(*ManagedSession) && !ManagedSession->IsDirty());
+					if (SecondManagedSession)
+						PF_CHECK(Tests, !SecondManagedSession->IsDirty() &&
+							EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor,
+								*SecondManagedSession).ID == SecondManagedBlueprint->GraphID);
 					const auto ReopenedProgram = ReadBytes(ProgramPath);
 					const auto ReopenedGraph = ReadBytes(GraphPath);
 					PF_CHECK(Tests, ReopenedProgram && ReopenedGraph);

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -16,8 +17,9 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintProgramFormatVersion = 8;
-	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 7;
+	inline constexpr uint32_t BlueprintProgramFormatVersion = 9;
+	inline constexpr uint32_t BlueprintPreviousProgramFormatVersion = 8;
+	inline constexpr uint32_t BlueprintRaycastProgramFormatVersion = 9;
 	inline constexpr uint32_t BlueprintSpawnProgramFormatVersion = 8;
 	inline constexpr uint32_t BlueprintDeferredServiceProgramFormatVersion = 6;
 	inline constexpr uint32_t BlueprintTimerProgramFormatVersion = 7;
@@ -38,6 +40,8 @@ namespace PulseForge
 	inline constexpr size_t BlueprintMaximumTraceNodesPerEvent = 256;
 	inline constexpr size_t BlueprintMaximumDeferredPhysicsCallsPerEvent = 256;
 	inline constexpr size_t BlueprintMaximumEntitySpawnsPerEvent = 64;
+	inline constexpr size_t BlueprintMaximumPhysicsQueriesPerEvent = 16;
+	inline constexpr uint32_t BlueprintMaximumPhysicsQueriesPerFrame = 256;
 	inline constexpr size_t BlueprintMaximumScheduledTimers = 1024;
 	inline constexpr size_t BlueprintMaximumTimersPerEvent = 64;
 	inline constexpr float BlueprintMinimumTimerDelaySeconds = 0.001f;
@@ -89,7 +93,8 @@ namespace PulseForge
 		RequestAudioControlSelf,
 		RequestTimerSelf,
 		JumpIfTimer,
-		RequestSpawnEntity
+		RequestSpawnEntity,
+		Raycast
 	};
 
 	struct BlueprintInstruction
@@ -137,6 +142,24 @@ namespace PulseForge
 		uint32_t Instruction = 0;
 		UUID SourceNode;
 		std::string Message;
+		uint32_t InstructionsExecuted = 0;
+	};
+
+	struct BlueprintRaycastQuery
+	{
+		float OriginX = 0.0f;
+		float OriginY = 0.0f;
+		float OriginZ = 0.0f;
+		float DirectionX = 0.0f;
+		float DirectionY = 0.0f;
+		float DirectionZ = 0.0f;
+		float MaxDistance = 0.0f;
+		UUID SourceNode;
+	};
+
+	struct BlueprintExecutionServices
+	{
+		std::function<std::expected<bool, BlueprintProgramError>(const BlueprintRaycastQuery&)> Raycast;
 	};
 
 	struct VerifiedBlueprintProgram final
@@ -212,7 +235,8 @@ namespace PulseForge
 		const VerifiedBlueprintProgram& Program,
 		std::span<float> ScalarState,
 		uint32_t InstructionBudget = BlueprintDefaultInstructionBudget,
-		std::string_view EventName = {});
+		std::string_view EventName = {},
+		const BlueprintExecutionServices& Services = {});
 	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<std::byte>, BlueprintProgramError>
 		SerializeBlueprintProgram(const BlueprintProgramSource& Source);
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintProgram, BlueprintProgramError>

@@ -486,6 +486,127 @@ namespace
 		const auto StateBudgetResult = ExecuteBlueprintProgram(*VerifiedStateLoop, StateBeforeFailure, 6);
 		PF_CHECK(Tests, !StateBudgetResult && StateBudgetResult.error().Code == BlueprintProgramErrorCode::InstructionBudgetExceeded &&
 			StateBeforeFailure[0] == 3.0f);
+
+		BlueprintProgramSource RaycastProgram;
+		RaycastProgram.Constants = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 20.0f };
+		RaycastProgram.ScalarPropertyIds = { "hit" };
+		for (uint32_t Index = 0; Index < 7; ++Index)
+			RaycastProgram.Instructions.push_back({ BlueprintOpcode::PushConstant, Index, 0, UUID(18, Index + 1) });
+		RaycastProgram.Instructions.insert(RaycastProgram.Instructions.end(), {
+			{ BlueprintOpcode::Raycast, 0, 0, UUID(18, 8) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(18, 9) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(18, 10) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(18, 11) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(18, 12) }
+		});
+		const auto VerifiedRaycast = VerifyBlueprintProgram(std::move(RaycastProgram));
+		PF_CHECK(Tests, VerifiedRaycast.has_value());
+		if (VerifiedRaycast)
+		{
+			std::array<float, 1> RaycastState{};
+			BlueprintExecutionServices RaycastServices;
+			RaycastServices.Raycast = [&](const BlueprintRaycastQuery& Query)
+				-> std::expected<bool, BlueprintProgramError>
+			{
+				PF_CHECK(Tests, Query.OriginX == 0.0f && Query.OriginY == 0.0f && Query.OriginZ == 0.0f);
+				PF_CHECK(Tests, Query.DirectionX == 1.0f && Query.DirectionY == 0.0f && Query.DirectionZ == 0.0f);
+				PF_CHECK(Tests, Query.MaxDistance == 20.0f && Query.SourceNode == UUID(18, 8));
+				return true;
+			};
+			const auto RaycastResult = ExecuteBlueprintProgram(*VerifiedRaycast, RaycastState,
+				BlueprintDefaultInstructionBudget, {}, RaycastServices);
+			PF_CHECK(Tests, RaycastResult && RaycastState[0] == 1.0f && RaycastResult->PropertyWrites.size() == 1 &&
+				RaycastResult->PropertyWrites.front().Value == 1.0f &&
+				RaycastResult->PropertyWrites.front().SourceNode == UUID(18, 11));
+			const auto RaycastBytes = SerializeBlueprintProgram(VerifiedRaycast->GetSource());
+			const auto RaycastRoundTrip = RaycastBytes ? DeserializeBlueprintProgram(*RaycastBytes)
+				: std::expected<VerifiedBlueprintProgram, BlueprintProgramError>(
+					std::unexpected(BlueprintProgramError{ BlueprintProgramErrorCode::InvalidByteStream }));
+			PF_CHECK(Tests, RaycastBytes && RaycastRoundTrip &&
+				RaycastRoundTrip->GetSource().Version == BlueprintProgramFormatVersion &&
+				RaycastRoundTrip->GetSource().Instructions[7].Opcode == BlueprintOpcode::Raycast);
+			if (RaycastBytes)
+			{
+				auto LegacyRaycastBytes = *RaycastBytes;
+				LegacyRaycastBytes[4] = static_cast<std::byte>(BlueprintPreviousProgramFormatVersion);
+				const auto RejectedLegacyRaycast = DeserializeBlueprintProgram(LegacyRaycastBytes);
+				PF_CHECK(Tests, !RejectedLegacyRaycast &&
+					RejectedLegacyRaycast.error().Code == BlueprintProgramErrorCode::UnsupportedVersion &&
+					RejectedLegacyRaycast.error().SourceNode == UUID(18, 8));
+			}
+		}
+		BlueprintProgramSource OldRaycast;
+		OldRaycast.Version = BlueprintPreviousProgramFormatVersion;
+		OldRaycast.Instructions = {
+			{ BlueprintOpcode::Raycast, 0, 0, UUID(18, 20) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(18, 21) }
+		};
+		const auto RejectedOldRaycast = VerifyBlueprintProgram(std::move(OldRaycast));
+		PF_CHECK(Tests, !RejectedOldRaycast && RejectedOldRaycast.error().Code == BlueprintProgramErrorCode::UnsupportedVersion);
+		BlueprintProgramSource RaycastUnderflow;
+		RaycastUnderflow.Instructions = {
+			{ BlueprintOpcode::Raycast, 0, 0, UUID(18, 22) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(18, 23) }
+		};
+		const auto RejectedRaycastUnderflow = VerifyBlueprintProgram(std::move(RaycastUnderflow));
+		PF_CHECK(Tests, !RejectedRaycastUnderflow &&
+			RejectedRaycastUnderflow.error().Code == BlueprintProgramErrorCode::StackUnderflow &&
+			RejectedRaycastUnderflow.error().SourceNode == UUID(18, 22));
+
+		BlueprintProgramSource InvalidRaycast;
+		InvalidRaycast.Constants = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 20.0f };
+		InvalidRaycast.ScalarPropertyIds = { "invalid-raycast-hit" };
+		for (uint32_t Index = 0; Index < 7; ++Index)
+			InvalidRaycast.Instructions.push_back({ BlueprintOpcode::PushConstant, Index, 0, UUID(18, Index + 30) });
+		InvalidRaycast.Instructions.push_back({ BlueprintOpcode::Raycast, 0, 0, UUID(18, 40) });
+		InvalidRaycast.Instructions.push_back({ BlueprintOpcode::StoreScalar, 0, 0, UUID(18, 41) });
+		InvalidRaycast.Instructions.push_back({ BlueprintOpcode::Return, 0, 0, UUID(18, 42) });
+		const auto VerifiedInvalidRaycast = VerifyBlueprintProgram(std::move(InvalidRaycast));
+		PF_CHECK(Tests, VerifiedInvalidRaycast.has_value());
+		if (VerifiedInvalidRaycast)
+		{
+			BlueprintExecutionServices InvalidRaycastServices;
+			std::array<float, 1> InvalidRaycastState{};
+			const auto InvalidRaycastResult = ExecuteBlueprintProgram(*VerifiedInvalidRaycast, InvalidRaycastState,
+				BlueprintDefaultInstructionBudget, {}, InvalidRaycastServices);
+			PF_CHECK(Tests, !InvalidRaycastResult &&
+				InvalidRaycastResult.error().Code == BlueprintProgramErrorCode::InvalidOperand &&
+				InvalidRaycastResult.error().InstructionsExecuted == 8);
+		}
+
+		BlueprintProgramSource QueryBudgetProgram;
+		QueryBudgetProgram.Constants = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 20.0f };
+		for (size_t QueryIndex = 0; QueryIndex <= BlueprintMaximumPhysicsQueriesPerEvent; ++QueryIndex)
+		{
+			QueryBudgetProgram.ScalarPropertyIds.push_back("query-" + std::to_string(QueryIndex));
+			for (uint32_t ConstantIndex = 0; ConstantIndex < 7; ++ConstantIndex)
+				QueryBudgetProgram.Instructions.push_back({ BlueprintOpcode::PushConstant, ConstantIndex, 0,
+					UUID(19, QueryIndex * 10 + ConstantIndex + 1) });
+			QueryBudgetProgram.Instructions.push_back({ BlueprintOpcode::Raycast, 0, 0,
+				UUID(19, QueryIndex * 10 + 8) });
+			QueryBudgetProgram.Instructions.push_back({ BlueprintOpcode::StoreScalar,
+				static_cast<uint32_t>(QueryIndex), 0, UUID(19, QueryIndex * 10 + 9) });
+		}
+		QueryBudgetProgram.Instructions.push_back({ BlueprintOpcode::Return, 0, 0, UUID(19, 1000) });
+		const auto VerifiedQueryBudget = VerifyBlueprintProgram(std::move(QueryBudgetProgram));
+		PF_CHECK(Tests, VerifiedQueryBudget.has_value());
+		if (VerifiedQueryBudget)
+		{
+			uint32_t QueryCalls = 0;
+			BlueprintExecutionServices BudgetServices;
+			BudgetServices.Raycast = [&](const BlueprintRaycastQuery&) -> std::expected<bool, BlueprintProgramError>
+			{
+				++QueryCalls;
+				return false;
+			};
+			std::vector<float> QueryState(VerifiedQueryBudget->GetSource().ScalarPropertyIds.size(), 0.0f);
+			const auto QueryBudgetResult = ExecuteBlueprintProgram(*VerifiedQueryBudget, QueryState,
+				BlueprintDefaultInstructionBudget, {}, BudgetServices);
+			PF_CHECK(Tests, !QueryBudgetResult &&
+				QueryBudgetResult.error().Code == BlueprintProgramErrorCode::EventBudgetExceeded &&
+				QueryCalls == BlueprintMaximumPhysicsQueriesPerEvent &&
+				QueryBudgetResult.error().InstructionsExecuted == BlueprintMaximumPhysicsQueriesPerEvent * 9 + 8);
+		}
 	}
 
 	void TestBlueprintAssetCodec(TestRunner& Tests)
