@@ -141,16 +141,30 @@ namespace
 #if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
 				auto FixtureID = PulseForge::UUID::Generate();
 				if (!FixtureID) throw std::runtime_error("Could not allocate a unique cooked graph renderer fixture identity");
-				m_TestProjectRoot = std::filesystem::temp_directory_path() /
-					("PulseForge-MacOS-CookedGraph-" + FixtureID->ToString());
+				std::error_code TemporaryRootError;
+				const std::filesystem::path SystemTemporaryRoot = std::filesystem::temp_directory_path(TemporaryRootError);
+				if (TemporaryRootError)
+					throw std::runtime_error("Could not resolve the macOS renderer fixture temp root: " +
+						TemporaryRootError.message());
+				const std::filesystem::path TemporaryRoot = std::filesystem::canonical(SystemTemporaryRoot, TemporaryRootError);
+				if (TemporaryRootError)
+					throw std::runtime_error("Could not resolve a canonical macOS renderer fixture temp root: " +
+						TemporaryRootError.message());
+				m_TestProjectRoot = TemporaryRoot / ("PulseForge-MacOS-CookedGraph-" + FixtureID->ToString());
 				const std::filesystem::path SourceProjectRoot = ProjectPath.parent_path();
-				const std::filesystem::path CopiedProjectRoot = m_TestProjectRoot / SourceProjectRoot.filename();
-				std::error_code CopyError;
-				std::filesystem::create_directories(m_TestProjectRoot, CopyError);
-				if (CopyError) throw std::runtime_error("Could not create the isolated PBR renderer fixture root: " + CopyError.message());
-				std::filesystem::copy(SourceProjectRoot, CopiedProjectRoot, std::filesystem::copy_options::recursive, CopyError);
-				if (CopyError) throw std::runtime_error("Could not isolate the PBR renderer fixture project: " + CopyError.message());
-				ProjectPath = CopiedProjectRoot / ProjectPath.filename();
+				std::filesystem::create_directories(m_TestProjectRoot, TemporaryRootError);
+				if (TemporaryRootError)
+					throw std::runtime_error("Could not create the isolated PBR renderer fixture root: " + TemporaryRootError.message());
+				m_TestProjectRoot = std::filesystem::canonical(m_TestProjectRoot, TemporaryRootError);
+				if (TemporaryRootError)
+					throw std::runtime_error("Could not canonicalize the isolated PBR renderer fixture root: " +
+						TemporaryRootError.message());
+				const std::filesystem::path CanonicalCopiedProjectRoot = m_TestProjectRoot / SourceProjectRoot.filename();
+				std::filesystem::copy(SourceProjectRoot, CanonicalCopiedProjectRoot, std::filesystem::copy_options::recursive,
+					TemporaryRootError);
+				if (TemporaryRootError)
+					throw std::runtime_error("Could not isolate the PBR renderer fixture project: " + TemporaryRootError.message());
+				ProjectPath = CanonicalCopiedProjectRoot / ProjectPath.filename();
 #endif
 				auto OpenedProject = PulseForge::Project::Open(ProjectPath);
 				if (!OpenedProject) throw std::runtime_error("Could not open the PBR validation project: " + OpenedProject.error().Message);
