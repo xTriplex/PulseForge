@@ -45,7 +45,7 @@ namespace PulseForge
 			const std::array<std::string_view, 3> Parts = {
 				Locator.substr(0, MeshMarker),
 				Locator.substr(MeshMarker + 6, PrimitiveMarker - (MeshMarker + 6)),
-				Locator.substr(PrimitiveMarker + 10)
+				Locator.substr(PrimitiveMarker + std::string_view("/primitive/").size())
 			};
 			std::array<uint32_t, 3> Values{};
 			for (size_t Index = 0; Index < Parts.size(); ++Index)
@@ -233,9 +233,12 @@ namespace PulseForge
 			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
 				Product.error().Path, "Could not rebuild the last successful skeletal product: " + Product.error().Message,
 				std::move(Product.error()), std::nullopt });
-		if (Product->Recipe.SubresourceKey != StableProductKey || Product->ResultFingerprint != Receipt->ResultFingerprint)
+		if (Product->Recipe.SubresourceKey != StableProductKey ||
+			Product->Recipe.InputFingerprint != Receipt->Recipe.InputFingerprint ||
+			Product->ResultFingerprint != Receipt->ResultFingerprint)
 			return std::unexpected(GltfMeshImportCoordinatorError{ GltfMeshImportCoordinatorErrorCode::ImportFailed,
-				*SourcePath, "Skeletal source no longer matches the last successful imported product", std::nullopt, std::nullopt });
+				*SourcePath, "Skeletal source no longer matches the last successful imported product; reimport is required",
+				std::nullopt, std::nullopt });
 		return GltfSkeletalMeshImportWithReceipt{ std::move(Product->Mesh), *Receipt };
 	}
 }

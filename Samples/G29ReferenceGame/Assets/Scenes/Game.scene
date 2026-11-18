@@ -663,7 +663,7 @@
         "asset": "b0190000-0000-4000-8000-000000000030",
         "volume": 0.35,
         "looping": true,
-        "playOnStart": true,
+        "playOnStart": false,
         "spatialized": false,
         "bus": "music"
       },
@@ -696,7 +696,7 @@
         "asset": "b0190000-0000-4000-8000-000000000031",
         "volume": 0.6,
         "looping": false,
-        "playOnStart": true,
+        "playOnStart": false,
         "spatialized": true,
         "bus": "effects"
       },

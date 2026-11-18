@@ -1013,39 +1013,131 @@ namespace
 		std::filesystem::copy(ProjectPath.parent_path(), SourceRoot, std::filesystem::copy_options::recursive, Error);
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
+		const auto OriginalProjectRoot = std::filesystem::weakly_canonical(ProjectPath.parent_path(), Error);
+		PF_CHECK(Tests, !Error);
+		const auto CopiedProjectRoot = std::filesystem::weakly_canonical(SourceRoot, Error);
+		PF_CHECK(Tests, !Error && OriginalProjectRoot != CopiedProjectRoot);
+		if (Error) return;
 		auto ProjectValue = Project::Open(SourceRoot / ProjectPath.filename());
 		if (!ProjectValue) std::cerr << "G29_REFERENCE_PROJECT_OPEN_FAILURE " << ProjectValue.error().Message << std::endl;
 		PF_CHECK(Tests, ProjectValue.has_value());
 		if (!ProjectValue) return;
 		PF_CHECK(Tests, ProjectValue->GetDescription().StartScene == MenuScene);
+		const std::filesystem::path DerivedDataRoot = SourceRoot / ".pulseforge/DerivedData";
+		std::filesystem::remove_all(DerivedDataRoot, Error);
+		PF_CHECK(Tests, !Error && !std::filesystem::exists(DerivedDataRoot));
+		const std::filesystem::path SkeletalSourcePath = SourceRoot / "Assets/Models/ReferenceRig.gltf";
+		const std::filesystem::path ReceiptPath = AssetImportProvenanceSerializer::GetSidecarPath(SkeletalSourcePath);
+		const auto Receipts = AssetImportProvenanceSerializer::LoadAll(ReceiptPath);
+		PF_CHECK(Tests, Receipts.has_value() && std::any_of(Receipts->begin(), Receipts->end(),
+			[&](const AssetImportSuccessReceipt& Receipt)
+			{
+				return Receipt.Recipe.SourceAsset == SkeletalModel && Receipt.Recipe.SubresourceKey == SkeletalProductKey &&
+					Receipt.Recipe.SourceLocator == "skeletal/node/0/mesh/0/primitive/0" &&
+					Receipt.Recipe.ImporterID == "PulseForge.SkeletalGltfMeshImporter" &&
+					Receipt.ResultIdentity == SkeletalProductKey;
+			}));
+		PF_CHECK(Tests, Receipts.has_value() && std::all_of(Receipts->begin(), Receipts->end(),
+			[](const AssetImportSuccessReceipt& Receipt)
+			{
+				return std::all_of(Receipt.Recipe.Inputs.begin(), Receipt.Recipe.Inputs.end(),
+					[](const AssetImportInputFingerprint& Input)
+					{
+						const std::filesystem::path InputPath(Input.ProjectRelativePath);
+						return !InputPath.is_absolute() && Input.ProjectRelativePath.find(':') == std::string::npos &&
+							Input.ProjectRelativePath.find('\\') == std::string::npos;
+					});
+			}));
+		auto RebuiltSkeletalProduct = GltfMeshImportCoordinator::LoadLastSuccessfulSkeletalProduct(
+			SkeletalModel, ProjectValue->GetRootPath(), ProjectValue->GetAssetRegistry(), SkeletalProductKey);
+		PF_CHECK(Tests, RebuiltSkeletalProduct.has_value());
+		if (!RebuiltSkeletalProduct) std::cerr << "G29_REFERENCE_RECEIPT_FAILURE " << RebuiltSkeletalProduct.error().Message << std::endl;
+
 		auto BeforeImportSnapshot = AssetDependencyCatalogBuilder::Build(
 			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
 		PF_CHECK(Tests, BeforeImportSnapshot.has_value());
 		if (!BeforeImportSnapshot) return;
-		AssetCookRequest MissingReceiptRequest{
-			*BeforeImportSnapshot, ProjectValue->GetFilePath(), MenuScene, {},
-#if defined(_WIN32)
-			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
-#elif defined(__APPLE__)
-			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
-#else
-			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
-#endif
-			OutputRoot / "MissingSkeletalReceipt"
+		const auto RunSourceStartClick = [&](PlayerSession& Session)
+		{
+			const RuntimeUIViewport Viewport{ { 960.0f, 540.0f }, 960, 540 };
+			for (const RuntimeUIInputKind Kind : { RuntimeUIInputKind::PointerPressed, RuntimeUIInputKind::PointerReleased })
+			{
+				const RuntimeUIInputEvent Event{ Kind, { 480.0f, 260.0f }, {} };
+				if (!Session.SubmitRuntimeUIFrame(Viewport, std::span(&Event, 1))) return false;
+				if (!Session.Advance(Timestep(1.0 / 60.0))) return false;
+			}
+			return true;
 		};
-		MissingReceiptRequest.DynamicRoots.push_back(GameScene);
-		const auto MissingReceiptPlan = AssetCookService::Plan(MissingReceiptRequest);
-		PF_CHECK(Tests, !MissingReceiptPlan &&
-			MissingReceiptPlan.error().Code == AssetCookErrorCode::InvalidDependency);
-		auto SkeletalImport = GltfMeshImportCoordinator::ProcessAndRecordSkeletalPrimitive(
-			SkeletalModel, ProjectValue->GetRootPath(), ProjectValue->GetAssetRegistry(), 0, 0, 0);
-		if (!SkeletalImport)
-			std::cerr << "G29_REFERENCE_SKELETAL_IMPORT_FAILURE " << SkeletalImport.error().Message << std::endl;
-		PF_CHECK(Tests, SkeletalImport.has_value());
-		if (!SkeletalImport) return;
-		PF_CHECK(Tests, SkeletalImport->Receipt.Recipe.SubresourceKey == SkeletalProductKey &&
-			SkeletalImport->Receipt.Recipe.SourceLocator == "skeletal/node/0/mesh/0/primitive/0");
-		const std::filesystem::path SkeletalSourcePath = SourceRoot / "Assets/Models/ReferenceRig.gltf";
+		const auto CheckSourceRouteFailure = [&](const AssetDependencyCatalog::SnapshotPtr& Snapshot,
+			std::string_view ExpectedDiagnostic)
+		{
+			AssetCookRequest MissingReceiptRequest{
+				Snapshot, ProjectValue->GetFilePath(), MenuScene, {},
+#if defined(_WIN32)
+				{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+				{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+				{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+				OutputRoot / "MissingSkeletalReceipt"
+			};
+			MissingReceiptRequest.DynamicRoots.push_back(GameScene);
+			const auto MissingReceiptPlan = AssetCookService::Plan(MissingReceiptRequest);
+			PF_CHECK(Tests, !MissingReceiptPlan && MissingReceiptPlan.error().Code == AssetCookErrorCode::InvalidDependency);
+			SceneRuntimeDesc SourceRuntimeDescription;
+			SourceRuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+			PlayerSession Session(ProjectValue->GetFilePath(), SourceRuntimeDescription);
+			PF_CHECK(Tests, Session.Start().has_value());
+			if (!Session.IsRunning()) return;
+			PF_CHECK(Tests, RunSourceStartClick(Session));
+			const auto FailedTransition = Session.Advance(Timestep(1.0 / 60.0));
+			PF_CHECK(Tests, !FailedTransition && FailedTransition.error().Message.find(SkeletalModel.ToString()) != std::string::npos &&
+				FailedTransition.error().Message.find(SkeletalProductKey) != std::string::npos &&
+				FailedTransition.error().Message.find(ExpectedDiagnostic) != std::string::npos);
+			PF_CHECK(Tests, Session.GetActiveSceneAsset() && *Session.GetActiveSceneAsset() == MenuScene && Session.IsRunning());
+			Session.Stop();
+		};
+		const std::filesystem::path MissingReceiptPath = OutputRoot / "ReferenceRig.gltf.importresult.test-backup";
+		std::filesystem::create_directories(OutputRoot, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		std::filesystem::copy_file(ReceiptPath, MissingReceiptPath, std::filesystem::copy_options::overwrite_existing, Error);
+		PF_CHECK(Tests, !Error);
+		const bool RemovedReceipt = std::filesystem::remove(ReceiptPath, Error);
+		PF_CHECK(Tests, RemovedReceipt && !Error);
+		if (!RemovedReceipt || Error) return;
+		auto MissingReceiptSnapshot = AssetDependencyCatalogBuilder::Build(
+			ProjectValue->GetRootPath(), ProjectValue->GetDescription().ID, 1);
+		if (!MissingReceiptSnapshot)
+			std::cerr << "G29_REFERENCE_MISSING_RECEIPT_CATALOG_FAILURE " << MissingReceiptSnapshot.error().Message << std::endl;
+		PF_CHECK(Tests, MissingReceiptSnapshot.has_value());
+		if (MissingReceiptSnapshot) CheckSourceRouteFailure(*MissingReceiptSnapshot,
+			"No successful skeletal import receipt matches the stable product key");
+		std::filesystem::rename(MissingReceiptPath, ReceiptPath, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		SceneRuntimeDesc SourceRuntimeDescription;
+		SourceRuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession SourceSession(ProjectValue->GetFilePath(), SourceRuntimeDescription);
+		PF_CHECK(Tests, SourceSession.Start().has_value());
+		if (!SourceSession.IsRunning()) return;
+		PF_CHECK(Tests, RunSourceStartClick(SourceSession));
+		const auto SourceTransition = SourceSession.Advance(Timestep(1.0 / 60.0));
+		if (!SourceTransition) std::cerr << "G29_REFERENCE_SOURCE_TRANSITION_FAILURE " << SourceTransition.error().Message << std::endl;
+		PF_CHECK(Tests, SourceTransition.has_value() && SourceSession.GetActiveSceneAsset() &&
+			*SourceSession.GetActiveSceneAsset() == GameScene);
+		constexpr UUID RigEntity{ 0xb029000000004000ull, 0x8000000000000005ull };
+		const auto InitialRuntimePose = SourceSession.GetActiveScene()
+			? SourceSession.GetActiveScene()->GetRuntimeSkeletalPose(RigEntity) : std::nullopt;
+		PF_CHECK(Tests, InitialRuntimePose.has_value() && !InitialRuntimePose->empty());
+		for (uint32_t Frame = 0; Frame < 8; ++Frame)
+			PF_CHECK(Tests, SourceSession.Advance(Timestep(1.0 / 60.0)).has_value());
+		const auto AdvancedRuntimePose = SourceSession.GetActiveScene()
+			? SourceSession.GetActiveScene()->GetRuntimeSkeletalPose(RigEntity) : std::nullopt;
+		PF_CHECK(Tests, InitialRuntimePose && AdvancedRuntimePose && *InitialRuntimePose != *AdvancedRuntimePose);
+		SourceSession.Stop();
+
 		std::ifstream SkeletalSourceStream(SkeletalSourcePath, std::ios::binary);
 		const std::string OriginalSkeletalSource{ std::istreambuf_iterator<char>(SkeletalSourceStream), {} };
 		PF_CHECK(Tests, SkeletalSourceStream.good() || SkeletalSourceStream.eof());
@@ -1077,6 +1169,8 @@ namespace
 			const auto StaleReceiptPlan = AssetCookService::Plan(StaleReceiptRequest);
 			PF_CHECK(Tests, !StaleReceiptPlan &&
 				StaleReceiptPlan.error().Code == AssetCookErrorCode::InvalidDependency);
+			CheckSourceRouteFailure(*StaleReceiptSnapshot,
+				"Skeletal source no longer matches the last successful imported product");
 		}
 		{
 			std::ofstream RestoredSource(SkeletalSourcePath, std::ios::binary | std::ios::trunc);
@@ -1247,6 +1341,8 @@ namespace
 			bool HasRuntimeUI = false;
 			bool HasSensor = false;
 			bool HasSpatialAudio = false;
+			bool HasLoopingMusicSourceWithoutAutoplay = false;
+			bool HasEffectsTestSourceWithoutAutoplay = false;
 			bool HasLua = false;
 			bool HasBlueprint = false;
 			bool HasLinkedPrefabInstance = false;
@@ -1258,12 +1354,20 @@ namespace
 				const auto Canvas = Current.GetRuntimeUICanvas();
 				const auto Collider = Current.GetCollider();
 				const auto Audio = Current.GetAudioSource();
+				const auto Tag = Current.GetTag();
 				const auto Script = Current.GetScript();
 				const auto Blueprint = Current.GetBlueprint();
 				const auto PrefabInstance = Current.GetPrefabInstance();
 				HasRuntimeUI = HasRuntimeUI || (Canvas && Canvas->has_value());
 				HasSensor = HasSensor || (Collider && Collider->has_value());
 				HasSpatialAudio = HasSpatialAudio || (Audio && Audio->has_value());
+				if (Audio && Audio->has_value() && Tag)
+				{
+					HasLoopingMusicSourceWithoutAutoplay = HasLoopingMusicSourceWithoutAutoplay ||
+						(Tag->Name == "Looping Music" && !(**Audio).PlayOnStart);
+					HasEffectsTestSourceWithoutAutoplay = HasEffectsTestSourceWithoutAutoplay ||
+						(Tag->Name == "Effects Test Source" && !(**Audio).PlayOnStart);
+				}
 				HasLua = HasLua || (Script && Script->has_value());
 				HasBlueprint = HasBlueprint || (Blueprint && Blueprint->has_value());
 				HasLinkedPrefabInstance = HasLinkedPrefabInstance || (PrefabInstance && PrefabInstance->has_value());
@@ -1281,10 +1385,16 @@ namespace
 			}
 			PF_CHECK(Tests, HasRuntimeUI && HasSensor && HasSpatialAudio && HasLua && HasBlueprint &&
 				HasLinkedPrefabInstance && HasPrefabMaterialOverride && HasGraphMaterialMesh && HasAnimatedGraphMaterialMesh);
+			PF_CHECK(Tests, HasLoopingMusicSourceWithoutAutoplay && HasEffectsTestSourceWithoutAutoplay);
 		}
 		SceneRuntimeDesc RuntimeDescription;
 		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
-		PlayerSession Session(*Provider, RuntimeDescription);
+		GameplayInputService GameplayInput;
+		const auto CookedGameplayMap = (*Provider)->LoadGameplayInput((*Provider)->GetProjectID());
+		PF_CHECK(Tests, CookedGameplayMap.has_value());
+		if (CookedGameplayMap) PF_CHECK(Tests, GameplayInput.SetActionMap(*CookedGameplayMap).has_value());
+		SceneRuntimeServices RuntimeServices{ .GameplayInput = &GameplayInput };
+		PlayerSession Session(*Provider, RuntimeDescription, RuntimeServices);
 		PF_CHECK(Tests, Session.IsCookedSession() && Session.GetProject() == nullptr);
 		PF_CHECK(Tests, Session.Start().has_value());
 		if (!Session.IsRunning()) return;
@@ -1297,6 +1407,9 @@ namespace
 		}
 		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Session.GetActiveSceneAsset() && *Session.GetActiveSceneAsset() == GameScene);
+		const auto InitialCookedRigPose = Session.GetActiveScene()
+			? Session.GetActiveScene()->GetRuntimeSkeletalPose(RigEntity) : std::nullopt;
+		PF_CHECK(Tests, InitialCookedRigPose.has_value() && !InitialCookedRigPose->empty());
 		bool BlueprintExecuted = false;
 		if (const Scene* Active = Session.GetActiveScene())
 			for (const Entity& Current : Active->GetEntities())
@@ -1339,10 +1452,34 @@ namespace
 				if (Command.Element == UUID(0xb018000000004000ull, 0x8000000000000132ull)) return Command.Text;
 			return {};
 		};
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, FindScore() == "Score: 0");
+		InputRoutingState GameplayRouting;
+		GameplayRouting.FocusedWindow = 1;
+		GameplayRouting.Contexts[0] = { InputContext::Gameplay, InputDeviceMask::Keyboard, 1, true };
+		GameplayRouting.ContextCount = 1;
+		PF_CHECK(Tests, GameplayInput.QueueEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) }, .Window = 1 }));
+		GameplayInput.PublishFrame(GameplayRouting);
+		PF_CHECK(Tests, GameplayInput.FindAction("game.interact") && GameplayInput.FindAction("game.interact")->Pressed);
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		GameplayInput.PublishFrame(GameplayRouting);
+		PF_CHECK(Tests, GameplayInput.FindAction("game.interact") && GameplayInput.FindAction("game.interact")->Held &&
+			!GameplayInput.FindAction("game.interact")->Pressed);
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, FindScore() == "Score: 10");
+		PF_CHECK(Tests, GameplayInput.QueueEvent({ .Kind = InputEventKind::Released,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) }, .Window = 1 }));
+		GameplayInput.PublishFrame(GameplayRouting);
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, FindScore() == "Score: 10");
 		for (uint32_t Frame = 0; Frame < 40; ++Frame)
 			PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		const auto AdvancedCookedRigPose = Session.GetActiveScene()
+			? Session.GetActiveScene()->GetRuntimeSkeletalPose(RigEntity) : std::nullopt;
+		PF_CHECK(Tests, InitialCookedRigPose && AdvancedCookedRigPose && *InitialCookedRigPose != *AdvancedCookedRigPose);
 		const std::string AdvancedScore = FindScore();
-		PF_CHECK(Tests, AdvancedScore.starts_with("Score: ") && AdvancedScore != "Score: 0");
+		PF_CHECK(Tests, AdvancedScore == "Score: 11");
 		PF_CHECK(Tests, Click({ 840.0f, 58.0f }) && Session.IsPaused());
 		for (uint32_t Frame = 0; Frame < 30; ++Frame)
 			PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());

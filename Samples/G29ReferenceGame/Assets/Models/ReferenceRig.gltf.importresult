@@ -1,0 +1,45 @@
+{
+  "format": "PulseForgeImportResult",
+  "version": 3,
+  "records": [
+    {
+      "recipe": {
+        "sourceAsset": "b0290000-0000-4000-8000-000000000003",
+        "subresource": "skeletal/c082e602f501ee8b6e73dffc66fe079d",
+        "sourceLocator": "skeletal/node/0/mesh/0/primitive/0",
+        "importer": "PulseForge.SkeletalGltfMeshImporter",
+        "importerVersion": "1",
+        "outputSchemaVersion": 1,
+        "effectiveSettings": "{\"version\":1,\"missingNormalsPolicy\":\"GenerateSmooth\"}",
+        "target": "cpu-generic-v1",
+        "inputs": [
+          {
+            "path": "Assets/Models/ReferenceRig.bin",
+            "content": {
+              "algorithm": "xxh3-128-v0.8.2",
+              "digest": "0661af2146304b1470df4f5815e0fded"
+            }
+          },
+          {
+            "path": "Assets/Models/ReferenceRig.gltf",
+            "content": {
+              "algorithm": "xxh3-128-v0.8.2",
+              "digest": "7fe27727dceed738240524ef10348cd5"
+            }
+          }
+        ],
+        "inputFingerprint": {
+          "algorithm": "xxh3-128-v0.8.2",
+          "digest": "d577f6aa624b2489890800145637ef74"
+        }
+      },
+      "resultFingerprint": {
+        "algorithm": "xxh3-128-v0.8.2",
+        "digest": "bbeb188329eb9f3d07d48a6ad362b39e"
+      },
+      "resultIdentity": "skeletal/c082e602f501ee8b6e73dffc66fe079d",
+      "artifactAvailability": "notPersisted",
+      "gpuResidency": "unknown"
+    }
+  ]
+}

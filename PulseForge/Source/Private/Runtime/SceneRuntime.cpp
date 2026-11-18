@@ -358,9 +358,11 @@ namespace PulseForge
 				}
 
 				const MeshRendererComponent& Component = **MeshRenderer;
+				const std::string ProductContext = "Skeletal asset " + Component.MeshAsset.ToString() +
+					" product " + *Component.SkeletalProductKey + ": ";
 				if (SkeletalInstances.size() >= MaximumRuntimeSkeletalInstances &&
 					!SkeletalInstances.contains(EntityValue.GetUUID()))
-					return std::unexpected("Scene exceeds the 256-instance skeletal animation runtime limit");
+					return std::unexpected(ProductContext + "scene exceeds the 256-instance skeletal animation runtime limit");
 				auto Found = SkeletalInstances.find(EntityValue.GetUUID());
 				if (Found != SkeletalInstances.end() &&
 					(Found->second.BoundEntity != EntityValue || Found->second.SourceAsset != Component.MeshAsset ||
@@ -373,9 +375,9 @@ namespace PulseForge
 				{
 					auto Product = LoadRuntimeSkeletalProduct(
 						SourceProject, CookedAssets, Component.MeshAsset, *Component.SkeletalProductKey);
-					if (!Product) return std::unexpected(Product.error());
+					if (!Product) return std::unexpected(ProductContext + Product.error());
 					if (Product->SkeletonNodes.empty() || Product->SkeletonNodes.size() > MaximumRuntimeSkeletalNodes)
-						return std::unexpected("Skeletal product node count is empty or exceeds the runtime limit");
+						return std::unexpected(ProductContext + "product node count is empty or exceeds the runtime limit");
 					SkeletalInstanceState State;
 					State.BoundEntity = EntityValue;
 					State.SourceAsset = Component.MeshAsset;
@@ -385,7 +387,7 @@ namespace PulseForge
 					for (const ImportedGltfSkeletonNode& Node : State.Product.SkeletonNodes)
 					{
 						auto Pose = DecomposeSkeletalRestTransform(Node.StableKey, Node.LocalBindMatrix);
-						if (!Pose) return std::unexpected("Invalid skeletal rest pose: " + Pose.error());
+						if (!Pose) return std::unexpected(ProductContext + "invalid rest pose: " + Pose.error());
 						State.RestPose.push_back(std::move(*Pose));
 					}
 					Found = SkeletalInstances.emplace(EntityValue.GetUUID(), std::move(State)).first;
@@ -404,16 +406,16 @@ namespace PulseForge
 					GltfAnimationInstancePlayback CandidatePlayback;
 					if (auto Started = PlayGltfAnimationInstance(CandidatePlayback, State.Product,
 								*Component.AnimationClipKey, Component.AnimationLooping); !Started)
-						return std::unexpected("Could not start skeletal animation clip: " + Started.error().Message);
+						return std::unexpected(ProductContext + "could not start animation clip: " + Started.error().Message);
 					State.Playback = std::move(CandidatePlayback);
 					State.ClipKey = *Component.AnimationClipKey;
 				}
 				State.Playback.CurrentClock.Looping = Component.AnimationLooping;
 				if (auto Speed = SetGltfAnimationPlaybackSpeed(State.Playback.CurrentClock, Component.AnimationSpeed); !Speed)
-					return std::unexpected("Could not set skeletal animation speed: " + Speed.error().Message);
+					return std::unexpected(ProductContext + "could not set animation speed: " + Speed.error().Message);
 				auto Advanced = AdvanceGltfAnimationInstance(
 					State.Playback, State.Product, State.RestPose, DeltaSeconds);
-				if (!Advanced) return std::unexpected("Could not advance skeletal animation: " + Advanced.error().Message);
+				if (!Advanced) return std::unexpected(ProductContext + "could not advance animation: " + Advanced.error().Message);
 				Pose = std::move(*Advanced);
 				}
 				else
@@ -428,7 +430,7 @@ namespace PulseForge
 				for (const GltfAnimationNodePose& NodePose : Pose)
 					LocalTransforms.push_back(ComposeSkeletalTransform(NodePose));
 				if (auto Published = SceneValue.SetRuntimeSkeletalPose(EntityValue.GetUUID(), std::move(LocalTransforms)); !Published)
-					return std::unexpected("Could not publish runtime skeletal pose: " + Published.error().Message);
+					return std::unexpected(ProductContext + "could not publish runtime pose: " + Published.error().Message);
 				LiveSkeletalEntities.push_back(EntityValue.GetUUID());
 			}
 
@@ -1094,6 +1096,15 @@ namespace PulseForge
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 			SourceProject = m_Project;
 #endif
+			if (auto SkeletalPreparation = Candidate->AdvanceSkeletalAnimations(
+					Source, 0.0f, SourceProject, m_CookedAssets); !SkeletalPreparation)
+			{
+				Source.ClearRuntimeSkeletalPoses();
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed,
+					SceneRuntimeSubsystem::None,
+					"Could not prepare scene skeletal products: " + SkeletalPreparation.error()));
+			}
+			Source.ClearRuntimeSkeletalPoses();
 			for (const Entity& EntityValue : Source.GetEntities())
 			{
 				auto Canvas = EntityValue.GetRuntimeUICanvas();
