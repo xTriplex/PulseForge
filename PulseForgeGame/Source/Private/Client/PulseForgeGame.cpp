@@ -250,6 +250,8 @@ public:
 			m_RuntimeUIPackageSmoke = std::string_view(UISmoke) == "1";
 		if (const char* UIAcceptance = std::getenv("PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE"))
 			m_RuntimeUIPackageAcceptance = std::string_view(UIAcceptance) == "1";
+		if (const char* G29Acceptance = std::getenv("PULSEFORGE_G29_PACKAGE_ACCEPTANCE"))
+			m_G29PackageAcceptance = std::string_view(G29Acceptance) == "1";
 		if (const char* Acceptance = std::getenv("PULSEFORGE_COOKED_PLAYER_ACCEPTANCE"))
 			m_CookedPlayerAcceptance = std::string_view(Acceptance) == "1";
 		if (const char* AudioAcceptance = std::getenv("PULSEFORGE_AUDIO_MIXING_PACKAGE_ACCEPTANCE"))
@@ -267,13 +269,15 @@ public:
 		auto& Application = PulseForge::Application::Get();
 		PulseForge::SceneRuntimeDesc RuntimeDescription{};
 #if defined(PF_DEBUG)
-		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance || m_AudioMixingPackageAcceptance)
+		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance || m_G29PackageAcceptance || m_AudioMixingPackageAcceptance)
 		{
 			RuntimeDescription.Audio.OutputBackend = PulseForge::AudioOutputBackend::Null;
 			if (m_CookedPlayerAcceptance)
 				PF_INFO("PULSEFORGE_COOKED_AUDIO_BACKEND=NULL; deterministic output selected for process acceptance");
 			if (m_RuntimeUIPackageAcceptance)
 				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_AUDIO_BACKEND=NULL; deterministic output selected for G18 package acceptance");
+			if (m_G29PackageAcceptance)
+				PF_INFO("PULSEFORGE_G29_PACKAGE_AUDIO_BACKEND=NULL; deterministic output selected for reference-game acceptance");
 			if (m_AudioMixingPackageAcceptance)
 				PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_BACKEND=NULL; explicit silent output selected for package acceptance");
 		}
@@ -308,7 +312,7 @@ public:
 		}
 		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
 #if defined(PF_DEBUG)
-		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance || m_AudioMixingPackageAcceptance)
+		if (m_CookedPlayerAcceptance || m_RuntimeUIPackageAcceptance || m_G29PackageAcceptance || m_AudioMixingPackageAcceptance)
 		{
 			if (!UserDataRoot)
 				throw std::runtime_error("Player package acceptance could not resolve its isolated user-data directory");
@@ -316,6 +320,8 @@ public:
 				PF_INFO("PULSEFORGE_COOKED_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
 			if (m_RuntimeUIPackageAcceptance)
 				PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
+			if (m_G29PackageAcceptance)
+				PF_INFO("PULSEFORGE_G29_PACKAGE_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
 			if (m_AudioMixingPackageAcceptance)
 				PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_USER_DATA=PASS; root={}", PathToUtf8(*UserDataRoot));
 		}
@@ -431,6 +437,9 @@ public:
 		if (m_RuntimeUIPackageAcceptance && Application.GetInputWindowID() != 0)
 			Routing.FocusedWindow = Application.GetInputWindowID();
 		AdvanceRuntimeUIPackageAcceptanceInput(Application, DeltaTime, Routing.FocusedWindow);
+		if (m_G29PackageAcceptance && Application.GetInputWindowID() != 0)
+			Routing.FocusedWindow = Application.GetInputWindowID();
+		AdvanceG29PackageAcceptanceInput(Application, DeltaTime, Routing.FocusedWindow);
 		if (m_AudioMixingPackageAcceptance && Application.GetInputWindowID() != 0)
 			Routing.FocusedWindow = Application.GetInputWindowID();
 		AdvanceAudioMixingPackageInput(Application, DeltaTime, Routing.FocusedWindow);
@@ -582,6 +591,7 @@ public:
 			PF_INFO("PULSEFORGE_COOKED_PLAYER_ACCEPTANCE=PASS; requesting orderly shutdown");
 			Application.RequestClose();
 		}
+			AdvanceG29PackageAcceptanceChecks(Application);
 #endif
 	}
 
@@ -701,6 +711,8 @@ public:
 		if (m_RuntimeUIPackageSmokeShutdownRequested) PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS");
 		if (m_RuntimeUIPackageAcceptanceComplete && !m_RuntimeUIPackageAcceptanceFailed)
 			PF_INFO("PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS; Player exited normally after menu/gameplay/pause/resume interaction");
+		if (m_G29PackageAcceptanceComplete && !m_G29PackageAcceptanceFailed)
+			PF_INFO("PULSEFORGE_G29_PACKAGE_SHUTDOWN=PASS; Player exited normally after reference-game gameplay and mapped Space input");
 		if (m_AudioMixingPackageComplete && !m_AudioMixingPackageFailed)
 			PF_INFO("PULSEFORGE_AUDIO_MIXING_PACKAGE_SHUTDOWN=PASS; Player exited normally after settings restore or mixing/pause interaction");
 #endif
@@ -732,6 +744,19 @@ private:
 		ResumedActionPressed,
 		ResumedActionReleased,
 		AwaitResumedAction,
+		Complete,
+		Failed
+	};
+
+	enum class G29PackageAcceptanceStage : uint8_t
+	{
+		ObserveMenu,
+		StartPressed,
+		StartReleased,
+		AwaitGameplay,
+		GameplayActionPressed,
+		GameplayActionReleasePending,
+		AwaitScore,
 		Complete,
 		Failed
 	};
@@ -1008,6 +1033,139 @@ private:
 		}
 	}
 
+	void AdvanceG29PackageAcceptanceInput(
+		PulseForge::Application& Application, PulseForge::Timestep DeltaTime, PulseForge::InputWindowID Window)
+	{
+		if (!m_G29PackageAcceptance || m_G29PackageAcceptanceComplete || m_G29PackageAcceptanceFailed) return;
+		m_G29PackageAcceptanceElapsed += std::clamp(DeltaTime.GetSeconds(), 0.0, 0.25);
+		if (m_G29PackageAcceptanceElapsed > 30.0)
+		{
+			FailG29PackageAcceptance(Application, "the bounded reference-game interaction exceeded 30 seconds");
+			return;
+		}
+		if (Window == 0 || !m_Session) return;
+		switch (m_G29PackageAcceptanceStage)
+		{
+		case G29PackageAcceptanceStage::ObserveMenu:
+			if (m_Session->GetActiveSceneAsset() && m_Session->GetActiveSceneAsset()->ToString() ==
+				"b0180000-0000-4000-8000-000000000010" && m_Session->HasRuntimeUI())
+			{
+				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::StartPressed;
+				PF_INFO("PULSEFORGE_G29_PACKAGE_MENU=PASS; exported menu scene and RuntimeUI are active");
+			}
+			break;
+		case G29PackageAcceptanceStage::StartPressed:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Enter, PulseForge::InputEventKind::Pressed))
+				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::StartReleased;
+			break;
+		case G29PackageAcceptanceStage::StartReleased:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Enter, PulseForge::InputEventKind::Released))
+				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::AwaitGameplay;
+			break;
+		case G29PackageAcceptanceStage::GameplayActionPressed:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Pressed))
+				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::GameplayActionReleasePending;
+			break;
+		case G29PackageAcceptanceStage::GameplayActionReleasePending:
+			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Released))
+			{
+				m_G29PackageScoreObservationFrames = 0;
+				m_G29PackageScoreVerified = false;
+				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::AwaitScore;
+			}
+			break;
+		case G29PackageAcceptanceStage::AwaitGameplay:
+		case G29PackageAcceptanceStage::AwaitScore:
+		case G29PackageAcceptanceStage::Complete:
+		case G29PackageAcceptanceStage::Failed:
+			break;
+		}
+	}
+
+	void AdvanceG29PackageAcceptanceChecks(PulseForge::Application& Application)
+	{
+		if (!m_G29PackageAcceptance || m_G29PackageAcceptanceComplete || m_G29PackageAcceptanceFailed || !m_Session)
+			return;
+		constexpr std::string_view GameplayScene = "b0180000-0000-4000-8000-000000000011";
+		static const auto RigIdentifier = PulseForge::UUID::Parse("b0290000-0000-4000-8000-000000000005");
+		if (!RigIdentifier)
+		{
+			FailG29PackageAcceptance(Application, "the fixed reference rig UUID is invalid");
+			return;
+		}
+		if (m_G29PackageAcceptanceStage == G29PackageAcceptanceStage::AwaitGameplay &&
+			m_Session->GetActiveSceneAsset() && m_Session->GetActiveSceneAsset()->ToString() == GameplayScene)
+		{
+			const auto Score = ReadRuntimeUIPackageScore();
+			const auto Rig = m_Session->GetActiveScene() ? m_Session->GetActiveScene()->FindEntity(*RigIdentifier) :
+				std::nullopt;
+			const auto Pose = Rig && m_Session->GetActiveScene()
+				? m_Session->GetActiveScene()->GetRuntimeSkeletalPose(Rig->GetUUID()) : std::nullopt;
+			if (!Score || !Pose || Pose->empty()) return;
+			m_G29PackageInitialPose = *Pose;
+			m_G29PackageScoreBeforeAction = *Score;
+			m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::GameplayActionPressed;
+			PF_INFO("PULSEFORGE_G29_PACKAGE_GAMEPLAY=PASS; Menu → Start activated the exported gameplay scene");
+		}
+		else if (m_G29PackageAcceptanceStage == G29PackageAcceptanceStage::AwaitScore)
+		{
+			const auto Score = ReadRuntimeUIPackageScore();
+			const auto Rig = m_Session->GetActiveScene() ? m_Session->GetActiveScene()->FindEntity(*RigIdentifier) :
+				std::nullopt;
+			const auto Pose = Rig && m_Session->GetActiveScene()
+				? m_Session->GetActiveScene()->GetRuntimeSkeletalPose(Rig->GetUUID()) : std::nullopt;
+			if (Pose && *Pose != m_G29PackageInitialPose)
+				m_G29PackageRigAdvanced = true;
+			if (!m_G29PackageScoreVerified)
+			{
+				++m_G29PackageScoreObservationFrames;
+				if (Score)
+				{
+					const int ScoreDelta = *Score - m_G29PackageScoreBeforeAction;
+					// The UI draw list is refreshed before Lua updates it. Allow two app frames for the
+					// post-action value to become observable; only one timer tick can coincide with Space.
+					if (ScoreDelta >= 10 && ScoreDelta <= 11)
+					{
+						m_G29PackageScoreAfterAction = *Score;
+						m_G29PackageCoincidentTimerTick = ScoreDelta == 11;
+						m_G29PackageScoreVerified = true;
+					}
+					else if (ScoreDelta > 11 || m_G29PackageScoreObservationFrames >= 2)
+					{
+						FailG29PackageAcceptance(Application, "Space score was not observed in the bounded post-update window: baseline=" +
+							std::to_string(m_G29PackageScoreBeforeAction) + ", observed=" + std::to_string(*Score) +
+							", delta=" + std::to_string(ScoreDelta));
+						return;
+					}
+				}
+				else if (m_G29PackageScoreObservationFrames >= 2)
+				{
+					FailG29PackageAcceptance(Application, "Runtime UI did not publish the post-Space score within two app frames");
+					return;
+				}
+			}
+			if (m_G29PackageRigAdvanced && Score && *Score >= m_G29PackageScoreAfterAction)
+			{
+				m_G29PackageAcceptanceComplete = true;
+				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::Complete;
+				PF_INFO("PULSEFORGE_G29_PACKAGE_RIG_ANIMATED=PASS; runtime skeletal pose advanced");
+				PF_INFO("PULSEFORGE_G29_PACKAGE_SPACE_SCORE=PASS; Space contributed 10 points in one update; coincident timer tick={}",
+					m_G29PackageCoincidentTimerTick ? "yes" : "no");
+				PF_INFO("PULSEFORGE_G29_PACKAGE_ACCEPTANCE=PASS; normal shutdown requested");
+				Application.RequestClose();
+			}
+		}
+	}
+
+	void FailG29PackageAcceptance(PulseForge::Application& Application, std::string_view Reason)
+	{
+		if (m_G29PackageAcceptanceFailed) return;
+		m_G29PackageAcceptanceFailed = true;
+		m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::Failed;
+		PF_ERROR("PULSEFORGE_G29_PACKAGE_ACCEPTANCE=FAIL; {}", Reason);
+		Application.RequestClose();
+	}
+
 	void AdvanceRuntimeUIPackageAcceptanceChecks(PulseForge::Application& Application)
 	{
 		if (!m_RuntimeUIPackageAcceptance || m_RuntimeUIPackageAcceptanceComplete || m_RuntimeUIPackageAcceptanceFailed || !m_Session)
@@ -1218,6 +1376,7 @@ private:
 	bool m_CookedReadbackPassed = false;
 	bool m_CookedAcceptanceShutdownRequested = false;
 	bool m_RuntimeUIPackageAcceptance = false;
+	bool m_G29PackageAcceptance = false;
 	bool m_RuntimeUIPackageMenuRendered = false;
 	bool m_RuntimeUIPackageAcceptanceComplete = false;
 	bool m_RuntimeUIPackageAcceptanceFailed = false;
@@ -1226,6 +1385,17 @@ private:
 	double m_RuntimeUIPackageAcceptanceElapsed = 0.0;
 	int m_RuntimeUIPackageScoreBeforeAction = 0;
 	int m_RuntimeUIPackagePausedScore = 0;
+	bool m_G29PackageAcceptanceComplete = false;
+	bool m_G29PackageAcceptanceFailed = false;
+	bool m_G29PackageRigAdvanced = false;
+	G29PackageAcceptanceStage m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::ObserveMenu;
+	double m_G29PackageAcceptanceElapsed = 0.0;
+	int m_G29PackageScoreBeforeAction = 0;
+	int m_G29PackageScoreAfterAction = 0;
+	uint32_t m_G29PackageScoreObservationFrames = 0;
+	bool m_G29PackageScoreVerified = false;
+	bool m_G29PackageCoincidentTimerTick = false;
+	std::vector<PulseForge::RuntimeSkeletalLocalTransform> m_G29PackageInitialPose;
 	bool m_AudioMixingPackageAcceptance = false;
 	bool m_AudioMixingPackageVerify = false;
 	bool m_AudioMixingPackageInitialFrameRendered = false;

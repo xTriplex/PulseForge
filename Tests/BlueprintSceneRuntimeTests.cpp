@@ -737,8 +737,9 @@ namespace
 		PF_CHECK(Tests, !Runtime.GetPendingBoundaryRequest().has_value());
 		AcceptStop = false;
 		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(1.0 / 60.0)).has_value());
-		PF_CHECK(Tests, QueueAttempts == 2 && UpdateResolutionAttempts == 2 &&
-			!Runtime.GetPendingBoundaryRequest().has_value());
+		PF_CHECK(Tests, QueueAttempts == 2);
+		PF_CHECK(Tests, UpdateResolutionAttempts == 2);
+		PF_CHECK(Tests, !Runtime.GetPendingBoundaryRequest().has_value());
 		const auto Diagnostics = Runtime.GetBlueprintDiagnostics();
 		PF_CHECK(Tests, Diagnostics.size() == 1 && Diagnostics[0].Entity == StopperId &&
 			Diagnostics[0].Code == BlueprintProgramErrorCode::HostRejectedDeferredCall &&
@@ -1181,29 +1182,88 @@ namespace
 		PF_CHECK(Tests, TimerPropertyTransactions == 1 && TimerRuntime.GetBlueprintDiagnostics().empty());
 		TimerRuntime.Stop();
 
+		Scene IsolatedRevisionScene;
+		const auto IsolatedTimerEntity = IsolatedRevisionScene.CreateEntityWithUUID(TimerTarget, "Isolated revision timer target");
+		constexpr UUID OtherBlueprintTarget{ 0x5f00000000004000ull, 0x8000000000000005ull };
+		constexpr AssetID OtherBlueprintAsset{ 0x5f00000000004000ull, 0x8000000000000006ull };
+		const auto OtherBlueprintEntity = IsolatedRevisionScene.CreateEntityWithUUID(OtherBlueprintTarget, "Other Blueprint target");
+		PF_CHECK(Tests, IsolatedTimerEntity.has_value() && OtherBlueprintEntity.has_value());
+		if (!IsolatedTimerEntity || !OtherBlueprintEntity) return;
+		BlueprintProgramSource OtherBlueprintSource;
+		OtherBlueprintSource.Instructions = { { BlueprintOpcode::Return, 0, 0, UUID(71, 1) } };
+		const auto VerifiedOtherBlueprint = VerifyBlueprintProgram(std::move(OtherBlueprintSource));
+		PF_CHECK(Tests, VerifiedOtherBlueprint.has_value());
+		if (!VerifiedOtherBlueprint) return;
+		const auto OtherBlueprintProgram = std::make_shared<const VerifiedBlueprintProgram>(std::move(*VerifiedOtherBlueprint));
+		uint64_t IsolatedCatalogGeneration = 1;
+		std::unordered_map<AssetID, uint64_t, UUIDHash> IsolatedAssetRevisions{
+			{ TimerProgramAsset, 1 }, { OtherBlueprintAsset, 1 }
+		};
+		uint32_t IsolatedTimerTransactions = 0;
+		SceneRuntimeServices IsolatedRevisionServices;
+		IsolatedRevisionServices.GetBlueprintProgramGeneration = [&] { return IsolatedCatalogGeneration; };
+		IsolatedRevisionServices.GetBlueprintProgramRevision = [&](const AssetID& Asset)
+			{ return IsolatedAssetRevisions[Asset]; };
+		IsolatedRevisionServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
+			-> std::optional<BlueprintProgramBinding>
+		{
+			if (Target == *IsolatedTimerEntity)
+			{
+				if (Event == BlueprintEventKind::OnCreate)
+					return BlueprintProgramBinding{ TimerProgramAsset, IsolatedAssetRevisions[TimerProgramAsset], ScheduleTimerProgram };
+				if (Event == BlueprintEventKind::OnTimer)
+					return BlueprintProgramBinding{ TimerProgramAsset, IsolatedAssetRevisions[TimerProgramAsset], TimerCallbackProgram };
+			}
+			if (Target == *OtherBlueprintEntity && Event == BlueprintEventKind::OnCreate)
+				return BlueprintProgramBinding{ OtherBlueprintAsset, IsolatedAssetRevisions[OtherBlueprintAsset], OtherBlueprintProgram };
+			return std::nullopt;
+		};
+		IsolatedRevisionServices.ApplyBlueprintPropertyWrites = [&](const Entity& Target,
+			std::span<const BlueprintScalarPropertyWrite> Writes)
+		{
+			if (Target == *IsolatedTimerEntity && Writes.size() == 1 && Writes.front().PropertyId == "health" &&
+				Writes.front().Value == 1.0f)
+				++IsolatedTimerTransactions;
+			return true;
+		};
+		SceneRuntime IsolatedRevisionRuntime(*ProjectResult, {}, IsolatedRevisionServices);
+		PF_CHECK(Tests, IsolatedRevisionRuntime.Start(IsolatedRevisionScene).has_value());
+		PF_CHECK(Tests, IsolatedRevisionRuntime.Advance(IsolatedRevisionScene, Timestep(0.02)).has_value());
+		++IsolatedAssetRevisions[OtherBlueprintAsset];
+		++IsolatedCatalogGeneration;
+		PF_CHECK(Tests, IsolatedRevisionRuntime.Advance(IsolatedRevisionScene, Timestep(0.04)).has_value());
+		PF_CHECK(Tests, IsolatedTimerTransactions == 1);
+		PF_CHECK(Tests, IsolatedRevisionRuntime.GetBlueprintDiagnostics().empty());
+		IsolatedRevisionRuntime.Stop();
+
 		Scene CancelledTimerScene;
 		const auto CancelledTimerEntity = CancelledTimerScene.CreateEntityWithUUID(TimerTarget, "Cancelled timer target");
 		PF_CHECK(Tests, CancelledTimerEntity.has_value());
 		if (!CancelledTimerEntity) return;
+		uint64_t CancelledTimerAssetRevision = 1;
 		TimerServices.ResolveBlueprintProgram = [&](const Entity& Target, BlueprintEventKind Event)
 			-> std::optional<BlueprintProgramBinding>
 		{
 			if (Target != *CancelledTimerEntity) return std::nullopt;
 			if (Event == BlueprintEventKind::OnCreate)
-				return BlueprintProgramBinding{ TimerProgramAsset, 1, ScheduleTimerProgram };
+				return BlueprintProgramBinding{ TimerProgramAsset, CancelledTimerAssetRevision, ScheduleTimerProgram };
 			if (Event == BlueprintEventKind::OnTimer)
-				return BlueprintProgramBinding{ TimerProgramAsset, 1, TimerCallbackProgram };
+				return BlueprintProgramBinding{ TimerProgramAsset, CancelledTimerAssetRevision, TimerCallbackProgram };
 			return std::nullopt;
 		};
+		TimerServices.GetBlueprintProgramRevision = [&](const AssetID& Asset)
+			{ return Asset == TimerProgramAsset ? CancelledTimerAssetRevision : 0; };
 		SceneRuntime CancelledTimerRuntime(*ProjectResult, {}, TimerServices);
 		PF_CHECK(Tests, CancelledTimerRuntime.Start(CancelledTimerScene).has_value());
 		PF_CHECK(Tests, CancelledTimerRuntime.Advance(CancelledTimerScene, Timestep(0.01)).has_value());
 		const uint32_t TransactionsBeforeGenerationChange = TimerPropertyTransactions;
+		++CancelledTimerAssetRevision;
 		++TimerCatalogGeneration;
 		PF_CHECK(Tests, CancelledTimerRuntime.Advance(CancelledTimerScene, Timestep(0.1)).has_value());
 		PF_CHECK(Tests, TimerPropertyTransactions == TransactionsBeforeGenerationChange);
 		CancelledTimerRuntime.Stop();
 
+		CancelledTimerAssetRevision = 1;
 		Scene ReplacedTimerScene;
 		const auto OriginalTimerEntity = ReplacedTimerScene.CreateEntityWithUUID(TimerTarget, "Original timer incarnation");
 		PF_CHECK(Tests, OriginalTimerEntity.has_value());

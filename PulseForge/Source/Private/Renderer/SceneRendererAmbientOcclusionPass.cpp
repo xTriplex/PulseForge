@@ -431,6 +431,7 @@ namespace PulseForge
 			return std::unexpected(std::move(Updated.error()));
 		for (const SceneMeshInstance& Instance : Inputs.Snapshot.Meshes)
 		{
+			if (!Instance.CameraVisible) continue;
 			auto Material = Inputs.ResolveMaterial(Instance);
 			if (!Material) return std::unexpected(std::move(Material.error()));
 			if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;

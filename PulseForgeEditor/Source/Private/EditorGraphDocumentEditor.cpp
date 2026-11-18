@@ -824,7 +824,9 @@ namespace PulseForgeEditor
 		EventSources.reserve(Compiled->GetEvents().size());
 		for (const PulseForge::BlueprintVerifiedEventProgram& Event : Compiled->GetEvents())
 			EventSources.push_back({ Event.Event, Event.Program.GetSource() });
-		auto ProgramBytes = PulseForge::SerializeBlueprintAsset(EventSources);
+		const auto GraphSourceBytes = std::as_bytes(std::span(GraphBytes->data(), GraphBytes->size()));
+		auto ProgramBytes = PulseForge::SerializeBlueprintAsset(
+			EventSources, PulseForge::ComputeBlueprintSourceRevision(GraphSourceBytes));
 		if (!ProgramBytes)
 		{
 			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
@@ -833,19 +835,20 @@ namespace PulseForgeEditor
 		const std::string InitialProgramSource(reinterpret_cast<const char*>(InitialBytes->data()), InitialBytes->size());
 		const std::string CompiledProgramSource(reinterpret_cast<const char*>(ProgramBytes->data()), ProgramBytes->size());
 		const auto ProgramPath = ProjectRoot / CreatedRecord->ProjectRelativePath;
-		auto ProgramPublished = PublishGraphSource(ProgramPath, InitialProgramSource, CompiledProgramSource, false);
-		if (!ProgramPublished)
-		{
-			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
-			return std::unexpected("Could not publish the initial Blueprint program: " + ProgramPublished.error());
-		}
 		const auto GraphRelativePath = GetBlueprintGraphPath(CreatedRecord->ID);
 		auto Published = PublishGraphSource(ProjectRoot / GraphRelativePath, {}, *GraphBytes, true);
 		if (!Published)
 		{
-			(void)PublishGraphSource(ProgramPath, CompiledProgramSource, InitialProgramSource, false);
 			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
 			return std::unexpected("Could not publish Blueprint graph source: " + Published.error());
+		}
+		auto ProgramPublished = PublishGraphSource(ProgramPath, InitialProgramSource, CompiledProgramSource, false);
+		if (!ProgramPublished)
+		{
+			std::error_code Ignored;
+			std::filesystem::remove(ProjectRoot / GraphRelativePath, Ignored);
+			(void)PulseForge::AssetOperations::Delete(Registry, ProjectRoot, CreatedRecord->ID);
+			return std::unexpected("Could not publish the initial Blueprint program: " + ProgramPublished.error());
 		}
 		if (m_BlueprintProgramPublished) m_BlueprintProgramPublished(CreatedRecord->ID);
 		return EditorGraphFixtureLocation{ CreatedRecord->ID, CreatedRecord->ProjectRelativePath,
@@ -1028,6 +1031,7 @@ namespace PulseForgeEditor
 		std::filesystem::path SourcePath = Context.ProjectRoot / Context.ProjectRelativePath;
 		std::filesystem::path ProgramPath;
 		std::string ProgramBytes;
+		std::string RecoveryMessage;
 		if (Context.Registry)
 		{
 			const auto Asset = Context.Registry->Find(Context.Identity.Asset);
@@ -1043,7 +1047,9 @@ namespace PulseForgeEditor
 				ProgramBytes = std::move(*Program);
 				const auto Verified = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
 					std::span<const char>(ProgramBytes.data(), ProgramBytes.size())));
-				if (!Verified) return std::unexpected("The Blueprint asset has an invalid runtime program: " + Verified.error().Message);
+				if (!Verified)
+					RecoveryMessage = "The compiled Blueprint program is invalid; the saved graph will be recovered: " +
+						Verified.error().Message;
 			}
 		}
 		auto Source = ReadFile(SourcePath);
@@ -1053,8 +1059,50 @@ namespace PulseForgeEditor
 		auto Graph = DeserializeEditorGraph(*Source, *Schema);
 		if (!Graph) return std::unexpected(Graph.error());
 		if (Graph->ID != Context.Identity.Asset) return std::unexpected("Graph source identity does not match the document identity");
+		if (!ProgramPath.empty())
+		{
+			const auto CurrentProgram = PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+				std::span<const char>(ProgramBytes.data(), ProgramBytes.size())));
+			const auto SourceBytes = std::as_bytes(std::span<const char>(Source->data(), Source->size()));
+			const uint64_t SourceRevision = PulseForge::ComputeBlueprintSourceRevision(SourceBytes);
+			if (!CurrentProgram)
+				RecoveryMessage = "The compiled Blueprint program is invalid; save the graph to rebuild it: " +
+					CurrentProgram.error().Message;
+			else if (CurrentProgram->GetSourceRevision() != SourceRevision)
+			{
+				const auto Compiled = CompileBlueprintGraph(*Graph, *Schema);
+				if (!Compiled)
+					RecoveryMessage = "The compiled Blueprint did not match the saved graph and recovery compilation failed: " +
+						Compiled.error().Message;
+				else
+				{
+					std::vector<PulseForge::BlueprintEventProgramSource> Events;
+					Events.reserve(Compiled->GetEvents().size());
+					for (const PulseForge::BlueprintVerifiedEventProgram& Event : Compiled->GetEvents())
+						Events.push_back({ Event.Event, Event.Program.GetSource() });
+					const auto RecoveredProgram = PulseForge::SerializeBlueprintAsset(Events, SourceRevision);
+					if (!RecoveredProgram)
+						RecoveryMessage = "Could not rebuild the compiled Blueprint for its saved graph: " +
+							RecoveredProgram.error().Message;
+					else
+					{
+						std::string RecoveredBytes(reinterpret_cast<const char*>(RecoveredProgram->data()), RecoveredProgram->size());
+						auto Published = PublishGraphSource(ProgramPath, ProgramBytes, RecoveredBytes, false);
+						if (!Published)
+							RecoveryMessage = "The saved Blueprint graph was recovered, but its compiled program could not be republished: " +
+								Published.error();
+						else
+						{
+							ProgramBytes = std::move(RecoveredBytes);
+							if (m_BlueprintProgramPublished) m_BlueprintProgramPublished(Context.Identity.Asset);
+						}
+					}
+				}
+			}
+		}
 		auto State = std::make_unique<GraphDocumentState>(std::move(*Graph), std::move(*Schema), SourcePath,
 			std::move(*Source), Context.ProjectRoot, std::move(ProgramPath), std::move(ProgramBytes));
+		State->Error = std::move(RecoveryMessage);
 		if (!State->Canvas) return std::unexpected("Could not create an isolated graph canvas context");
 		return std::unique_ptr<EditorDocumentEditorState>(std::move(State));
 	}
@@ -1185,31 +1233,31 @@ namespace PulseForgeEditor
 			EventSources.reserve(Compiled->GetEvents().size());
 			for (const PulseForge::BlueprintVerifiedEventProgram& Event : Compiled->GetEvents())
 				EventSources.push_back({ Event.Event, Event.Program.GetSource() });
-			auto Program = PulseForge::SerializeBlueprintAsset(EventSources);
+			const auto SourceBytes = std::as_bytes(std::span(Source->data(), Source->size()));
+			auto Program = PulseForge::SerializeBlueprintAsset(
+				EventSources, PulseForge::ComputeBlueprintSourceRevision(SourceBytes));
 			if (!Program)
 			{
 				State->Error = "Could not serialize the compiled Blueprint: " + Program.error().Message;
 				return false;
 			}
 			CompiledProgramBytes.assign(reinterpret_cast<const char*>(Program->data()), Program->size());
-			auto ProgramPublished = PublishGraphSource(State->ProgramPath, State->SavedProgramBytes,
-				CompiledProgramBytes, false);
-			if (!ProgramPublished) { State->Error = ProgramPublished.error(); return false; }
 		}
 		auto Published = PublishGraphSource(State->SourcePath, State->SavedBytes, *Source, false);
-		if (!Published)
-		{
-			if (!State->ProgramPath.empty())
-			{
-				auto Rollback = PublishGraphSource(State->ProgramPath, CompiledProgramBytes, State->SavedProgramBytes, false);
-				State->Error = Published.error();
-				if (!Rollback) State->Error += "; compiled program rollback failed: " + Rollback.error();
-			}
-			else State->Error = Published.error();
-			return false;
-		}
+		if (!Published) { State->Error = Published.error(); return false; }
 		State->SavedBytes = std::move(*Source);
-		if (!State->ProgramPath.empty()) State->SavedProgramBytes = std::move(CompiledProgramBytes);
+		if (!State->ProgramPath.empty())
+		{
+			auto ProgramPublished = PublishGraphSource(State->ProgramPath, State->SavedProgramBytes,
+				CompiledProgramBytes, false);
+			if (!ProgramPublished)
+			{
+				State->Error = "Blueprint graph source was saved but its matching compiled program was not published: " +
+					ProgramPublished.error() + ". Save again to finish publication.";
+				return false;
+			}
+			State->SavedProgramBytes = std::move(CompiledProgramBytes);
+		}
 		State->History.MarkSaved();
 		State->Error.clear();
 		if (!State->ProgramPath.empty() && m_BlueprintProgramPublished)
@@ -1356,6 +1404,12 @@ namespace PulseForgeEditor
 	{
 		const auto* State = GetState(Session);
 		return State ? State->LastHoveredPin : PulseForge::UUID{};
+	}
+
+	std::string EditorGraphDocumentEditor::GetRecoveryMessageForTesting(EditorDocumentSession& Session)
+	{
+		const auto* State = GetState(Session);
+		return State ? State->Error : std::string{};
 	}
 
 	void EditorGraphDocumentEditor::SetPinHiddenForTesting(EditorDocumentSession& Session,

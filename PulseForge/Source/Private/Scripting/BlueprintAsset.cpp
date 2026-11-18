@@ -24,6 +24,21 @@ namespace PulseForge
 				Bytes.push_back(static_cast<std::byte>((Value >> (Byte * 8)) & 0xffu));
 		}
 
+		void AppendRevision(std::vector<std::byte>& Bytes, uint64_t Value)
+		{
+			for (size_t Byte = 0; Byte < sizeof(Value); ++Byte)
+				Bytes.push_back(static_cast<std::byte>((Value >> (Byte * 8)) & 0xffu));
+		}
+
+		bool ReadRevision(std::span<const std::byte> Bytes, size_t& Offset, uint64_t& Value)
+		{
+			if (Offset > Bytes.size() || Bytes.size() - Offset < sizeof(Value)) return false;
+			Value = 0;
+			for (size_t Byte = 0; Byte < sizeof(Value); ++Byte)
+				Value |= static_cast<uint64_t>(std::to_integer<uint8_t>(Bytes[Offset++])) << (Byte * 8);
+			return true;
+		}
+
 		bool ReadInteger(std::span<const std::byte> Bytes, size_t& Offset, uint32_t& Value)
 		{
 			if (Offset > Bytes.size() || Bytes.size() - Offset < sizeof(Value)) return false;
@@ -35,7 +50,7 @@ namespace PulseForge
 	}
 
 	std::expected<VerifiedBlueprintAsset, BlueprintProgramError> VerifyBlueprintAsset(
-		std::vector<BlueprintEventProgramSource> Events)
+		std::vector<BlueprintEventProgramSource> Events, uint64_t SourceRevision)
 	{
 		if (Events.size() > BlueprintMaximumEventPrograms)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::ProgramTooLarge,
@@ -81,11 +96,11 @@ namespace PulseForge
 						"Blueprint timer request has no matching OnTimer handler" });
 			}
 		}
-		return VerifiedBlueprintAsset(BlueprintAssetFormatVersion, std::move(Verified));
+		return VerifiedBlueprintAsset(BlueprintAssetFormatVersion, SourceRevision, std::move(Verified));
 	}
 
 	std::expected<std::vector<std::byte>, BlueprintProgramError> SerializeBlueprintAsset(
-		std::span<const BlueprintEventProgramSource> Events)
+		std::span<const BlueprintEventProgramSource> Events, uint64_t SourceRevision)
 	{
 		if (Events.size() > BlueprintMaximumEventPrograms)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::ProgramTooLarge,
@@ -95,12 +110,13 @@ namespace PulseForge
 		{
 			return static_cast<uint8_t>(Left.Event) < static_cast<uint8_t>(Right.Event);
 		});
-		if (auto Verified = VerifyBlueprintAsset(Candidate); !Verified)
+		if (auto Verified = VerifyBlueprintAsset(Candidate, SourceRevision); !Verified)
 			return std::unexpected(Verified.error());
 
 		std::vector<std::byte> Bytes(Magic.begin(), Magic.end());
 		AppendInteger(Bytes, BlueprintAssetFormatVersion);
 		Bytes.push_back(static_cast<std::byte>(Events.size()));
+		AppendRevision(Bytes, SourceRevision);
 		for (const BlueprintEventProgramSource& Event : Candidate)
 		{
 			auto Program = SerializeBlueprintProgram(Event.Program);
@@ -133,13 +149,18 @@ namespace PulseForge
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint asset header is truncated"));
 		if (Version != BlueprintLegacyAssetFormatVersion && Version != BlueprintLegacyActionAssetFormatVersion &&
-			Version != BlueprintPreviousAssetFormatVersion && Version != BlueprintAssetFormatVersion)
+			Version != BlueprintLegacyTimerAssetFormatVersion && Version != BlueprintPreviousAssetFormatVersion &&
+			Version != BlueprintAssetFormatVersion)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::UnsupportedVersion,
 				"Blueprint asset version is not supported"));
 		const size_t EventCount = std::to_integer<uint8_t>(Bytes[Offset++]);
 		if (EventCount > BlueprintMaximumEventPrograms)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::ProgramTooLarge,
 				"Blueprint asset event count exceeds its limit"));
+		uint64_t SourceRevision = 0;
+		if (Version >= BlueprintAssetFormatVersion && !ReadRevision(Bytes, Offset, SourceRevision))
+			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
+				"Blueprint source revision is truncated"));
 
 		std::vector<BlueprintEventProgramSource> Events;
 		Events.reserve(EventCount);
@@ -154,7 +175,7 @@ namespace PulseForge
 				? static_cast<size_t>(BlueprintEventKind::OnUIAction) + 1
 				: Version == BlueprintLegacyActionAssetFormatVersion
 					? static_cast<size_t>(BlueprintEventKind::OnDestroy) + 1
-					: Version == BlueprintPreviousAssetFormatVersion
+					: Version == BlueprintLegacyTimerAssetFormatVersion
 						? static_cast<size_t>(BlueprintEventKind::OnActionCancelled) + 1 : BlueprintMaximumEventPrograms;
 			if (EventIndex >= SupportedEventCount)
 				return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidOperand,
@@ -171,6 +192,17 @@ namespace PulseForge
 		if (Offset != Bytes.size())
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint asset contains trailing bytes"));
-		return VerifyBlueprintAsset(std::move(Events));
+		return VerifyBlueprintAsset(std::move(Events), SourceRevision);
+	}
+
+	uint64_t ComputeBlueprintSourceRevision(std::span<const std::byte> SourceBytes) noexcept
+	{
+		uint64_t Hash = 14695981039346656037ull;
+		for (const std::byte Byte : SourceBytes)
+		{
+			Hash ^= std::to_integer<uint8_t>(Byte);
+			Hash *= 1099511628211ull;
+		}
+		return Hash == 0 ? 1 : Hash;
 	}
 }

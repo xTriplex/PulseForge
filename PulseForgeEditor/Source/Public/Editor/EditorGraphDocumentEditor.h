@@ -519,6 +519,7 @@ namespace PulseForgeEditor
 			EditorGraphVector3 Placement);
 		[[nodiscard]] bool IsCanvasInputSuppressedForTesting(EditorDocumentSession& Session);
 		[[nodiscard]] PulseForge::UUID GetLastHoveredPinForTesting(EditorDocumentSession& Session);
+		[[nodiscard]] std::string GetRecoveryMessageForTesting(EditorDocumentSession& Session);
 		void SetPinHiddenForTesting(EditorDocumentSession& Session, PulseForge::UUID PinID, bool Hidden);
 		[[nodiscard]] EditorGraph GetGraphForTesting(EditorDocumentSession& Session);
 		void SetSelectedNodesForTesting(EditorDocumentSession& Session, const std::vector<PulseForge::UUID>& NodeIDs);

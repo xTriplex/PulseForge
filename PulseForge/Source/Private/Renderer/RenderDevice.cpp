@@ -60,7 +60,7 @@ namespace PulseForge
 		}
 
 		return MeshHandle(new Mesh(Description.VertexLayout, Validation->VertexCount, Validation->IndexCount,
-			std::move(CreatedVertexBuffer.value()), std::move(IndexBuffer)));
+			std::move(CreatedVertexBuffer.value()), std::move(IndexBuffer), Description.VertexData));
 	}
 
 	BufferUpdateResult RenderDevice::UpdateDynamicMeshVertices(
@@ -104,6 +104,8 @@ namespace PulseForge
 
 		if (const auto Validation = ValidateBufferUpdate(VertexBuffer, 0, VertexData.size()); !Validation)
 			return std::unexpected(Validation.error());
-		return WriteBuffer(Target.GetVertexBuffer(), 0, VertexData);
+		auto Updated = WriteBuffer(Target.GetVertexBuffer(), 0, VertexData);
+		if (Updated) Target.UpdateLocalBounds(VertexData);
+		return Updated;
 	}
 } // namespace PulseForge

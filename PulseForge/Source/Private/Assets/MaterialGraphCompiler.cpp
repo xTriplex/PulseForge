@@ -347,6 +347,49 @@ namespace PulseForge
 		};
 	}
 
+	std::expected<MaterialGraphCompileIdentity, MaterialGraphCompileError> MaterialGraphCompiler::Describe(
+		const MaterialGraphSource& Source, std::string_view ToolchainFingerprint)
+	{
+		if (ToolchainFingerprint.empty())
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+				"Material graph identity requires a toolchain fingerprint"));
+		const auto Validation = ValidateMaterialGraphSource(Source);
+		if (!Validation.IsValid())
+		{
+			auto Error = Failure(MaterialGraphCompileErrorCode::InvalidGraph, "Material graph validation failed");
+			Error.Diagnostics = Validation.Diagnostics;
+			return std::unexpected(std::move(Error));
+		}
+		auto Generated = BuildSource(Source);
+		if (!Generated) return std::unexpected(std::move(Generated.error()));
+#if defined(PF_MATERIAL_GRAPH_PBR_TEMPLATE)
+		std::error_code TemplateError;
+		const std::filesystem::path TemplatePath = std::filesystem::weakly_canonical(PF_MATERIAL_GRAPH_PBR_TEMPLATE, TemplateError);
+		if (TemplateError || !TemplatePath.is_absolute() || !std::filesystem::is_regular_file(TemplatePath, TemplateError))
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest, "PBR material shader template is unavailable"));
+		const uintmax_t TemplateSize = std::filesystem::file_size(TemplatePath, TemplateError);
+		if (TemplateError || TemplateSize == 0 || TemplateSize > 1024 * 1024)
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+				"PBR material shader template is empty or exceeds its one MiB bound"));
+		std::ifstream TemplateStream(TemplatePath, std::ios::binary);
+		std::string TemplateBytes(static_cast<size_t>(TemplateSize), '\0');
+		TemplateStream.read(TemplateBytes.data(), static_cast<std::streamsize>(TemplateBytes.size()));
+		if (!TemplateStream || TemplateBytes.find("PULSEFORGE_MATERIAL_GRAPH") == std::string::npos ||
+			TemplateBytes.find("GraphMaterialBaseColor(Input.TexCoord)") == std::string::npos)
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+				"PBR material shader template is unreadable or lacks the graph material hook"));
+		AssetFingerprintBuilder TemplateFingerprintBuilder("PulseForge.MaterialGraphPbrTemplate.v1");
+		TemplateFingerprintBuilder.UpdateBytes("template", std::as_bytes(std::span(TemplateBytes.data(), TemplateBytes.size())));
+		const AssetContentFingerprint TemplateFingerprint = TemplateFingerprintBuilder.Finish();
+		const AssetContentFingerprint Recipe = SemanticRecipe(Source, Generated->Hlsl,
+			TemplateFingerprint.Algorithm + ":" + TemplateFingerprint.DigestHex, ToolchainFingerprint);
+		return MaterialGraphCompileIdentity{ Recipe.DigestHex, std::move(Generated->Parameters) };
+#else
+		return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+			"Graph material compilation requires the configured PBR shader template"));
+#endif
+	}
+
 	std::expected<MaterialGraphCompiledArtifact, MaterialGraphCompileError> MaterialGraphCompiler::Compile(
 		const MaterialGraphCompileRequest& Request)
 	{

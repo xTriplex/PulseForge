@@ -1,6 +1,43 @@
 #include "TestEditorSupport.h"
 
 #include <spdlog/spdlog.h>
+#include <iterator>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#include <DbgHelp.h>
+#include <cwchar>
+
+namespace
+{
+	LONG WINAPI CaptureEditorTestCrash(EXCEPTION_POINTERS* ExceptionInfo) noexcept
+	{
+		wchar_t TempPath[MAX_PATH]{};
+		const DWORD TempPathLength = GetTempPathW(MAX_PATH, TempPath);
+		if (TempPathLength == 0 || TempPathLength >= MAX_PATH) return EXCEPTION_EXECUTE_HANDLER;
+
+		wchar_t DumpPath[MAX_PATH]{};
+		if (swprintf_s(DumpPath, std::size(DumpPath), L"%lsPulseForgeEditorTests-crash.dmp", TempPath) < 0)
+			return EXCEPTION_EXECUTE_HANDLER;
+
+		const HANDLE DumpFile = CreateFileW(DumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (DumpFile == INVALID_HANDLE_VALUE) return EXCEPTION_EXECUTE_HANDLER;
+
+		MINIDUMP_EXCEPTION_INFORMATION ExceptionRecord{
+			GetCurrentThreadId(), ExceptionInfo, FALSE
+		};
+		(void)MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), DumpFile, MiniDumpNormal,
+			ExceptionInfo ? &ExceptionRecord : nullptr, nullptr, nullptr);
+		CloseHandle(DumpFile);
+		OutputDebugStringW(L"PulseForgeEditorTests wrote an unhandled-exception minidump to %TEMP%\\PulseForgeEditorTests-crash.dmp\n");
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+}
+#endif
 
 void RunEditorDocumentHostTestEditorTests(TestRunner& Tests);
 void RunPrefabLinkedInstanceEditorTests(TestRunner& Tests);
@@ -16,6 +53,9 @@ void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
 
 int main(int ArgumentCount, char** Arguments)
 {
+	#if defined(_WIN32)
+	SetUnhandledExceptionFilter(CaptureEditorTestCrash);
+	#endif
 	PulseForge::Log::Init();
 	TestRunner Tests;
 	PF_CHECK(Tests, spdlog::get("PULSEFORGE") != nullptr);

@@ -8,6 +8,11 @@
 
 namespace PulseForge
 {
+	namespace
+	{
+		constexpr size_t MaximumCachedGraphScenePipelines = 64;
+	}
+
 	SceneRendererPipelineCache::SceneRendererPipelineCache(RenderDevice& Runtime) noexcept : m_Runtime(Runtime)
 	{
 	}
@@ -92,9 +97,13 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Cannot create a graph-material pipeline for a singular mesh transform"));
 		if (RecipeFingerprint.empty() || !FragmentShader || !MaterialLayout)
 			return std::unexpected(MakeResourceError("Graph-material pipeline identity or shader resources are incomplete"));
-		const auto Key = std::tuple{ std::string(RecipeFingerprint), MaterialLayout.get(), ColorFormat,
+		const auto Key = std::tuple{ std::string(RecipeFingerprint), ColorFormat,
 			AlphaBlend, DoubleSided, Orientation };
-		if (m_GraphScenePipelines.contains(Key)) return {};
+		if (auto Existing = m_GraphScenePipelines.find(Key); Existing != m_GraphScenePipelines.end())
+		{
+			Existing->second.LastUsed = ++m_GraphPipelineUseSequence;
+			return {};
+		}
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
 		if (!m_VertexLayout)
 			return std::unexpected(MakeResourceError("Cannot create a graph-material pipeline before a mesh vertex layout is prepared"));
@@ -118,7 +127,13 @@ namespace PulseForge
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 		if (!Pipeline)
 			return std::unexpected(MakeResourceError("Could not create graph-material graphics pipeline: " + Pipeline.error().Message));
-		m_GraphScenePipelines.emplace(Key, std::move(*Pipeline));
+		m_GraphScenePipelines.emplace(Key, CachedGraphPipeline{ std::move(*Pipeline), ++m_GraphPipelineUseSequence });
+		if (m_GraphScenePipelines.size() > MaximumCachedGraphScenePipelines)
+		{
+			const auto LeastRecentlyUsed = std::ranges::min_element(m_GraphScenePipelines, {},
+				[](const auto& Entry) { return Entry.second.LastUsed; });
+			if (LeastRecentlyUsed != m_GraphScenePipelines.end()) m_GraphScenePipelines.erase(LeastRecentlyUsed);
+		}
 		return {};
 	}
 
@@ -225,15 +240,14 @@ namespace PulseForge
 	const GraphicsPipeline* SceneRendererPipelineCache::FindGraphScenePipeline(
 		ColorTargetFormat ColorFormat,
 		std::string_view RecipeFingerprint,
-		const BindingLayoutHandle& MaterialLayout,
 		bool AlphaBlend,
 		bool DoubleSided,
 		WorldTransformOrientation Orientation) const noexcept
 	{
 		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
 		const auto Found = m_GraphScenePipelines.find(
-			{ std::string(RecipeFingerprint), MaterialLayout.get(), ColorFormat, AlphaBlend, DoubleSided, Orientation });
-		return Found != m_GraphScenePipelines.end() ? Found->second.get() : nullptr;
+			{ std::string(RecipeFingerprint), ColorFormat, AlphaBlend, DoubleSided, Orientation });
+		return Found != m_GraphScenePipelines.end() ? Found->second.Pipeline.get() : nullptr;
 	}
 
 	const GraphicsPipeline* SceneRendererPipelineCache::FindBackgroundPipeline(ColorTargetFormat ColorFormat) const noexcept

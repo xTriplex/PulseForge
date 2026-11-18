@@ -10,6 +10,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace PulseForge
@@ -58,6 +59,11 @@ namespace PulseForge
 		std::array<float, 4> Scale{ 1.0f, 1.0f, 1.0f, 0.0f };
 	};
 
+	using GltfAnimationClipValidationMap = std::unordered_map<std::string, GltfAnimationClipValidationToken>;
+
+	[[nodiscard]] PULSEFORGE_API std::expected<GltfAnimationClipValidationMap, GltfAnimationSamplingError>
+		ValidateGltfAnimationProduct(const ImportedGltfSkeletalMesh& Product, std::stop_token CancellationToken = {});
+
 	// Value-owned state for one animated instance. Mesh and clip data remain shared immutable asset data.
 	struct GltfAnimationInstancePlayback final
 	{
@@ -104,6 +110,13 @@ namespace PulseForge
 			std::span<const GltfAnimationNodePose> RestPose,
 			const GltfAnimationPlaybackClock& Clock,
 			std::stop_token CancellationToken = {});
+	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<GltfAnimationNodePose>, GltfAnimationPlaybackError>
+		SampleGltfAnimationPose(
+			const ImportedGltfAnimationClip& Clip,
+			const GltfAnimationClipValidationToken& Validation,
+			std::span<const GltfAnimationNodePose> RestPose,
+			const GltfAnimationPlaybackClock& Clock,
+			std::stop_token CancellationToken = {});
 
 	// Blends matching node-keyed poses; rotations use shortest-path normalized quaternion interpolation.
 	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<GltfAnimationNodePose>, GltfAnimationPlaybackError>
@@ -136,5 +149,6 @@ namespace PulseForge
 			const ImportedGltfSkeletalMesh& Mesh,
 			std::span<const GltfAnimationNodePose> RestPose,
 			float DeltaSeconds,
-			std::stop_token CancellationToken = {});
+		std::stop_token CancellationToken = {},
+		const GltfAnimationClipValidationMap* ValidatedClips = nullptr);
 }

@@ -43,6 +43,7 @@ namespace PulseForge
 	class Mesh;
 	class CookedContentProvider;
 	struct GraphMaterialRuntime;
+	struct GraphMaterialShaderRuntime;
 	struct CookedGraphMaterialProduct;
 	struct ImportedGltfSkeletalMesh;
 
@@ -271,6 +272,7 @@ namespace PulseForge
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareGraphMaterialBindings();
+		[[nodiscard]] std::expected<void, SceneRendererError> ApplyPendingGraphMaterialParameters();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
 			ColorTargetFormat ColorFormat,
@@ -358,6 +360,7 @@ namespace PulseForge
 		PreparedMaterialBindingMap m_PreparedMaterialBindings;
 		std::unordered_map<UUID, const GraphMaterialRuntime*, UUIDHash> m_PreparedGraphMaterials;
 		std::unordered_map<AssetID, std::unique_ptr<GraphMaterialRuntime>, UUIDHash> m_GraphMaterialResources;
+		std::unordered_map<std::string, std::weak_ptr<GraphMaterialShaderRuntime>> m_GraphMaterialShaderResources;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;

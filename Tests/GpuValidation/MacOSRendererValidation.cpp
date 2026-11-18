@@ -101,6 +101,8 @@ namespace
 	enum class ValidationPhase
 	{
 		InitialFrame,
+		SourceGraphMaterialFrame,
+		CookedGraphMaterialFrame,
 		GraphMaterialFrame,
 		SkinnedPoseFrame,
 		WaitForResize,
@@ -266,11 +268,17 @@ namespace
 #if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
 					try
 					{
-						CookAndActivateSavedGraphMaterial();
+						SaveGraphThroughMaterialDocument();
+						m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
+						const auto IdentityBaseline = m_SceneRenderer->GetResourceCacheStats();
+						m_SourceGraphIdentityDescribeBaseline = IdentityBaseline.GraphMaterialIdentityDescribeCalls;
+						m_SourceGraphIdentityCacheHitBaseline = IdentityBaseline.GraphMaterialIdentityCacheHits;
+						m_Phase = ValidationPhase::SourceGraphMaterialFrame;
+						return;
 					}
 					catch (const std::exception& Exception)
 					{
-						Fail(std::string("Could not create the saved-source cooked graph renderer fixture: ") + Exception.what());
+						Fail(std::string("Could not save the discriminating graph renderer fixture: ") + Exception.what());
 						return;
 					}
 #else
@@ -287,6 +295,82 @@ namespace
 					}
 #endif
 					m_Phase = ValidationPhase::GraphMaterialFrame;
+					return;
+				}
+				if (m_Phase == ValidationPhase::SourceGraphMaterialFrame)
+				{
+					if (!m_CookedGraphMaterialDrawObserved ||
+						m_SceneRenderer->GetResourceCacheStats().GraphMaterialResources == 0)
+					{
+						Fail("The project-backed source renderer did not select and draw the saved graph material");
+						return;
+					}
+					const auto GraphMaterialStats = m_SceneRenderer->GetResourceCacheStats();
+					if (GraphMaterialStats.GraphMaterialIdentityDescribeCalls < m_SourceGraphIdentityDescribeBaseline ||
+						GraphMaterialStats.GraphMaterialIdentityCacheHits < m_SourceGraphIdentityCacheHitBaseline)
+					{
+						Fail("The source graph identity counters were reset before the refreshed revision could be verified");
+						return;
+					}
+					const size_t SourceRevisionDescribes = GraphMaterialStats.GraphMaterialIdentityDescribeCalls -
+						m_SourceGraphIdentityDescribeBaseline;
+					const size_t SourceRevisionCacheHits = GraphMaterialStats.GraphMaterialIdentityCacheHits -
+						m_SourceGraphIdentityCacheHitBaseline;
+					if (SourceRevisionDescribes != 1)
+					{
+						Fail("The refreshed saved source graph recipe was not described exactly once (describes=" +
+							std::to_string(SourceRevisionDescribes) + ", lifetime=" +
+							std::to_string(GraphMaterialStats.GraphMaterialIdentityDescribeCalls) + ")");
+						return;
+					}
+					if (SourceRevisionCacheHits == 0) return;
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_FixedMaterialBaseline, m_CapturedColor);
+					if (ChangedPixels < 64)
+					{
+						Fail("The saved graph output did not visibly differ from fixed material fields in the source renderer "
+							"(changed pixels=" + std::to_string(ChangedPixels) + ")");
+						return;
+					}
+					m_SourceGraphReadback = m_CapturedColor;
+					PF_INFO("MACOS_SOURCE_GRAPH_MATERIAL_RENDER=PASS; asset_id={}; graph_material_resources={}; changed_pixels={}; "
+						"identity_describes={}; identity_cache_hits={}", m_GraphValidationMaterial->ToString(),
+						GraphMaterialStats.GraphMaterialResources, ChangedPixels,
+						GraphMaterialStats.GraphMaterialIdentityDescribeCalls, GraphMaterialStats.GraphMaterialIdentityCacheHits);
+					try
+					{
+						CookAndActivateSavedGraphMaterial();
+						m_CookedGraphMaterialDrawObserved = false;
+						m_Phase = ValidationPhase::CookedGraphMaterialFrame;
+					}
+					catch (const std::exception& Exception)
+					{
+						Fail(std::string("Could not create the saved-source cooked graph renderer fixture: ") + Exception.what());
+					}
+					return;
+				}
+				if (m_Phase == ValidationPhase::CookedGraphMaterialFrame)
+				{
+					if (!m_CookedGraphMaterialDrawObserved ||
+						m_SceneRenderer->GetResourceCacheStats().GraphMaterialResources == 0)
+					{
+						Fail("The cooked provider did not select and draw the saved graph material");
+						return;
+					}
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_FixedMaterialBaseline, m_CapturedColor);
+					const size_t SourceCookedDifference = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_SourceGraphReadback, m_CapturedColor);
+					if (ChangedPixels < 64 || SourceCookedDifference > 4)
+					{
+						Fail("The cooked graph render did not match the discriminating source render "
+							"(changed from fixed=" + std::to_string(ChangedPixels) + ", source/cooked=" +
+							std::to_string(SourceCookedDifference) + ")");
+						return;
+					}
+					PF_INFO("MACOS_COOKED_GRAPH_MATERIAL_RENDER=PASS; asset_id={}; changed_pixels={}; source_cooked_difference={}",
+						m_GraphValidationMaterial->ToString(), ChangedPixels, SourceCookedDifference);
+					BeginSkinnedPoseFrame();
 					return;
 				}
 				if (m_Phase == ValidationPhase::GraphMaterialFrame)
@@ -310,19 +394,7 @@ namespace
 						m_GraphValidationMaterial->ToString(), m_SceneRenderer->GetResourceCacheStats().GraphMaterialResources,
 						m_CapturedGeometryDraws, ChangedPixels);
 #endif
-					if (!m_SkinnedValidationEntity)
-					{
-						Fail("The renderer fixture did not create its skeletal validation entity");
-						return;
-					}
-					auto Pose = MakeBindPose();
-					Pose[1][13] += 0.65f;
-					if (auto Updated = m_Scene->SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), std::move(Pose)); !Updated)
-					{
-						Fail("Could not update the runtime skeletal validation pose: " + Updated.error().Message);
-						return;
-					}
-					m_Phase = ValidationPhase::SkinnedPoseFrame;
+					BeginSkinnedPoseFrame();
 					return;
 				}
 				if (m_Phase == ValidationPhase::SkinnedPoseFrame)
@@ -418,7 +490,8 @@ namespace
 				m_Phase = ValidationPhase::ResizedFrame;
 			}
 
-			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
+			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
+				m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
 				m_Phase == ValidationPhase::SkinnedPoseFrame ||
 				m_Phase == ValidationPhase::ResizedFrame ||
 				m_Phase == ValidationPhase::ExposureFrame)
@@ -481,12 +554,13 @@ namespace
 					return;
 				}
 #if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
-				if (m_Phase == ValidationPhase::GraphMaterialFrame)
+				if (m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
+					m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame)
 				{
 					const PulseForge::SceneRendererResourceCacheStats ResourceStats = m_SceneRenderer->GetResourceCacheStats();
 					if (ResourceStats.GraphMaterialResources == 0 || Rendered->GeometryDrawCount == 0)
 					{
-						Fail("The cooked-provider render submitted no graph material resource and indexed geometry draw");
+						Fail("The graph-material render submitted no graph resource and indexed geometry draw");
 						return;
 					}
 					m_CookedGraphMaterialDrawObserved = true;
@@ -727,14 +801,13 @@ namespace
 			MaterialGraphSource Graph;
 			Graph.GraphID = UUID(0x475055, 1);
 			Graph.Nodes = {
-				{ UUID(0x475055, 2), MaterialGraphNodeKind::UV0, 0.0f, {} },
-				{ UUID(0x475055, 3), MaterialGraphNodeKind::BaseColorTextureSample, 0.0f, {} },
+				{ UUID(0x475055, 3), MaterialGraphNodeKind::ColorConstant, 0.0f, {}, 220.0, 0.0,
+					{ 0.92f, 0.035f, 0.025f } },
 				{ UUID(0x475055, 4), MaterialGraphNodeKind::PbrOutput, 0.0f, {} },
 				{ UUID(0x475055, 7), MaterialGraphNodeKind::FloatConstant, m_GraphValidationDescription.MetallicFactor },
 				{ UUID(0x475055, 8), MaterialGraphNodeKind::FloatConstant, m_GraphValidationDescription.RoughnessFactor }
 			};
 			Graph.Connections = {
-				{ UUID(0x475055, 5), UUID(0x475055, 2), UUID(0x475055, 3), 0 },
 				{ UUID(0x475055, 6), UUID(0x475055, 3), UUID(0x475055, 4), 0 },
 				{ UUID(0x475055, 9), UUID(0x475055, 7), UUID(0x475055, 4), 1 },
 				{ UUID(0x475055, 10), UUID(0x475055, 8), UUID(0x475055, 4), 2 }
@@ -760,7 +833,6 @@ namespace
 		void CookAndActivateSavedGraphMaterial()
 		{
 			using namespace PulseForge;
-			SaveGraphThroughMaterialDocument();
 			if (!m_Project->GetDescription().StartScene)
 				throw std::runtime_error("The isolated PBR project has no startup scene for the graph cook");
 			const auto SavedSource = MaterialAssetService::LoadSourceSnapshot(
@@ -818,6 +890,23 @@ namespace
 			PrepareSkinnedRendererFixture();
 		}
 #endif
+
+		void BeginSkinnedPoseFrame()
+		{
+			if (!m_SkinnedValidationEntity)
+			{
+				Fail("The renderer fixture did not create its skeletal validation entity");
+				return;
+			}
+			auto Pose = MakeBindPose();
+			Pose[1][13] += 0.65f;
+			if (auto Updated = m_Scene->SetRuntimeSkeletalPose(m_SkinnedValidationEntity->GetUUID(), std::move(Pose)); !Updated)
+			{
+				Fail("Could not update the runtime skeletal validation pose: " + Updated.error().Message);
+				return;
+			}
+			m_Phase = ValidationPhase::SkinnedPoseFrame;
+		}
 
 		static std::array<float, 16> IdentityTransform()
 		{
@@ -1116,6 +1205,9 @@ namespace
 		const PulseForge::Texture* m_CapturedAoOutputTexture = nullptr;
 		PulseForge::TextureReadback m_CapturedColor;
 		PulseForge::TextureReadback m_FixedMaterialBaseline;
+		PulseForge::TextureReadback m_SourceGraphReadback;
+		size_t m_SourceGraphIdentityDescribeBaseline = 0;
+		size_t m_SourceGraphIdentityCacheHitBaseline = 0;
 		PulseForge::TextureReadback m_FixedMaterialHdrBaseline;
 		PulseForge::TextureReadback m_FixedMaterialDepthBaseline;
 		PulseForge::TextureReadback m_FixedMaterialShadowBaseline;

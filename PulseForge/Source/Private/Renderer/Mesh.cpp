@@ -1,5 +1,10 @@
 #include "Renderer/Mesh.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 namespace PulseForge
 {
@@ -40,13 +45,47 @@ namespace PulseForge
 		uint32_t VertexCount,
 		uint32_t IndexCount,
 		BufferHandle VertexBuffer,
-		BufferHandle IndexBuffer)
+		BufferHandle IndexBuffer,
+		std::span<const std::byte> VertexData)
 		: m_VertexLayout(std::move(VertexLayout)),
 		  m_VertexCount(VertexCount),
 		  m_IndexCount(IndexCount),
 		  m_VertexBuffer(std::move(VertexBuffer)),
 		  m_IndexBuffer(std::move(IndexBuffer))
 	{
+		UpdateLocalBounds(VertexData);
+	}
+
+	void Mesh::UpdateLocalBounds(std::span<const std::byte> VertexData) noexcept
+	{
+		m_LocalBounds.reset();
+		const auto Position = std::ranges::find(m_VertexLayout.Attributes, VertexSemantic::Position,
+			&VertexAttributeDesc::Semantic);
+		if (Position == m_VertexLayout.Attributes.end() || m_VertexLayout.Stride == 0 ||
+			VertexData.size() != static_cast<size_t>(m_VertexCount) * m_VertexLayout.Stride)
+			return;
+
+		size_t PositionComponents = 0;
+		switch (Position->Format)
+		{
+		case VertexFormat::Float2: PositionComponents = 2; break;
+		case VertexFormat::Float3: PositionComponents = 3; break;
+		case VertexFormat::Float4: PositionComponents = 4; break;
+		default: return;
+		}
+		glm::vec3 Minimum(std::numeric_limits<float>::max());
+		glm::vec3 Maximum(std::numeric_limits<float>::lowest());
+		for (size_t Index = 0; Index < m_VertexCount; ++Index)
+		{
+			std::array<float, 4> Value{ 0.0f, 0.0f, 0.0f, 1.0f };
+			const size_t Offset = Index * m_VertexLayout.Stride + Position->Offset;
+			std::memcpy(Value.data(), VertexData.data() + Offset, PositionComponents * sizeof(float));
+			if (!std::isfinite(Value[0]) || !std::isfinite(Value[1]) || !std::isfinite(Value[2]) ||
+				(PositionComponents == 4 && (!std::isfinite(Value[3]) || std::abs(Value[3] - 1.0f) > 1.0e-6f))) return;
+			Minimum = glm::min(Minimum, glm::vec3(Value[0], Value[1], Value[2]));
+			Maximum = glm::max(Maximum, glm::vec3(Value[0], Value[1], Value[2]));
+		}
+		m_LocalBounds = MeshLocalBounds{ Minimum, Maximum };
 	}
 
 	GraphicsResult ValidateMeshDrawArguments(

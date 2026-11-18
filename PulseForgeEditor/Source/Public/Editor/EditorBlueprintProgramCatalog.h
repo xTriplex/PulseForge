@@ -26,6 +26,7 @@ namespace PulseForgeEditor
 		void BindRuntimeServices(PulseForge::SceneRuntimeServices& Services);
 
 		[[nodiscard]] uint64_t GetGeneration() const noexcept { return m_Generation; }
+		[[nodiscard]] uint64_t GetAssetRevision(const PulseForge::AssetID& Asset) const noexcept;
 		[[nodiscard]] std::optional<PulseForge::BlueprintProgramBinding> Resolve(
 			const PulseForge::Entity& Target, PulseForge::BlueprintEventKind Event);
 		[[nodiscard]] std::optional<std::string> GetLoadFailure(const PulseForge::AssetID& Asset) const;
@@ -43,5 +44,6 @@ namespace PulseForgeEditor
 		std::unordered_map<PulseForge::AssetID,
 			std::shared_ptr<const PulseForge::VerifiedBlueprintAsset>, PulseForge::UUIDHash> m_Programs;
 		std::unordered_map<PulseForge::AssetID, std::string, PulseForge::UUIDHash> m_LoadFailures;
+		std::unordered_map<PulseForge::AssetID, uint64_t, PulseForge::UUIDHash> m_AssetRevisions;
 	};
 }

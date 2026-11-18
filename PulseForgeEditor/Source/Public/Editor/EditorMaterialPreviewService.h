@@ -12,6 +12,7 @@
 
 namespace PulseForge
 {
+	class DerivedDataArtifactStore;
 	class Project;
 	class RenderDevice;
 }
@@ -46,6 +47,8 @@ namespace PulseForgeEditor
 			const std::filesystem::path& CompiledShaderDirectory);
 
 		std::unordered_map<uint64_t, std::unique_ptr<Entry>> m_Entries;
+		std::unique_ptr<PulseForge::DerivedDataArtifactStore> m_GraphArtifacts;
+		std::string m_ToolchainFingerprint;
 		uint64_t m_Frame = 0;
 		uint64_t m_AssetRevision = 1;
 		PulseForge::UUID m_ProjectID;

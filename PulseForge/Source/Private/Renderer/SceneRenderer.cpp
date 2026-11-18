@@ -12,12 +12,14 @@
 
 #include "Assets/MaterialAssetCache.h"
 #include "Assets/CookedProductCodec.h"
+#include "Assets/MaterialGraphArtifact.h"
 #include "Assets/GltfMeshImportCoordinator.h"
 #include "Animation/GltfSkinning.h"
 #include "Assets/AssetPathResolver.h"
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPreparationService.h"
 #include "Assets/DerivedDataArtifactStore.h"
+#include "Assets/MaterialGraphCompiler.h"
 #include "Assets/Project.h"
 #endif
 #include "Renderer/AssetCache/MeshAssetCache.h"
@@ -31,6 +33,7 @@
 #include "Scene/Components/EnvironmentLightComponent.h"
 
 #include <cmath>
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -84,14 +87,39 @@ namespace PulseForge
 			}
 			return Total;
 		}
+
+		[[nodiscard]] std::optional<SceneAxisAlignedBounds> ComputeSkeletalPoseBounds(
+			std::span<const GltfMeshVertex> Vertices)
+		{
+			if (Vertices.empty()) return std::nullopt;
+			glm::vec3 Minimum(std::numeric_limits<float>::max());
+			glm::vec3 Maximum(std::numeric_limits<float>::lowest());
+			for (const GltfMeshVertex& Vertex : Vertices)
+			{
+				const glm::vec3 Position(Vertex.Position[0], Vertex.Position[1], Vertex.Position[2]);
+				if (!std::isfinite(Position.x) || !std::isfinite(Position.y) || !std::isfinite(Position.z))
+					return std::nullopt;
+				Minimum = glm::min(Minimum, Position);
+				Maximum = glm::max(Maximum, Position);
+			}
+			return SceneAxisAlignedBounds{ Minimum, Maximum };
+		}
 	}
 
-	struct GraphMaterialRuntime final
+	struct GraphMaterialShaderRuntime final
 	{
 		std::string RecipeFingerprint;
 		ShaderHandle FragmentShader;
 		BindingLayoutHandle MaterialLayout;
+	};
+
+	struct GraphMaterialRuntime final
+	{
+		std::string RecipeFingerprint;
+		std::shared_ptr<GraphMaterialShaderRuntime> ShaderResources;
 		BufferHandle ParameterBuffer;
+		std::vector<std::byte> ParameterBytes;
+		std::vector<std::byte> PendingParameterBytes;
 		BindingSetHandle MaterialBindings;
 		uint64_t PointShadowResourceGeneration = (std::numeric_limits<uint64_t>::max)();
 	};
@@ -171,6 +199,40 @@ namespace PulseForge
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
 		}
 
+		CookedMaterialProduct MakeCookedMaterialProduct(const MaterialAssetDesc& Material)
+		{
+			CookedMaterialProduct Product;
+			Product.BaseColorTexture = Material.BaseColorTexture;
+			Product.MetallicRoughnessTexture = Material.MetallicRoughnessTexture;
+			Product.NormalTexture = Material.NormalTexture;
+			Product.OcclusionTexture = Material.OcclusionTexture;
+			Product.EmissiveTexture = Material.EmissiveTexture;
+			for (size_t Component = 0; Component < Product.BaseColorFactor.size(); ++Component)
+				Product.BaseColorFactor[Component] = Material.BaseColorFactor[static_cast<int>(Component)];
+			Product.MetallicFactor = Material.MetallicFactor;
+			Product.RoughnessFactor = Material.RoughnessFactor;
+			Product.NormalScale = Material.NormalScale;
+			Product.OcclusionStrength = Material.OcclusionStrength;
+			for (size_t Component = 0; Component < Product.EmissiveFactor.size(); ++Component)
+				Product.EmissiveFactor[Component] = Material.EmissiveFactor[static_cast<int>(Component)];
+			Product.AlphaMode = static_cast<CookedMaterialAlphaMode>(Material.AlphaMode);
+			Product.AlphaCutoff = Material.AlphaCutoff;
+			Product.DoubleSided = Material.DoubleSided;
+			return Product;
+		}
+
+		std::vector<std::byte> BuildGraphParameterBytes(
+			std::span<const CookedGraphMaterialProduct::Parameter> InputParameters)
+		{
+			std::vector<CookedGraphMaterialProduct::Parameter> Parameters(InputParameters.begin(), InputParameters.end());
+			std::ranges::sort(Parameters, {}, &CookedGraphMaterialProduct::Parameter::Name);
+			const size_t RegisterCount = (std::max)(size_t{ 1 }, (Parameters.size() + 3) / 4);
+			std::vector<std::byte> Bytes(RegisterCount * 16, std::byte{ 0 });
+			for (size_t Index = 0; Index < Parameters.size(); ++Index)
+				std::memcpy(Bytes.data() + Index * sizeof(float), &Parameters[Index].DefaultValue, sizeof(float));
+			return Bytes;
+		}
+
 		std::expected<TextureHandle, TextureError> CreateBlackCube(RenderDevice& Runtime, std::string DebugName)
 		{
 			const std::array<float, 4> Black{ 0.0f, 0.0f, 0.0f, 1.0f };
@@ -231,6 +293,12 @@ namespace PulseForge
 		TextureAssetCache Textures;
 		MaterialAssetCache Materials;
 		EnvironmentLightingCache EnvironmentLighting;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		std::unordered_map<AssetID,
+			std::expected<MaterialGraphCompileIdentity, MaterialGraphCompileError>, UUIDHash> GraphMaterialIdentities;
+		size_t GraphMaterialIdentityDescribeCalls = 0;
+		size_t GraphMaterialIdentityCacheHits = 0;
+#endif
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		static std::string MakeSessionKey(const std::filesystem::path& ProjectRoot)
@@ -273,6 +341,7 @@ namespace PulseForge
 
 		void Clear(const AssetRegistry& CurrentRegistry) noexcept
 		{
+			GraphMaterialIdentities.clear();
 			try
 			{
 				Registry = std::make_shared<const AssetRegistry>(CurrentRegistry);
@@ -312,6 +381,7 @@ namespace PulseForge
 		std::shared_ptr<const ImportedGltfSkeletalMesh> Product;
 		std::vector<std::array<float, 16>> LastLocalTransforms;
 		std::vector<std::byte> PendingVertexData;
+		std::optional<SceneAxisAlignedBounds> CurrentPoseBounds;
 		MeshHandle Resource;
 	};
 
@@ -362,6 +432,13 @@ namespace PulseForge
 		Stats.EnvironmentLighting = m_ProjectAssetCaches->EnvironmentLighting.GetInventoryStats();
 		Stats.MaterialDescriptions = m_ProjectAssetCaches->Materials.GetLoadedCount();
 		Stats.GraphMaterialResources = m_GraphMaterialResources.size();
+		Stats.GraphMaterialIdentityDescribeCalls = m_ProjectAssetCaches->GraphMaterialIdentityDescribeCalls;
+		Stats.GraphMaterialIdentityCacheHits = m_ProjectAssetCaches->GraphMaterialIdentityCacheHits;
+		for (const auto& [Recipe, Resources] : m_GraphMaterialShaderResources)
+		{
+			(void)Recipe;
+			Stats.GraphMaterialShaderResources += Resources.expired() ? 0u : 1u;
+		}
 		Stats.SkeletalMeshResources = m_SkeletalMeshResources.size();
 		return Stats;
 	}
@@ -1080,7 +1157,7 @@ namespace PulseForge
 		std::optional<VertexLayoutDesc> SceneVertexLayout;
 		std::vector<SceneMeshInstance> ReadyMeshes;
 		ReadyMeshes.reserve(Snapshot->Meshes.size());
-		for (const SceneMeshInstance& Instance : Snapshot->Meshes)
+		for (SceneMeshInstance& Instance : Snapshot->Meshes)
 		{
 			if (Instance.MaterialAsset && !m_ProjectAssetCaches->Materials.IsRegistered(*Instance.MaterialAsset))
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
@@ -1128,6 +1205,7 @@ namespace PulseForge
 					if (!SkinnedVertices)
 						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
 							Instance.MeshAsset, "Could not prepare skinned vertices: " + SkinnedVertices.error().Message });
+					Skeletal.CurrentPoseBounds = ComputeSkeletalPoseBounds(*SkinnedVertices);
 
 					MeshDesc Description = Skeletal.Product->Geometry.GetMeshDescription();
 					Description.VertexData = std::as_bytes(std::span(*SkinnedVertices));
@@ -1168,6 +1246,16 @@ namespace PulseForge
 					});
 				}
 				MeshResource = &MeshResult->get();
+			}
+			if (Snapshot->HasCameraFrustum)
+			{
+				const auto Skeletal = m_SkeletalMeshResources.find(Instance.Entity);
+				if (Skeletal != m_SkeletalMeshResources.end() && Skeletal->second->CurrentPoseBounds)
+					Instance.CameraVisible = IsSceneBoundsVisible(
+						*Skeletal->second->CurrentPoseBounds, Instance.WorldTransform, Snapshot->ViewProjection);
+				else if (const auto& Bounds = MeshResource->GetLocalBounds(); Bounds)
+					Instance.CameraVisible = IsSceneBoundsVisible(
+						{ Bounds->Minimum, Bounds->Maximum }, Instance.WorldTransform, Snapshot->ViewProjection);
 			}
 			const VertexLayoutDesc& Layout = MeshResource->GetVertexLayout();
 			if (SceneVertexLayout && !SceneRendererPipelineCache::HasSameVertexLayout(*SceneVertexLayout, Layout))
@@ -1224,20 +1312,72 @@ namespace PulseForge
 				m_TransientMaterialOverride->Material == *Instance.MaterialAsset;
 			const bool HasTransientGraph = Instance.MaterialAsset && m_TransientMaterialOverride &&
 				m_TransientMaterialOverride->Material == *Instance.MaterialAsset && m_TransientMaterialOverride->GraphProduct;
-			if (Instance.MaterialAsset && (HasTransientGraph || (!HasTransientMaterial && m_ProjectAssetCaches->CookedContent &&
-				m_ProjectAssetCaches->CookedContent->FindGraphMaterial(*Instance.MaterialAsset))))
+			const MaterialAssetDesc* SourceDescription = nullptr;
+			bool HasSourceGraph = false;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			if (Instance.MaterialAsset && !HasTransientMaterial && !m_ProjectAssetCaches->CookedContent)
+			{
+				auto Description = ResolveMaterialDescription(Instance);
+				if (!Description) return std::unexpected(std::move(Description.error()));
+				SourceDescription = *Description;
+				HasSourceGraph = SourceDescription->Graph.has_value();
+			}
+#endif
+			const bool HasCookedGraph = Instance.MaterialAsset && !HasTransientMaterial && m_ProjectAssetCaches->CookedContent &&
+				m_ProjectAssetCaches->CookedContent->FindGraphMaterial(*Instance.MaterialAsset);
+			if (Instance.MaterialAsset && (HasTransientGraph || HasCookedGraph || HasSourceGraph))
 			{
 				GraphMaterialRuntime* GraphMaterial = nullptr;
-				const auto Existing = m_GraphMaterialResources.find(*Instance.MaterialAsset);
-				if (Existing != m_GraphMaterialResources.end())
-					GraphMaterial = Existing->second.get();
-				else
+				auto Existing = m_GraphMaterialResources.find(*Instance.MaterialAsset);
+				std::optional<MaterialGraphCompileIdentity> SourceIdentity;
+				if (HasSourceGraph)
+				{
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+					auto Identity = m_ProjectAssetCaches->GraphMaterialIdentities.find(*Instance.MaterialAsset);
+					if (Identity == m_ProjectAssetCaches->GraphMaterialIdentities.end())
+					{
+						++m_ProjectAssetCaches->GraphMaterialIdentityDescribeCalls;
+						auto Described = MaterialGraphCompiler::Describe(
+							*SourceDescription->Graph, GetMaterialGraphCompilerToolchainFingerprint());
+						Identity = m_ProjectAssetCaches->GraphMaterialIdentities.emplace(
+							*Instance.MaterialAsset, std::move(Described)).first;
+					}
+					else ++m_ProjectAssetCaches->GraphMaterialIdentityCacheHits;
+					if (!Identity->second)
+					{
+						if (Existing == m_GraphMaterialResources.end())
+							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+								*Instance.MaterialAsset, "Saved graph material is invalid for source rendering: " +
+								Identity->second.error().Message });
+						PF_CORE_WARN("Saved graph material {} is invalid; retaining its last good renderer product: {}",
+							Instance.MaterialAsset->ToString(), Identity->second.error().Message);
+					}
+					else SourceIdentity.emplace(Identity->second.value());
+#endif
+				}
+			if (Existing != m_GraphMaterialResources.end() && (!SourceIdentity ||
+				Existing->second->RecipeFingerprint == SourceIdentity->RecipeFingerprint))
+			{
+				GraphMaterial = Existing->second.get();
+				if (SourceIdentity)
+				{
+					auto Parameters = SourceIdentity->Parameters;
+					std::ranges::sort(Parameters, {}, &MaterialGraphCompiledArtifact::Parameter::Name);
+					const size_t RegisterCount = (std::max)(size_t{ 1 }, (Parameters.size() + 3) / 4);
+					std::vector<std::byte> ParameterBytes(RegisterCount * 16, std::byte{ 0 });
+					for (size_t Index = 0; Index < Parameters.size(); ++Index)
+						std::memcpy(ParameterBytes.data() + Index * sizeof(float), &Parameters[Index].DefaultValue, sizeof(float));
+					if (ParameterBytes != GraphMaterial->ParameterBytes)
+						GraphMaterial->PendingParameterBytes = std::move(ParameterBytes);
+				}
+			}
+			else
 				{
 					std::optional<CookedGraphMaterialProduct> LoadedProduct;
 					const CookedGraphMaterialProduct* Product = nullptr;
 					if (HasTransientGraph)
 						Product = &*m_TransientMaterialOverride->GraphProduct;
-					else
+					else if (m_ProjectAssetCaches->CookedContent)
 					{
 						auto Loaded = m_ProjectAssetCaches->CookedContent->LoadGraphMaterialProduct(*Instance.MaterialAsset);
 						if (!Loaded)
@@ -1246,26 +1386,85 @@ namespace PulseForge
 						LoadedProduct.emplace(std::move(*Loaded));
 						Product = &*LoadedProduct;
 					}
+					else
+					{
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+						if (!SourceDescription || !SourceDescription->Graph)
+							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+								*Instance.MaterialAsset, "Saved graph material source is unavailable" });
+						MaterialGraphCompileRequest CompileRequest;
+						CompileRequest.Source = *SourceDescription->Graph;
+						CompileRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
+						CompileRequest.ArtifactStore = &m_ProjectAssetCaches->Artifacts;
+						CompileRequest.Generation = m_ProjectAssetCaches->Generation;
+						const ProjectAssetCaches* const Caches = m_ProjectAssetCaches.get();
+						CompileRequest.IsGenerationCurrent = [Caches](uint64_t Generation)
+						{
+							return Caches->Generation == Generation;
+						};
+						auto Compiled = MaterialGraphCompiler::Compile(CompileRequest);
+						if (!Compiled)
+						{
+							if (Existing == m_GraphMaterialResources.end())
+								return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+										*Instance.MaterialAsset, "Could not compile saved graph material for source rendering: " +
+										Compiled.error().Message });
+							GraphMaterial = Existing->second.get();
+							PF_CORE_WARN("Could not compile saved graph material {}; retaining its last good renderer product: {}",
+								Instance.MaterialAsset->ToString(), Compiled.error().Message);
+						}
+						else
+						{
+							CookedGraphMaterialProduct SourceProduct;
+							SourceProduct.RecipeFingerprint = Compiled->RecipeFingerprint;
+							SourceProduct.Parameters.reserve(Compiled->Parameters.size());
+							for (const auto& Parameter : Compiled->Parameters)
+								SourceProduct.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
+							SourceProduct.SpirV = std::move(Compiled->SpirV);
+							SourceProduct.Material = MakeCookedMaterialProduct(*SourceDescription);
+							LoadedProduct.emplace(std::move(SourceProduct));
+							Product = &*LoadedProduct;
+						}
+#else
+						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
+							*Instance.MaterialAsset, "Cooked-only scene renderer cannot compile graph source" });
+#endif
+					}
 
-					ShaderDesc ShaderDescription;
-					ShaderDescription.Stage = ShaderStage::Fragment;
-					ShaderDescription.EntryPoint = "PSMain";
-					ShaderDescription.DebugName = "PulseForge graph material " + Product->RecipeFingerprint;
-					auto Shader = m_Runtime.CreateShader(ShaderDescription, Product->SpirV);
-					if (!Shader)
-						return std::unexpected(MakeResourceError("Could not create cooked graph material shader: " + Shader.error().Message));
+					if (Product)
+					{
+					auto ShaderResources = m_GraphMaterialShaderResources[Product->RecipeFingerprint].lock();
+					if (!ShaderResources)
+					{
+						ShaderDesc ShaderDescription;
+						ShaderDescription.Stage = ShaderStage::Fragment;
+						ShaderDescription.EntryPoint = "PSMain";
+						ShaderDescription.DebugName = "PulseForge graph material " + Product->RecipeFingerprint;
+						auto Shader = m_Runtime.CreateShader(ShaderDescription, Product->SpirV);
+						if (!Shader)
+							return std::unexpected(MakeResourceError("Could not create cooked graph material shader: " + Shader.error().Message));
 
-					BindingLayoutDesc GraphLayoutDescription;
-					GraphLayoutDescription.Visibility = ShaderVisibility::Fragment;
-					GraphLayoutDescription.ShaderRegisterSpace = 3;
-					GraphLayoutDescription.Items = {
-						{ BindingResourceType::TextureCube, 0 }, { BindingResourceType::TextureCube, 1 },
-						{ BindingResourceType::Sampler, 0 }, { BindingResourceType::ConstantBuffer, 0 }
-					};
-					GraphLayoutDescription.DebugName = "PulseForge graph material and point-shadow resources (space3)";
-					auto GraphLayout = m_Runtime.CreateBindingLayout(GraphLayoutDescription);
-					if (!GraphLayout)
-						return std::unexpected(MakeResourceError("Could not create graph-material binding layout: " + GraphLayout.error().Message));
+						BindingLayoutDesc GraphLayoutDescription;
+						GraphLayoutDescription.Visibility = ShaderVisibility::Fragment;
+						GraphLayoutDescription.ShaderRegisterSpace = 3;
+						GraphLayoutDescription.Items = {
+							{ BindingResourceType::TextureCube, 0 }, { BindingResourceType::TextureCube, 1 },
+							{ BindingResourceType::Sampler, 0 }, { BindingResourceType::ConstantBuffer, 0 }
+						};
+						GraphLayoutDescription.DebugName = "PulseForge graph material and point-shadow resources (space3)";
+						auto GraphLayout = m_Runtime.CreateBindingLayout(GraphLayoutDescription);
+						if (!GraphLayout)
+							return std::unexpected(MakeResourceError("Could not create graph-material binding layout: " +
+							GraphLayout.error().Message));
+
+						ShaderResources = std::make_shared<GraphMaterialShaderRuntime>();
+						ShaderResources->RecipeFingerprint = Product->RecipeFingerprint;
+						ShaderResources->FragmentShader = std::move(*Shader);
+						ShaderResources->MaterialLayout = std::move(*GraphLayout);
+						std::erase_if(m_GraphMaterialShaderResources,
+							[](const auto& Entry) { return Entry.second.expired(); });
+						m_GraphMaterialShaderResources.insert_or_assign(Product->RecipeFingerprint, ShaderResources);
+					}
 
 					auto Parameters = Product->Parameters;
 					std::ranges::sort(Parameters, {}, &CookedGraphMaterialProduct::Parameter::Name);
@@ -1283,11 +1482,13 @@ namespace PulseForge
 							ParameterBuffer.error().Message));
 					auto RuntimeMaterial = std::make_unique<GraphMaterialRuntime>();
 					RuntimeMaterial->RecipeFingerprint = Product->RecipeFingerprint;
-					RuntimeMaterial->FragmentShader = std::move(*Shader);
-					RuntimeMaterial->MaterialLayout = std::move(*GraphLayout);
+					RuntimeMaterial->ShaderResources = std::move(ShaderResources);
 					RuntimeMaterial->ParameterBuffer = std::move(*ParameterBuffer);
+					RuntimeMaterial->ParameterBytes = std::move(ParameterBytes);
 					GraphMaterial = RuntimeMaterial.get();
+					if (Existing != m_GraphMaterialResources.end()) m_GraphMaterialResources.erase(Existing);
 					m_GraphMaterialResources.emplace(*Instance.MaterialAsset, std::move(RuntimeMaterial));
+					}
 				}
 				m_PreparedGraphMaterials.insert_or_assign(Instance.Entity, GraphMaterial);
 			}
@@ -1400,10 +1601,29 @@ namespace PulseForge
 		{
 			(void)Material;
 			if (Graph->MaterialBindings && Graph->PointShadowResourceGeneration == PointShadowGeneration) continue;
-			auto Bindings = m_ShadowTargetCache->CreateGraphMaterialBindings(Graph->MaterialLayout, *Graph->ParameterBuffer);
+			auto Bindings = m_ShadowTargetCache->CreateGraphMaterialBindings(Graph->ShaderResources->MaterialLayout,
+				*Graph->ParameterBuffer);
 			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
 			Graph->MaterialBindings = std::move(*Bindings);
 			Graph->PointShadowResourceGeneration = PointShadowGeneration;
+		}
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::ApplyPendingGraphMaterialParameters()
+	{
+		for (auto& [Material, Graph] : m_GraphMaterialResources)
+		{
+			if (Graph->PendingParameterBytes.empty()) continue;
+			if (!Graph->ParameterBuffer || Graph->PendingParameterBytes.size() != Graph->ParameterBuffer->GetDescription().ByteSize)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, {}, Material,
+					"Prepared graph material parameter storage no longer matches its shader ABI" });
+			auto Updated = m_Runtime.WriteBuffer(*Graph->ParameterBuffer, 0, Graph->PendingParameterBytes);
+			if (!Updated)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::DrawFailed, {}, Material,
+					"Could not update graph material parameter data: " + Updated.error().Message });
+			Graph->ParameterBytes = std::move(Graph->PendingParameterBytes);
+			Graph->PendingParameterBytes.clear();
 		}
 		return {};
 	}
@@ -1445,6 +1665,10 @@ namespace PulseForge
 		m_PreparedMaterialBindings.clear();
 		m_PreparedGraphMaterials.clear();
 		m_GraphMaterialResources.clear();
+		m_GraphMaterialShaderResources.clear();
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		m_ProjectAssetCaches->GraphMaterialIdentities.clear();
+#endif
 		m_MaterialBindingCache->RefreshMaterialAssets();
 	}
 
@@ -1453,7 +1677,9 @@ namespace PulseForge
 		m_PreparedSnapshot.reset();
 		m_PreparedMaterialBindings.clear();
 		m_PreparedGraphMaterials.clear();
-		m_GraphMaterialResources.erase(Material);
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		m_ProjectAssetCaches->GraphMaterialIdentities.erase(Material);
+#endif
 		m_MaterialBindingCache->RefreshMaterialAsset(Material);
 	}
 
@@ -1499,12 +1725,21 @@ namespace PulseForge
 			Replacement->Description = Description;
 			Replacement->GraphProduct = Product;
 			Replacement->Revision = Revision;
+			const auto Existing = m_GraphMaterialResources.find(Material);
+			if (Existing != m_GraphMaterialResources.end())
+			{
+				const std::vector<std::byte> ParameterBytes = BuildGraphParameterBytes(Product.Parameters);
+				if (Existing->second->RecipeFingerprint == Product.RecipeFingerprint && Existing->second->ParameterBuffer &&
+					Existing->second->ParameterBuffer->GetDescription().ByteSize == ParameterBytes.size())
+					Existing->second->PendingParameterBytes = ParameterBytes;
+				else
+					m_GraphMaterialResources.erase(Existing);
+			}
 			m_TransientMaterialOverride = std::move(Replacement);
 			m_PreparedSnapshot.reset();
 			m_PreparedMaterialBindings.clear();
 			m_PreparedGraphMaterials.clear();
-			m_GraphMaterialResources.erase(Material);
-			m_MaterialBindingCache->RefreshMaterialAssets();
+			m_MaterialBindingCache->RefreshMaterialAsset(Material);
 			return {};
 		}
 		catch (const std::exception& Exception)
@@ -1550,6 +1785,10 @@ namespace PulseForge
 		m_PreparedMaterialBindings.clear();
 		m_PreparedGraphMaterials.clear();
 		m_GraphMaterialResources.clear();
+		m_GraphMaterialShaderResources.clear();
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		m_ProjectAssetCaches->GraphMaterialIdentities.clear();
+#endif
 		m_PreparedCascades.reset();
 		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
 		m_PreparedEnvironmentBinding = nullptr;
@@ -1762,6 +2001,7 @@ namespace PulseForge
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene()
 	{
 		if (auto Updated = ApplyPendingSkeletalMeshUpdates(); !Updated) return std::unexpected(std::move(Updated.error()));
+		if (auto Updated = ApplyPendingGraphMaterialParameters(); !Updated) return std::unexpected(std::move(Updated.error()));
 		if (auto Shadows = RenderShadowCascades(); !Shadows)
 			return std::unexpected(std::move(Shadows.error()));
 		const auto [Width, Height] = m_Runtime.GetOutputFramebufferSize();
@@ -1787,6 +2027,7 @@ namespace PulseForge
 			if (auto Pipeline = m_PipelineCache->EnsureScenePipeline(ColorFormat); !Pipeline)
 				return std::unexpected(std::move(Pipeline.error()));
 		}
+		if (auto Updated = ApplyPendingGraphMaterialParameters(); !Updated) return std::unexpected(std::move(Updated.error()));
 		if (auto Shadows = RenderShadowCascades(); !Shadows)
 			return std::unexpected(std::move(Shadows.error()));
 		if (auto AmbientOcclusion = RenderAmbientOcclusion(
@@ -1914,7 +2155,8 @@ namespace PulseForge
 			if (Graph)
 			{
 				if (auto PipelineResult = m_PipelineCache->EnsureGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint,
-						Graph->FragmentShader, Graph->MaterialLayout, AlphaBlend, Material.DoubleSided, Instance.Orientation);
+						Graph->ShaderResources->FragmentShader, Graph->ShaderResources->MaterialLayout, AlphaBlend,
+						Material.DoubleSided, Instance.Orientation);
 					!PipelineResult)
 					return std::unexpected(std::move(PipelineResult.error()));
 			}
@@ -1923,7 +2165,7 @@ namespace PulseForge
 				!PipelineResult)
 				return std::unexpected(std::move(PipelineResult.error()));
 			const GraphicsPipeline* Pipeline = Graph
-				? m_PipelineCache->FindGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint, Graph->MaterialLayout,
+				? m_PipelineCache->FindGraphScenePipeline(ColorFormat, Graph->RecipeFingerprint,
 					AlphaBlend, Material.DoubleSided, Instance.Orientation)
 				: m_PipelineCache->FindScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
 			if (!Pipeline) return std::unexpected(MakeResourceError("Prepared material graphics pipeline is unavailable"));
@@ -1992,6 +2234,7 @@ namespace PulseForge
 		m_TransparentDrawOrder.reserve(std::max(m_TransparentDrawOrder.capacity(), m_PreparedSnapshot->Meshes.size()));
 		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 		{
+			if (!Instance.CameraVisible) continue;
 			auto Material = ResolveMaterialDescription(Instance);
 			if (!Material)
 				return std::unexpected(std::move(Material.error()));

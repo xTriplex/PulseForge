@@ -453,7 +453,7 @@ if(BUILD_TESTING)
 		target_link_libraries(PulseForgeEditorTests PRIVATE
 			PulseForgeAssetCookService PulseForgeAssetServices PulseForgeCookedRuntimeProvider PulseForgeRuntime)
 		if(WIN32)
-			target_link_libraries(PulseForgeEditorTests PRIVATE shell32 dwmapi)
+			target_link_libraries(PulseForgeEditorTests PRIVATE shell32 dwmapi dbghelp)
 		endif()
 		if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
@@ -581,6 +581,15 @@ if(BUILD_TESTING)
 					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
 					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
 			set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+			add_test(NAME PulseForge.G29ReferenceGame.ExportedPackageInteraction
+				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
+					--scenario g29
+					--export "$<TARGET_FILE:PulseForgeExport>"
+					--template-root "${PF_COOKED_PLAYER_TEMPLATE_ROOT}"
+					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
+					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/G29ReferenceGame/G29ReferenceGame.pfproj")
+			set_tests_properties(PulseForge.G29ReferenceGame.ExportedPackageInteraction
+				PROPERTIES RUN_SERIAL TRUE TIMEOUT 360 CONFIGURATIONS Debug)
 			add_test(NAME PulseForge.AudioMixing.ExportedPackageInteraction
 				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/AudioMixingPackageAcceptance.py"
 					--export "$<TARGET_FILE:PulseForgeExport>"

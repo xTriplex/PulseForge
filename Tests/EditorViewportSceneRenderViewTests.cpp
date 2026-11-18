@@ -428,19 +428,36 @@ namespace
 		const auto EquivalentGraphLayout = MakeLayout(3);
 		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
 			EquivalentGraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
-		const size_t TwoGraphPipelines = Runtime.PipelineCreations;
-		PF_CHECK(Tests, TwoGraphPipelines == OneGraphPipeline + 1);
+		const size_t EquivalentGraphPipelineCount = Runtime.PipelineCreations;
+		PF_CHECK(Tests, EquivalentGraphPipelineCount == OneGraphPipeline);
 		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
 			EquivalentGraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
-		PF_CHECK(Tests, Runtime.PipelineCreations == TwoGraphPipelines);
+		PF_CHECK(Tests, Runtime.PipelineCreations == EquivalentGraphPipelineCount);
 		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-b", GraphShader,
 			GraphLayout).has_value());
-		const GraphicsPipeline* const GraphPipeline = Cache.FindGraphScenePipeline(
-			ColorTargetFormat::RGBA16_Float, "recipe-a", GraphLayout, true, true, WorldTransformOrientation::Mirrored);
+		const GraphicsPipeline* GraphPipeline = Cache.FindGraphScenePipeline(
+			ColorTargetFormat::RGBA16_Float, "recipe-a", true, true, WorldTransformOrientation::Mirrored);
 		const GraphicsPipeline* const EquivalentGraphPipeline = Cache.FindGraphScenePipeline(
-			ColorTargetFormat::RGBA16_Float, "recipe-a", EquivalentGraphLayout, true, true, WorldTransformOrientation::Mirrored);
+			ColorTargetFormat::RGBA16_Float, "recipe-a", true, true, WorldTransformOrientation::Mirrored);
 		PF_CHECK(Tests, GraphPipeline && GraphPipeline != FixedPipeline && EquivalentGraphPipeline &&
-			EquivalentGraphPipeline != GraphPipeline);
+			EquivalentGraphPipeline == GraphPipeline);
+		PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
+			GraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
+		for (size_t Index = 0; Index < 64; ++Index)
+		{
+			const std::string Recipe = "lru-recipe-" + std::to_string(Index);
+			PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", GraphShader,
+				GraphLayout, true, true, WorldTransformOrientation::Mirrored).has_value());
+			PF_CHECK(Tests, Cache.EnsureGraphScenePipeline(ColorTargetFormat::RGBA16_Float, Recipe,
+				GraphShader, GraphLayout).has_value());
+		}
+		GraphPipeline = Cache.FindGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", true, true,
+			WorldTransformOrientation::Mirrored);
+		PF_CHECK(Tests, Cache.GetGraphScenePipelineCount() == 64 &&
+			Cache.FindGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", true, true,
+				WorldTransformOrientation::Mirrored) != nullptr &&
+			Cache.FindGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-b", false, false,
+				WorldTransformOrientation::Normal) == nullptr);
 		if (GraphPipeline)
 		{
 			const auto& Description = GraphPipeline->GetDescription();
@@ -451,7 +468,7 @@ namespace
 			PF_CHECK(Tests, Description.Rasterizer.Cull == CullMode::None && !Description.Rasterizer.FrontCounterClockwise);
 		}
 		if (EquivalentGraphPipeline)
-			PF_CHECK(Tests, EquivalentGraphPipeline->GetDescription().BindingLayouts.back().get() == EquivalentGraphLayout.get());
+			PF_CHECK(Tests, EquivalentGraphPipeline->GetDescription().BindingLayouts.back().get() == GraphLayout.get());
 	}
 
 	class FakeTextureRegistry final : public PulseForgeEditor::EditorTextureRegistry

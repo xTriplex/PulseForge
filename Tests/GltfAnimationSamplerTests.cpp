@@ -180,8 +180,16 @@ namespace
 		GltfAnimationPlaybackClock Clock;
 		Clock.TimeSeconds = 1.0f;
 		const auto Pose = SampleGltfAnimationPose(Clip, RestPose, Clock);
+		const auto Validation = ValidateGltfAnimationClip(Clip);
 		const std::array<float, 4> ExpectedRootTranslation = { 1.0f, 2.0f, 3.0f, 0.0f };
 		PF_CHECK(Tests, Pose && Pose->size() == RestPose.size());
+		PF_CHECK(Tests, Validation.has_value());
+		if (Validation && Pose)
+		{
+			const auto PreparedPose = SampleGltfAnimationPose(Clip, *Validation, RestPose, Clock);
+			PF_CHECK(Tests, PreparedPose && (*PreparedPose)[0].Translation == (*Pose)[0].Translation &&
+				(*PreparedPose)[1].Rotation == (*Pose)[1].Rotation);
+		}
 		PF_CHECK(Tests, Pose && (*Pose)[0].Translation == ExpectedRootTranslation);
 		PF_CHECK(Tests, Pose && (*Pose)[0].Scale == RestPose[0].Scale);
 		PF_CHECK(Tests, Pose && (*Pose)[1].Translation == RestPose[1].Translation);
@@ -270,6 +278,9 @@ namespace
 		AddTranslationClip("idle", 0.0f, 2.0f);
 		AddTranslationClip("walk", 10.0f, 20.0f);
 		AddTranslationClip("run", 20.0f, 40.0f);
+		const auto ValidatedProduct = ValidateGltfAnimationProduct(Mesh);
+		PF_CHECK(Tests, ValidatedProduct && ValidatedProduct->size() == Mesh.Animations.size());
+		if (!ValidatedProduct) return;
 
 		GltfAnimationNodePose RestNode;
 		RestNode.NodeKey = "root";
@@ -279,21 +290,21 @@ namespace
 		PF_CHECK(Tests, PlayGltfAnimationInstance(FirstActor, Mesh, "idle"));
 		PF_CHECK(Tests, PlayGltfAnimationInstance(SecondActor, Mesh, "idle"));
 		PF_CHECK(Tests, SetGltfAnimationPlaybackSpeed(SecondActor.CurrentClock, 2.0f));
-		const auto FirstInitial = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f);
-		const auto SecondInitial = AdvanceGltfAnimationInstance(SecondActor, Mesh, RestPose, 0.25f);
+		const auto FirstInitial = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f, {}, &*ValidatedProduct);
+		const auto SecondInitial = AdvanceGltfAnimationInstance(SecondActor, Mesh, RestPose, 0.25f, {}, &*ValidatedProduct);
 		PF_CHECK(Tests, FirstInitial && std::abs((*FirstInitial)[0].Translation[0] - 0.5f) < 1.0e-5f);
 		PF_CHECK(Tests, SecondInitial && std::abs((*SecondInitial)[0].Translation[0] - 0.5f) < 1.0e-5f);
 		PF_CHECK(Tests, FirstActor.CurrentClock.TimeSeconds == 0.5f && SecondActor.CurrentClock.TimeSeconds == 0.5f);
 
 		PF_CHECK(Tests, TransitionGltfAnimationInstance(FirstActor, Mesh, RestPose, "walk", 1.0f));
-		const auto FirstHalf = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f);
+		const auto FirstHalf = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f, {}, &*ValidatedProduct);
 		PF_CHECK(Tests, FirstHalf && std::abs((*FirstHalf)[0].Translation[0] - 6.5f) < 1.0e-5f);
 		PF_CHECK(Tests, FirstActor.CurrentClipKey == "idle" && FirstActor.TargetClipKey == "walk");
 
 		PF_CHECK(Tests, TransitionGltfAnimationInstance(FirstActor, Mesh, RestPose, "run", 1.0f));
-		const auto InterruptedHalf = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f);
+		const auto InterruptedHalf = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f, {}, &*ValidatedProduct);
 		PF_CHECK(Tests, InterruptedHalf && std::abs((*InterruptedHalf)[0].Translation[0] - 15.75f) < 1.0e-5f);
-		const auto Completed = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f);
+		const auto Completed = AdvanceGltfAnimationInstance(FirstActor, Mesh, RestPose, 0.5f, {}, &*ValidatedProduct);
 		PF_CHECK(Tests, Completed && std::abs((*Completed)[0].Translation[0] - 30.0f) < 1.0e-5f);
 		PF_CHECK(Tests, FirstActor.CurrentClipKey == "run" && FirstActor.TargetClipKey.empty() &&
 			!FirstActor.Crossfade.Active);
@@ -306,12 +317,14 @@ namespace
 		PF_CHECK(Tests, TransitionSpeedActor.TargetClock.Speed == 1.25f && !TransitionSpeedActor.TargetClock.Paused);
 		TransitionSpeedActor.CurrentClock.Paused = true;
 		TransitionSpeedActor.TargetClock.Paused = true;
-		const auto PausedTransition = AdvanceGltfAnimationInstance(TransitionSpeedActor, Mesh, RestPose, 0.5f);
+		const auto PausedTransition = AdvanceGltfAnimationInstance(
+			TransitionSpeedActor, Mesh, RestPose, 0.5f, {}, &*ValidatedProduct);
 		PF_CHECK(Tests, PausedTransition && TransitionSpeedActor.CurrentClock.TimeSeconds == 0.0f &&
 			TransitionSpeedActor.TargetClock.TimeSeconds == 0.0f && TransitionSpeedActor.Crossfade.ElapsedSeconds == 0.0f);
 		TransitionSpeedActor.CurrentClock.Paused = false;
 		TransitionSpeedActor.TargetClock.Paused = false;
-		const auto ResumedTransition = AdvanceGltfAnimationInstance(TransitionSpeedActor, Mesh, RestPose, 0.5f);
+		const auto ResumedTransition = AdvanceGltfAnimationInstance(
+			TransitionSpeedActor, Mesh, RestPose, 0.5f, {}, &*ValidatedProduct);
 		PF_CHECK(Tests, ResumedTransition && std::abs(TransitionSpeedActor.TargetClock.TimeSeconds - 0.625f) < 1.0e-5f &&
 			TransitionSpeedActor.Crossfade.ElapsedSeconds == 0.5f);
 

@@ -25,6 +25,7 @@
 #include <deque>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <span>
 #include <unordered_map>
 
@@ -66,6 +67,45 @@ namespace PulseForge
 		constexpr size_t MaximumRuntimeSkeletalInstances = 256;
 		constexpr size_t MaximumRuntimeSkinnedVerticesPerFrame = 2'000'000;
 		constexpr size_t MaximumRuntimeSkeletalNodes = 4096;
+		constexpr size_t MaximumRuntimeSkeletalProductBytes = 512u * 1024u * 1024u;
+
+		[[nodiscard]] size_t EstimateSkeletalProductBytes(const ImportedGltfSkeletalMesh& Product) noexcept
+		{
+			size_t Bytes = sizeof(Product);
+			const auto Add = [&](size_t Count, size_t ElementSize)
+			{
+				if (Count > (std::numeric_limits<size_t>::max() - Bytes) / ElementSize)
+					Bytes = std::numeric_limits<size_t>::max();
+				else
+					Bytes += Count * ElementSize;
+			};
+			Add(Product.Geometry.Vertices.capacity(), sizeof(GltfMeshVertex));
+			Add(Product.Geometry.Indices.capacity(), sizeof(uint32_t));
+			Add(Product.Geometry.Name.capacity(), sizeof(char));
+			Add(Product.SkeletonNodes.capacity(), sizeof(ImportedGltfSkeletonNode));
+			Add(Product.JointNodeIndices.capacity(), sizeof(uint16_t));
+			Add(Product.InverseBindMatrices.capacity(), sizeof(std::array<float, 16>));
+			Add(Product.VertexInfluences.capacity(), sizeof(GltfVertexInfluences));
+			Add(Product.Animations.capacity(), sizeof(ImportedGltfAnimationClip));
+			for (const ImportedGltfSkeletonNode& Node : Product.SkeletonNodes)
+			{
+				Add(Node.StableKey.capacity(), sizeof(char));
+				Add(Node.Name.capacity(), sizeof(char));
+			}
+			for (const ImportedGltfAnimationClip& Clip : Product.Animations)
+			{
+				Add(Clip.StableKey.capacity(), sizeof(char));
+				Add(Clip.Name.capacity(), sizeof(char));
+				Add(Clip.Channels.capacity(), sizeof(ImportedGltfAnimationChannel));
+				for (const ImportedGltfAnimationChannel& Channel : Clip.Channels)
+				{
+					Add(Channel.TargetNodeKey.capacity(), sizeof(char));
+					Add(Channel.Times.capacity(), sizeof(float));
+					Add(Channel.Values.capacity(), sizeof(std::array<float, 4>));
+				}
+			}
+			return Bytes;
+		}
 
 		[[nodiscard]] std::expected<GltfAnimationNodePose, std::string> DecomposeSkeletalRestTransform(
 			std::string NodeKey, const std::array<float, 16>& Matrix)
@@ -277,14 +317,24 @@ namespace PulseForge
 			std::vector<RuntimeUIDrawCommand> DrawCommands;
 			uint64_t TreeGeneration = 0;
 		};
+		struct CachedSkeletalProduct final
+		{
+			ImportedGltfSkeletalMesh Mesh;
+			GltfAnimationClipValidationMap ValidatedClips;
+			std::shared_ptr<const std::vector<GltfAnimationNodePose>> RestPose;
+			size_t RetainedBytes = 0;
+		};
 		struct SkeletalInstanceState final
 		{
 			Entity BoundEntity;
 			AssetID SourceAsset;
 			std::string ProductKey;
 			std::string ClipKey;
-			ImportedGltfSkeletalMesh Product;
-			std::vector<GltfAnimationNodePose> RestPose;
+			std::string AuthoredClipKey;
+			std::optional<std::string> OverrideClipKey;
+			bool Paused = false;
+			std::shared_ptr<const CachedSkeletalProduct> Product;
+			std::shared_ptr<const std::vector<GltfAnimationNodePose>> RestPose;
 			GltfAnimationInstancePlayback Playback;
 		};
 		// Reverse destruction stops scripts and scene voices before the session-owned engine and cache.
@@ -296,6 +346,8 @@ namespace PulseForge
 		SceneRuntimeServices Services;
 		std::optional<RuntimeUICanvasState> RuntimeUI;
 		std::unordered_map<UUID, SkeletalInstanceState, UUIDHash> SkeletalInstances;
+		std::unordered_map<std::string, std::shared_ptr<const CachedSkeletalProduct>> SkeletalProducts;
+		size_t SkeletalProductBytes = 0;
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInitialScalarDefaults, UUIDHash>, UUIDHash>
@@ -343,6 +395,7 @@ namespace PulseForge
 				SceneValue.ClearRuntimeSkeletalPose(Entry.first);
 				return true;
 			});
+			PruneSkeletalProducts();
 			std::vector<UUID> LiveSkeletalEntities;
 			LiveSkeletalEntities.reserve(std::min(SceneValue.GetEntityCount(), MaximumRuntimeSkeletalInstances));
 			size_t SkinnedVerticesThisFrame = 0;
@@ -373,56 +426,100 @@ namespace PulseForge
 				}
 				if (Found == SkeletalInstances.end())
 				{
-					auto Product = LoadRuntimeSkeletalProduct(
-						SourceProject, CookedAssets, Component.MeshAsset, *Component.SkeletalProductKey);
-					if (!Product) return std::unexpected(ProductContext + Product.error());
-					if (Product->SkeletonNodes.empty() || Product->SkeletonNodes.size() > MaximumRuntimeSkeletalNodes)
+					const std::string ProductCacheKey = Component.MeshAsset.ToString() + "\n" + *Component.SkeletalProductKey;
+					auto Cached = SkeletalProducts.find(ProductCacheKey);
+					if (Cached == SkeletalProducts.end())
+					{
+						auto Product = LoadRuntimeSkeletalProduct(
+							SourceProject, CookedAssets, Component.MeshAsset, *Component.SkeletalProductKey);
+						if (!Product) return std::unexpected(ProductContext + Product.error());
+						if (Product->SkeletonNodes.empty() || Product->SkeletonNodes.size() > MaximumRuntimeSkeletalNodes)
+							return std::unexpected(ProductContext + "product node count is empty or exceeds the runtime limit");
+						auto ValidatedClips = ValidateGltfAnimationProduct(*Product);
+						if (!ValidatedClips)
+							return std::unexpected(ProductContext + "animation validation failed: " + ValidatedClips.error().Message);
+						const size_t ProductBytes = EstimateSkeletalProductBytes(*Product);
+						const size_t RestPoseBytes = Product->SkeletonNodes.size() * sizeof(GltfAnimationNodePose);
+						const size_t RetainedBytes = ProductBytes > std::numeric_limits<size_t>::max() - RestPoseBytes
+							? std::numeric_limits<size_t>::max() : ProductBytes + RestPoseBytes;
+						if (RetainedBytes > MaximumRuntimeSkeletalProductBytes - SkeletalProductBytes)
+							return std::unexpected(ProductContext +
+								"loaded skeletal products exceed the 512 MiB runtime retention budget");
+						auto SharedProduct = std::make_shared<CachedSkeletalProduct>();
+						SharedProduct->Mesh = std::move(*Product);
+						SharedProduct->ValidatedClips = std::move(*ValidatedClips);
+						auto RestPose = std::make_shared<std::vector<GltfAnimationNodePose>>();
+						RestPose->reserve(SharedProduct->Mesh.SkeletonNodes.size());
+						for (const ImportedGltfSkeletonNode& Node : SharedProduct->Mesh.SkeletonNodes)
+						{
+							auto Pose = DecomposeSkeletalRestTransform(Node.StableKey, Node.LocalBindMatrix);
+							if (!Pose) return std::unexpected(ProductContext + "invalid rest pose: " + Pose.error());
+							RestPose->push_back(std::move(*Pose));
+						}
+						SharedProduct->RestPose = std::move(RestPose);
+						SharedProduct->RetainedBytes = RetainedBytes;
+						Cached = SkeletalProducts.emplace(ProductCacheKey, std::move(SharedProduct)).first;
+						SkeletalProductBytes += RetainedBytes;
+					}
+					const std::shared_ptr<const CachedSkeletalProduct> SharedProduct = Cached->second;
+					if (SharedProduct->Mesh.SkeletonNodes.empty() ||
+						SharedProduct->Mesh.SkeletonNodes.size() > MaximumRuntimeSkeletalNodes)
 						return std::unexpected(ProductContext + "product node count is empty or exceeds the runtime limit");
 					SkeletalInstanceState State;
 					State.BoundEntity = EntityValue;
 					State.SourceAsset = Component.MeshAsset;
 					State.ProductKey = *Component.SkeletalProductKey;
-					State.Product = std::move(*Product);
-					State.RestPose.reserve(State.Product.SkeletonNodes.size());
-					for (const ImportedGltfSkeletonNode& Node : State.Product.SkeletonNodes)
-					{
-						auto Pose = DecomposeSkeletalRestTransform(Node.StableKey, Node.LocalBindMatrix);
-						if (!Pose) return std::unexpected(ProductContext + "invalid rest pose: " + Pose.error());
-						State.RestPose.push_back(std::move(*Pose));
-					}
+					State.Product = SharedProduct;
+					State.RestPose = SharedProduct->RestPose;
+					State.AuthoredClipKey = Component.AnimationClipKey.value_or(std::string{});
 					Found = SkeletalInstances.emplace(EntityValue.GetUUID(), std::move(State)).first;
 				}
 
 				SkeletalInstanceState& State = Found->second;
-				const size_t VertexCount = State.Product.Geometry.Vertices.size();
+				const size_t VertexCount = State.Product->Mesh.Geometry.Vertices.size();
 				if (VertexCount > MaximumRuntimeSkinnedVerticesPerFrame - SkinnedVerticesThisFrame)
 					return std::unexpected("Scene exceeds the 2,000,000 skinned-vertex per-frame CPU budget");
 				SkinnedVerticesThisFrame += VertexCount;
 				std::vector<GltfAnimationNodePose> Pose;
-				if (Component.AnimationClipKey)
+				const std::string AuthoredClipKey = Component.AnimationClipKey.value_or(std::string{});
+				if (State.AuthoredClipKey != AuthoredClipKey)
 				{
-					if (State.ClipKey != *Component.AnimationClipKey)
-					{
-					GltfAnimationInstancePlayback CandidatePlayback;
-					if (auto Started = PlayGltfAnimationInstance(CandidatePlayback, State.Product,
-								*Component.AnimationClipKey, Component.AnimationLooping); !Started)
-						return std::unexpected(ProductContext + "could not start animation clip: " + Started.error().Message);
-					State.Playback = std::move(CandidatePlayback);
-					State.ClipKey = *Component.AnimationClipKey;
+					State.AuthoredClipKey = AuthoredClipKey;
+					State.OverrideClipKey.reset();
+					State.ClipKey.clear();
 				}
-				State.Playback.CurrentClock.Looping = Component.AnimationLooping;
-				if (auto Speed = SetGltfAnimationPlaybackSpeed(State.Playback.CurrentClock, Component.AnimationSpeed); !Speed)
-					return std::unexpected(ProductContext + "could not set animation speed: " + Speed.error().Message);
-				auto Advanced = AdvanceGltfAnimationInstance(
-					State.Playback, State.Product, State.RestPose, DeltaSeconds);
-				if (!Advanced) return std::unexpected(ProductContext + "could not advance animation: " + Advanced.error().Message);
-				Pose = std::move(*Advanced);
+				const std::string DesiredClipKey = State.OverrideClipKey.value_or(AuthoredClipKey);
+				if (!DesiredClipKey.empty())
+				{
+					if (State.ClipKey != DesiredClipKey)
+					{
+						GltfAnimationInstancePlayback CandidatePlayback;
+						if (auto Started = PlayGltfAnimationInstance(CandidatePlayback, State.Product->Mesh,
+							DesiredClipKey, Component.AnimationLooping); !Started)
+							return std::unexpected(ProductContext + "could not start animation clip: " + Started.error().Message);
+						CandidatePlayback.CurrentClock.Paused = State.Paused;
+						State.Playback = std::move(CandidatePlayback);
+						State.ClipKey = DesiredClipKey;
+					}
+					if (!State.OverrideClipKey) State.Playback.CurrentClock.Looping = Component.AnimationLooping;
+					State.Playback.CurrentClock.Paused = State.Paused;
+					State.Playback.TargetClock.Paused = State.Paused;
+					if (auto Speed = SetGltfAnimationPlaybackSpeed(State.Playback.CurrentClock, Component.AnimationSpeed); !Speed)
+						return std::unexpected(ProductContext + "could not set animation speed: " + Speed.error().Message);
+					if (!State.Playback.TargetClipKey.empty())
+						if (auto Speed = SetGltfAnimationPlaybackSpeed(State.Playback.TargetClock, Component.AnimationSpeed); !Speed)
+							return std::unexpected(ProductContext + "could not set transition animation speed: " + Speed.error().Message);
+					auto Advanced = AdvanceGltfAnimationInstance(
+						State.Playback, State.Product->Mesh, *State.RestPose, DeltaSeconds, {},
+						&State.Product->ValidatedClips);
+					if (!Advanced) return std::unexpected(ProductContext + "could not advance animation: " + Advanced.error().Message);
+					Pose = std::move(*Advanced);
 				}
 				else
 				{
 					State.ClipKey.clear();
 					State.Playback = {};
-					Pose = State.RestPose;
+					Pose = *State.RestPose;
 				}
 
 				std::vector<std::array<float, 16>> LocalTransforms;
@@ -441,7 +538,18 @@ namespace PulseForge
 				SceneValue.ClearRuntimeSkeletalPose(Entry.first);
 				return true;
 			});
+			PruneSkeletalProducts();
 			return {};
+		}
+
+		void PruneSkeletalProducts() noexcept
+		{
+			std::erase_if(SkeletalProducts, [&](const auto& Entry)
+			{
+				if (Entry.second.use_count() != 1) return false;
+				SkeletalProductBytes -= std::min(SkeletalProductBytes, Entry.second->RetainedBytes);
+				return true;
+			});
 		}
 
 		void RecordBlueprintDiagnostic(
@@ -481,9 +589,10 @@ namespace PulseForge
 				return false;
 			const auto Current = Source->FindEntity(Target.GetUUID());
 			if (!Current || *Current != Target) return false;
+			const uint64_t ProgramRevision = GetBlueprintQueueRevision(Binding);
 			for (const BlueprintPhysicsForceRequest& Request : Requests)
 				PendingBlueprintPhysicsForces.push_back({ Target, Binding.Asset, Event, Request, SessionGeneration,
-					BlueprintProgramGeneration });
+					ProgramRevision });
 			return true;
 		}
 
@@ -524,6 +633,7 @@ namespace PulseForge
 				if (Existing == PendingBlueprintTimers.end() && !AlreadyCounted) ++AdditionalTimers;
 			}
 			if (AdditionalTimers > BlueprintMaximumScheduledTimers - PendingBlueprintTimers.size()) return false;
+			const uint64_t ProgramRevision = GetBlueprintQueueRevision(Binding);
 			for (const BlueprintTimerRequest& Request : Requests)
 			{
 				const double DueTime = BlueprintClockSeconds + Request.DelaySeconds;
@@ -534,10 +644,10 @@ namespace PulseForge
 					});
 				if (Existing != PendingBlueprintTimers.end())
 					*Existing = { Target, Binding.Asset, Request.Name, DueTime, Request.SourceNode, SessionGeneration,
-						BlueprintProgramGeneration };
+						ProgramRevision };
 				else
 					PendingBlueprintTimers.push_back({ Target, Binding.Asset, Request.Name, DueTime, Request.SourceNode,
-						SessionGeneration, BlueprintProgramGeneration });
+						SessionGeneration, ProgramRevision });
 			}
 			return true;
 		}
@@ -583,11 +693,12 @@ namespace PulseForge
 				return false;
 			const auto Current = Source->FindEntity(Target.GetUUID());
 			if (!Current || *Current != Target) return false;
+			const uint64_t ProgramRevision = GetBlueprintQueueRevision(Binding);
 			for (const BlueprintEntitySpawnRequest& Request : Requests)
 			{
 				if (!std::isfinite(Request.X) || !std::isfinite(Request.Y) || !std::isfinite(Request.Z)) return false;
 				PendingBlueprintEntitySpawns.push_back({ Target, Binding.Asset, Event, Request, SessionGeneration,
-					BlueprintProgramGeneration });
+					ProgramRevision });
 			}
 			return true;
 		}
@@ -616,8 +727,8 @@ namespace PulseForge
 				const PendingBlueprintEntitySpawn Pending = PendingBlueprintEntitySpawns.front();
 				PendingBlueprintEntitySpawns.pop_front();
 				const auto Current = SceneValue.FindEntity(Pending.Target.GetUUID());
-				if (Pending.SessionGeneration != SessionGeneration || Pending.ProgramGeneration != BlueprintProgramGeneration ||
-					!Current || *Current != Pending.Target)
+				if (!Current || *Current != Pending.Target || !IsCurrentBlueprintRevision(
+					SceneValue, Pending.Target, Pending.Asset, Pending.Event, Pending.SessionGeneration, Pending.ProgramGeneration))
 					continue;
 				auto Spawned = SceneValue.CreateEntity("Blueprint Spawned Entity");
 				TransformComponent Transform;
@@ -631,6 +742,60 @@ namespace PulseForge
 						"Scene runtime could not apply a deferred Blueprint entity spawn");
 				}
 			}
+		}
+
+		[[nodiscard]] bool IsCurrentBlueprintRevision(
+			const Scene& SceneValue,
+			const Entity& Target,
+			const AssetID& Asset,
+			BlueprintEventKind Event,
+			uint64_t ExpectedSession,
+			uint64_t ExpectedRevision) const noexcept
+		{
+			if (ExpectedSession != SessionGeneration || !Services.ResolveBlueprintProgram) return false;
+			const auto Current = SceneValue.FindEntity(Target.GetUUID());
+			if (!Current || *Current != Target) return false;
+			if (!Services.GetBlueprintProgramRevision)
+				return BlueprintProgramGeneration == ExpectedRevision;
+			try
+			{
+				const auto Binding = Services.ResolveBlueprintProgram(Target, Event);
+				if (!Binding || !Binding->Program || Binding->Asset != Asset) return false;
+				return Services.GetBlueprintProgramRevision(Asset) == ExpectedRevision && Binding->Revision == ExpectedRevision;
+			}
+			catch (...)
+			{
+				return false;
+			}
+		}
+
+		[[nodiscard]] uint64_t GetBlueprintQueueRevision(const BlueprintProgramBinding& Binding) const
+		{
+			return Services.GetBlueprintProgramRevision
+				? Services.GetBlueprintProgramRevision(Binding.Asset) : BlueprintProgramGeneration;
+		}
+
+		void RetireBlueprintRevision(const Entity& Target, const AssetID& Asset)
+		{
+			if (Asset.IsNil()) return;
+			if (auto Events = BlueprintEvents.find(Target.GetUUID()); Events != BlueprintEvents.end())
+			{
+				for (BoundBlueprintEvent& Event : Events->second)
+					if (Event.Asset == Asset) Event = {};
+			}
+			if (auto Instances = BlueprintInstances.find(Target.GetUUID()); Instances != BlueprintInstances.end())
+			{
+				Instances->second.erase(Asset);
+				if (Instances->second.empty()) BlueprintInstances.erase(Instances);
+			}
+			std::erase_if(BlueprintTraces, [&](const BlueprintRuntimeTrace& Trace)
+				{ return Trace.Handle.Target == Target && Trace.Handle.Asset == Asset; });
+			std::erase_if(PendingBlueprintTimers, [&](const PendingBlueprintTimer& Pending)
+				{ return Pending.Target == Target && Pending.Asset == Asset; });
+			std::erase_if(PendingBlueprintPhysicsForces, [&](const PendingBlueprintPhysicsForce& Pending)
+				{ return Pending.Target == Target && Pending.Asset == Asset; });
+			std::erase_if(PendingBlueprintEntitySpawns, [&](const PendingBlueprintEntitySpawn& Pending)
+				{ return Pending.Target == Target && Pending.Asset == Asset; });
 		}
 
 		void DispatchDueBlueprintTimers(Scene& SceneValue)
@@ -660,10 +825,10 @@ namespace PulseForge
 					break;
 				}
 				const PendingBlueprintTimer& Timer = DueTimers[TimerIndex];
-				if (Timer.SessionGeneration != SessionGeneration || Timer.ProgramGeneration != BlueprintProgramGeneration)
-					continue;
 				const auto Current = SceneValue.FindEntity(Timer.Target.GetUUID());
-				if (!Current || *Current != Timer.Target) continue;
+				if (!Current || *Current != Timer.Target || !IsCurrentBlueprintRevision(
+					SceneValue, Timer.Target, Timer.Asset, BlueprintEventKind::OnTimer,
+					Timer.SessionGeneration, Timer.ProgramGeneration)) continue;
 				const auto Instance = BlueprintInstances.find(Timer.Target.GetUUID());
 				if (Instance == BlueprintInstances.end() || !Instance->second.contains(Timer.Asset)) continue;
 				DispatchBlueprintEvent(SceneValue, Timer.Target, BlueprintEventKind::OnTimer, Services, Timer.Name);
@@ -680,8 +845,8 @@ namespace PulseForge
 				const PendingBlueprintPhysicsForce Pending = PendingBlueprintPhysicsForces.front();
 				PendingBlueprintPhysicsForces.pop_front();
 				const auto Current = SceneValue.FindEntity(Pending.Target.GetUUID());
-				if (Pending.SessionGeneration != SessionGeneration || Pending.ProgramGeneration != BlueprintProgramGeneration ||
-					!Current || *Current != Pending.Target)
+				if (!Current || *Current != Pending.Target || !IsCurrentBlueprintRevision(
+					SceneValue, Pending.Target, Pending.Asset, Pending.Event, Pending.SessionGeneration, Pending.ProgramGeneration))
 					continue;
 				const auto Applied = Physics->ApplyForce(Pending.Target.GetUUID(),
 					glm::vec3(Pending.Request.X, Pending.Request.Y, Pending.Request.Z));
@@ -758,21 +923,62 @@ namespace PulseForge
 					Instance = {};
 					Instance.BoundEntity = Target;
 				}
-				if (!Instance.Resolved)
+				std::optional<BlueprintProgramBinding> ResolvedBinding;
+				AssetID CurrentBlueprintAsset;
+				if (Services.GetBlueprintProgramRevision)
 				{
-					const auto Binding = Services.ResolveBlueprintProgram(Target, Event);
-					Instance.Resolved = true;
-					if (!Binding || !Binding->Program) return;
-					if (Binding->Asset.IsNil())
+					const auto Component = Target.GetBlueprint();
+					if (Component && Component->has_value() && (**Component).Enabled)
+						CurrentBlueprintAsset = (**Component).BlueprintAsset;
+				}
+				bool ShouldResolve = !Instance.Resolved;
+				if (Instance.Resolved && Services.GetBlueprintProgramRevision)
+				{
+					const uint64_t CurrentRevision = CurrentBlueprintAsset.IsNil()
+						? 0 : Services.GetBlueprintProgramRevision(CurrentBlueprintAsset);
+					ShouldResolve = CurrentBlueprintAsset != Instance.Asset || CurrentRevision != Instance.Revision;
+					if (!ShouldResolve)
 					{
-						RecordBlueprintDiagnostic(Target, &*Binding, Event, BlueprintProgramErrorCode::InvalidOperand, {},
-							"Blueprint event binding is missing a stable asset identity");
-						Instance.Faulted = true;
-						return;
+						if (!Instance.Program) return;
+						ResolvedBinding = BlueprintProgramBinding{ Instance.Asset, Instance.Revision, Instance.Program };
 					}
-					Instance.Asset = Binding->Asset;
-					Instance.Revision = Binding->Revision;
-					Instance.Program = Binding->Program;
+				}
+				else if (Instance.Resolved)
+				{
+					if (!Instance.Program) return;
+					ResolvedBinding = BlueprintProgramBinding{ Instance.Asset, Instance.Revision, Instance.Program };
+				}
+				if (ShouldResolve) ResolvedBinding = Services.ResolveBlueprintProgram(Target, Event);
+				if (!ResolvedBinding || !ResolvedBinding->Program)
+				{
+					if (Instance.Resolved) RetireBlueprintRevision(Target, Instance.Asset);
+					Instance = {};
+					Instance.BoundEntity = Target;
+					Instance.Resolved = true;
+					if (Services.GetBlueprintProgramRevision && !CurrentBlueprintAsset.IsNil())
+					{
+						Instance.Asset = CurrentBlueprintAsset;
+						Instance.Revision = Services.GetBlueprintProgramRevision(CurrentBlueprintAsset);
+					}
+					return;
+				}
+				if (ResolvedBinding->Asset.IsNil())
+				{
+					RecordBlueprintDiagnostic(Target, &*ResolvedBinding, Event, BlueprintProgramErrorCode::InvalidOperand, {},
+						"Blueprint event binding is missing a stable asset identity");
+					Instance.Faulted = true;
+					return;
+				}
+				if (Instance.Resolved && (Instance.Asset != ResolvedBinding->Asset || Instance.Revision != ResolvedBinding->Revision))
+					RetireBlueprintRevision(Target, Instance.Asset);
+				if (!Instance.Resolved || Instance.Asset != ResolvedBinding->Asset || Instance.Revision != ResolvedBinding->Revision)
+				{
+					Instance = {};
+					Instance.BoundEntity = Target;
+					Instance.Resolved = true;
+					Instance.Asset = ResolvedBinding->Asset;
+					Instance.Revision = ResolvedBinding->Revision;
+					Instance.Program = ResolvedBinding->Program;
 				}
 				if (!Instance.Program) return;
 				const BlueprintProgramBinding Binding{ Instance.Asset, Instance.Revision, Instance.Program };
@@ -1413,6 +1619,8 @@ namespace PulseForge
 			if (m_Impl->Source)
 				m_Impl->Source->ClearRuntimeSkeletalPoses();
 			m_Impl->SkeletalInstances.clear();
+			m_Impl->SkeletalProducts.clear();
+			m_Impl->SkeletalProductBytes = 0;
 			m_Impl->PendingContactEvents.clear();
 			m_Impl->PendingBlueprintPhysicsForces.clear();
 			m_Impl->PendingBlueprintTimers.clear();
@@ -1463,6 +1671,113 @@ namespace PulseForge
 	bool SceneRuntime::IsPaused() const noexcept
 	{
 		return m_Impl && m_Impl->Paused;
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::PlaySkeletalAnimation(
+		const Entity& Target, std::string_view ClipKey, bool Looping)
+	{
+		if (!m_Impl || !m_Impl->Source)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation control requires a running scene runtime"));
+		const auto Current = m_Impl->Source->FindEntity(Target.GetUUID());
+		auto Found = m_Impl->SkeletalInstances.find(Target.GetUUID());
+		if (!Target.IsValid() || !Current || *Current != Target || Found == m_Impl->SkeletalInstances.end() ||
+			Found->second.BoundEntity != Target)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation target is stale or has not completed its first runtime update"));
+		Impl::SkeletalInstanceState& State = Found->second;
+		GltfAnimationInstancePlayback Candidate;
+		if (auto Played = PlayGltfAnimationInstance(Candidate, State.Product->Mesh, ClipKey, Looping); !Played)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Could not play skeletal animation: " + Played.error().Message));
+		Candidate.CurrentClock.Paused = State.Paused;
+		State.Playback = std::move(Candidate);
+		State.ClipKey = ClipKey;
+		State.OverrideClipKey = std::string(ClipKey);
+		return {};
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::SetSkeletalAnimationPaused(const Entity& Target, bool Paused)
+	{
+		if (!m_Impl || !m_Impl->Source)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation control requires a running scene runtime"));
+		const auto Current = m_Impl->Source->FindEntity(Target.GetUUID());
+		auto Found = m_Impl->SkeletalInstances.find(Target.GetUUID());
+		if (!Target.IsValid() || !Current || *Current != Target || Found == m_Impl->SkeletalInstances.end() ||
+			Found->second.BoundEntity != Target)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation target is stale or has not completed its first runtime update"));
+		Found->second.Paused = Paused;
+		Found->second.Playback.CurrentClock.Paused = Paused;
+		Found->second.Playback.TargetClock.Paused = Paused;
+		return {};
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::SeekSkeletalAnimation(const Entity& Target, float TimeSeconds)
+	{
+		if (!m_Impl || !m_Impl->Source)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation control requires a running scene runtime"));
+		const auto Current = m_Impl->Source->FindEntity(Target.GetUUID());
+		auto Found = m_Impl->SkeletalInstances.find(Target.GetUUID());
+		if (!Target.IsValid() || !Current || *Current != Target || Found == m_Impl->SkeletalInstances.end() ||
+			Found->second.BoundEntity != Target)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation target is stale or has not completed its first runtime update"));
+		Impl::SkeletalInstanceState& State = Found->second;
+		GltfAnimationInstancePlayback Candidate = State.Playback;
+		std::string CandidateClipKey = State.ClipKey;
+		std::optional<std::string> CandidateOverride = State.OverrideClipKey;
+		if (!Candidate.TargetClipKey.empty())
+		{
+			Candidate.CurrentClipKey = Candidate.TargetClipKey;
+			Candidate.CurrentClock = Candidate.TargetClock;
+			Candidate.TargetClipKey.clear();
+			Candidate.TargetClock = {};
+			Candidate.TransitionSourcePose.clear();
+			Candidate.Crossfade = {};
+			CandidateClipKey = Candidate.CurrentClipKey;
+			CandidateOverride = CandidateClipKey;
+		}
+		const auto Clip = std::find_if(State.Product->Mesh.Animations.begin(), State.Product->Mesh.Animations.end(),
+			[&](const ImportedGltfAnimationClip& CandidateClip) { return CandidateClip.StableKey == Candidate.CurrentClipKey; });
+		if (Clip == State.Product->Mesh.Animations.end())
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation target has no active clip to seek"));
+		if (auto Sought = SeekGltfAnimationPlayback(Candidate.CurrentClock, Clip->Duration, TimeSeconds); !Sought)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Could not seek skeletal animation: " + Sought.error().Message));
+		Candidate.CurrentClock.Paused = State.Paused;
+		Candidate.LastPose.clear();
+		State.Playback = std::move(Candidate);
+		State.ClipKey = std::move(CandidateClipKey);
+		State.OverrideClipKey = std::move(CandidateOverride);
+		return {};
+	}
+
+	std::expected<void, SceneRuntimeError> SceneRuntime::TransitionSkeletalAnimation(
+		const Entity& Target, std::string_view ClipKey, float DurationSeconds, bool Looping)
+	{
+		if (!m_Impl || !m_Impl->Source)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation control requires a running scene runtime"));
+		const auto Current = m_Impl->Source->FindEntity(Target.GetUUID());
+		auto Found = m_Impl->SkeletalInstances.find(Target.GetUUID());
+		if (!Target.IsValid() || !Current || *Current != Target || Found == m_Impl->SkeletalInstances.end() ||
+			Found->second.BoundEntity != Target)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Skeletal animation target is stale or has not completed its first runtime update"));
+		Impl::SkeletalInstanceState& State = Found->second;
+		if (auto Transitioned = TransitionGltfAnimationInstance(State.Playback, State.Product->Mesh, *State.RestPose,
+			ClipKey, DurationSeconds, Looping); !Transitioned)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Could not transition skeletal animation: " + Transitioned.error().Message));
+		State.Playback.CurrentClock.Paused = State.Paused;
+		State.Playback.TargetClock.Paused = State.Paused;
+		State.ClipKey = ClipKey;
+		State.OverrideClipKey = std::string(ClipKey);
+		return {};
 	}
 
 	bool SceneRuntime::HasRuntimeUI() const noexcept
@@ -1533,8 +1848,7 @@ namespace PulseForge
 		const BlueprintRuntimeTraceHandle& Handle) const
 	{
 		if (!m_Impl || m_Impl->State != Impl::Lifecycle::Active || !Handle.Target.IsValid() ||
-			Handle.SessionGeneration != m_Impl->SessionGeneration ||
-			Handle.ProgramGeneration != m_Impl->BlueprintProgramGeneration)
+			Handle.SessionGeneration != m_Impl->SessionGeneration)
 			return std::nullopt;
 		const auto Trace = std::find_if(m_Impl->BlueprintTraces.begin(), m_Impl->BlueprintTraces.end(),
 			[&](const BlueprintRuntimeTrace& Candidate)
@@ -1618,7 +1932,9 @@ namespace PulseForge
 				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Scripting,
 					"Could not read Blueprint catalog generation"));
 			}
-			if (CurrentProgramGeneration != m_Impl->BlueprintProgramGeneration)
+			const bool ProgramGenerationChanged = CurrentProgramGeneration != m_Impl->BlueprintProgramGeneration;
+			if (ProgramGenerationChanged) m_Impl->BlueprintProgramGeneration = CurrentProgramGeneration;
+			if (!m_Services.GetBlueprintProgramRevision && ProgramGenerationChanged)
 			{
 				m_Impl->BlueprintEvents.clear();
 				m_Impl->BlueprintInstances.clear();
@@ -1626,7 +1942,6 @@ namespace PulseForge
 				m_Impl->PendingBlueprintPhysicsForces.clear();
 				m_Impl->PendingBlueprintTimers.clear();
 				m_Impl->PendingBlueprintEntitySpawns.clear();
-				m_Impl->BlueprintProgramGeneration = CurrentProgramGeneration;
 			}
 		}
 		m_Impl->BlueprintInstructionsRemaining = MaximumBlueprintInstructionsPerFrame;

@@ -6,11 +6,20 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
+#include <glm/glm.hpp>
+
 namespace PulseForge
 {
+	struct MeshLocalBounds final
+	{
+		glm::vec3 Minimum{ 0.0f };
+		glm::vec3 Maximum{ 0.0f };
+	};
+
 	class PULSEFORGE_API Mesh final
 	{
 	public:
@@ -23,6 +32,7 @@ namespace PulseForge
 		[[nodiscard]] uint32_t GetVertexCount() const noexcept { return m_VertexCount; }
 		[[nodiscard]] uint32_t GetIndexCount() const noexcept { return m_IndexCount; }
 		[[nodiscard]] bool HasIndices() const noexcept { return m_IndexBuffer != nullptr; }
+		[[nodiscard]] const std::optional<MeshLocalBounds>& GetLocalBounds() const noexcept { return m_LocalBounds; }
 
 	private:
 		friend class Application;
@@ -35,13 +45,16 @@ namespace PulseForge
 			uint32_t VertexCount,
 			uint32_t IndexCount,
 			BufferHandle VertexBuffer,
-			BufferHandle IndexBuffer);
+			BufferHandle IndexBuffer,
+			std::span<const std::byte> VertexData);
+		void UpdateLocalBounds(std::span<const std::byte> VertexData) noexcept;
 
 		VertexLayoutDesc m_VertexLayout;
 		uint32_t m_VertexCount = 0;
 		uint32_t m_IndexCount = 0;
 		BufferHandle m_VertexBuffer;
 		BufferHandle m_IndexBuffer;
+		std::optional<MeshLocalBounds> m_LocalBounds;
 	};
 
 	using MeshHandle = std::unique_ptr<Mesh>;

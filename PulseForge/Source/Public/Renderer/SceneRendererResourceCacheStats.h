@@ -17,6 +17,9 @@ namespace PulseForge
 		AssetCacheInventoryStats EnvironmentLighting;
 		size_t MaterialDescriptions = 0;
 		size_t GraphMaterialResources = 0;
+		size_t GraphMaterialShaderResources = 0;
+		size_t GraphMaterialIdentityDescribeCalls = 0;
+		size_t GraphMaterialIdentityCacheHits = 0;
 		size_t SkeletalMeshResources = 0;
 		bool DeviceAllocationBytesAvailable = false;
 	};

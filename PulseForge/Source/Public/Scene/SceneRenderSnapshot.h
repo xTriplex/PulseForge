@@ -33,6 +33,16 @@ namespace PulseForge
 		return Orientation != WorldTransformOrientation::Mirrored;
 	}
 
+	struct SceneAxisAlignedBounds final
+	{
+		glm::vec3 Minimum{ 0.0f };
+		glm::vec3 Maximum{ 0.0f };
+	};
+
+	// Invalid or non-finite bounds are conservatively visible.
+	[[nodiscard]] PULSEFORGE_API bool IsSceneBoundsVisible(
+		const SceneAxisAlignedBounds& LocalBounds, const glm::mat4& WorldTransform, const glm::mat4& ViewProjection) noexcept;
+
 	struct SceneMeshInstance
 	{
 		UUID Entity;
@@ -43,6 +53,7 @@ namespace PulseForge
 		std::optional<std::string> SkeletalProductKey;
 		std::optional<std::string> AnimationClipKey;
 		std::vector<RuntimeSkeletalLocalTransform> SkeletalLocalTransforms;
+		bool CameraVisible = true;
 	};
 
 	struct SceneDirectionalLight

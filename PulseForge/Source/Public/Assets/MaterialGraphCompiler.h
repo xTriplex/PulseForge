@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Assets/MaterialGraphArtifact.h"
 #include "Assets/MaterialGraphSource.h"
 #include "Core/Core.h"
 
@@ -37,24 +38,6 @@ namespace PulseForge
 		MaterialGraphCompileTarget Target = MaterialGraphCompileTarget::VulkanSpirV;
 	};
 
-	struct MaterialGraphCompiledArtifact final
-	{
-		struct Parameter final
-		{
-			UUID ID;
-			std::string Name;
-			float DefaultValue = 0.0f;
-		};
-
-		std::vector<std::byte> SpirV;
-		std::string SemanticRecipe;
-		std::string RecipeFingerprint;
-		std::string Diagnostics;
-		std::vector<UUID> SourceNodes;
-		std::vector<Parameter> Parameters;
-		uint64_t Generation = 0;
-	};
-
 	enum class MaterialGraphCompileErrorCode : uint8_t
 	{
 		InvalidGraph,
@@ -78,6 +61,8 @@ namespace PulseForge
 	class PULSEFORGE_API MaterialGraphCompiler final
 	{
 	public:
+		[[nodiscard]] static std::expected<MaterialGraphCompileIdentity, MaterialGraphCompileError> Describe(
+			const MaterialGraphSource& Source, std::string_view ToolchainFingerprint);
 		[[nodiscard]] static std::expected<MaterialGraphCompiledArtifact, MaterialGraphCompileError> Compile(
 			const MaterialGraphCompileRequest& Request);
 	};

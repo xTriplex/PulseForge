@@ -24,6 +24,7 @@ namespace PulseForgeEditor
 		m_ProjectIdentity = Identity;
 		m_Programs.clear();
 		m_LoadFailures.clear();
+		m_AssetRevisions.clear();
 		AdvanceGeneration();
 	}
 
@@ -31,7 +32,17 @@ namespace PulseForgeEditor
 	{
 		m_Programs.erase(Asset);
 		m_LoadFailures.erase(Asset);
+		uint64_t& Revision = m_AssetRevisions[Asset];
+		if (Revision == 0) Revision = 1;
+		++Revision;
+		if (Revision == 0) ++Revision;
 		AdvanceGeneration();
+	}
+
+	uint64_t EditorBlueprintProgramCatalog::GetAssetRevision(const PulseForge::AssetID& Asset) const noexcept
+	{
+		const auto Found = m_AssetRevisions.find(Asset);
+		return Found == m_AssetRevisions.end() || Found->second == 0 ? 1 : Found->second;
 	}
 
 	void EditorBlueprintProgramCatalog::BindRuntimeServices(PulseForge::SceneRuntimeServices& Services)
@@ -39,6 +50,7 @@ namespace PulseForgeEditor
 		Services.ResolveBlueprintProgram = [this](const PulseForge::Entity& Target, PulseForge::BlueprintEventKind Event)
 			{ return Resolve(Target, Event); };
 		Services.GetBlueprintProgramGeneration = [this] { return GetGeneration(); };
+		Services.GetBlueprintProgramRevision = [this](const PulseForge::AssetID& Asset) { return GetAssetRevision(Asset); };
 		Services.ReadBlueprintScalarProperty = [this](const PulseForge::Entity& Target, std::string_view PropertyID)
 			{ return ReadScalarProperty(Target, PropertyID); };
 		Services.ApplyBlueprintPropertyWrites = [this](const PulseForge::Entity& Target,
@@ -75,16 +87,31 @@ namespace PulseForgeEditor
 				{ return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
 			const auto Decoded = PulseForge::DeserializeBlueprintAsset(Buffer);
 			if (!Decoded) return Fail("Blueprint program is invalid: " + Decoded.error().Message);
+			if (Decoded->GetSourceRevision() != 0)
+			{
+				const std::filesystem::path GraphPath = m_Project->GetRootPath() / ".pulseforge" / "blueprint-graphs" /
+					(Asset.ToString() + ".pfg");
+				std::ifstream GraphInput(GraphPath, std::ios::binary);
+				if (!GraphInput) return Fail("Blueprint graph source is missing; reopen and save the Blueprint to rebuild its program.");
+				const auto GraphBytes = PulseForge::Detail::ReadBoundedInput(GraphInput, PulseForge::BlueprintMaximumAssetBytes);
+				if (!GraphBytes)
+					return Fail("Blueprint graph source could not be read within its supported size; program publication was rejected.");
+				const auto GraphSource = std::as_bytes(std::span<const char>(GraphBytes->data(), GraphBytes->size()));
+				if (PulseForge::ComputeBlueprintSourceRevision(GraphSource) != Decoded->GetSourceRevision())
+					return Fail("Compiled Blueprint program does not match the current graph source; save the Blueprint to rebuild it.");
+			}
 			Found = m_Programs.emplace(Asset,
 				std::make_shared<const PulseForge::VerifiedBlueprintAsset>(std::move(*Decoded))).first;
 			m_LoadFailures.erase(Asset);
 		}
+		uint64_t& Revision = m_AssetRevisions[Asset];
+		if (Revision == 0) Revision = 1;
 
 		for (const PulseForge::BlueprintVerifiedEventProgram& Candidate : Found->second->GetEvents())
 		{
 			if (Candidate.Event != Event) continue;
 			auto Program = std::shared_ptr<const PulseForge::VerifiedBlueprintProgram>(Found->second, &Candidate.Program);
-			return PulseForge::BlueprintProgramBinding{ Asset, m_Generation, std::move(Program) };
+			return PulseForge::BlueprintProgramBinding{ Asset, Revision, std::move(Program) };
 		}
 		return std::nullopt;
 	}

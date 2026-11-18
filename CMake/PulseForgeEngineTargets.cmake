@@ -347,7 +347,7 @@ target_compile_definitions(PulseForgeSceneRenderer PRIVATE _CRT_SECURE_NO_WARNIN
 target_link_libraries(PulseForgeSceneRenderer
 	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer PulseForgeAssetPreparation PulseForgeDerivedData
 	PRIVATE freetype PulseForgeAssetCpuProducts PulseForgeAssetImporters PulseForgeAssetServices PulseForgeCookedProductCodecs
-		PulseForgeSkeletalAnimation
+		PulseForgeSkeletalAnimation PulseForgeMaterialGraphCompiler
 		PulseForgeCookedRuntimeProvider
 )
 target_precompile_headers(PulseForgeSceneRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")

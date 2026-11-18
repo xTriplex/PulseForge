@@ -825,6 +825,17 @@ namespace
 		const glm::mat4 Singular = glm::scale(Identity, glm::vec3(1.0f, 0.0f, 1.0f));
 		PF_CHECK(Tests, ClassifyWorldTransform(Singular) == WorldTransformOrientation::Singular);
 		PF_CHECK(Tests, !PulseForge::BuildNormalTransform(Singular).has_value());
+
+		const PulseForge::SceneAxisAlignedBounds UnitBounds{ glm::vec3(-0.1f), glm::vec3(0.1f) };
+		PF_CHECK(Tests, PulseForge::IsSceneBoundsVisible(UnitBounds, Identity, Identity));
+		const glm::mat4 Outside = glm::translate(Identity, glm::vec3(2.0f, 0.0f, 0.5f));
+		PF_CHECK(Tests, !PulseForge::IsSceneBoundsVisible(UnitBounds, Outside, Identity));
+		const glm::mat4 ScaledAcrossEdge = glm::translate(Identity, glm::vec3(1.1f, 0.0f, 0.5f)) *
+			glm::scale(Identity, glm::vec3(3.0f, 1.0f, 1.0f));
+		PF_CHECK(Tests, PulseForge::IsSceneBoundsVisible(UnitBounds, ScaledAcrossEdge, Identity));
+		PF_CHECK(Tests, !PulseForge::IsSceneBoundsVisible(UnitBounds, Outside * OneReflection, Identity));
+		const PulseForge::SceneAxisAlignedBounds InvalidBounds{ glm::vec3(1.0f), glm::vec3(-1.0f) };
+		PF_CHECK(Tests, PulseForge::IsSceneBoundsVisible(InvalidBounds, Identity, Identity));
 	}
 } // namespace
 

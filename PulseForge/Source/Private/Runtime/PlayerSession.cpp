@@ -79,8 +79,27 @@ namespace PulseForge
 								std::transform(Bytes->begin(), Bytes->end(), Buffer.begin(),
 									[](char Value) { return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
 								auto Decoded = DeserializeBlueprintAsset(Buffer);
-								if (Decoded) Loaded = std::move(*Decoded);
-								else Loaded = std::unexpected(Decoded.error().Message);
+								if (!Decoded) Loaded = std::unexpected(Decoded.error().Message);
+								else
+								{
+									const std::filesystem::path GraphPath = SourceProject->GetRootPath() / ".pulseforge" /
+										"blueprint-graphs" / (Asset.ToString() + ".pfg");
+									std::ifstream GraphInput(GraphPath, std::ios::binary);
+									auto GraphBytes = GraphInput ? Detail::ReadBoundedInput(GraphInput, BlueprintMaximumAssetBytes)
+										: std::expected<std::string, Detail::BoundedInputError>(std::unexpected(Detail::BoundedInputError{
+											Detail::BoundedInputErrorCode::ReadFailed }));
+									if (!GraphBytes)
+									Loaded = std::unexpected("Blueprint graph source is unavailable: " + GraphPath.string());
+									else
+									{
+										const auto GraphSource = std::as_bytes(std::span<const char>(GraphBytes->data(), GraphBytes->size()));
+										if (Decoded->GetSourceRevision() != 0 &&
+											ComputeBlueprintSourceRevision(GraphSource) != Decoded->GetSourceRevision())
+											Loaded = std::unexpected("Blueprint runtime program does not match the current graph source: " +
+												GraphPath.string());
+										else Loaded = std::move(*Decoded);
+									}
+								}
 							}
 						}
 					}
@@ -429,6 +448,40 @@ namespace PulseForge
 			return std::unexpected(MakeError(
 				PlayerSessionErrorCode::RuntimeOperationFailed, "Could not resume player scene runtime: " + Result.error().Message));
 		m_Paused = false;
+		return {};
+	}
+
+	std::expected<void, PlayerSessionError> PlayerSession::PlaySkeletalAnimation(
+		const Entity& Target, std::string_view ClipKey, bool Looping)
+	{
+		if (!m_Runtime) return std::unexpected(MakeError(PlayerSessionErrorCode::NotStarted, "Player session is not running"));
+		if (auto Result = m_Runtime->PlaySkeletalAnimation(Target, ClipKey, Looping); !Result)
+			return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed, Result.error().Message));
+		return {};
+	}
+
+	std::expected<void, PlayerSessionError> PlayerSession::SetSkeletalAnimationPaused(const Entity& Target, bool Paused)
+	{
+		if (!m_Runtime) return std::unexpected(MakeError(PlayerSessionErrorCode::NotStarted, "Player session is not running"));
+		if (auto Result = m_Runtime->SetSkeletalAnimationPaused(Target, Paused); !Result)
+			return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed, Result.error().Message));
+		return {};
+	}
+
+	std::expected<void, PlayerSessionError> PlayerSession::SeekSkeletalAnimation(const Entity& Target, float TimeSeconds)
+	{
+		if (!m_Runtime) return std::unexpected(MakeError(PlayerSessionErrorCode::NotStarted, "Player session is not running"));
+		if (auto Result = m_Runtime->SeekSkeletalAnimation(Target, TimeSeconds); !Result)
+			return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed, Result.error().Message));
+		return {};
+	}
+
+	std::expected<void, PlayerSessionError> PlayerSession::TransitionSkeletalAnimation(
+		const Entity& Target, std::string_view ClipKey, float DurationSeconds, bool Looping)
+	{
+		if (!m_Runtime) return std::unexpected(MakeError(PlayerSessionErrorCode::NotStarted, "Player session is not running"));
+		if (auto Result = m_Runtime->TransitionSkeletalAnimation(Target, ClipKey, DurationSeconds, Looping); !Result)
+			return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed, Result.error().Message));
 		return {};
 	}
 

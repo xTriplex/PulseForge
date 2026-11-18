@@ -1,5 +1,6 @@
 #include "Scene/SceneRenderSnapshot.h"
 
+#include <array>
 #include <cmath>
 #include <unordered_set>
 #include <utility>
@@ -261,6 +262,44 @@ namespace PulseForge
 			}
 			return Snapshot;
 		}
+	}
+
+	bool IsSceneBoundsVisible(
+		const SceneAxisAlignedBounds& LocalBounds, const glm::mat4& WorldTransform, const glm::mat4& ViewProjection) noexcept
+	{
+		for (int Axis = 0; Axis < 3; ++Axis)
+			if (!std::isfinite(LocalBounds.Minimum[Axis]) || !std::isfinite(LocalBounds.Maximum[Axis]) ||
+				LocalBounds.Minimum[Axis] > LocalBounds.Maximum[Axis]) return true;
+		if (!IsFinite(WorldTransform) || !IsFinite(ViewProjection)) return true;
+		const glm::vec3 LocalCenter = (LocalBounds.Minimum + LocalBounds.Maximum) * 0.5f;
+		const glm::vec3 LocalExtents = (LocalBounds.Maximum - LocalBounds.Minimum) * 0.5f;
+		const glm::vec4 WorldCenter4 = WorldTransform * glm::vec4(LocalCenter, 1.0f);
+		if (!std::isfinite(WorldCenter4.w) || std::abs(WorldCenter4.w) <= 1.0e-8f) return true;
+		const glm::vec3 WorldCenter = glm::vec3(WorldCenter4) / WorldCenter4.w;
+		glm::mat3 AbsoluteLinear(WorldTransform);
+		for (int Column = 0; Column < 3; ++Column)
+			for (int Row = 0; Row < 3; ++Row)
+				AbsoluteLinear[Column][Row] = std::abs(AbsoluteLinear[Column][Row]);
+		const glm::vec3 WorldExtents = AbsoluteLinear * LocalExtents;
+		const auto Row = [&ViewProjection](int Index)
+		{
+			return glm::vec4(ViewProjection[0][Index], ViewProjection[1][Index],
+				ViewProjection[2][Index], ViewProjection[3][Index]);
+		};
+		const glm::vec4 Row0 = Row(0);
+		const glm::vec4 Row1 = Row(1);
+		const glm::vec4 Row2 = Row(2);
+		const glm::vec4 Row3 = Row(3);
+		const std::array<glm::vec4, 6> Planes = { Row3 + Row0, Row3 - Row0, Row3 + Row1, Row3 - Row1, Row2, Row3 - Row2 };
+		for (const glm::vec4& Plane : Planes)
+		{
+			const glm::vec3 Normal(Plane);
+			const float Radius = glm::dot(glm::abs(Normal), WorldExtents);
+			const float SignedCenter = glm::dot(Normal, WorldCenter) + Plane.w;
+			if (!std::isfinite(Radius) || !std::isfinite(SignedCenter)) return true;
+			if (SignedCenter + Radius < 0.0f) return false;
+		}
+		return true;
 	}
 
 	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::Build(

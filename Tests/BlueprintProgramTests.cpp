@@ -638,10 +638,22 @@ namespace
 			PF_CHECK(Tests, Decoded->GetEvents()[0].Program.GetSource().Instructions[3].SourceNode == UUID(10, 4));
 		}
 
-		std::vector<std::byte> LegacyVersion = *Encoded;
+		std::vector<std::byte> LegacyVersion(Encoded->begin(), Encoded->begin() + 9);
+		LegacyVersion.insert(LegacyVersion.end(), Encoded->begin() + 17, Encoded->end());
 		LegacyVersion[4] = std::byte{ 1 };
 		const auto LegacyDecoded = DeserializeBlueprintAsset(LegacyVersion);
 		PF_CHECK(Tests, LegacyDecoded && LegacyDecoded->GetEvents().size() == 2);
+		const std::array<std::byte, 5> GraphRevisionBytes{
+			std::byte{ 'g' }, std::byte{ 'r' }, std::byte{ 'a' }, std::byte{ 'p' }, std::byte{ 'h' }
+		};
+		const uint64_t GraphRevision = ComputeBlueprintSourceRevision(GraphRevisionBytes);
+		const auto BoundProgram = SerializeBlueprintAsset(Events, GraphRevision);
+		PF_CHECK(Tests, BoundProgram.has_value() && GraphRevision != 0);
+		if (BoundProgram)
+		{
+			const auto DecodedBoundProgram = DeserializeBlueprintAsset(*BoundProgram);
+			PF_CHECK(Tests, DecodedBoundProgram && DecodedBoundProgram->GetSourceRevision() == GraphRevision);
+		}
 
 		std::vector<std::byte> UnsupportedVersion = *Encoded;
 		UnsupportedVersion[4] = std::byte{ static_cast<uint8_t>(BlueprintAssetFormatVersion + 1) };
@@ -674,12 +686,14 @@ namespace
 			const auto DestroyDecoded = DeserializeBlueprintAsset(*DestroyEncoded);
 			PF_CHECK(Tests, DestroyDecoded && DestroyDecoded->GetEvents().size() == 1 &&
 				DestroyDecoded->GetEvents()[0].Event == BlueprintEventKind::OnDestroy);
-			std::vector<std::byte> LegacyDestroy = *DestroyEncoded;
+			std::vector<std::byte> LegacyDestroy(DestroyEncoded->begin(), DestroyEncoded->begin() + 9);
+			LegacyDestroy.insert(LegacyDestroy.end(), DestroyEncoded->begin() + 17, DestroyEncoded->end());
 			LegacyDestroy[4] = std::byte{ 1 };
 			const auto LegacyDestroyDecoded = DeserializeBlueprintAsset(LegacyDestroy);
 			PF_CHECK(Tests, !LegacyDestroyDecoded &&
 				LegacyDestroyDecoded.error().Code == BlueprintProgramErrorCode::InvalidOperand);
-			std::vector<std::byte> PreviousDestroy = *DestroyEncoded;
+			std::vector<std::byte> PreviousDestroy(DestroyEncoded->begin(), DestroyEncoded->begin() + 9);
+			PreviousDestroy.insert(PreviousDestroy.end(), DestroyEncoded->begin() + 17, DestroyEncoded->end());
 			PreviousDestroy[4] = std::byte{ 2 };
 			PF_CHECK(Tests, DeserializeBlueprintAsset(PreviousDestroy).has_value());
 		}

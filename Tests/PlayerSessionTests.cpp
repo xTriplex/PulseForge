@@ -508,6 +508,144 @@ namespace
 		PF_CHECK(Tests, !MissingStartup && MissingStartup.error().Code == PlayerSessionErrorCode::MissingStartupScene);
 	}
 
+	void TestSourcePlayerRejectsStaleBlueprintGraphPair(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto Identifier = UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier) return;
+		std::error_code Error;
+		const auto Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForge Stale Blueprint Player " + Identifier->ToString());
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		struct DirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~DirectoryCleanup() { std::error_code CleanupError; std::filesystem::remove_all(Path, CleanupError); }
+		} Cleanup{ Root };
+
+		auto ProjectResult = Project::Create(Root / "Source.pfproj", "Stale Blueprint Player");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult) return;
+		std::optional<Project> ProjectValue(std::move(*ProjectResult));
+		const std::string SavedGraph = "graph source revision 1";
+		const std::string InterruptedGraph = "graph source revision 0";
+		BlueprintProgramSource ProgramSource;
+		ProgramSource.Constants = { 1.0f };
+		ProgramSource.ScalarPropertyIds = { "score" };
+		ProgramSource.Instructions = {
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(0x91, 1) },
+			{ BlueprintOpcode::PushConstant, 0, 0, UUID(0x91, 2) },
+			{ BlueprintOpcode::Add, 0, 0, UUID(0x91, 3) },
+			{ BlueprintOpcode::StoreScalar, 0, 0, UUID(0x91, 4) },
+			{ BlueprintOpcode::LoadScalar, 0, 0, UUID(0x91, 5) },
+			{ BlueprintOpcode::WriteScalarProperty, 0, 0, UUID(0x91, 6) },
+			{ BlueprintOpcode::Return, 0, 0, UUID(0x91, 7) }
+		};
+		const std::array Events{ BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, ProgramSource } };
+		const auto ProgramBytes = SerializeBlueprintAsset(Events,
+			ComputeBlueprintSourceRevision(std::as_bytes(std::span<const char>(SavedGraph.data(), SavedGraph.size()))));
+		PF_CHECK(Tests, ProgramBytes.has_value());
+		if (!ProgramBytes) return;
+		const auto BehaviorAsset = AssetOperations::CreateAssetFromBytes(ProjectValue->GetAssetRegistry(),
+			ProjectValue->GetRootPath(), std::span<const std::byte>(*ProgramBytes), "Assets/StaleBehavior.pfblueprint");
+		PF_CHECK(Tests, BehaviorAsset.has_value());
+		if (!BehaviorAsset) return;
+		const auto GraphPath = ProjectValue->GetRootPath() / ".pulseforge" / "blueprint-graphs" /
+			(BehaviorAsset->ID.ToString() + ".pfg");
+		std::filesystem::create_directories(GraphPath.parent_path(), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		auto WriteText = [](const std::filesystem::path& Path, std::string_view Text)
+		{
+			std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
+			Output.write(Text.data(), static_cast<std::streamsize>(Text.size()));
+			return static_cast<bool>(Output);
+		};
+		PF_CHECK(Tests, WriteText(GraphPath, InterruptedGraph));
+		Scene Startup;
+		auto EntityValue = Startup.CreateEntity("Stale graph source behavior");
+		PF_CHECK(Tests, EntityValue.has_value());
+		if (!EntityValue) return;
+		BlueprintComponent Blueprint{ BehaviorAsset->ID, true };
+		PF_CHECK(Tests, Blueprint.SetFloatProperty("score", 0.0f).has_value());
+		PF_CHECK(Tests, EntityValue->SetBlueprint(Blueprint).has_value());
+		const UUID EntityID = EntityValue->GetUUID();
+		auto SceneAsset = SceneAssetService::Create(ProjectValue->GetAssetRegistry(), ProjectValue->GetRootPath(),
+			"Assets/Startup.scene", Startup);
+		PF_CHECK(Tests, SceneAsset.has_value());
+		if (!SceneAsset) return;
+		PF_CHECK(Tests, ProjectValue->SetStartScene(SceneAsset->ID).has_value());
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession Session(ProjectValue->GetFilePath(), RuntimeDescription);
+		PF_CHECK(Tests, Session.Start().has_value());
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		auto StaleEntity = Session.GetActiveScene()->FindEntity(EntityID);
+		PF_CHECK(Tests, StaleEntity.has_value());
+		if (StaleEntity)
+		{
+			const auto Value = StaleEntity->GetBlueprint();
+			PF_CHECK(Tests, Value && Value->has_value() && (**Value).FindFloatProperty("score") == 0.0f);
+		}
+		Session.Stop();
+		PF_CHECK(Tests, WriteText(GraphPath, SavedGraph));
+		PlayerSession RepairedSession(ProjectValue->GetFilePath(), RuntimeDescription);
+		PF_CHECK(Tests, RepairedSession.Start().has_value());
+		PF_CHECK(Tests, RepairedSession.Advance(Timestep(1.0 / 60.0)).has_value());
+		const auto CurrentEntity = RepairedSession.GetActiveScene()->FindEntity(EntityID);
+		PF_CHECK(Tests, CurrentEntity.has_value());
+		if (CurrentEntity)
+		{
+			const auto Value = CurrentEntity->GetBlueprint();
+			PF_CHECK(Tests, Value && Value->has_value() && (**Value).FindFloatProperty("score") == 1.0f);
+		}
+		RepairedSession.Stop();
+
+		auto LegacyEnvelope = SerializeBlueprintAsset(Events);
+		PF_CHECK(Tests, LegacyEnvelope.has_value());
+		if (!LegacyEnvelope) return;
+		std::vector<std::byte> LegacyProgramBytes(LegacyEnvelope->begin(), LegacyEnvelope->begin() + 9);
+		LegacyProgramBytes.insert(LegacyProgramBytes.end(), LegacyEnvelope->begin() + 17, LegacyEnvelope->end());
+		LegacyProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintLegacyAssetFormatVersion) };
+		const auto LegacyProgram = DeserializeBlueprintAsset(LegacyProgramBytes);
+		PF_CHECK(Tests, LegacyProgram && LegacyProgram->GetSourceRevision() == 0);
+		if (!LegacyProgram) return;
+		const auto LegacyBehaviorAsset = AssetOperations::CreateAssetFromBytes(ProjectValue->GetAssetRegistry(),
+			ProjectValue->GetRootPath(), std::span<const std::byte>(LegacyProgramBytes), "Assets/LegacyBehavior.pfblueprint");
+		PF_CHECK(Tests, LegacyBehaviorAsset.has_value());
+		if (!LegacyBehaviorAsset) return;
+		const auto LegacyGraphPath = ProjectValue->GetRootPath() / ".pulseforge" / "blueprint-graphs" /
+			(LegacyBehaviorAsset->ID.ToString() + ".pfg");
+		PF_CHECK(Tests, WriteText(LegacyGraphPath, "legacy source graph"));
+		Scene LegacyStartup;
+		auto LegacyEntity = LegacyStartup.CreateEntity("Legacy source Blueprint");
+		PF_CHECK(Tests, LegacyEntity.has_value());
+		if (!LegacyEntity) return;
+		BlueprintComponent LegacyComponent{ LegacyBehaviorAsset->ID, true };
+		PF_CHECK(Tests, LegacyComponent.SetFloatProperty("score", 0.0f).has_value());
+		PF_CHECK(Tests, LegacyEntity->SetBlueprint(LegacyComponent).has_value());
+		const UUID LegacyEntityID = LegacyEntity->GetUUID();
+		auto LegacySceneAsset = SceneAssetService::Create(ProjectValue->GetAssetRegistry(), ProjectValue->GetRootPath(),
+			"Assets/LegacyStartup.scene", LegacyStartup);
+		PF_CHECK(Tests, LegacySceneAsset.has_value());
+		if (!LegacySceneAsset) return;
+		PF_CHECK(Tests, ProjectValue->SetStartScene(LegacySceneAsset->ID).has_value());
+		PlayerSession LegacySession(ProjectValue->GetFilePath(), RuntimeDescription);
+		PF_CHECK(Tests, LegacySession.Start().has_value());
+		PF_CHECK(Tests, LegacySession.Advance(Timestep(1.0 / 60.0)).has_value());
+		const auto LoadedLegacyEntity = LegacySession.GetActiveScene()->FindEntity(LegacyEntityID);
+		PF_CHECK(Tests, LoadedLegacyEntity.has_value());
+		if (LoadedLegacyEntity)
+		{
+			const auto Value = LoadedLegacyEntity->GetBlueprint();
+			PF_CHECK(Tests, Value && Value->has_value() && (**Value).FindFloatProperty("score") == 1.0f);
+		}
+		LegacySession.Stop();
+	}
+
 	void TestCookedPlayerSessionDoesNotOpenSourceProject(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -552,6 +690,10 @@ namespace
 		SkeletalComponent.AnimationLooping = false;
 		SkeletalComponent.AnimationSpeed = 2.0f;
 		PF_CHECK(Tests, AuthoredEntity->SetMeshRenderer(SkeletalComponent).has_value());
+		auto SecondSkeletalEntity = AuthoredScene.CreateEntity("Second cooked animation instance");
+		PF_CHECK(Tests, SecondSkeletalEntity.has_value());
+		if (!SecondSkeletalEntity) return;
+		PF_CHECK(Tests, SecondSkeletalEntity->SetMeshRenderer(SkeletalComponent).has_value());
 
 		ImportedGltfSkeletalMesh SkeletalProduct;
 		SkeletalProduct.Geometry.Vertices.resize(3);
@@ -589,6 +731,17 @@ namespace
 		RuntimeChannel.Values = { { 0,0,0,0 }, { 0,1,0,0 } };
 		RuntimeClip.Channels.push_back(std::move(RuntimeChannel));
 		SkeletalProduct.Animations.push_back(std::move(RuntimeClip));
+		ImportedGltfAnimationClip SecondRuntimeClip;
+		SecondRuntimeClip.StableKey = "animation/cccccccccccccccccccccccccccccccc";
+		SecondRuntimeClip.Name = "move-down";
+		SecondRuntimeClip.Duration = 2.0f;
+		ImportedGltfAnimationChannel SecondRuntimeChannel;
+		SecondRuntimeChannel.TargetNodeKey = JointNode.StableKey;
+		SecondRuntimeChannel.Path = GltfAnimationPath::Translation;
+		SecondRuntimeChannel.Times = { 0.0f, 2.0f };
+		SecondRuntimeChannel.Values = { { 0,0,0,0 }, { 0,-1,0,0 } };
+		SecondRuntimeClip.Channels.push_back(std::move(SecondRuntimeChannel));
+		SkeletalProduct.Animations.push_back(std::move(SecondRuntimeClip));
 		auto SkeletalProductBytes = Detail::EncodeSkeletalMeshProduct(SkeletalProduct);
 		PF_CHECK(Tests, SkeletalProductBytes.has_value());
 		if (!SkeletalProductBytes) return;
@@ -703,7 +856,7 @@ namespace
 		PF_CHECK(Tests, !std::filesystem::exists(Root / "SourceProject.pfproj"));
 		PF_CHECK(Tests, !std::filesystem::exists(Root / "Assets"));
 		PF_CHECK(Tests, Session.GetActiveSceneAsset() == *SceneIdentifier);
-		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 1);
+		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 2);
 		const auto CookedEntityAtStart = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());
 		PF_CHECK(Tests, CookedEntityAtStart.has_value());
 		if (CookedEntityAtStart)
@@ -769,12 +922,45 @@ namespace
 		PF_CHECK(Tests, CookedEntity.has_value());
 		PF_CHECK(Tests, CookedEntity && CookedEntity->GetTransform()->Translation.x > 0.0f);
 		PF_CHECK(Tests, CookedEntity && CookedEntity->GetTransform()->Translation.y < 0.0f);
+		const auto SecondRuntimeEntity = Session.GetActiveScene()->FindEntity(SecondSkeletalEntity->GetUUID());
+		PF_CHECK(Tests, SecondRuntimeEntity.has_value());
+		if (SecondRuntimeEntity)
+		{
+			PF_CHECK(Tests, Session.SetSkeletalAnimationPaused(*CookedEntity, true).has_value());
+			const auto PausedFrame = Session.Advance(Timestep(0.25));
+			PF_CHECK(Tests, PausedFrame.has_value());
+			auto FirstPausedPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			auto SecondIndependentPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(SecondRuntimeEntity->GetUUID());
+			PF_CHECK(Tests, FirstPausedPose && SecondIndependentPose &&
+				std::abs((*FirstPausedPose)[1][13] - (4.0f / 60.0f)) < 1.0e-4f &&
+				std::abs((*SecondIndependentPose)[1][13] - (4.0f / 60.0f + 0.5f)) < 1.0e-4f);
+
+			PF_CHECK(Tests, Session.SeekSkeletalAnimation(*CookedEntity, 0.75f).has_value());
+			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			const auto SoughtPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			PF_CHECK(Tests, SoughtPose && std::abs((*SoughtPose)[1][13] - 0.75f) < 1.0e-4f);
+			PF_CHECK(Tests, Session.SetSkeletalAnimationPaused(*CookedEntity, false).has_value());
+			PF_CHECK(Tests, Session.TransitionSkeletalAnimation(
+				*CookedEntity, "animation/cccccccccccccccccccccccccccccccc", 0.5f).has_value());
+			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			const auto HalfTransitionPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			PF_CHECK(Tests, HalfTransitionPose && std::abs((*HalfTransitionPose)[1][13] - 0.25f) < 1.0e-4f);
+			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			const auto CompletedTransitionPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			PF_CHECK(Tests, CompletedTransitionPose && std::abs((*CompletedTransitionPose)[1][13] + 0.5f) < 1.0e-4f);
+			PF_CHECK(Tests, Session.PlaySkeletalAnimation(*CookedEntity, AnimationClipKey, false).has_value());
+			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			const auto ReplayedPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			PF_CHECK(Tests, ReplayedPose && std::abs((*ReplayedPose)[1][13] - 0.5f) < 1.0e-4f);
+		}
 		Session.Stop();
+		PF_CHECK(Tests, !Session.PlaySkeletalAnimation(*CookedEntity, AnimationClipKey));
 	}
 } // namespace
 
 void RunPlayerSessionTests(TestRunner& Tests)
 {
 	TestPlayerSessionLifecycleAndTransitions(Tests);
+	TestSourcePlayerRejectsStaleBlueprintGraphPair(Tests);
 	TestCookedPlayerSessionDoesNotOpenSourceProject(Tests);
 }

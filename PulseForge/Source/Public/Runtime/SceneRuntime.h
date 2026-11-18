@@ -19,6 +19,7 @@
 #include <optional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <span>
 
 namespace PulseForge
@@ -93,6 +94,8 @@ namespace PulseForge
 		std::function<std::optional<BlueprintProgramBinding>(const Entity&, BlueprintEventKind)> ResolveBlueprintProgram;
 		// Changes invalidate per-entity Blueprint state and force the resolver to bind the new immutable revision.
 		std::function<uint64_t()> GetBlueprintProgramGeneration;
+		// Optional per-asset revision. Hosts that provide it can reload one asset without clearing unrelated instances.
+		std::function<uint64_t(const AssetID&)> GetBlueprintProgramRevision;
 		// Reads authored initial scalar values once when an asset instance is first bound.
 		std::function<std::optional<float>(const Entity&, std::string_view)> ReadBlueprintScalarProperty;
 		// Accepts/rejects one event's per-instance scalar-state transaction before SceneRuntime commits it.
@@ -129,6 +132,7 @@ namespace PulseForge
 		AlreadyRunning,
 		NotRunning,
 		DifferentScene,
+		InvalidAnimationTarget,
 		InvalidDeltaTime,
 		InitializationFailed,
 		UpdateFailed
@@ -186,6 +190,13 @@ namespace PulseForge
 		[[nodiscard]] bool IsRunning() const noexcept;
 		[[nodiscard]] std::expected<void, SceneRuntimeError> SetPaused(bool Paused);
 		[[nodiscard]] bool IsPaused() const noexcept;
+		// Animation controls are keyed by the live entity incarnation and apply to the active runtime scene.
+		[[nodiscard]] std::expected<void, SceneRuntimeError> PlaySkeletalAnimation(
+			const Entity& Target, std::string_view ClipKey, bool Looping = true);
+		[[nodiscard]] std::expected<void, SceneRuntimeError> SetSkeletalAnimationPaused(const Entity& Target, bool Paused);
+		[[nodiscard]] std::expected<void, SceneRuntimeError> SeekSkeletalAnimation(const Entity& Target, float TimeSeconds);
+		[[nodiscard]] std::expected<void, SceneRuntimeError> TransitionSkeletalAnimation(
+			const Entity& Target, std::string_view ClipKey, float DurationSeconds, bool Looping = true);
 		[[nodiscard]] bool HasRuntimeUI() const noexcept;
 		[[nodiscard]] RuntimeUIInputPolicy GetRuntimeUIInputPolicy() const noexcept;
 		[[nodiscard]] uint64_t GetRuntimeUIInputGeneration() const noexcept;

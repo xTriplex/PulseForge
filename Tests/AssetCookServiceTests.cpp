@@ -1683,9 +1683,17 @@ namespace
 			BlueprintEventProgramSource{ BlueprintEventKind::OnCreate, std::move(OnCreate) },
 			BlueprintEventProgramSource{ BlueprintEventKind::OnUpdate, std::move(OnUpdate) }
 		};
-		const auto BlueprintBytes = SerializeBlueprintAsset(Events);
+		const std::string BlueprintGraphSource = "g29-blueprint-source-revision\n";
+		const auto BlueprintGraphSourceBytes = std::as_bytes(std::span<const char>(
+			BlueprintGraphSource.data(), BlueprintGraphSource.size()));
+		const uint64_t BlueprintSourceRevision = ComputeBlueprintSourceRevision(BlueprintGraphSourceBytes);
+		const auto BlueprintBytes = SerializeBlueprintAsset(Events, BlueprintSourceRevision);
 		PF_CHECK(Tests, BlueprintBytes.has_value());
 		if (!BlueprintBytes) return;
+		const std::filesystem::path BlueprintGraphPath = Fixture.Source / ".pulseforge" / "blueprint-graphs" /
+			(Fixture.BlueprintAsset.ToString() + ".pfg");
+		std::filesystem::create_directories(BlueprintGraphPath.parent_path());
+		CookFixture::WriteText(BlueprintGraphPath, BlueprintGraphSource);
 		{
 			std::ofstream BlueprintOutput(Fixture.BlueprintSourcePath, std::ios::binary | std::ios::trunc);
 			BlueprintOutput.write(reinterpret_cast<const char*>(BlueprintBytes->data()),
@@ -1702,6 +1710,22 @@ namespace
 		const auto Plan = AssetCookService::Plan(Request);
 		PF_CHECK(Tests, Plan.has_value());
 		if (!Plan) return;
+		const auto StaleGraphCookPlan = [&]
+		{
+			auto StaleRequest = Request;
+			StaleRequest.OutputRoot = Fixture.Root / "G29StaleBlueprintGraphCooked";
+			auto StalePlan = AssetCookService::Plan(StaleRequest);
+			PF_CHECK(Tests, StalePlan.has_value());
+			return StalePlan;
+		}();
+		PF_CHECK(Tests, StaleGraphCookPlan.has_value());
+		if (!StaleGraphCookPlan) return;
+		CookFixture::WriteText(BlueprintGraphPath, "g29-edited-without-recompile\n");
+		const auto StaleGraphCook = AssetCookService::Cook(*StaleGraphCookPlan);
+		PF_CHECK(Tests, !StaleGraphCook && StaleGraphCook.error().Code == AssetCookErrorCode::ProductProcessingFailed &&
+			StaleGraphCook.error().Asset == Fixture.BlueprintAsset && StaleGraphCook.error().Path == BlueprintGraphPath &&
+			StaleGraphCook.error().Message.find("does not match") != std::string::npos);
+		CookFixture::WriteText(BlueprintGraphPath, BlueprintGraphSource);
 		const auto GraphProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
 			{ return Product.Asset == Fixture.GraphMaterialAsset && Product.Product == CookedAssetProductKind::GraphMaterial; });
 		const auto BlueprintProduct = std::find_if(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Product)
@@ -2044,6 +2068,9 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		auto ParameterGraph = Source;
 		ParameterGraph.Nodes[0].Kind = MaterialGraphNodeKind::FloatParameter;
 		ParameterGraph.Nodes[0].ParameterName = "BaseTint";
+		const auto ParameterIdentity = MaterialGraphCompiler::Describe(ParameterGraph, CompileRequest.ToolchainFingerprint);
+		PF_CHECK(Tests, ParameterIdentity && ParameterIdentity->RecipeFingerprint.size() == 32 &&
+			ParameterIdentity->Parameters.size() == 1 && std::abs(ParameterIdentity->Parameters[0].DefaultValue - 0.25f) < 0.0001f);
 		MaterialGraphCompileRequest ParameterRequest{ ParameterGraph, {}, CompileRequest.ToolchainFingerprint };
 		ParameterRequest.ArtifactStore = &CompilerArtifacts;
 		auto ParameterCompiled = MaterialGraphCompiler::Compile(ParameterRequest);
@@ -2053,11 +2080,20 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 			ParameterGraph.Nodes[0].Value += 0.2f;
 			ParameterRequest.Source = ParameterGraph;
 			ParameterRequest.CompilerExecutable = "missing-after-parameter-edit.exe";
+			const auto ParameterValueIdentity = MaterialGraphCompiler::Describe(ParameterGraph, CompileRequest.ToolchainFingerprint);
+			PF_CHECK(Tests, ParameterValueIdentity && ParameterIdentity &&
+				ParameterValueIdentity->RecipeFingerprint == ParameterIdentity->RecipeFingerprint &&
+				std::abs(ParameterValueIdentity->Parameters[0].DefaultValue - 0.45f) < 0.0001f);
 			auto ParameterValueChanged = MaterialGraphCompiler::Compile(ParameterRequest);
 			PF_CHECK(Tests, ParameterValueChanged &&
 				ParameterValueChanged->RecipeFingerprint == ParameterCompiled->RecipeFingerprint);
 			PF_CHECK(Tests, ParameterValueChanged && ParameterValueChanged->Parameters.size() == 1 &&
 				std::abs(ParameterValueChanged->Parameters[0].DefaultValue - 0.45f) < 0.0001f);
+			ParameterGraph.Nodes[0].X += 240.0;
+			ParameterGraph.Nodes[0].Y -= 80.0;
+			const auto LayoutOnlyIdentity = MaterialGraphCompiler::Describe(ParameterGraph, CompileRequest.ToolchainFingerprint);
+			PF_CHECK(Tests, LayoutOnlyIdentity && ParameterValueIdentity &&
+				LayoutOnlyIdentity->RecipeFingerprint == ParameterValueIdentity->RecipeFingerprint);
 		}
 	}
 	MaterialGraphCompileRequest MissingCompiler;

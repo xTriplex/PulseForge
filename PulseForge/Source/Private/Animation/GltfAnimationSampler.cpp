@@ -96,6 +96,40 @@ namespace PulseForge
 				Result[Component] = WeightA * NormalizedA[Component] + WeightB * NormalizedB[Component];
 			return Normalize(Result);
 		}
+
+		[[nodiscard]] std::expected<std::array<float, 4>, GltfAnimationSamplingError> SampleValidatedChannel(
+			const ImportedGltfAnimationChannel& Channel, float Time, std::stop_token CancellationToken)
+		{
+			if (!std::isfinite(Time))
+				return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::InvalidTime,
+					"Requested animation sample time must be finite."));
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::Cancelled,
+					"Animation sampling was cancelled."));
+			if (Time <= Channel.Times.front())
+				return Channel.Path == GltfAnimationPath::Rotation ? Normalize(Channel.Values.front()) : Channel.Values.front();
+			if (Time >= Channel.Times.back())
+				return Channel.Path == GltfAnimationPath::Rotation ? Normalize(Channel.Values.back()) : Channel.Values.back();
+
+			const auto Upper = std::upper_bound(Channel.Times.begin(), Channel.Times.end(), Time);
+			const size_t NextIndex = static_cast<size_t>(Upper - Channel.Times.begin());
+			const size_t PreviousIndex = NextIndex - 1;
+			if (Channel.Interpolation == GltfAnimationInterpolation::Step)
+				return Channel.Path == GltfAnimationPath::Rotation ? Normalize(Channel.Values[PreviousIndex]) : Channel.Values[PreviousIndex];
+
+			const double AlphaDouble = (static_cast<double>(Time) - Channel.Times[PreviousIndex]) /
+				(static_cast<double>(Channel.Times[NextIndex]) - Channel.Times[PreviousIndex]);
+			const float Alpha = static_cast<float>(AlphaDouble);
+			if (Channel.Path == GltfAnimationPath::Rotation)
+				return SampleRotation(Channel.Values[PreviousIndex], Channel.Values[NextIndex], Alpha);
+
+			std::array<float, 4> Result{};
+			for (size_t Component = 0; Component < Result.size(); ++Component)
+				Result[Component] = static_cast<float>(
+					(1.0 - AlphaDouble) * Channel.Values[PreviousIndex][Component] +
+					AlphaDouble * Channel.Values[NextIndex][Component]);
+			return Result;
+		}
 	}
 
 	std::expected<void, GltfAnimationSamplingError> ValidateGltfAnimationChannel(
@@ -153,43 +187,45 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<GltfAnimationClipValidationToken, GltfAnimationSamplingError> ValidateGltfAnimationClip(
+		const ImportedGltfAnimationClip& Clip, std::stop_token CancellationToken)
+	{
+		if (Clip.StableKey.empty() || Clip.Channels.empty() || Clip.Channels.size() > 4096 ||
+			!std::isfinite(Clip.Duration) || Clip.Duration < 0.0f)
+			return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::InvalidChannel,
+				"Animation clip identity, duration, or channel count is invalid."));
+		for (size_t Index = 0; Index < Clip.Channels.size(); ++Index)
+		{
+			if ((Index & 0x3fu) == 0 && CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::Cancelled,
+					"Animation clip validation was cancelled."));
+			if (auto Valid = ValidateGltfAnimationChannel(Clip.Channels[Index], CancellationToken); !Valid)
+				return std::unexpected(Valid.error());
+		}
+		GltfAnimationClipValidationToken Token;
+		Token.m_Clip = &Clip;
+		Token.m_ChannelCount = Clip.Channels.size();
+		return Token;
+	}
+
 	std::expected<std::array<float, 4>, GltfAnimationSamplingError> SampleGltfAnimationChannel(
 		const ImportedGltfAnimationChannel& Channel,
 		float Time,
 		std::stop_token CancellationToken)
 	{
-		if (!std::isfinite(Time))
-			return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::InvalidTime,
-				"Requested animation sample time must be finite."));
 		if (auto Validation = ValidateGltfAnimationChannel(Channel, CancellationToken); !Validation)
 			return std::unexpected(Validation.error());
-		if (CancellationToken.stop_requested())
-			return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::Cancelled,
-				"Animation sampling was cancelled."));
+		return SampleValidatedChannel(Channel, Time, CancellationToken);
+	}
 
-		if (Time <= Channel.Times.front())
-			return Channel.Path == GltfAnimationPath::Rotation ? Normalize(Channel.Values.front()) : Channel.Values.front();
-		if (Time >= Channel.Times.back())
-			return Channel.Path == GltfAnimationPath::Rotation ? Normalize(Channel.Values.back()) : Channel.Values.back();
-
-		const auto Upper = std::upper_bound(Channel.Times.begin(), Channel.Times.end(), Time);
-		const size_t NextIndex = static_cast<size_t>(Upper - Channel.Times.begin());
-		const size_t PreviousIndex = NextIndex - 1;
-		if (Channel.Interpolation == GltfAnimationInterpolation::Step)
-			return Channel.Path == GltfAnimationPath::Rotation ? Normalize(Channel.Values[PreviousIndex]) : Channel.Values[PreviousIndex];
-
-		const double AlphaDouble = (static_cast<double>(Time) - Channel.Times[PreviousIndex]) /
-			(static_cast<double>(Channel.Times[NextIndex]) - Channel.Times[PreviousIndex]);
-		const float Alpha = static_cast<float>(AlphaDouble);
-		if (Channel.Path == GltfAnimationPath::Rotation)
-			return SampleRotation(Channel.Values[PreviousIndex], Channel.Values[NextIndex], Alpha);
-
-		std::array<float, 4> Result{};
-		for (size_t Component = 0; Component < Result.size(); ++Component)
-			Result[Component] = static_cast<float>(
-				(1.0 - AlphaDouble) * Channel.Values[PreviousIndex][Component] +
-				AlphaDouble * Channel.Values[NextIndex][Component]);
-		return Result;
+	std::expected<std::array<float, 4>, GltfAnimationSamplingError> SampleGltfAnimationChannel(
+		const ImportedGltfAnimationClip& Clip, const GltfAnimationClipValidationToken& Validation,
+		size_t ChannelIndex, float Time, std::stop_token CancellationToken)
+	{
+		if (!Validation.IsFor(Clip) || ChannelIndex >= Clip.Channels.size())
+			return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::InvalidChannel,
+				"Animation validation token does not match the immutable clip."));
+		return SampleValidatedChannel(Clip.Channels[ChannelIndex], Time, CancellationToken);
 	}
 }
 #include "Animation/GltfAnimationPlayback.h"
@@ -362,12 +398,55 @@ namespace PulseForge
 		return Weight;
 	}
 
+	std::expected<GltfAnimationClipValidationMap, GltfAnimationSamplingError> ValidateGltfAnimationProduct(
+		const ImportedGltfSkeletalMesh& Product, std::stop_token CancellationToken)
+	{
+		if (Product.Animations.size() > MaximumGltfAnimationPoseChannels)
+			return std::unexpected(GltfAnimationSamplingError{
+				GltfAnimationSamplingErrorCode::ResourceLimitExceeded, "Skeletal product exceeds its animation clip limit." });
+		GltfAnimationClipValidationMap Validated;
+		Validated.reserve(Product.Animations.size());
+		for (size_t Index = 0; Index < Product.Animations.size(); ++Index)
+		{
+			if ((Index & 0x3fu) == 0 && CancellationToken.stop_requested())
+				return std::unexpected(GltfAnimationSamplingError{
+					GltfAnimationSamplingErrorCode::Cancelled, "Skeletal animation validation was cancelled." });
+			const ImportedGltfAnimationClip& Clip = Product.Animations[Index];
+			auto Token = ValidateGltfAnimationClip(Clip, CancellationToken);
+			if (!Token) return std::unexpected(Token.error());
+			if (!Validated.emplace(Clip.StableKey, std::move(*Token)).second)
+				return std::unexpected(GltfAnimationSamplingError{
+					GltfAnimationSamplingErrorCode::InvalidChannel, "Skeletal product contains duplicate animation clip keys." });
+		}
+		return Validated;
+	}
+
 	std::expected<std::vector<GltfAnimationNodePose>, GltfAnimationPlaybackError> SampleGltfAnimationPose(
 		const ImportedGltfAnimationClip& Clip,
 		std::span<const GltfAnimationNodePose> RestPose,
 		const GltfAnimationPlaybackClock& Clock,
 		std::stop_token CancellationToken)
 	{
+		auto Validation = ValidateGltfAnimationClip(Clip, CancellationToken);
+		if (!Validation)
+			return std::unexpected(MakePlaybackError(
+				Validation.error().Code == GltfAnimationSamplingErrorCode::Cancelled
+					? GltfAnimationPlaybackErrorCode::Cancelled
+					: GltfAnimationPlaybackErrorCode::InvalidClip,
+				Validation.error().Message));
+		return SampleGltfAnimationPose(Clip, *Validation, RestPose, Clock, CancellationToken);
+	}
+
+	std::expected<std::vector<GltfAnimationNodePose>, GltfAnimationPlaybackError> SampleGltfAnimationPose(
+		const ImportedGltfAnimationClip& Clip,
+		const GltfAnimationClipValidationToken& Validation,
+		std::span<const GltfAnimationNodePose> RestPose,
+		const GltfAnimationPlaybackClock& Clock,
+		std::stop_token CancellationToken)
+	{
+		if (!Validation.IsFor(Clip))
+			return std::unexpected(MakePlaybackError(GltfAnimationPlaybackErrorCode::InvalidClip,
+				"Animation clip validation token does not match this immutable clip."));
 		if (auto Validation = ValidateDurationAndClock(Clock, Clip.Duration, CancellationToken); !Validation)
 			return std::unexpected(Validation.error());
 		if (Clip.StableKey.empty() || Clip.Channels.empty() || Clip.Channels.size() > MaximumGltfAnimationPoseChannels)
@@ -403,7 +482,8 @@ namespace PulseForge
 				return std::unexpected(MakePlaybackError(GltfAnimationPlaybackErrorCode::InvalidClip,
 					"Animation channel targets a node that is missing from the rest pose: " + Channel.TargetNodeKey));
 
-			const auto Sample = SampleGltfAnimationChannel(Channel, Clock.TimeSeconds, CancellationToken);
+			const auto Sample = SampleGltfAnimationChannel(Clip, Validation, ChannelIndex,
+				Clock.TimeSeconds, CancellationToken);
 			if (!Sample)
 				return std::unexpected(MakePlaybackError(GltfAnimationPlaybackErrorCode::ChannelSamplingFailed,
 					"Channel for node " + Channel.TargetNodeKey + " failed: " + Sample.error().Message));
@@ -594,7 +674,8 @@ namespace PulseForge
 		const ImportedGltfSkeletalMesh& Mesh,
 		std::span<const GltfAnimationNodePose> RestPose,
 		float DeltaSeconds,
-		std::stop_token CancellationToken)
+		std::stop_token CancellationToken,
+		const GltfAnimationClipValidationMap* ValidatedClips)
 	{
 		if (CancellationToken.stop_requested())
 			return std::unexpected(MakePlaybackError(GltfAnimationPlaybackErrorCode::Cancelled,
@@ -605,6 +686,17 @@ namespace PulseForge
 
 		try
 		{
+			const auto SampleClip = [&](const ImportedGltfAnimationClip& Clip,
+				const GltfAnimationPlaybackClock& Clock)
+				-> std::expected<std::vector<GltfAnimationNodePose>, GltfAnimationPlaybackError>
+			{
+				if (!ValidatedClips) return SampleGltfAnimationPose(Clip, RestPose, Clock, CancellationToken);
+				const auto Validation = ValidatedClips->find(Clip.StableKey);
+				if (Validation == ValidatedClips->end() || !Validation->second.IsFor(Clip))
+					return std::unexpected(MakePlaybackError(GltfAnimationPlaybackErrorCode::InvalidClip,
+						"Validated animation clip is unavailable for the immutable skeletal product."));
+				return SampleGltfAnimationPose(Clip, Validation->second, RestPose, Clock, CancellationToken);
+			};
 			GltfAnimationInstancePlayback Next = Instance;
 			const ImportedGltfAnimationClip* const CurrentClip = FindAnimationClip(Mesh, Next.CurrentClipKey);
 			if (CurrentClip == nullptr)
@@ -616,7 +708,7 @@ namespace PulseForge
 				if (auto Advanced = AdvanceGltfAnimationPlayback(Next.CurrentClock, CurrentClip->Duration,
 					DeltaSeconds, CancellationToken); !Advanced)
 					return std::unexpected(Advanced.error());
-				auto Pose = SampleGltfAnimationPose(*CurrentClip, RestPose, Next.CurrentClock, CancellationToken);
+				auto Pose = SampleClip(*CurrentClip, Next.CurrentClock);
 				if (!Pose) return std::unexpected(Pose.error());
 				Next.LastPose = *Pose;
 				if (CancellationToken.stop_requested())
@@ -639,7 +731,7 @@ namespace PulseForge
 			auto Weight = AdvanceGltfAnimationCrossfade(
 				Next.Crossfade, Next.CurrentClock.Paused ? 0.0f : DeltaSeconds, CancellationToken);
 			if (!Weight) return std::unexpected(Weight.error());
-			auto TargetPose = SampleGltfAnimationPose(*TargetClip, RestPose, Next.TargetClock, CancellationToken);
+			auto TargetPose = SampleClip(*TargetClip, Next.TargetClock);
 			if (!TargetPose) return std::unexpected(TargetPose.error());
 			auto BlendedPose = BlendGltfAnimationPoses(
 				Next.TransitionSourcePose, *TargetPose, *Weight, CancellationToken);

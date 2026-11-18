@@ -60,6 +60,12 @@ namespace PulseForge
 		[[nodiscard]] std::expected<SceneRuntimeFrameResult, PlayerSessionError> Advance(Timestep FrameDelta);
 		[[nodiscard]] std::expected<void, PlayerSessionError> Pause();
 		[[nodiscard]] std::expected<void, PlayerSessionError> Resume();
+		[[nodiscard]] std::expected<void, PlayerSessionError> PlaySkeletalAnimation(
+			const Entity& Target, std::string_view ClipKey, bool Looping = true);
+		[[nodiscard]] std::expected<void, PlayerSessionError> SetSkeletalAnimationPaused(const Entity& Target, bool Paused);
+		[[nodiscard]] std::expected<void, PlayerSessionError> SeekSkeletalAnimation(const Entity& Target, float TimeSeconds);
+		[[nodiscard]] std::expected<void, PlayerSessionError> TransitionSkeletalAnimation(
+			const Entity& Target, std::string_view ClipKey, float DurationSeconds, bool Looping = true);
 		// Positive finite scales affect script/physics frame time; audio playback follows real time. Use Pause for full pause.
 		[[nodiscard]] std::expected<void, PlayerSessionError> SetTimeScale(double Scale);
 		[[nodiscard]] double GetTimeScale() const noexcept { return m_TimeScale; }

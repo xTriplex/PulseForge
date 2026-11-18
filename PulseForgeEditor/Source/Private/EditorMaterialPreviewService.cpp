@@ -4,6 +4,7 @@
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
 #include "Assets/CookedProductCodec.h"
+#include "Assets/DerivedDataArtifactStore.h"
 #include "Assets/MaterialGraphCompiler.h"
 #include "Assets/Project.h"
 #include "Editor/EditorTextureRegistry.h"
@@ -121,6 +122,8 @@ namespace PulseForgeEditor
 		std::optional<std::expected<PulseForge::MaterialGraphCompiledArtifact, PulseForge::MaterialGraphCompileError>>
 			GraphCompileResult;
 		uint64_t GraphCompileFingerprint = 0;
+		std::optional<PulseForge::MaterialGraphCompileIdentity> GraphCompileIdentity;
+		std::optional<PulseForge::CookedGraphMaterialProduct> GraphProduct;
 
 		~Entry()
 		{
@@ -136,7 +139,10 @@ namespace PulseForgeEditor
 	};
 
 	EditorMaterialPreviewService::EditorMaterialPreviewService() = default;
-	EditorMaterialPreviewService::~EditorMaterialPreviewService() = default;
+	EditorMaterialPreviewService::~EditorMaterialPreviewService()
+	{
+		Clear();
+	}
 
 	void EditorMaterialPreviewService::BeginFrame() noexcept
 	{
@@ -146,6 +152,8 @@ namespace PulseForgeEditor
 	void EditorMaterialPreviewService::Clear() noexcept
 	{
 		m_Entries.clear();
+		m_GraphArtifacts.reset();
+		m_ToolchainFingerprint.clear();
 		m_ProjectID = {};
 	}
 
@@ -197,6 +205,9 @@ namespace PulseForgeEditor
 		New->Runtime = &Runtime;
 		New->Textures = &Textures;
 		New->AssetRevision = m_AssetRevision;
+		if (!m_GraphArtifacts)
+			m_GraphArtifacts = std::make_unique<PulseForge::DerivedDataArtifactStore>(
+				PulseForge::DerivedDataArtifactStoreOptions{ Project.GetRootPath() / ".pulseforge" / "DerivedData" });
 		auto Renderer = PulseForge::SceneRenderer::Create(Runtime, Project, CompiledShaderDirectory);
 		if (!Renderer)
 		{
@@ -297,6 +308,27 @@ namespace PulseForgeEditor
 			return;
 		}
 		const uint64_t Fingerprint = ComputeEditorMaterialPreviewFingerprint(*Serialized);
+		const bool DraftChanged = Fingerprint != Preview->RequestedFingerprint;
+		uint64_t CompileFingerprint = Preview->GraphCompileFingerprint;
+		if (DraftChanged)
+		{
+			Preview->GraphCompileIdentity.reset();
+			if (Draft.Graph)
+			{
+				if (m_ToolchainFingerprint.empty())
+					m_ToolchainFingerprint = PulseForge::GetMaterialGraphCompilerToolchainFingerprint();
+				auto Identity = PulseForge::MaterialGraphCompiler::Describe(*Draft.Graph, m_ToolchainFingerprint);
+				if (Identity)
+				{
+					CompileFingerprint = ComputeEditorMaterialPreviewFingerprint(Identity->RecipeFingerprint);
+					Preview->GraphCompileIdentity = std::move(*Identity);
+				}
+				else
+					CompileFingerprint = Fingerprint;
+			}
+			else
+				CompileFingerprint = Fingerprint;
+		}
 		Preview->RequestedFingerprint = Fingerprint;
 		std::optional<std::expected<PulseForge::MaterialGraphCompiledArtifact, PulseForge::MaterialGraphCompileError>> CompletedCompile;
 		{
@@ -307,26 +339,24 @@ namespace PulseForgeEditor
 				Preview->GraphCompileResult.reset();
 			}
 		}
-		if (CompletedCompile && Preview->GraphCompileFingerprint == Fingerprint)
+		if (CompletedCompile && Preview->GraphCompileFingerprint == CompileFingerprint)
 		{
 			const bool AcceptedCompletion = Preview->GraphCompileState.Complete(
 				Preview->GraphCompileFingerprint, static_cast<bool>(*CompletedCompile));
 			if (!AcceptedCompletion) CompletedCompile.reset();
 		}
-		if (CompletedCompile && Preview->GraphCompileFingerprint == Fingerprint)
+		if (CompletedCompile && Preview->GraphCompileFingerprint == CompileFingerprint)
 		{
 			if (*CompletedCompile)
 			{
 				PulseForge::CookedGraphMaterialProduct Product;
 				Product.RecipeFingerprint = CompletedCompile->value().RecipeFingerprint;
 				Product.SpirV = std::move(CompletedCompile->value().SpirV);
-				for (const auto& Parameter : CompletedCompile->value().Parameters)
+				const auto& Parameters = Preview->GraphCompileIdentity
+					? Preview->GraphCompileIdentity->Parameters : CompletedCompile->value().Parameters;
+				for (const auto& Parameter : Parameters)
 					Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
-				const uint64_t Revision = (DraftRevision ^ Fingerprint) ? (DraftRevision ^ Fingerprint) : 1;
-				if (auto Updated = Preview->Renderer->SetTransientGraphMaterialOverride(Material, Draft, Product, Revision); !Updated)
-					Preview->Error = Updated.error().Message;
-				else
-					Preview->DraftFingerprint = Fingerprint;
+				Preview->GraphProduct = std::move(Product);
 			}
 			else
 			{
@@ -343,7 +373,7 @@ namespace PulseForgeEditor
 		}
 		if (Draft.Graph)
 		{
-			if (Fingerprint != Preview->GraphCompileFingerprint)
+			if (CompileFingerprint != Preview->GraphCompileFingerprint)
 			{
 				if (Preview->GraphCompileWorker.joinable())
 				{
@@ -354,12 +384,14 @@ namespace PulseForgeEditor
 					std::scoped_lock Lock(Preview->GraphCompileMutex);
 					Preview->GraphCompileResult.reset();
 				}
-				Preview->GraphCompileFingerprint = Fingerprint;
-				(void)Preview->GraphCompileState.Request(Fingerprint);
+				Preview->GraphCompileFingerprint = CompileFingerprint;
+				(void)Preview->GraphCompileState.Request(CompileFingerprint);
 				Preview->Error = "Compiling the current material graph; the last complete preview is retained.";
 				auto Graph = *Draft.Graph;
-				const uint64_t CompileFingerprint = Fingerprint;
-				Preview->GraphCompileWorker = std::jthread([Preview, Graph = std::move(Graph), CompileFingerprint](std::stop_token Stop)
+				const std::string ToolchainFingerprint = m_ToolchainFingerprint;
+				PulseForge::DerivedDataArtifactStore* const ArtifactStore = m_GraphArtifacts.get();
+				Preview->GraphCompileWorker = std::jthread(
+					[Preview, Graph = std::move(Graph), CompileFingerprint, ToolchainFingerprint, ArtifactStore](std::stop_token Stop)
 				{
 					std::expected<PulseForge::MaterialGraphCompiledArtifact, PulseForge::MaterialGraphCompileError> Result =
 						std::unexpected(PulseForge::MaterialGraphCompileError{
@@ -368,11 +400,12 @@ namespace PulseForgeEditor
 					{
 						PulseForge::MaterialGraphCompileRequest Request;
 						Request.Source = Graph;
-						Request.ToolchainFingerprint = PulseForge::GetMaterialGraphCompilerToolchainFingerprint();
+						Request.ToolchainFingerprint = ToolchainFingerprint;
 						Request.Timeout = std::chrono::minutes(2);
 						Request.MaximumOutputBytes = 64 * 1024 * 1024;
 						Request.Generation = CompileFingerprint;
 						Request.CancellationToken = Stop;
+						Request.ArtifactStore = ArtifactStore;
 						Result = PulseForge::MaterialGraphCompiler::Compile(Request);
 					}
 					catch (const std::exception& Exception)
@@ -382,12 +415,29 @@ namespace PulseForgeEditor
 					}
 					std::scoped_lock Lock(Preview->GraphCompileMutex);
 					if (!Stop.stop_requested()) Preview->GraphCompileResult.emplace(std::move(Result));
-				});
+					});
 			}
-			else if (Preview->GraphCompileState.IsPending(Fingerprint))
+			else if (Preview->GraphCompileState.IsPending(CompileFingerprint))
 				Preview->Error = "Compiling the current material graph; the last complete preview is retained.";
-			if (Preview->GraphCompileState.IsPending(Fingerprint) || Preview->GraphCompileState.HasFailed(Fingerprint) ||
-				!Preview->GraphCompileState.IsCurrent(Fingerprint) || Preview->DraftFingerprint != Fingerprint) return;
+			if (Preview->GraphCompileState.IsPending(CompileFingerprint) || Preview->GraphCompileState.HasFailed(CompileFingerprint) ||
+				!Preview->GraphCompileState.IsCurrent(CompileFingerprint) || !Preview->GraphProduct) return;
+			if (Preview->DraftFingerprint != Fingerprint)
+			{
+				PulseForge::CookedGraphMaterialProduct Product = *Preview->GraphProduct;
+				if (Preview->GraphCompileIdentity)
+				{
+					Product.Parameters.clear();
+					for (const auto& Parameter : Preview->GraphCompileIdentity->Parameters)
+						Product.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
+				}
+				const uint64_t Revision = (DraftRevision ^ Fingerprint) ? (DraftRevision ^ Fingerprint) : 1;
+				if (auto Updated = Preview->Renderer->SetTransientGraphMaterialOverride(Material, Draft, Product, Revision); !Updated)
+				{
+					Preview->Error = Updated.error().Message;
+					return;
+				}
+				Preview->DraftFingerprint = Fingerprint;
+			}
 		}
 		else if (Preview->GraphCompileWorker.joinable())
 		{

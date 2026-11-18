@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export and exercise the RuntimeUI sample through a relocated cooked Player."""
+"""Export and exercise RuntimeUI or the G29 reference game through a relocated cooked Player."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import tempfile
 from StandalonePackageDesktopSmoke import WindowsPackageReadOnlyAccess, _build_environment
 
 
-REQUIRED_MARKERS = (
+RUNTIME_UI_REQUIRED_MARKERS = (
     "PULSEFORGE_RUNTIME_UI_PACKAGE_MENU=PASS",
     "PULSEFORGE_RUNTIME_UI_PACKAGE_GAMEPLAY=PASS",
     "PULSEFORGE_RUNTIME_UI_PACKAGE_HUD=PASS",
@@ -28,6 +28,14 @@ REQUIRED_MARKERS = (
     "PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE=PASS",
     "PULSEFORGE_RUNTIME_UI_PACKAGE_SHUTDOWN=PASS",
     "Runtime UI font has unsupported text beyond Latin-1; replacement glyphs are shown",
+)
+G29_REQUIRED_MARKERS = (
+    "PULSEFORGE_G29_PACKAGE_MENU=PASS",
+    "PULSEFORGE_G29_PACKAGE_GAMEPLAY=PASS",
+    "PULSEFORGE_G29_PACKAGE_RIG_ANIMATED=PASS",
+    "PULSEFORGE_G29_PACKAGE_SPACE_SCORE=PASS",
+    "PULSEFORGE_G29_PACKAGE_ACCEPTANCE=PASS",
+    "PULSEFORGE_G29_PACKAGE_SHUTDOWN=PASS",
 )
 
 
@@ -159,6 +167,7 @@ def main() -> int:
     parser.add_argument("--template-root", required=True, type=Path)
     parser.add_argument("--template-descriptor", required=True, type=Path)
     parser.add_argument("--source-project", required=True, type=Path)
+    parser.add_argument("--scenario", choices=("runtime-ui", "g29"), default="runtime-ui")
     parser.add_argument("--timeout-seconds", type=int, default=240)
     args = parser.parse_args()
 
@@ -177,11 +186,13 @@ def main() -> int:
             raise RuntimeError("source sample copy contains a linked path")
         project_file = project_root / args.source_project.name
         project = json.loads(project_file.read_text(encoding="utf-8"))
+        is_g29 = args.scenario == "g29"
+        prefix = "G29" if is_g29 else "G18"
         profile = {
             "format": "PulseForgeBuildProfile",
             "version": 1,
-            "profileId": "b0180000-0000-4000-8000-0000000001f0",
-            "displayName": "G18 Runtime UI Package Acceptance",
+            "profileId": "b0290000-0000-4000-8000-0000000001f0" if is_g29 else "b0180000-0000-4000-8000-0000000001f0",
+            "displayName": "G29 Reference Game Package Acceptance" if is_g29 else "G18 Runtime UI Package Acceptance",
             "targetPlatform": "Windows",
             "architecture": "x64",
             "configuration": "Debug",
@@ -190,10 +201,10 @@ def main() -> int:
             # Runtime Lua chooses the gameplay scene by stable asset ID, so the package
             # profile must declare it as a dynamic cook root.
             "dynamicRoots": ["b0180000-0000-4000-8000-000000000011"],
-            "defaultOutputPath": "Build/Exports/G18Acceptance",
+            "defaultOutputPath": "Build/Exports/G29Acceptance" if is_g29 else "Build/Exports/G18Acceptance",
             "window": {"width": 960, "height": 540},
         }
-        profile_path = root / "G18 Acceptance.pfbuildprofile"
+        profile_path = root / f"{prefix} Acceptance.pfbuildprofile"
         profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
         staging_package = root / "Export Staging"
         unrelated_cwd = root / "Unrelated Working Directory Ω"
@@ -220,7 +231,10 @@ def main() -> int:
         writable.mkdir()
         runtime_library, runtime_identity = prepare_windows_vulkan_runtime(root, package)
         environment = _build_environment("Windows", writable, WindowsVulkanRuntimeLibrary=runtime_library)
-        environment["PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE"] = "1"
+        if is_g29:
+            environment["PULSEFORGE_G29_PACKAGE_ACCEPTANCE"] = "1"
+        else:
+            environment["PULSEFORGE_RUNTIME_UI_PACKAGE_ACCEPTANCE"] = "1"
         user_data = Path(environment["PULSEFORGE_USER_DATA_DIR"])
         print(f"G18_PACKAGE_VULKAN_RUNTIME=PASS; {runtime_identity}")
 
@@ -228,23 +242,29 @@ def main() -> int:
         try:
             read_only.apply()
             before = digest_tree(package)
-            process_log = root / "runtime-ui-package-player.log"
+            process_log = root / f"{args.scenario}-package-player.log"
             output = run([str(executable)], unrelated_cwd, args.timeout_seconds, process_log, environment)
-            missing = [marker for marker in REQUIRED_MARKERS if marker not in output]
+            required_markers = G29_REQUIRED_MARKERS if is_g29 else RUNTIME_UI_REQUIRED_MARKERS
+            missing = [marker for marker in required_markers if marker not in output]
             if missing:
-                raise RuntimeError(f"G18 package omitted behavior markers {missing}; inspect {process_log}\n{output[-16000:]}")
+                raise RuntimeError(f"{prefix} package omitted behavior markers {missing}; inspect {process_log}\n{output[-16000:]}")
             after = digest_tree(package)
             if before != after:
                 raise RuntimeError("read-only G18 package contents changed during the interaction run")
-            user_data_prefix = "PULSEFORGE_RUNTIME_UI_PACKAGE_USER_DATA=PASS; root="
+            user_data_prefix = ("PULSEFORGE_G29_PACKAGE_USER_DATA=PASS; root=" if is_g29 else
+                               "PULSEFORGE_RUNTIME_UI_PACKAGE_USER_DATA=PASS; root=")
             user_data_lines = [line for line in output.splitlines() if user_data_prefix in line]
             if len(user_data_lines) != 1:
-                raise RuntimeError("Player did not report exactly one resolved G18 user-data root")
+                raise RuntimeError(f"Player did not report exactly one resolved {prefix} user-data root")
             reported_user_data = Path(user_data_lines[0].split(user_data_prefix, 1)[1].strip())
             if not user_data.is_dir() or reported_user_data.resolve() != user_data.resolve():
-                raise RuntimeError(f"Player resolved unexpected G18 user data: {reported_user_data}")
-            print("G18_RUNTIME_UI_EXPORTED_PACKAGE=PASS; source removed; unrelated CWD; package write denied; "
-                  "synthetic mapped Player input; menu/gameplay/HUD/pause/resume; normal exit")
+                raise RuntimeError(f"Player resolved unexpected {prefix} user data: {reported_user_data}")
+            if is_g29:
+                print("G29_REFERENCE_EXPORTED_PACKAGE=PASS; source removed; unrelated CWD; package write denied; "
+                      "mapped Menu→Start and Space; gameplay scene; animated rig pose; exact +10 score; normal exit")
+            else:
+                print("G18_RUNTIME_UI_EXPORTED_PACKAGE=PASS; source removed; unrelated CWD; package write denied; "
+                      "synthetic mapped Player input; menu/gameplay/HUD/pause/resume; normal exit")
         finally:
             read_only.restore()
     return 0
@@ -254,5 +274,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        print(f"G18_RUNTIME_UI_EXPORTED_PACKAGE=FAIL; {error}", file=sys.stderr)
+        print(f"EXPORTED_PACKAGE_ACCEPTANCE=FAIL; {error}", file=sys.stderr)
         raise SystemExit(1)

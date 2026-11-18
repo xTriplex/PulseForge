@@ -302,6 +302,36 @@ namespace PulseForge
 			PF_INFO("Validating cook source read set");
 			if (Request.CancellationToken.stop_requested())
 				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before source freshness validation"));
+			for (const AssetCookPlannedProduct& Product : Plan.Products)
+			{
+				if (Product.Product != CookedAssetProductKind::BlueprintProgram) continue;
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled,
+						"Cook was cancelled while validating Blueprint source identity", Product.SourcePath, Product.Asset));
+				auto ProgramBytes = ReadBounded(Product.SourcePath, BlueprintMaximumAssetBytes,
+					Product.Asset, Request.CancellationToken);
+				if (!ProgramBytes)
+					return std::unexpected(ProgramBytes.error());
+				auto Program = DeserializeBlueprintAsset(*ProgramBytes);
+				if (!Program)
+					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+						"Blueprint program changed or became invalid during cook: " + Program.error().Message,
+						Product.SourcePath, Product.Asset));
+				if (Program->GetSourceRevision() == 0) continue;
+				const std::filesystem::path GraphPath = Request.SourceSnapshot->GetProjectRootPath() / ".pulseforge" /
+					"blueprint-graphs" / (Product.Asset.ToString() + ".pfg");
+				std::ifstream GraphInput(GraphPath, std::ios::binary);
+				if (!GraphInput)
+					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+						"Blueprint graph source is missing for the current compiled program", GraphPath, Product.Asset));
+				auto GraphBytes = ReadBounded(GraphPath, BlueprintMaximumAssetBytes, Product.Asset, Request.CancellationToken);
+				if (!GraphBytes)
+					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+						"Blueprint graph source could not be revalidated", GraphPath, Product.Asset));
+				if (ComputeBlueprintSourceRevision(*GraphBytes) != Program->GetSourceRevision())
+					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+						"Compiled Blueprint program does not match the current graph source", GraphPath, Product.Asset));
+			}
 			if (auto ReadSet = AssetDependencyExtractor::ValidateInputReceipts(
 				Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetInputReadSet(), Request.CancellationToken); !ReadSet)
 			{
@@ -1096,11 +1126,27 @@ namespace PulseForge
 					if (!Parsed)
 						return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 							"Blueprint source is invalid: " + Parsed.error().Message, Product.SourcePath, Product.Asset));
+					if (Parsed->GetSourceRevision() != 0)
+					{
+						const std::filesystem::path GraphPath = Request.SourceSnapshot->GetProjectRootPath() / ".pulseforge" /
+							"blueprint-graphs" / (Product.Asset.ToString() + ".pfg");
+						std::ifstream GraphInput(GraphPath, std::ios::binary);
+						if (!GraphInput)
+							return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+								"Blueprint graph source is missing for the current compiled program", GraphPath, Product.Asset));
+						auto GraphBytes = ReadBounded(GraphPath, BlueprintMaximumAssetBytes, Product.Asset, Request.CancellationToken);
+						if (!GraphBytes)
+							return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+								"Blueprint graph source could not be read", GraphPath, Product.Asset));
+						if (ComputeBlueprintSourceRevision(*GraphBytes) != Parsed->GetSourceRevision())
+							return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
+								"Compiled Blueprint program does not match the current graph source", GraphPath, Product.Asset));
+					}
 					std::vector<BlueprintEventProgramSource> Events;
 					Events.reserve(Parsed->GetEvents().size());
 					for (const BlueprintVerifiedEventProgram& Event : Parsed->GetEvents())
 						Events.push_back({ Event.Event, Event.Program.GetSource() });
-					auto Encoded = SerializeBlueprintAsset(Events);
+					auto Encoded = SerializeBlueprintAsset(Events, Parsed->GetSourceRevision());
 					if (!Encoded)
 						return std::unexpected(Error(AssetCookErrorCode::SerializationFailed,
 							"Blueprint product serialization failed: " + Encoded.error().Message, Product.SourcePath, Product.Asset));
