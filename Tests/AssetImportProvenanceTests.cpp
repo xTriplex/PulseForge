@@ -171,6 +171,21 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	const AssetContentFingerprint OrdinaryFingerprint = ComputeAssetContentFingerprint(FingerprintedBytes);
 	const auto CancellableFingerprint = ComputeAssetContentFingerprintCancellable(FingerprintedBytes, {});
 	PF_CHECK(Tests, CancellableFingerprint && *CancellableFingerprint == OrdinaryFingerprint);
+	const std::string LfJson = "{\"value\":1}\n";
+	const std::string CrLfJson = "{\"value\":1}\r\n";
+	const std::string CrJson = "{\"value\":1}\r";
+	const auto LfTextFingerprint = ComputeAssetTextContentFingerprintCancellable(
+		std::as_bytes(std::span(LfJson.data(), LfJson.size())), {});
+	const auto CrLfTextFingerprint = ComputeAssetTextContentFingerprintCancellable(
+		std::as_bytes(std::span(CrLfJson.data(), CrLfJson.size())), {});
+	const auto CrTextFingerprint = ComputeAssetTextContentFingerprintCancellable(
+		std::as_bytes(std::span(CrJson.data(), CrJson.size())), {});
+	PF_CHECK(Tests, LfTextFingerprint && CrLfTextFingerprint && CrTextFingerprint &&
+		*LfTextFingerprint == *CrLfTextFingerprint && *LfTextFingerprint == *CrTextFingerprint);
+	const std::string EditedJson = "{\"value\":2}\n";
+	const auto EditedTextFingerprint = ComputeAssetTextContentFingerprintCancellable(
+		std::as_bytes(std::span(EditedJson.data(), EditedJson.size())), {});
+	PF_CHECK(Tests, LfTextFingerprint && EditedTextFingerprint && *LfTextFingerprint != *EditedTextFingerprint);
 	std::stop_source FingerprintStop;
 	FingerprintStop.request_stop();
 	const auto CancelledFingerprint = ComputeAssetContentFingerprintCancellable(FingerprintedBytes, FingerprintStop.get_token());

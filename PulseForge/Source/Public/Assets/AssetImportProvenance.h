@@ -80,6 +80,8 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API AssetContentFingerprint ComputeAssetContentFingerprint(std::span<const std::byte> Bytes);
 	[[nodiscard]] PULSEFORGE_API std::expected<AssetContentFingerprint, std::string> ComputeAssetContentFingerprintCancellable(
 		std::span<const std::byte> Bytes, std::stop_token CancellationToken);
+	[[nodiscard]] PULSEFORGE_API std::expected<AssetContentFingerprint, std::string>
+		ComputeAssetTextContentFingerprintCancellable(std::span<const std::byte> Bytes, std::stop_token CancellationToken);
 
 	enum class AssetImportProvenanceErrorCode : uint8_t
 	{

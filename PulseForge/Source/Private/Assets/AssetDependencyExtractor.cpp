@@ -576,10 +576,12 @@ namespace PulseForge
 				if (!Bytes) return std::unexpected(Bytes.error());
 				if (CancellationToken.stop_requested()) return std::unexpected("cancelled");
 				if (!Bytes->empty()) Result.JsonText.assign(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
-				auto Fingerprint = ComputeAssetContentFingerprintCancellable(*Bytes, CancellationToken);
+				auto RawFingerprint = ComputeAssetContentFingerprintCancellable(*Bytes, CancellationToken);
+				if (!RawFingerprint) return std::unexpected(RawFingerprint.error());
+				auto Fingerprint = ComputeAssetTextContentFingerprintCancellable(*Bytes, CancellationToken);
 				if (!Fingerprint) return std::unexpected(Fingerprint.error());
 				Result.Content = std::move(*Fingerprint);
-				AddReadReceipt(Output, ProjectRelativeKey(ProjectRoot, SourcePath), Result.FileSize, Result.Content);
+				AddReadReceipt(Output, ProjectRelativeKey(ProjectRoot, SourcePath), Result.FileSize, *RawFingerprint);
 				return Result;
 			}
 

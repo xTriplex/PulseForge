@@ -1449,7 +1449,9 @@ namespace PulseForge
 			std::vector<AssetImportInputFingerprint> Inputs;
 			Inputs.reserve(Buffers->ExternalInputs.size() + 1);
 			const std::filesystem::path SourceRelativeKey = Record->ProjectRelativePath.lexically_normal();
-			auto SourceFingerprint = ComputeAssetContentFingerprintCancellable(FileBytes, CancellationToken);
+			auto SourceFingerprint = HasExtension(*Source, ".glb")
+				? ComputeAssetContentFingerprintCancellable(FileBytes, CancellationToken)
+				: ComputeAssetTextContentFingerprintCancellable(FileBytes, CancellationToken);
 			if (!SourceFingerprint)
 				return std::unexpected(MakeError(GltfMeshImportErrorCode::Cancelled, *Source, SourceFingerprint.error()));
 			Inputs.push_back({ PathToUtf8(SourceRelativeKey), std::move(*SourceFingerprint) });

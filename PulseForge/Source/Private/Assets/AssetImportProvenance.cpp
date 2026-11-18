@@ -290,6 +290,27 @@ namespace PulseForge
 		return Builder.Finish();
 	}
 
+	std::expected<AssetContentFingerprint, std::string> ComputeAssetTextContentFingerprintCancellable(
+		std::span<const std::byte> Bytes, std::stop_token CancellationToken)
+	{
+		std::vector<std::byte> CanonicalBytes;
+		CanonicalBytes.reserve(Bytes.size());
+		for (size_t Index = 0; Index < Bytes.size(); ++Index)
+		{
+			if ((Index & 0xffff) == 0 && CancellationToken.stop_requested())
+				return std::unexpected("Asset text fingerprinting was cancelled");
+			if (Bytes[Index] == std::byte{'\r'})
+			{
+				CanonicalBytes.push_back(std::byte{'\n'});
+				if (Index + 1 < Bytes.size() && Bytes[Index + 1] == std::byte{'\n'}) ++Index;
+			}
+			else CanonicalBytes.push_back(Bytes[Index]);
+		}
+		if (CancellationToken.stop_requested())
+			return std::unexpected("Asset text fingerprinting was cancelled");
+		return ComputeAssetContentFingerprint(CanonicalBytes);
+	}
+
 	std::expected<AssetContentFingerprint, std::string> ComputeAssetImportInputFingerprint(const AssetImportRecipe& Recipe)
 	{
 		if (Recipe.SourceAsset.IsNil() || Recipe.SubresourceKey.empty() || Recipe.ImporterID.empty() || Recipe.ImporterVersion.empty() ||
