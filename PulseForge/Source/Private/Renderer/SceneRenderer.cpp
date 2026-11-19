@@ -434,6 +434,15 @@ namespace PulseForge
 		Stats.GraphMaterialResources = m_GraphMaterialResources.size();
 		Stats.GraphMaterialIdentityDescribeCalls = m_ProjectAssetCaches->GraphMaterialIdentityDescribeCalls;
 		Stats.GraphMaterialIdentityCacheHits = m_ProjectAssetCaches->GraphMaterialIdentityCacheHits;
+		Stats.GraphMaterialDxcProcessLaunches = m_GraphMaterialDxcProcessLaunches;
+		Stats.GraphMaterialShaderCreations = m_GraphMaterialShaderCreations;
+		Stats.GraphMaterialBindingLayoutCreations = m_GraphMaterialBindingLayoutCreations;
+		Stats.GraphMaterialParameterBufferCreations = m_GraphMaterialParameterBufferCreations;
+		Stats.GraphMaterialBindingSetCreations = m_GraphMaterialBindingSetCreations;
+		Stats.GraphMaterialParameterUploads = m_GraphMaterialParameterUploads;
+		Stats.GraphMaterialPipelines = m_PipelineCache->GetGraphScenePipelineCount();
+		Stats.GraphMaterialPipelineCreations = m_PipelineCache->GetGraphScenePipelineCreations();
+		Stats.GraphMaterialPipelineEvictions = m_PipelineCache->GetGraphScenePipelineEvictions();
 		for (const auto& [Recipe, Resources] : m_GraphMaterialShaderResources)
 		{
 			(void)Recipe;
@@ -1397,6 +1406,7 @@ namespace PulseForge
 						CompileRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
 						CompileRequest.ArtifactStore = &m_ProjectAssetCaches->Artifacts;
 						CompileRequest.Generation = m_ProjectAssetCaches->Generation;
+						CompileRequest.OnDxcProcessLaunched = [this] { ++m_GraphMaterialDxcProcessLaunches; };
 						const ProjectAssetCaches* const Caches = m_ProjectAssetCaches.get();
 						CompileRequest.IsGenerationCurrent = [Caches](uint64_t Generation)
 						{
@@ -1443,6 +1453,7 @@ namespace PulseForge
 						auto Shader = m_Runtime.CreateShader(ShaderDescription, Product->SpirV);
 						if (!Shader)
 							return std::unexpected(MakeResourceError("Could not create cooked graph material shader: " + Shader.error().Message));
+						++m_GraphMaterialShaderCreations;
 
 						BindingLayoutDesc GraphLayoutDescription;
 						GraphLayoutDescription.Visibility = ShaderVisibility::Fragment;
@@ -1456,6 +1467,7 @@ namespace PulseForge
 						if (!GraphLayout)
 							return std::unexpected(MakeResourceError("Could not create graph-material binding layout: " +
 							GraphLayout.error().Message));
+						++m_GraphMaterialBindingLayoutCreations;
 
 						ShaderResources = std::make_shared<GraphMaterialShaderRuntime>();
 						ShaderResources->RecipeFingerprint = Product->RecipeFingerprint;
@@ -1480,6 +1492,7 @@ namespace PulseForge
 					if (!ParameterBuffer)
 						return std::unexpected(MakeResourceError("Could not create graph-material parameter data: " +
 							ParameterBuffer.error().Message));
+					++m_GraphMaterialParameterBufferCreations;
 					auto RuntimeMaterial = std::make_unique<GraphMaterialRuntime>();
 					RuntimeMaterial->RecipeFingerprint = Product->RecipeFingerprint;
 					RuntimeMaterial->ShaderResources = std::move(ShaderResources);
@@ -1604,6 +1617,7 @@ namespace PulseForge
 			auto Bindings = m_ShadowTargetCache->CreateGraphMaterialBindings(Graph->ShaderResources->MaterialLayout,
 				*Graph->ParameterBuffer);
 			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
+			++m_GraphMaterialBindingSetCreations;
 			Graph->MaterialBindings = std::move(*Bindings);
 			Graph->PointShadowResourceGeneration = PointShadowGeneration;
 		}
@@ -1622,6 +1636,7 @@ namespace PulseForge
 			if (!Updated)
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::DrawFailed, {}, Material,
 					"Could not update graph material parameter data: " + Updated.error().Message });
+			++m_GraphMaterialParameterUploads;
 			Graph->ParameterBytes = std::move(Graph->PendingParameterBytes);
 			Graph->PendingParameterBytes.clear();
 		}

@@ -96,6 +96,34 @@ namespace
 	struct FakeBufferLifetime final
 	{
 		bool Alive = true;
+		bool CacheOwnerReleased = false;
+		size_t RetainedFrameReferences = 0;
+	};
+
+	class FakeBufferFrameReference final
+	{
+	public:
+		explicit FakeBufferFrameReference(std::shared_ptr<FakeBufferLifetime> Lifetime)
+			: m_Lifetime(std::move(Lifetime))
+		{
+			if (m_Lifetime) ++m_Lifetime->RetainedFrameReferences;
+		}
+
+		~FakeBufferFrameReference() { Release(); }
+		FakeBufferFrameReference(const FakeBufferFrameReference&) = delete;
+		FakeBufferFrameReference& operator=(const FakeBufferFrameReference&) = delete;
+
+		void Release() noexcept
+		{
+			if (!m_Lifetime) return;
+			if (m_Lifetime->RetainedFrameReferences > 0) --m_Lifetime->RetainedFrameReferences;
+			if (m_Lifetime->CacheOwnerReleased && m_Lifetime->RetainedFrameReferences == 0)
+				m_Lifetime->Alive = false;
+			m_Lifetime.reset();
+		}
+
+	private:
+		std::shared_ptr<FakeBufferLifetime> m_Lifetime;
 	};
 
 	class FakeBuffer final : public PulseForge::Buffer
@@ -105,7 +133,11 @@ namespace
 			: m_Description(std::move(Description)), m_Lifetime(std::move(Lifetime))
 		{
 		}
-		~FakeBuffer() override { m_Lifetime->Alive = false; }
+		~FakeBuffer() override
+		{
+			m_Lifetime->CacheOwnerReleased = true;
+			if (m_Lifetime->RetainedFrameReferences == 0) m_Lifetime->Alive = false;
+		}
 		[[nodiscard]] const PulseForge::BufferDesc& GetDescription() const noexcept override { return m_Description; }
 
 	private:
@@ -454,6 +486,7 @@ namespace
 		GraphPipeline = Cache.FindGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", true, true,
 			WorldTransformOrientation::Mirrored);
 		PF_CHECK(Tests, Cache.GetGraphScenePipelineCount() == 64 &&
+			Cache.GetGraphScenePipelineCreations() == 66 && Cache.GetGraphScenePipelineEvictions() == 2 &&
 			Cache.FindGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-a", true, true,
 				WorldTransformOrientation::Mirrored) != nullptr &&
 			Cache.FindGraphScenePipeline(ColorTargetFormat::RGBA16_Float, "recipe-b", false, false,
@@ -607,6 +640,7 @@ namespace
 		const Mesh* OldMesh = &Original->get();
 		const std::weak_ptr<FakeBufferLifetime> OldVertexBuffer = Runtime.BufferLifetimes[0];
 		PF_CHECK(Tests, !OldVertexBuffer.expired());
+		FakeBufferFrameReference OldPreparedFrameBuffer(OldVertexBuffer.lock());
 
 		PF_CHECK(Tests, WriteTinyTriangleGltf(MeshPath, 2.0f));
 		Meshes.SetSessionKey("mesh-frame-2");
@@ -626,7 +660,25 @@ namespace
 		PF_CHECK(Tests, Meshes.AdvancePending());
 		auto NextFrame = Meshes.GetOrLoad(Metadata->ID);
 		PF_CHECK(Tests, NextFrame.has_value());
+		const AssetCacheInventoryStats ReplacedMeshInventory = Meshes.GetInventoryStats();
+		PF_CHECK(Tests, ReplacedMeshInventory.Entries == 1 && ReplacedMeshInventory.PublishedResources == 1 &&
+			ReplacedMeshInventory.PendingResources == 0);
+		PF_CHECK(Tests, !OldVertexBuffer.expired() && OldVertexBuffer.lock()->Alive &&
+			OldVertexBuffer.lock()->CacheOwnerReleased && OldVertexBuffer.lock()->RetainedFrameReferences == 1);
+		OldPreparedFrameBuffer.Release();
 		PF_CHECK(Tests, OldVertexBuffer.expired());
+
+		const std::weak_ptr<FakeBufferLifetime> ProjectFrameBuffer = Runtime.BufferLifetimes.back();
+		FakeBufferFrameReference RetainedProjectFrame(ProjectFrameBuffer.lock());
+		Meshes.Clear();
+		const AssetCacheInventoryStats ClearedMeshInventory = Meshes.GetInventoryStats();
+		PF_CHECK(Tests, ClearedMeshInventory.Entries == 0 && ClearedMeshInventory.PublishedResources == 0 &&
+			ClearedMeshInventory.LogicalPayloadBytes == 0);
+		PF_CHECK(Tests, !ProjectFrameBuffer.expired() && ProjectFrameBuffer.lock()->Alive &&
+			ProjectFrameBuffer.lock()->CacheOwnerReleased && ProjectFrameBuffer.lock()->RetainedFrameReferences == 1);
+		Runtime.LastBufferLifetime.reset(); // The fake device must not retain the cache-owned resource beyond Clear().
+		RetainedProjectFrame.Release();
+		PF_CHECK(Tests, ProjectFrameBuffer.expired());
 		Preparation.Shutdown();
 	}
 

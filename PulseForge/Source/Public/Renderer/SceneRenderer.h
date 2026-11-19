@@ -361,6 +361,12 @@ namespace PulseForge
 		std::unordered_map<UUID, const GraphMaterialRuntime*, UUIDHash> m_PreparedGraphMaterials;
 		std::unordered_map<AssetID, std::unique_ptr<GraphMaterialRuntime>, UUIDHash> m_GraphMaterialResources;
 		std::unordered_map<std::string, std::weak_ptr<GraphMaterialShaderRuntime>> m_GraphMaterialShaderResources;
+		uint64_t m_GraphMaterialDxcProcessLaunches = 0;
+		uint64_t m_GraphMaterialShaderCreations = 0;
+		uint64_t m_GraphMaterialBindingLayoutCreations = 0;
+		uint64_t m_GraphMaterialParameterBufferCreations = 0;
+		uint64_t m_GraphMaterialBindingSetCreations = 0;
+		uint64_t m_GraphMaterialParameterUploads = 0;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;

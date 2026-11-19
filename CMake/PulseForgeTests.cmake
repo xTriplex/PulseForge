@@ -570,17 +570,14 @@ if(BUILD_TESTING)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
 	endif()
-	if(WIN32 AND PULSEFORGE_BUILD_EDITOR AND TARGET PulseForgeExport AND TARGET PulseForgeCookedGame AND
+	if(PULSEFORGE_BUILD_EDITOR AND TARGET PulseForgeExport AND TARGET PulseForgeCookedGame AND
 		TARGET PulseForgeCookedPlayerTemplate)
 		find_package(Python3 COMPONENTS Interpreter QUIET)
 		if(Python3_Interpreter_FOUND)
-			add_test(NAME PulseForge.RuntimeUI.ExportedPackageInteraction
+			add_test(NAME PulseForge.G29ReferenceGame.PackageHarness
 				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
-					--export "$<TARGET_FILE:PulseForgeExport>"
-				--template-root "${PF_COOKED_PLAYER_TEMPLATE_ROOT}"
-					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
-					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
-			set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+					--self-test)
+			set_tests_properties(PulseForge.G29ReferenceGame.PackageHarness PROPERTIES RUN_SERIAL TRUE TIMEOUT 30)
 			add_test(NAME PulseForge.G29ReferenceGame.ExportedPackageInteraction
 				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
 					--scenario g29
@@ -590,13 +587,22 @@ if(BUILD_TESTING)
 					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/G29ReferenceGame/G29ReferenceGame.pfproj")
 			set_tests_properties(PulseForge.G29ReferenceGame.ExportedPackageInteraction
 				PROPERTIES RUN_SERIAL TRUE TIMEOUT 360 CONFIGURATIONS Debug)
-			add_test(NAME PulseForge.AudioMixing.ExportedPackageInteraction
-				COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/AudioMixingPackageAcceptance.py"
+			if(WIN32)
+				add_test(NAME PulseForge.RuntimeUI.ExportedPackageInteraction
+					COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/RuntimeUIPackageAcceptance.py"
+					--export "$<TARGET_FILE:PulseForgeExport>"
+				--template-root "${PF_COOKED_PLAYER_TEMPLATE_ROOT}"
+					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
+					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/RuntimeUI/RuntimeUI.pfproj")
+				set_tests_properties(PulseForge.RuntimeUI.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+				add_test(NAME PulseForge.AudioMixing.ExportedPackageInteraction
+					COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Platform/AudioMixingPackageAcceptance.py"
 					--export "$<TARGET_FILE:PulseForgeExport>"
 				--template-root "${PF_COOKED_PLAYER_TEMPLATE_ROOT}"
 					--template-descriptor "$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
 					--source-project "${CMAKE_CURRENT_SOURCE_DIR}/Samples/AudioMixing/AudioMixing.pfproj")
-			set_tests_properties(PulseForge.AudioMixing.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+				set_tests_properties(PulseForge.AudioMixing.ExportedPackageInteraction PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+			endif()
 			add_dependencies(PulseForgeTests PulseForgeExport PulseForgeCookedPlayerTemplate)
 		else()
 			message(STATUS "Runtime UI exported-package acceptance requires a runnable Python 3 interpreter; test is not registered")

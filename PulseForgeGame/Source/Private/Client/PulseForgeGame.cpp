@@ -1063,8 +1063,14 @@ private:
 				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::AwaitGameplay;
 			break;
 		case G29PackageAcceptanceStage::GameplayActionPressed:
-			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Pressed))
+			if (const auto ScoreBeforePress = ReadRuntimeUIPackageScore(); ScoreBeforePress &&
+				QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Pressed))
+			{
+				// Sample in the same update immediately before input enters the authored action map.
+				// Timer ticks before this boundary are excluded; one tick delivered with Space may add one.
+				m_G29PackageScoreBeforeAction = *ScoreBeforePress;
 				m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::GameplayActionReleasePending;
+			}
 			break;
 		case G29PackageAcceptanceStage::GameplayActionReleasePending:
 			if (QueueRuntimeUIPackageKey(Application, Window, PulseForge::InputKey::Space, PulseForge::InputEventKind::Released))
@@ -1103,7 +1109,6 @@ private:
 				? m_Session->GetActiveScene()->GetRuntimeSkeletalPose(Rig->GetUUID()) : std::nullopt;
 			if (!Score || !Pose || Pose->empty()) return;
 			m_G29PackageInitialPose = *Pose;
-			m_G29PackageScoreBeforeAction = *Score;
 			m_G29PackageAcceptanceStage = G29PackageAcceptanceStage::GameplayActionPressed;
 			PF_INFO("PULSEFORGE_G29_PACKAGE_GAMEPLAY=PASS; Menu → Start activated the exported gameplay scene");
 		}

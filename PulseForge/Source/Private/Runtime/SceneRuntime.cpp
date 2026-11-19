@@ -68,6 +68,8 @@ namespace PulseForge
 		constexpr size_t MaximumRuntimeSkinnedVerticesPerFrame = 2'000'000;
 		constexpr size_t MaximumRuntimeSkeletalNodes = 4096;
 		constexpr size_t MaximumRuntimeSkeletalProductBytes = 512u * 1024u * 1024u;
+		constexpr size_t MaximumPendingSkeletalAnimationEvents = 1024;
+		constexpr size_t MaximumSkeletalAnimationLoopSegmentsPerAdvance = 64;
 
 		[[nodiscard]] size_t EstimateSkeletalProductBytes(const ImportedGltfSkeletalMesh& Product) noexcept
 		{
@@ -96,6 +98,12 @@ namespace PulseForge
 			{
 				Add(Clip.StableKey.capacity(), sizeof(char));
 				Add(Clip.Name.capacity(), sizeof(char));
+				Add(Clip.EventMarkers.capacity(), sizeof(ImportedGltfAnimationEventMarker));
+				for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+				{
+					Add(Marker.StableKey.capacity(), sizeof(char));
+					Add(Marker.Name.capacity(), sizeof(char));
+				}
 				Add(Clip.Channels.capacity(), sizeof(ImportedGltfAnimationChannel));
 				for (const ImportedGltfAnimationChannel& Channel : Clip.Channels)
 				{
@@ -347,6 +355,7 @@ namespace PulseForge
 		std::optional<RuntimeUICanvasState> RuntimeUI;
 		std::unordered_map<UUID, SkeletalInstanceState, UUIDHash> SkeletalInstances;
 		std::unordered_map<std::string, std::shared_ptr<const CachedSkeletalProduct>> SkeletalProducts;
+		std::deque<SkeletalAnimationEvent> PendingSkeletalAnimationEvents;
 		size_t SkeletalProductBytes = 0;
 		std::unordered_map<UUID, BlueprintEventStates, UUIDHash> BlueprintEvents;
 		std::unordered_map<UUID, std::unordered_map<AssetID, BlueprintInstanceState, UUIDHash>, UUIDHash> BlueprintInstances;
@@ -421,6 +430,8 @@ namespace PulseForge
 					(Found->second.BoundEntity != EntityValue || Found->second.SourceAsset != Component.MeshAsset ||
 					Found->second.ProductKey != *Component.SkeletalProductKey))
 				{
+					std::erase_if(PendingSkeletalAnimationEvents, [&](const SkeletalAnimationEvent& Event)
+						{ return Event.Target == EntityValue; });
 					SkeletalInstances.erase(Found);
 					Found = SkeletalInstances.end();
 				}
@@ -484,6 +495,8 @@ namespace PulseForge
 				const std::string AuthoredClipKey = Component.AnimationClipKey.value_or(std::string{});
 				if (State.AuthoredClipKey != AuthoredClipKey)
 				{
+					std::erase_if(PendingSkeletalAnimationEvents, [&](const SkeletalAnimationEvent& Event)
+						{ return Event.Target == EntityValue; });
 					State.AuthoredClipKey = AuthoredClipKey;
 					State.OverrideClipKey.reset();
 					State.ClipKey.clear();
@@ -504,6 +517,13 @@ namespace PulseForge
 					if (!State.OverrideClipKey) State.Playback.CurrentClock.Looping = Component.AnimationLooping;
 					State.Playback.CurrentClock.Paused = State.Paused;
 					State.Playback.TargetClock.Paused = State.Paused;
+					const bool WasTransitioning = !State.Playback.TargetClipKey.empty();
+					const std::string PreviousEventClipKey = WasTransitioning
+						? State.Playback.TargetClipKey : State.Playback.CurrentClipKey;
+					const GltfAnimationPlaybackClock PreviousEventClock = WasTransitioning
+						? State.Playback.TargetClock : State.Playback.CurrentClock;
+					const float PreviousEventTime = PreviousEventClock.TimeSeconds;
+					const float EventRawDelta = PreviousEventClock.Paused ? 0.0f : DeltaSeconds * Component.AnimationSpeed;
 					if (auto Speed = SetGltfAnimationPlaybackSpeed(State.Playback.CurrentClock, Component.AnimationSpeed); !Speed)
 						return std::unexpected(ProductContext + "could not set animation speed: " + Speed.error().Message);
 					if (!State.Playback.TargetClipKey.empty())
@@ -513,6 +533,20 @@ namespace PulseForge
 						State.Playback, State.Product->Mesh, *State.RestPose, DeltaSeconds, {},
 						&State.Product->ValidatedClips);
 					if (!Advanced) return std::unexpected(ProductContext + "could not advance animation: " + Advanced.error().Message);
+					const bool IsTransitioning = !State.Playback.TargetClipKey.empty();
+					const std::string& EventClipKey = IsTransitioning
+						? State.Playback.TargetClipKey : State.Playback.CurrentClipKey;
+					const GltfAnimationPlaybackClock& EventClock = IsTransitioning
+						? State.Playback.TargetClock : State.Playback.CurrentClock;
+					if (EventClipKey == PreviousEventClipKey)
+					{
+						const auto EventClip = std::find_if(State.Product->Mesh.Animations.begin(), State.Product->Mesh.Animations.end(),
+							[&](const ImportedGltfAnimationClip& Candidate) { return Candidate.StableKey == EventClipKey; });
+						if (EventClip != State.Product->Mesh.Animations.end())
+							CollectCrossedAnimationEvents(PendingSkeletalAnimationEvents, EntityValue, Component.MeshAsset,
+								*Component.SkeletalProductKey, *EventClip, PreviousEventTime,
+								EventRawDelta, EventClock.Looping, SessionGeneration);
+					}
 					Pose = std::move(*Advanced);
 				}
 				else
@@ -741,6 +775,93 @@ namespace PulseForge
 						BlueprintProgramErrorCode::HostRejectedDeferredCall, Pending.Request.SourceNode,
 						"Scene runtime could not apply a deferred Blueprint entity spawn");
 				}
+			}
+		}
+
+		void CollectCrossedAnimationEvents(
+			std::deque<SkeletalAnimationEvent>& Queue,
+			const Entity& Target,
+			const AssetID& Asset,
+			std::string_view ProductKey,
+			const ImportedGltfAnimationClip& Clip,
+			float PreviousTime,
+			float RawDelta,
+			bool Looping,
+			uint64_t SessionGeneration)
+		{
+			if (Clip.EventMarkers.empty() || Clip.Duration <= 0.0f || RawDelta == 0.0f || !std::isfinite(RawDelta)) return;
+			const bool Forward = RawDelta > 0.0f;
+			double Remaining = std::abs(static_cast<double>(RawDelta));
+			float Position = PreviousTime;
+			size_t Segments = 0;
+			while (Remaining > 0.0 && Segments++ < MaximumSkeletalAnimationLoopSegmentsPerAdvance)
+			{
+				float End = Forward ? Clip.Duration : 0.0f;
+				if (!Looping)
+					End = Forward ? std::min(Clip.Duration, static_cast<float>(Position + Remaining))
+						: std::max(0.0f, static_cast<float>(Position - Remaining));
+				else if (Forward)
+					End = std::min(Clip.Duration, static_cast<float>(Position + Remaining));
+				else
+					End = std::max(0.0f, static_cast<float>(Position - Remaining));
+
+				std::vector<const ImportedGltfAnimationEventMarker*> Crossed;
+				for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+				{
+					const bool IsCrossed = Forward ? Marker.TimeSeconds > Position && Marker.TimeSeconds <= End
+						: Marker.TimeSeconds < Position && Marker.TimeSeconds >= End;
+					if (IsCrossed) Crossed.push_back(&Marker);
+				}
+				std::sort(Crossed.begin(), Crossed.end(), [Forward](const auto* First, const auto* Second)
+				{
+					return Forward ? First->TimeSeconds < Second->TimeSeconds : First->TimeSeconds > Second->TimeSeconds;
+				});
+				for (const ImportedGltfAnimationEventMarker* Marker : Crossed)
+				{
+					if (Queue.size() >= MaximumPendingSkeletalAnimationEvents) return;
+					Queue.push_back({ Target, Asset, std::string(ProductKey), Clip.StableKey, Marker->StableKey,
+						Marker->Name, Marker->TimeSeconds, SessionGeneration });
+				}
+
+				Remaining -= std::abs(static_cast<double>(End) - Position);
+				if (Remaining <= 0.0)
+				{
+					if (Looping && Forward && End >= Clip.Duration)
+						for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+							if (Marker.TimeSeconds == 0.0f && Queue.size() < MaximumPendingSkeletalAnimationEvents)
+								Queue.push_back({ Target, Asset, std::string(ProductKey), Clip.StableKey, Marker.StableKey,
+									Marker.Name, Marker.TimeSeconds, SessionGeneration });
+					if (Looping && !Forward && End <= 0.0f)
+						for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+							if (Marker.TimeSeconds == Clip.Duration && Queue.size() < MaximumPendingSkeletalAnimationEvents)
+								Queue.push_back({ Target, Asset, std::string(ProductKey), Clip.StableKey, Marker.StableKey,
+									Marker.Name, Marker.TimeSeconds, SessionGeneration });
+					break;
+				}
+				if (!Looping) break;
+				if (Forward && End >= Clip.Duration)
+				{
+					Position = 0.0f;
+					for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+						if (Marker.TimeSeconds == 0.0f)
+						{
+							if (Queue.size() >= MaximumPendingSkeletalAnimationEvents) return;
+							Queue.push_back({ Target, Asset, std::string(ProductKey), Clip.StableKey, Marker.StableKey,
+								Marker.Name, Marker.TimeSeconds, SessionGeneration });
+						}
+				}
+				else if (!Forward && End <= 0.0f)
+				{
+					Position = Clip.Duration;
+					for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+						if (Marker.TimeSeconds == Clip.Duration)
+						{
+							if (Queue.size() >= MaximumPendingSkeletalAnimationEvents) return;
+							Queue.push_back({ Target, Asset, std::string(ProductKey), Clip.StableKey, Marker.StableKey,
+								Marker.Name, Marker.TimeSeconds, SessionGeneration });
+						}
+				}
+				else break;
 			}
 		}
 
@@ -1620,6 +1741,7 @@ namespace PulseForge
 				m_Impl->Source->ClearRuntimeSkeletalPoses();
 			m_Impl->SkeletalInstances.clear();
 			m_Impl->SkeletalProducts.clear();
+			m_Impl->PendingSkeletalAnimationEvents.clear();
 			m_Impl->SkeletalProductBytes = 0;
 			m_Impl->PendingContactEvents.clear();
 			m_Impl->PendingBlueprintPhysicsForces.clear();
@@ -1692,6 +1814,8 @@ namespace PulseForge
 				"Could not play skeletal animation: " + Played.error().Message));
 		Candidate.CurrentClock.Paused = State.Paused;
 		State.Playback = std::move(Candidate);
+		std::erase_if(m_Impl->PendingSkeletalAnimationEvents,
+			[&](const SkeletalAnimationEvent& Event) { return Event.Target == Target; });
 		State.ClipKey = ClipKey;
 		State.OverrideClipKey = std::string(ClipKey);
 		return {};
@@ -1773,11 +1897,65 @@ namespace PulseForge
 			ClipKey, DurationSeconds, Looping); !Transitioned)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
 				"Could not transition skeletal animation: " + Transitioned.error().Message));
+		std::erase_if(m_Impl->PendingSkeletalAnimationEvents,
+			[&](const SkeletalAnimationEvent& Event) { return Event.Target == Target; });
 		State.Playback.CurrentClock.Paused = State.Paused;
 		State.Playback.TargetClock.Paused = State.Paused;
 		State.ClipKey = ClipKey;
 		State.OverrideClipKey = std::string(ClipKey);
 		return {};
+	}
+
+	std::optional<SkeletalAnimationPlaybackInfo> SceneRuntime::GetSkeletalAnimationPlayback(const Entity& Target) const
+	{
+		if (!m_Impl || !m_Impl->Source || !Target.IsValid()) return std::nullopt;
+		const auto Current = m_Impl->Source->FindEntity(Target.GetUUID());
+		const auto Found = m_Impl->SkeletalInstances.find(Target.GetUUID());
+		if (!Current || *Current != Target || Found == m_Impl->SkeletalInstances.end() || Found->second.BoundEntity != Target ||
+			!Found->second.Product)
+			return std::nullopt;
+
+		const Impl::SkeletalInstanceState& State = Found->second;
+		SkeletalAnimationPlaybackInfo Info;
+		Info.SourceAsset = State.SourceAsset;
+		Info.ProductKey = State.ProductKey;
+		Info.CurrentClipKey = State.Playback.CurrentClipKey;
+		Info.TargetClipKey = State.Playback.TargetClipKey;
+		Info.TimeSeconds = State.Playback.CurrentClock.TimeSeconds;
+		Info.Looping = State.Playback.CurrentClock.Looping;
+		Info.Paused = State.Paused;
+		Info.Crossfading = State.Playback.Crossfade.Active;
+		if (Info.Crossfading && State.Playback.Crossfade.DurationSeconds > 0.0f)
+			Info.CrossfadeProgress = std::clamp(State.Playback.Crossfade.ElapsedSeconds / State.Playback.Crossfade.DurationSeconds, 0.0f, 1.0f);
+		Info.Clips.reserve(State.Product->Mesh.Animations.size());
+		for (const ImportedGltfAnimationClip& Clip : State.Product->Mesh.Animations)
+		{
+			Info.Clips.push_back({ Clip.StableKey, Clip.Name, Clip.Duration });
+			if (Clip.StableKey == Info.CurrentClipKey) Info.DurationSeconds = Clip.Duration;
+		}
+		if (Info.CurrentClipKey.empty() && !State.Product->Mesh.Animations.empty())
+		{
+			Info.CurrentClipKey = State.Product->Mesh.Animations.front().StableKey;
+			Info.DurationSeconds = State.Product->Mesh.Animations.front().Duration;
+		}
+		return Info;
+	}
+
+	std::vector<SkeletalAnimationEvent> SceneRuntime::TakeSkeletalAnimationEvents()
+	{
+		std::vector<SkeletalAnimationEvent> Events;
+		if (!m_Impl || !m_Impl->Source) return Events;
+		Events.reserve(m_Impl->PendingSkeletalAnimationEvents.size());
+		while (!m_Impl->PendingSkeletalAnimationEvents.empty())
+		{
+			SkeletalAnimationEvent Event = std::move(m_Impl->PendingSkeletalAnimationEvents.front());
+			m_Impl->PendingSkeletalAnimationEvents.pop_front();
+			if (Event.SessionGeneration != m_Impl->SessionGeneration || !Event.Target.IsValid()) continue;
+			const auto Current = m_Impl->Source->FindEntity(Event.Target.GetUUID());
+			if (!Current || *Current != Event.Target) continue;
+			Events.push_back(std::move(Event));
+		}
+		return Events;
 	}
 
 	bool SceneRuntime::HasRuntimeUI() const noexcept

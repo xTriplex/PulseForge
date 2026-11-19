@@ -2173,11 +2173,13 @@ namespace PulseForge
 				constexpr size_t MaximumAnimationCount = 256;
 				constexpr size_t MaximumAnimationChannels = 4096;
 				constexpr size_t MaximumAnimationKeys = 1'000'000;
+				constexpr size_t MaximumAnimationEvents = 4096;
 				if (!Animations->is_array() || Animations->size() > MaximumAnimationCount)
 					return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
 						"Animation array exceeds the supported 256-clip limit"));
 				size_t TotalChannels = 0;
 				size_t TotalKeys = 0;
+				size_t TotalEvents = 0;
 				std::set<std::string> ClipKeys;
 				for (const Json& Animation : *Animations)
 				{
@@ -2284,6 +2286,49 @@ namespace PulseForge
 					if (!ClipKeys.insert(Clip.StableKey).second)
 						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
 							"Animation clip identity is ambiguous; names and target channels must be unique"));
+					if (const Json* Extras = FindField(Animation, "extras"); Extras != nullptr)
+					{
+						if (!Extras->is_object())
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+								"Animation extras must be an object when present"));
+						if (const Json* Events = FindField(*Extras, "pulseforgeEvents"); Events != nullptr)
+						{
+							constexpr size_t MaximumAnimationEventsPerClip = 256;
+							if (!Events->is_array() || Events->size() > MaximumAnimationEventsPerClip)
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
+									"Animation extras pulseforgeEvents must contain at most 256 markers"));
+							if (Events->size() > MaximumAnimationEvents - TotalEvents)
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::ResourceLimitExceeded, SourcePath,
+									"Skeletal source exceeds the 4096 animation marker limit"));
+							TotalEvents += Events->size();
+							std::set<std::string> EventKeys;
+							for (const Json& Event : *Events)
+							{
+								const Json* KeyValue = FindField(Event, "key");
+								const Json* NameValue = FindField(Event, "name");
+								const Json* TimeValue = FindField(Event, "time");
+								if (!Event.is_object() || KeyValue == nullptr || !KeyValue->is_string() ||
+									NameValue == nullptr || !NameValue->is_string() || TimeValue == nullptr ||
+									!TimeValue->is_number())
+									return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+										"Each pulseforgeEvents entry requires string key/name and numeric time fields"));
+								const std::string Key = KeyValue->get<std::string>();
+								const std::string EventName = NameValue->get<std::string>();
+								const double TimeValueSeconds = TimeValue->get<double>();
+								if (Key.empty() || Key.size() > 128 || EventName.empty() || EventName.size() > 128 ||
+									!std::isfinite(TimeValueSeconds) || TimeValueSeconds < 0.0 || TimeValueSeconds > Clip.Duration ||
+									!EventKeys.insert(Key).second)
+									return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidDocument, SourcePath,
+										"pulseforgeEvents keys must be unique and marker names/times must be bounded by the clip"));
+								AssetFingerprintBuilder EventKeyBuilder("PulseForge.GltfAnimationEventMarker.v1");
+								EventKeyBuilder.UpdateText("asset", Asset.ToString());
+								EventKeyBuilder.UpdateText("clip", Clip.StableKey);
+								EventKeyBuilder.UpdateText("marker", Key);
+								Clip.EventMarkers.push_back({ "event/" + EventKeyBuilder.Finish().DigestHex,
+									EventName, static_cast<float>(TimeValueSeconds) });
+							}
+						}
+					}
 					Imported.Animations.push_back(std::move(Clip));
 				}
 			}
@@ -2292,6 +2337,9 @@ namespace PulseForge
 			Product.Mesh = std::move(Imported);
 			Product.Recipe = std::move(StaticProduct->Recipe);
 			Product.Recipe.ImporterID = "PulseForge.SkeletalGltfMeshImporter";
+			// Marker extras are optional and the v3 product decoder accepts the previous
+			// marker-free payload. Keep the successful source recipe identity stable so
+			// shipped receipts remain usable; changed source bytes still select a new key.
 			Product.Recipe.ImporterVersion = "1";
 			Product.Recipe.OutputSchemaVersion = 1;
 			const std::string PrimitiveJson = Primitive.dump();
@@ -2315,6 +2363,15 @@ namespace PulseForge
 			{
 				ResultBuilder.UpdateText("node-key", Node.StableKey);
 				ResultBuilder.UpdateBytes("node-transform", std::as_bytes(std::span(Node.LocalBindMatrix)));
+			}
+			for (const ImportedGltfAnimationClip& Clip : Product.Mesh.Animations)
+			{
+				for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+				{
+					ResultBuilder.UpdateText("animation-event-key", Marker.StableKey);
+					ResultBuilder.UpdateText("animation-event-name", Marker.Name);
+					ResultBuilder.UpdateBytes("animation-event-time", std::as_bytes(std::span(&Marker.TimeSeconds, 1)));
+				}
 			}
 			for (const GltfVertexInfluences& Influence : Product.Mesh.VertexInfluences)
 			{

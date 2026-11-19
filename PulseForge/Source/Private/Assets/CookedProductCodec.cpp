@@ -287,6 +287,8 @@ namespace PulseForge
 		constexpr size_t MaximumClips = 256;
 		constexpr size_t MaximumChannels = 4096;
 		constexpr size_t MaximumKeys = 1'000'000;
+		constexpr size_t MaximumEventsPerClip = 256;
+		constexpr size_t MaximumEventsPerProduct = 4096;
 		if (CancellationToken.stop_requested()) return std::unexpected("Skeletal mesh encoding cancelled");
 		auto Geometry = EncodeMeshProduct(Mesh.Geometry, CancellationToken);
 		if (!Geometry) return std::unexpected("Skeletal geometry is invalid: " + Geometry.error());
@@ -353,15 +355,29 @@ namespace PulseForge
 		if (!AddRequiredBytes(4ull + Mesh.JointNodeIndices.size() * 68ull) ||
 			!AddRequiredBytes(4ull + Mesh.VertexInfluences.size() * 32ull) || !AddRequiredBytes(4ull))
 			return std::unexpected("Skeletal mesh product exceeds artifact byte limit");
+		size_t TotalEvents = 0;
 		for (const ImportedGltfAnimationClip& Clip : Mesh.Animations)
 		{
-			if (Clip.Channels.size() > MaximumChannels || !AddRequiredBytes(4ull + Clip.StableKey.size() +
-				4ull + Clip.Name.size() + 4ull + 4ull))
+			if (Clip.Channels.size() > MaximumChannels || Clip.EventMarkers.size() > MaximumEventsPerClip ||
+				Clip.EventMarkers.size() > MaximumEventsPerProduct - TotalEvents ||
+				!AddRequiredBytes(4ull + Clip.StableKey.size() + 4ull + Clip.Name.size() + 4ull + 4ull + 4ull))
 				return std::unexpected("Skeletal animation product exceeds artifact byte limit");
+			TotalEvents += Clip.EventMarkers.size();
 			for (const ImportedGltfAnimationChannel& Channel : Clip.Channels)
 				if (Channel.Times.size() > MaximumKeys ||
 					!AddRequiredBytes(4ull + Channel.TargetNodeKey.size() + 4ull + 4ull + 4ull + Channel.Times.size() * 20ull))
 					return std::unexpected("Skeletal animation product exceeds artifact byte limit");
+			std::vector<std::string_view> MarkerKeys;
+			MarkerKeys.reserve(Clip.EventMarkers.size());
+			for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+			{
+				if (Marker.StableKey.empty() || Marker.StableKey.size() > 256 || Marker.Name.empty() || Marker.Name.size() > 256 ||
+					!std::isfinite(Marker.TimeSeconds) || Marker.TimeSeconds < 0.0f || Marker.TimeSeconds > Clip.Duration ||
+					std::find(MarkerKeys.begin(), MarkerKeys.end(), Marker.StableKey) != MarkerKeys.end() ||
+					!AddRequiredBytes(4ull + Marker.StableKey.size() + 4ull + Marker.Name.size() + 4ull))
+					return std::unexpected("Animation event marker identity, time, or bounds are invalid");
+				MarkerKeys.push_back(Marker.StableKey);
+			}
 		}
 
 		std::vector<std::byte> Output;
@@ -443,6 +459,13 @@ namespace PulseForge
 					PreviousTime = Time;
 				}
 			}
+			AppendU32(Output, static_cast<uint32_t>(Clip.EventMarkers.size()));
+			for (const ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+			{
+				AppendString(Output, Marker.StableKey);
+				AppendString(Output, Marker.Name);
+				AppendFloat(Output, Marker.TimeSeconds);
+			}
 		}
 		if (Output.size() > MaximumProductBytes) return std::unexpected("Skeletal mesh product exceeds artifact byte limit");
 		return Output;
@@ -455,6 +478,8 @@ namespace PulseForge
 		constexpr size_t MaximumClips = 256;
 		constexpr size_t MaximumChannels = 4096;
 		constexpr size_t MaximumKeys = 1'000'000;
+		constexpr size_t MaximumEventsPerClip = 256;
+		constexpr size_t MaximumEventsPerProduct = 4096;
 		if (Input.size() < 16 || Input.size() > MaximumProductBytes || Input[0] != std::byte{'P'} ||
 			Input[1] != std::byte{'F'} || Input[2] != std::byte{'S'} || Input[3] != std::byte{'K'})
 			return std::unexpected("Skeletal mesh artifact has invalid magic or size");
@@ -462,7 +487,7 @@ namespace PulseForge
 		{
 		size_t Offset = 4;
 		uint32_t Version = 0, GeometrySize = 0;
-		if (!ReadU32(Input, Offset, Version) || Version != SkeletalMeshProductSchemaVersion ||
+		if (!ReadU32(Input, Offset, Version) || (Version != 2 && Version != SkeletalMeshProductSchemaVersion) ||
 			!ReadU32(Input, Offset, GeometrySize) || GeometrySize > Input.size() - Offset)
 			return std::unexpected("Skeletal mesh artifact schema or geometry length is invalid");
 		auto Geometry = DecodeMeshProduct(Input.subspan(Offset, GeometrySize));
@@ -554,6 +579,7 @@ namespace PulseForge
 			return std::unexpected("Animation clip count exceeds schema bounds");
 		Mesh.Animations.resize(ClipCount);
 		size_t TotalChannels = 0, TotalKeys = 0;
+		size_t TotalEvents = 0;
 		for (ImportedGltfAnimationClip& Clip : Mesh.Animations)
 		{
 			uint32_t ChannelCount = 0;
@@ -601,6 +627,27 @@ namespace PulseForge
 							return std::unexpected("Animation rotation key is not normalized");
 					}
 					PreviousTime = Time;
+				}
+			}
+			if (Version >= 3)
+			{
+				uint32_t EventCount = 0;
+				if (!ReadU32(Input, Offset, EventCount) || EventCount > MaximumEventsPerClip ||
+					EventCount > MaximumEventsPerProduct - TotalEvents)
+					return std::unexpected("Animation event marker count exceeds schema bounds");
+				TotalEvents += EventCount;
+				Clip.EventMarkers.resize(EventCount);
+				std::vector<std::string_view> MarkerKeys;
+				MarkerKeys.reserve(EventCount);
+				for (ImportedGltfAnimationEventMarker& Marker : Clip.EventMarkers)
+				{
+					if (!ReadString(Input, Offset, Marker.StableKey, 256) || Marker.StableKey.empty() ||
+						!ReadString(Input, Offset, Marker.Name, 256) || Marker.Name.empty() ||
+						!ReadFloat(Input, Offset, Marker.TimeSeconds) || Marker.TimeSeconds < 0.0f ||
+						Marker.TimeSeconds > Clip.Duration ||
+						std::find(MarkerKeys.begin(), MarkerKeys.end(), Marker.StableKey) != MarkerKeys.end())
+						return std::unexpected("Animation event marker identity or time is invalid");
+					MarkerKeys.push_back(Marker.StableKey);
 				}
 			}
 		}

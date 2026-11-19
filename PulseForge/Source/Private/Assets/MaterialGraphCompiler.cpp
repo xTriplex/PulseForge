@@ -511,6 +511,7 @@ namespace PulseForge
 			CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, nullptr, Temporary.Root.c_str(), &Startup, &Process);
 		CloseHandle(Log);
 		if (!Started) return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerUnavailable, "Could not start configured DXC"));
+		if (Request.OnDxcProcessLaunched) Request.OnDxcProcessLaunched();
 		bool TimedOut = false;
 		bool Cancelled = false;
 		bool Stale = false;
@@ -577,6 +578,7 @@ namespace PulseForge
 		pid_t Child = -1;
 		const int SpawnError = posix_spawn(&Child, Executable.c_str(), &Actions, nullptr, Arguments.data(), environ);
 		if (SpawnError != 0) return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerUnavailable, "Could not start configured DXC"));
+		if (Request.OnDxcProcessLaunched) Request.OnDxcProcessLaunched();
 		bool TimedOut = false;
 		bool Cancelled = false;
 		bool Stale = false;

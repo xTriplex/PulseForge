@@ -102,6 +102,8 @@ namespace
 	{
 		InitialFrame,
 		SourceGraphMaterialFrame,
+		GraphMaterialParameterFrame,
+		GraphMaterialPresentationFrame,
 		CookedGraphMaterialFrame,
 		GraphMaterialFrame,
 		SkinnedPoseFrame,
@@ -339,6 +341,96 @@ namespace
 						GraphMaterialStats.GraphMaterialIdentityDescribeCalls, GraphMaterialStats.GraphMaterialIdentityCacheHits);
 					try
 					{
+						m_GraphParameterEditCount = 0;
+						UpdateSavedGraphParameterForReuse();
+						m_Phase = ValidationPhase::GraphMaterialParameterFrame;
+					}
+					catch (const std::exception& Exception)
+					{
+						Fail(std::string("Could not prepare the saved graph parameter-reuse phase: ") + Exception.what());
+					}
+					return;
+				}
+				if (m_Phase == ValidationPhase::GraphMaterialParameterFrame)
+				{
+					const auto Stats = m_SceneRenderer->GetResourceCacheStats();
+					const bool ResourcesReused = Stats.GraphMaterialDxcProcessLaunches == m_GraphParameterBaselineStats.GraphMaterialDxcProcessLaunches &&
+						Stats.GraphMaterialShaderCreations == m_GraphParameterBaselineStats.GraphMaterialShaderCreations &&
+						Stats.GraphMaterialBindingLayoutCreations == m_GraphParameterBaselineStats.GraphMaterialBindingLayoutCreations &&
+						Stats.GraphMaterialParameterBufferCreations == m_GraphParameterBaselineStats.GraphMaterialParameterBufferCreations &&
+						Stats.GraphMaterialBindingSetCreations == m_GraphParameterBaselineStats.GraphMaterialBindingSetCreations &&
+						Stats.GraphMaterialPipelineCreations == m_GraphParameterBaselineStats.GraphMaterialPipelineCreations &&
+						Stats.GraphMaterialParameterUploads == m_GraphParameterBaselineStats.GraphMaterialParameterUploads + 1;
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_SourceGraphReadback, m_CapturedColor);
+					if (!ResourcesReused || ChangedPixels < 16)
+					{
+						Fail("A saved scalar edit did not update the visible graph material through its existing GPU resources "
+							"(dxc=" + std::to_string(Stats.GraphMaterialDxcProcessLaunches) + ", uploads=" +
+							std::to_string(Stats.GraphMaterialParameterUploads) + ", changed_pixels=" + std::to_string(ChangedPixels) + ")");
+						return;
+					}
+					++m_GraphParameterEditCount;
+					PF_INFO("MACOS_GRAPH_MATERIAL_PARAMETER_EDIT=PASS; edit={}; dxc_launches={}; shader_creations={}; layout_creations={}; "
+						"parameter_buffer_creations={}; binding_set_creations={}; pipeline_creations={}; parameter_uploads={}; "
+						"retained_pipelines={}; changed_pixels={}", m_GraphParameterEditCount,
+						Stats.GraphMaterialDxcProcessLaunches, Stats.GraphMaterialShaderCreations,
+						Stats.GraphMaterialBindingLayoutCreations, Stats.GraphMaterialParameterBufferCreations,
+						Stats.GraphMaterialBindingSetCreations, Stats.GraphMaterialPipelineCreations,
+						Stats.GraphMaterialParameterUploads, Stats.GraphMaterialPipelines, ChangedPixels);
+					m_SourceGraphReadback = m_CapturedColor;
+					if (m_GraphParameterEditCount < 3)
+					{
+						try { UpdateSavedGraphParameterForReuse(); }
+						catch (const std::exception& Exception)
+						{
+							Fail(std::string("Could not prepare the next saved parameter-only edit: ") + Exception.what());
+						}
+						return;
+					}
+					PF_INFO("MACOS_GRAPH_MATERIAL_PARAMETER_REUSE=PASS; edits={}; dxc_launches={}; shader_creations={}; "
+						"layout_creations={}; parameter_buffer_creations={}; binding_set_creations={}; pipeline_creations={}; "
+						"parameter_uploads={}; retained_pipelines={}", m_GraphParameterEditCount,
+						Stats.GraphMaterialDxcProcessLaunches, Stats.GraphMaterialShaderCreations,
+						Stats.GraphMaterialBindingLayoutCreations, Stats.GraphMaterialParameterBufferCreations,
+						Stats.GraphMaterialBindingSetCreations, Stats.GraphMaterialPipelineCreations,
+						Stats.GraphMaterialParameterUploads, Stats.GraphMaterialPipelines);
+					try
+					{
+						ApplySavedGraphPresentationEdit();
+						m_Phase = ValidationPhase::GraphMaterialPresentationFrame;
+					}
+					catch (const std::exception& Exception)
+					{
+						Fail(std::string("Could not prepare a presentation-only graph edit: ") + Exception.what());
+					}
+					return;
+				}
+				if (m_Phase == ValidationPhase::GraphMaterialPresentationFrame)
+				{
+					const auto Stats = m_SceneRenderer->GetResourceCacheStats();
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_SourceGraphReadback, m_CapturedColor);
+					const bool ResourcesReused = Stats.GraphMaterialDxcProcessLaunches == m_GraphParameterBaselineStats.GraphMaterialDxcProcessLaunches &&
+						Stats.GraphMaterialShaderCreations == m_GraphParameterBaselineStats.GraphMaterialShaderCreations &&
+						Stats.GraphMaterialBindingLayoutCreations == m_GraphParameterBaselineStats.GraphMaterialBindingLayoutCreations &&
+						Stats.GraphMaterialParameterBufferCreations == m_GraphParameterBaselineStats.GraphMaterialParameterBufferCreations &&
+						Stats.GraphMaterialBindingSetCreations == m_GraphParameterBaselineStats.GraphMaterialBindingSetCreations &&
+						Stats.GraphMaterialPipelineCreations == m_GraphParameterBaselineStats.GraphMaterialPipelineCreations &&
+						Stats.GraphMaterialParameterUploads == m_GraphParameterBaselineStats.GraphMaterialParameterUploads;
+					if (!ResourcesReused || ChangedPixels > 4)
+					{
+						Fail("A presentation-only Material layout edit changed rendered pixels or recreated graph GPU resources "
+							"(dxc=" + std::to_string(Stats.GraphMaterialDxcProcessLaunches) + ", uploads=" +
+							std::to_string(Stats.GraphMaterialParameterUploads) + ", changed_pixels=" + std::to_string(ChangedPixels) + ")");
+						return;
+					}
+					PF_INFO("MACOS_GRAPH_MATERIAL_PRESENTATION_REUSE=PASS; dxc_launches={}; shader_creations={}; layouts={}; "
+						"pipelines={}; parameter_uploads={}; changed_pixels={}", Stats.GraphMaterialDxcProcessLaunches,
+						Stats.GraphMaterialShaderCreations, Stats.GraphMaterialBindingLayoutCreations,
+						Stats.GraphMaterialPipelineCreations, Stats.GraphMaterialParameterUploads, ChangedPixels);
+					try
+					{
 						CookAndActivateSavedGraphMaterial();
 						m_CookedGraphMaterialDrawObserved = false;
 						m_Phase = ValidationPhase::CookedGraphMaterialFrame;
@@ -491,6 +583,8 @@ namespace
 			}
 
 			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
+				m_Phase == ValidationPhase::GraphMaterialParameterFrame ||
+				m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
 				m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
 				m_Phase == ValidationPhase::SkinnedPoseFrame ||
 				m_Phase == ValidationPhase::ResizedFrame ||
@@ -555,6 +649,8 @@ namespace
 				}
 #if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
 				if (m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
+					m_Phase == ValidationPhase::GraphMaterialParameterFrame ||
+					m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
 					m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame)
 				{
 					const PulseForge::SceneRendererResourceCacheStats ResourceStats = m_SceneRenderer->GetResourceCacheStats();
@@ -805,7 +901,8 @@ namespace
 					{ 0.92f, 0.035f, 0.025f } },
 				{ UUID(0x475055, 4), MaterialGraphNodeKind::PbrOutput, 0.0f, {} },
 				{ UUID(0x475055, 7), MaterialGraphNodeKind::FloatConstant, m_GraphValidationDescription.MetallicFactor },
-				{ UUID(0x475055, 8), MaterialGraphNodeKind::FloatConstant, m_GraphValidationDescription.RoughnessFactor }
+				{ UUID(0x475055, 8), MaterialGraphNodeKind::FloatParameter, m_GraphValidationDescription.RoughnessFactor,
+					"Roughness" }
 			};
 			Graph.Connections = {
 				{ UUID(0x475055, 6), UUID(0x475055, 3), UUID(0x475055, 4), 0 },
@@ -828,6 +925,45 @@ namespace
 				SavedSource->Description.BaseColorTexture != m_GraphValidationDescription.BaseColorTexture)
 				throw std::runtime_error("The saved Material source no longer matches the edited graph or stable asset reference");
 			m_GraphValidationDescription = SavedSource->Description;
+		}
+
+		void UpdateSavedGraphParameterForReuse()
+		{
+			using namespace PulseForge;
+			auto Description = MaterialAssetService::Load(
+				*m_GraphValidationMaterial, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!Description || !Description->Graph)
+				throw std::runtime_error("Could not reload the saved graph before its parameter-only edit");
+			auto Parameter = std::ranges::find(Description->Graph->Nodes, UUID(0x475055, 8), &MaterialGraphNode::ID);
+			if (Parameter == Description->Graph->Nodes.end() || Parameter->Kind != MaterialGraphNodeKind::FloatParameter)
+				throw std::runtime_error("The saved graph has no stable Roughness parameter node");
+			Parameter->Value = Parameter->Value < 0.5f ? 0.95f : 0.05f;
+			if (auto Saved = MaterialAssetService::Save(*m_GraphValidationMaterial, m_Project->GetRootPath(),
+				m_Project->GetAssetRegistry(), *Description); !Saved)
+				throw std::runtime_error("Could not save the scalar-only graph edit: " + Saved.error().Message);
+			m_GraphParameterBaselineStats = m_SceneRenderer->GetResourceCacheStats();
+			m_SourceGraphReadback = m_CapturedColor;
+			m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
+		}
+
+		void ApplySavedGraphPresentationEdit()
+		{
+			using namespace PulseForge;
+			auto Description = MaterialAssetService::Load(
+				*m_GraphValidationMaterial, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!Description || !Description->Graph)
+				throw std::runtime_error("Could not reload the saved graph before its layout-only edit");
+			auto Node = std::ranges::find(Description->Graph->Nodes, UUID(0x475055, 3), &MaterialGraphNode::ID);
+			if (Node == Description->Graph->Nodes.end())
+				throw std::runtime_error("The saved graph lost its stable layout probe node");
+			Node->X += 37.0;
+			Node->Y += 19.0;
+			if (auto Saved = MaterialAssetService::Save(*m_GraphValidationMaterial, m_Project->GetRootPath(),
+				m_Project->GetAssetRegistry(), *Description); !Saved)
+				throw std::runtime_error("Could not save the presentation-only graph edit: " + Saved.error().Message);
+			m_GraphParameterBaselineStats = m_SceneRenderer->GetResourceCacheStats();
+			m_SourceGraphReadback = m_CapturedColor;
+			m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
 		}
 
 		void CookAndActivateSavedGraphMaterial()
@@ -1189,6 +1325,8 @@ namespace
 		std::filesystem::path m_TestProjectRoot;
 		std::shared_ptr<const PulseForge::CookedContentProvider> m_GraphContent;
 		bool m_CookedGraphMaterialDrawObserved = false;
+		PulseForge::SceneRendererResourceCacheStats m_GraphParameterBaselineStats;
+		size_t m_GraphParameterEditCount = 0;
 #endif
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;

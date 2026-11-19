@@ -35,6 +35,8 @@ namespace PulseForge
 		std::function<bool(uint64_t)> IsGenerationCurrent;
 		DerivedDataArtifactStore* ArtifactStore = nullptr;
 		std::stop_token CancellationToken;
+		// Invoked only after the host process was successfully created; cache hits do not invoke it.
+		std::function<void()> OnDxcProcessLaunched;
 		MaterialGraphCompileTarget Target = MaterialGraphCompileTarget::VulkanSpirV;
 	};
 

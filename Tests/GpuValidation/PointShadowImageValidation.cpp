@@ -42,6 +42,7 @@ namespace PulseForge::GpuValidation
 			bool UseCeiling;
 			bool PointLightRotated;
 			glm::vec3 CasterOffset{ 0.0f };
+			bool HideCasterFromCamera = false;
 		};
 
 		struct PointShadowOverviewImageCase
@@ -58,7 +59,7 @@ namespace PulseForge::GpuValidation
 				{ "overview_user_position_shadows_on", { 0.0f, 3.109f, -1.233f }, true } }
 		};
 
-		constexpr std::array<PointShadowImageCase, 23> PointShadowImageCases = {
+		constexpr std::array<PointShadowImageCase, 25> PointShadowImageCases = {
 			{ { "positive_x_shadows_off", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, false, false, false },
 				{ "positive_x_shadows_on", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, false },
 				{ "negative_x_shadows_off", { -2.0f, 3.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, false, false, false },
@@ -91,7 +92,11 @@ namespace PulseForge::GpuValidation
 					false, false, false },
 				{ "negative_x_negative_z_cube_corner_shadows_on", { 2.0f, 3.0f, 2.0f }, { -1.0f, 0.0f, -1.0f }, { 2.0f, 0.0f, 0.0f }, true,
 					false, false },
-				{ "positive_x_rotated_point_light", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, true } }
+				{ "positive_x_rotated_point_light", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, true },
+				{ "positive_z_offscreen_caster_shadows_off", { 0.0f, 3.0f, 2.0f }, { 1.25f, 0.0f, -1.0f }, { 1.55f, 0.0f, -1.0f }, false,
+					false, false, { 0.5f, 0.0f, 0.0f }, true },
+				{ "positive_z_offscreen_caster_shadows_on", { 0.0f, 3.0f, 2.0f }, { 1.25f, 0.0f, -1.0f }, { 1.55f, 0.0f, -1.0f }, true,
+					false, false, { 0.5f, 0.0f, 0.0f }, true } }
 		};
 
 		namespace PointShadowAnalysis = PulseForge::GpuValidation::PointShadowImageAnalysis;
@@ -292,6 +297,7 @@ namespace PulseForge::GpuValidation
 			if (!ImageCamera->SetCamera(CameraComponent)) throw std::runtime_error("Could not configure point-shadow image camera");
 			m_PointShadowImageCamera = *ImageCamera;
 			m_PointShadowImageCameraTransform = *CameraTransform;
+			m_PointShadowImageCameraComponent = CameraComponent;
 
 			m_PointShadowImageFloor = CopyMeshEntity(FloorSource, "Only receiving floor");
 			const auto FloorMesh = m_PointShadowImageFloor.GetMeshRenderer();
@@ -517,6 +523,20 @@ namespace PulseForge::GpuValidation
 					return false;
 				}
 			}
+			if (TestCase.HideCasterFromCamera)
+			{
+				TransformComponent CameraTransform;
+				CameraTransform.Translation = TestCase.ExpectedReceiver + glm::vec3(0.0f, 3.0f, 0.0f);
+				CameraTransform.Rotation = glm::angleAxis(-std::numbers::pi_v<float> * 0.5f, glm::vec3(1.0f, 0.0f, 0.0f));
+				CameraComponent Camera = m_PointShadowImageCameraComponent;
+				Camera.ProjectionType = CameraProjectionType::Orthographic;
+				Camera.OrthographicHeight = 0.9f;
+				if (!m_PointShadowImageCamera.SetTransform(CameraTransform) || !m_PointShadowImageCamera.SetCamera(Camera))
+				{
+					Fail("Could not configure the narrow receiver camera for the off-screen shadow-caster case");
+					return false;
+				}
+			}
 
 			auto Snapshot =
 				PulseForge::SceneRenderSnapshotBuilder::Build(m_PointShadowImageScene, m_PointShadowImageCamera.GetUUID(), 1.0f);
@@ -524,6 +544,22 @@ namespace PulseForge::GpuValidation
 			{
 				Fail("Could not build point-shadow image camera reference: " + Snapshot.error().Message);
 				return false;
+			}
+			if (TestCase.HideCasterFromCamera)
+			{
+				const auto FindMesh = [&](const UUID Entity)
+				{
+					return std::find_if(Snapshot->Meshes.begin(), Snapshot->Meshes.end(),
+						[Entity](const SceneMeshInstance& Mesh) { return Mesh.Entity == Entity; });
+				};
+				const auto Receiver = FindMesh(m_PointShadowImageFloor.GetUUID());
+				const auto Caster = FindMesh(m_PointShadowImageCube.GetUUID());
+				if (Receiver == Snapshot->Meshes.end() || Caster == Snapshot->Meshes.end() || !Receiver->CameraVisible ||
+					Caster->CameraVisible)
+				{
+					Fail("Off-screen point-shadow fixture did not isolate a visible receiver from its camera-invisible caster");
+					return false;
+				}
 			}
 			m_PointShadowImageViewProjections[m_PointShadowImageCase] = Snapshot->ViewProjection;
 			m_PointShadowImageCameraPositions[m_PointShadowImageCase] = Snapshot->CameraWorldPosition;
@@ -641,7 +677,7 @@ namespace PulseForge::GpuValidation
 		bool ValidatePointShadowImageResults()
 		{
 			bool AllDirectionsPass = true;
-			for (size_t Pair = 0; Pair < 11; ++Pair)
+			for (size_t Pair = 0; Pair < 12; ++Pair)
 			{
 				const size_t OffIndex = Pair * 2;
 				const size_t OnIndex = OffIndex + 1;
@@ -674,6 +710,13 @@ namespace PulseForge::GpuValidation
 				if (Metrics.ExpectedPixelCount < 20 || Metrics.ControlPixelCount < 20 || Metrics.ExpectedOff < 0.025 ||
 					Metrics.ControlOff < 0.025 || ShadowDelta < 0.025 || ShadowDelta <= ControlDelta + 0.01)
 				{
+					AllDirectionsPass = false;
+				}
+				if (TestCase.HideCasterFromCamera && (Metrics.ChangedExpectedPixelCount < 20 ||
+					Metrics.ChangedOtherPixelCount > (std::max)(size_t{ 4 }, Metrics.ChangedPixelCount / 20)))
+				{
+					PF_ERROR("POINT_SHADOW_OFFSCREEN_CASTER_REGION_MISMATCH={0}; changed_expected={1}; changed_other={2}",
+						TestCase.Name, Metrics.ChangedExpectedPixelCount, Metrics.ChangedOtherPixelCount);
 					AllDirectionsPass = false;
 				}
 				if (Pair == 2 || Pair == 3)
@@ -719,7 +762,9 @@ namespace PulseForge::GpuValidation
 			if (!m_Succeeded || !m_ScenePrepared || m_PointShadowImageCapturePending) return;
 			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_PointShadowImageOutputTarget);
 			const PointShadowImageCase& TestCase = PointShadowImageCases[m_PointShadowImageCase];
-			if (!Rendered || Rendered->GeometryDrawCount != 2 || Rendered->PointShadowPassCount != (TestCase.CastShadows ? 6u : 0u) ||
+			const size_t ExpectedGeometryDrawCount = TestCase.HideCasterFromCamera ? 1u : 2u;
+			if (!Rendered || Rendered->GeometryDrawCount != ExpectedGeometryDrawCount ||
+				Rendered->PointShadowPassCount != (TestCase.CastShadows ? 6u : 0u) ||
 				Rendered->PointShadowCasterDrawCount != (TestCase.CastShadows ? 12u : 0u))
 			{
 				Fail(Rendered ? "Point-shadow image case had unexpected draw counts (geometry=" + std::to_string(Rendered->GeometryDrawCount) +
@@ -765,6 +810,7 @@ namespace PulseForge::GpuValidation
 		Entity m_PointShadowImageCube;
 		Entity m_PointShadowImageLight;
 		TransformComponent m_PointShadowImageCameraTransform;
+		CameraComponent m_PointShadowImageCameraComponent;
 		TransformComponent m_PointShadowImageCeilingTransform;
 		MeshRendererComponent m_PointShadowImageFloorMesh;
 		std::array<glm::mat4, PointShadowImageCases.size()> m_PointShadowImageViewProjections{};

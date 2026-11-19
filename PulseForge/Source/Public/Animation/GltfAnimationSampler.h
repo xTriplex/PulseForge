@@ -33,12 +33,14 @@ namespace PulseForge
 	public:
 		[[nodiscard]] bool IsFor(const ImportedGltfAnimationClip& Clip) const noexcept
 		{
-			return m_Clip == &Clip && m_ChannelCount == Clip.Channels.size();
+			return m_Clip == &Clip && m_ChannelCount == Clip.Channels.size() &&
+				m_EventMarkerCount == Clip.EventMarkers.size();
 		}
 
 	private:
 		const ImportedGltfAnimationClip* m_Clip = nullptr;
 		size_t m_ChannelCount = 0;
+		size_t m_EventMarkerCount = 0;
 		friend PULSEFORGE_API std::expected<GltfAnimationClipValidationToken, GltfAnimationSamplingError>
 			ValidateGltfAnimationClip(const ImportedGltfAnimationClip&, std::stop_token);
 	};

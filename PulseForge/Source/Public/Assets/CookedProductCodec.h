@@ -77,12 +77,22 @@ namespace PulseForge
 		std::vector<std::array<float, 4>> Values;
 	};
 
+	struct ImportedGltfAnimationEventMarker final
+	{
+		// Stable identity derived from source asset ID, clip key and the source-authored marker key.
+		std::string StableKey;
+		std::string Name;
+		float TimeSeconds = 0.0f;
+		friend bool operator==(const ImportedGltfAnimationEventMarker&, const ImportedGltfAnimationEventMarker&) = default;
+	};
+
 	struct ImportedGltfAnimationClip final
 	{
 		std::string StableKey;
 		std::string Name;
 		float Duration = 0.0f;
 		std::vector<ImportedGltfAnimationChannel> Channels;
+		std::vector<ImportedGltfAnimationEventMarker> EventMarkers;
 	};
 
 	struct ImportedGltfSkeletalMesh final
@@ -182,7 +192,7 @@ namespace PulseForge
 	namespace Detail
 	{
 		inline constexpr uint32_t MeshProductSchemaVersion = 1;
-		inline constexpr uint32_t SkeletalMeshProductSchemaVersion = 2;
+		inline constexpr uint32_t SkeletalMeshProductSchemaVersion = 3;
 		inline constexpr uint32_t TextureProductSchemaVersion = 1;
 		inline constexpr uint32_t EnvironmentProductSchemaVersion = 1;
 		inline constexpr uint32_t MaterialProductSchemaVersion = 1;

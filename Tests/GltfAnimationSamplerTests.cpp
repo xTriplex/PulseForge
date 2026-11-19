@@ -278,9 +278,18 @@ namespace
 		AddTranslationClip("idle", 0.0f, 2.0f);
 		AddTranslationClip("walk", 10.0f, 20.0f);
 		AddTranslationClip("run", 20.0f, 40.0f);
+		Mesh.Animations[0].EventMarkers.push_back({ "event/valid", "Valid", 1.0f });
 		const auto ValidatedProduct = ValidateGltfAnimationProduct(Mesh);
 		PF_CHECK(Tests, ValidatedProduct && ValidatedProduct->size() == Mesh.Animations.size());
 		if (!ValidatedProduct) return;
+		auto InvalidMarkerProduct = Mesh;
+		InvalidMarkerProduct.Animations[0].EventMarkers.push_back({ "event/valid", "Duplicate", 1.5f });
+		const auto DuplicateMarker = ValidateGltfAnimationProduct(InvalidMarkerProduct);
+		PF_CHECK(Tests, !DuplicateMarker && DuplicateMarker.error().Code == GltfAnimationSamplingErrorCode::InvalidChannel);
+		InvalidMarkerProduct = Mesh;
+		InvalidMarkerProduct.Animations[0].EventMarkers[0].TimeSeconds = 3.0f;
+		const auto OutOfRangeMarker = ValidateGltfAnimationProduct(InvalidMarkerProduct);
+		PF_CHECK(Tests, !OutOfRangeMarker && OutOfRangeMarker.error().Code == GltfAnimationSamplingErrorCode::InvalidChannel);
 
 		GltfAnimationNodePose RestNode;
 		RestNode.NodeKey = "root";

@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace PulseForge
 {
@@ -66,6 +67,14 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, PlayerSessionError> SeekSkeletalAnimation(const Entity& Target, float TimeSeconds);
 		[[nodiscard]] std::expected<void, PlayerSessionError> TransitionSkeletalAnimation(
 			const Entity& Target, std::string_view ClipKey, float DurationSeconds, bool Looping = true);
+		[[nodiscard]] std::optional<SkeletalAnimationPlaybackInfo> GetSkeletalAnimationPlayback(const Entity& Target) const
+		{
+			return m_Runtime ? m_Runtime->GetSkeletalAnimationPlayback(Target) : std::nullopt;
+		}
+		[[nodiscard]] std::vector<SkeletalAnimationEvent> TakeSkeletalAnimationEvents()
+		{
+			return m_Runtime ? m_Runtime->TakeSkeletalAnimationEvents() : std::vector<SkeletalAnimationEvent>{};
+		}
 		// Positive finite scales affect script/physics frame time; audio playback follows real time. Use Pause for full pause.
 		[[nodiscard]] std::expected<void, PlayerSessionError> SetTimeScale(double Scale);
 		[[nodiscard]] double GetTimeScale() const noexcept { return m_TimeScale; }

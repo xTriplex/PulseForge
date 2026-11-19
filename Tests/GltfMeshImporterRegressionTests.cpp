@@ -4,6 +4,7 @@
 #include "Assets/AssetImportProvenance.h"
 #include "Assets/GltfMeshImportCoordinator.h"
 #include "Assets/GltfMeshImporter.h"
+#include "Assets/CookedProductCodec.h"
 #include "Animation/GltfAnimationSampler.h"
 
 #include <algorithm>
@@ -90,7 +91,8 @@ namespace
 			bool ZeroWeights = false,
 			bool InvalidJointIndex = false,
 			bool AddAnimation = false,
-			bool ReorderedNodes = false)
+			bool ReorderedNodes = false,
+			std::string_view AnimationExtras = {})
 		{
 			const std::filesystem::path Directory = Root / "Assets" / "Models";
 			std::vector<std::byte> Bytes = PositionBytes();
@@ -163,7 +165,8 @@ namespace
 			{
 				Document.pop_back();
 				Document += ",\"animations\":[{\"name\":\"move\",\"samplers\":[{\"input\":5,\"output\":6,\"interpolation\":\"LINEAR\"}],"
-					"\"channels\":[{\"sampler\":0,\"target\":{\"node\":2,\"path\":\"translation\"}}]}]}";
+					"\"channels\":[{\"sampler\":0,\"target\":{\"node\":2,\"path\":\"translation\"}}]" +
+					std::string(AnimationExtras) + "}]}";
 			}
 			const std::filesystem::path SourcePath = Directory / std::string(FileName);
 			if (!WriteText(SourcePath, Document)) return {};
@@ -523,7 +526,10 @@ namespace
 			}
 		}
 
-		const AssetID AnimatedSource = Fixture.WriteSkinnedSource("SkeletalAnimationFixture.gltf", false, false, true);
+		constexpr std::string_view ValidAnimationExtras =
+			R"(,"extras":{"pulseforgeEvents":[{"key":"footstep-left","name":"Footstep","time":0.5}]})";
+		const AssetID AnimatedSource = Fixture.WriteSkinnedSource(
+			"SkeletalAnimationFixture.gltf", false, false, true, false, ValidAnimationExtras);
 		const auto AnimatedRegistry = Fixture.BuildRegistry();
 		PF_CHECK(Tests, !AnimatedSource.IsNil() && AnimatedRegistry.has_value());
 		if (!AnimatedSource.IsNil() && AnimatedRegistry)
@@ -540,11 +546,52 @@ namespace
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].TargetNodeKey ==
 					Animated->Mesh.SkeletonNodes[2].StableKey);
 				PF_CHECK(Tests, Animated->Mesh.Animations[0].Channels[0].Values[1][1] == 1.0f);
+				PF_CHECK(Tests, Animated->Mesh.Animations[0].EventMarkers.size() == 1 &&
+					Animated->Mesh.Animations[0].EventMarkers[0].Name == "Footstep" &&
+					Animated->Mesh.Animations[0].EventMarkers[0].TimeSeconds == 0.5f &&
+					Animated->Mesh.Animations[0].EventMarkers[0].StableKey.starts_with("event/"));
+				const auto Reimported = GltfMeshImporter::ProcessSkeletalPrimitive(
+					AnimatedSource, Fixture.Root, *AnimatedRegistry, 0, 0, 0);
+				PF_CHECK(Tests, Reimported && Reimported->Mesh.Animations[0].EventMarkers ==
+					Animated->Mesh.Animations[0].EventMarkers);
+				const auto Encoded = Detail::EncodeSkeletalMeshProduct(Animated->Mesh);
+				PF_CHECK(Tests, Encoded.has_value());
+				if (Encoded)
+				{
+					const auto Decoded = Detail::DecodeSkeletalMeshProduct(*Encoded);
+					PF_CHECK(Tests, Decoded && Decoded->Animations[0].EventMarkers == Animated->Mesh.Animations[0].EventMarkers);
+				}
+				ImportedGltfSkeletalMesh LegacyProduct = Animated->Mesh;
+				LegacyProduct.Animations[0].EventMarkers.clear();
+				auto LegacyV2Bytes = Detail::EncodeSkeletalMeshProduct(LegacyProduct);
+				PF_CHECK(Tests, LegacyV2Bytes && LegacyV2Bytes->size() >= 4);
+				if (LegacyV2Bytes && LegacyV2Bytes->size() >= 4)
+				{
+					LegacyV2Bytes->resize(LegacyV2Bytes->size() - 4); // v2 products have no event-marker count after each clip.
+					(*LegacyV2Bytes)[4] = std::byte{ 2 };
+					(*LegacyV2Bytes)[5] = std::byte{ 0 };
+					(*LegacyV2Bytes)[6] = std::byte{ 0 };
+					(*LegacyV2Bytes)[7] = std::byte{ 0 };
+					const auto LegacyDecoded = Detail::DecodeSkeletalMeshProduct(*LegacyV2Bytes);
+					PF_CHECK(Tests, LegacyDecoded && LegacyDecoded->Animations[0].EventMarkers.empty());
+				}
 				const auto ReferenceSample = SampleGltfAnimationChannel(
 					Animated->Mesh.Animations[0].Channels[0], 0.5f);
 				PF_CHECK(Tests, ReferenceSample && std::abs((*ReferenceSample)[0]) < 1.0e-6f &&
 					std::abs((*ReferenceSample)[1] - 0.5f) < 1.0e-6f && std::abs((*ReferenceSample)[2]) < 1.0e-6f);
 			}
+		}
+
+		const AssetID InvalidAnimationEventSource = Fixture.WriteSkinnedSource(
+			"InvalidAnimationEventFixture.gltf", false, false, true, false,
+			R"(,"extras":{"pulseforgeEvents":[{"key":"outside","name":"Outside","time":2.0}]})");
+		const auto InvalidAnimationEventRegistry = Fixture.BuildRegistry();
+		PF_CHECK(Tests, !InvalidAnimationEventSource.IsNil() && InvalidAnimationEventRegistry.has_value());
+		if (!InvalidAnimationEventSource.IsNil() && InvalidAnimationEventRegistry)
+		{
+			const auto Rejected = GltfMeshImporter::ProcessSkeletalPrimitive(
+				InvalidAnimationEventSource, Fixture.Root, *InvalidAnimationEventRegistry, 0, 0, 0);
+			PF_CHECK(Tests, !Rejected && Rejected.error().Code == GltfMeshImportErrorCode::InvalidDocument);
 		}
 
 		const AssetID ZeroWeightSource = Fixture.WriteSkinnedSource("ZeroWeightFixture.gltf", true);

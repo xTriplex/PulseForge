@@ -830,6 +830,10 @@ namespace
 		PF_CHECK(Tests, PulseForge::IsSceneBoundsVisible(UnitBounds, Identity, Identity));
 		const glm::mat4 Outside = glm::translate(Identity, glm::vec3(2.0f, 0.0f, 0.5f));
 		PF_CHECK(Tests, !PulseForge::IsSceneBoundsVisible(UnitBounds, Outside, Identity));
+		const glm::mat4 CrossingCameraPlane = glm::translate(Identity, glm::vec3(1.05f, 0.0f, 0.5f));
+		const glm::mat4 BeyondCameraPlane = glm::translate(Identity, glm::vec3(1.25f, 0.0f, 0.5f));
+		PF_CHECK(Tests, PulseForge::IsSceneBoundsVisible(UnitBounds, CrossingCameraPlane, Identity) &&
+			!PulseForge::IsSceneBoundsVisible(UnitBounds, BeyondCameraPlane, Identity));
 		const glm::mat4 ScaledAcrossEdge = glm::translate(Identity, glm::vec3(1.1f, 0.0f, 0.5f)) *
 			glm::scale(Identity, glm::vec3(3.0f, 1.0f, 1.0f));
 		PF_CHECK(Tests, PulseForge::IsSceneBoundsVisible(UnitBounds, ScaledAcrossEdge, Identity));

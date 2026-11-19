@@ -490,7 +490,7 @@ namespace
 				const EditorDocumentEditorContext ManagedContext{ ManagedIdentity, Project->GetRootPath(),
 					ManagedBlueprint->ProjectRelativePath, ManagedBlueprint->DisplayName, &Project->GetAssetRegistry() };
 				PF_CHECK(Tests, ManagedOpen && ManagedSession && GraphEditor.Open(*ManagedSession, ManagedContext));
-				const size_t PublicationsAfterOpenRecovery = PublishedBlueprintPrograms.size();
+				size_t PublicationsAfterOpenRecovery = PublishedBlueprintPrograms.size();
 				if (InitialProgram && !RecoveredGraphBytes.empty())
 				{
 					const auto RecoveredProgram = ReadBytes(ProgramPath);
@@ -524,6 +524,31 @@ namespace
 					(void)EditorGraphDocumentEditorTestAccess::Process(GraphEditor, *ManagedSession,
 						{ { PropertyPinID, std::string("health"), true, true, false },
 							{ PropertyPinID, std::string("health"), false, true, true } });
+					auto RepairedManagedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *ManagedSession);
+					auto WriteNode = std::find_if(RepairedManagedGraph.Nodes.begin(), RepairedManagedGraph.Nodes.end(),
+						[](const EditorGraphNode& Node) { return Node.TypeKey == "blueprint.action.write_scalar"; });
+					PF_CHECK(Tests, WriteNode != RepairedManagedGraph.Nodes.end());
+					if (WriteNode != RepairedManagedGraph.Nodes.end())
+					{
+						auto Property = std::find_if(WriteNode->Pins.begin(), WriteNode->Pins.end(),
+							[](const EditorGraphPin& Pin) { return Pin.Key == "property"; });
+						PF_CHECK(Tests, Property != WriteNode->Pins.end());
+						if (Property != WriteNode->Pins.end())
+						{
+							auto* PropertyName = std::get_if<std::string>(&Property->DefaultValue);
+							PF_CHECK(Tests, PropertyName != nullptr);
+							if (PropertyName) *PropertyName = "health";
+						}
+					}
+					EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *ManagedSession,
+						std::move(RepairedManagedGraph), MakeBlueprintAuthoringSchema());
+					PF_CHECK(Tests, GraphEditor.Save(*ManagedSession) && !ManagedSession->IsDirty());
+					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery + 1u &&
+						PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
+					PublicationsAfterOpenRecovery = PublishedBlueprintPrograms.size();
+					const auto PendingGraphNode = GraphEditor.AddNode(*ManagedSession,
+						"blueprint.value.constant_float", 1024.0, 256.0);
+					PF_CHECK(Tests, PendingGraphNode && ManagedSession->IsDirty());
 					auto SecondManagedBlueprint = GraphEditor.CreateBlueprintAsset(Project->GetAssetRegistry(),
 						Project->GetRootPath(), std::filesystem::path("Assets") / "Mana.pfblueprint");
 					PF_CHECK(Tests, SecondManagedBlueprint.has_value());
@@ -559,10 +584,58 @@ namespace
 						}
 					}
 					}
-					PF_CHECK(Tests, GraphEditor.Save(*ManagedSession) && !ManagedSession->IsDirty());
+					// Simulate interruption after the graph's durable replacement but before the
+					// matching compiled sidecar can be opened and replaced. Reopening must rebuild
+					// a program for the durable graph before Play or cook can resolve it.
+					const auto ProgramBackup = ProgramPath.parent_path() /
+						(ProgramPath.filename().string() + ".interrupted-publication");
+					std::error_code PublicationError;
+					std::filesystem::remove(ProgramBackup, PublicationError);
+					PublicationError.clear();
+					std::filesystem::rename(ProgramPath, ProgramBackup, PublicationError);
+					PF_CHECK(Tests, !PublicationError);
+					// An absent sidecar is a valid first publication target. Make the destination
+					// unreplaceable instead, so source publication succeeds and program publication
+					// deterministically fails on Windows, Linux, and macOS.
+					PublicationError.clear();
+					std::filesystem::create_directory(ProgramPath, PublicationError);
+					PF_CHECK(Tests, !PublicationError);
+					const auto InterruptedSave = GraphEditor.Save(*ManagedSession);
+					const auto DurableInterruptedGraph = ReadBytes(GraphPath);
+					PF_CHECK(Tests, !InterruptedSave && ManagedSession->IsDirty() && DurableInterruptedGraph &&
+						*DurableInterruptedGraph != RecoveredGraphBytes);
+					PublicationError.clear();
+					std::filesystem::remove(ProgramPath, PublicationError);
+					PF_CHECK(Tests, !PublicationError);
+					PublicationError.clear();
+					std::filesystem::rename(ProgramBackup, ProgramPath, PublicationError);
+					PF_CHECK(Tests, !PublicationError);
+					const auto InterruptedClose = Documents.Close(ManagedIdentity, EditorDocumentCloseChoice::Discard,
+						[](const EditorDocumentSession&, uint64_t) { return false; },
+						[](const EditorDocumentSession&) { return true; });
+					PF_CHECK(Tests, InterruptedClose == EditorDocumentCloseStatus::Closed);
+					const auto InterruptedReopen = Documents.Open(ManagedIdentity, ManagedBlueprint->ProjectRelativePath,
+						ManagedBlueprint->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+					ManagedSession = Documents.Find(ManagedIdentity);
+					PF_CHECK(Tests, InterruptedReopen && ManagedSession &&
+						GraphEditor.Open(*ManagedSession, ManagedContext));
+					if (ManagedSession)
+					{
+						const auto RecoveredSource = ReadBytes(GraphPath);
+						const auto RecoveredProgram = ReadBytes(ProgramPath);
+						const auto RecoveredProgramAsset = RecoveredProgram
+							? PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+								std::span<const char>(RecoveredProgram->data(), RecoveredProgram->size())))
+							: std::expected<PulseForge::VerifiedBlueprintAsset, PulseForge::BlueprintProgramError>(
+								std::unexpected(PulseForge::BlueprintProgramError{}));
+						PF_CHECK(Tests, RecoveredSource && *RecoveredSource == *DurableInterruptedGraph && RecoveredProgramAsset &&
+							RecoveredProgramAsset->GetSourceRevision() == PulseForge::ComputeBlueprintSourceRevision(
+								std::as_bytes(std::span<const char>(RecoveredSource->data(), RecoveredSource->size()))));
+						PF_CHECK(Tests, !ManagedSession->IsDirty());
+					}
 					PF_CHECK(Tests, SecondManagedSession == nullptr || SecondManagedSession->IsDirty());
-					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery +
-						(SecondManagedBlueprint ? 2u : 1u) && PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
+					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery + 2u &&
+						PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
 					if (SecondManagedSession)
 					{
 						const auto OtherGraphBeforeSave = EditorGraphDocumentEditorTestAccess::GetGraph(
@@ -644,14 +717,14 @@ namespace
 							EditorRuntime.Stop();
 							PF_CHECK(Tests, CookBlueprint.SetFloatProperty("health", 0.0f) && CookEntity->SetBlueprint(CookBlueprint));
 						}
-						if (CookEntity && InitialProgram)
+						if (CookEntity && ReopenedProgram)
 						{
 							EditorBlueprintProgramCatalog FailureCatalog;
 							FailureCatalog.SetProject(&*Project);
 							PF_CHECK(Tests, WriteBytes(ProgramPath, "malformed Blueprint program"));
 							PF_CHECK(Tests, !FailureCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate) &&
 								FailureCatalog.GetLoadFailure(ManagedBlueprint->GraphID).has_value());
-							PF_CHECK(Tests, WriteBytes(ProgramPath, *InitialProgram));
+							PF_CHECK(Tests, WriteBytes(ProgramPath, *ReopenedProgram));
 							PF_CHECK(Tests, !FailureCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate));
 							FailureCatalog.ProgramPublished(ManagedBlueprint->GraphID);
 							PF_CHECK(Tests, FailureCatalog.Resolve(*CookEntity, BlueprintEventKind::OnCreate).has_value() &&

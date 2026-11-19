@@ -128,11 +128,16 @@ namespace PulseForge
 		if (!Pipeline)
 			return std::unexpected(MakeResourceError("Could not create graph-material graphics pipeline: " + Pipeline.error().Message));
 		m_GraphScenePipelines.emplace(Key, CachedGraphPipeline{ std::move(*Pipeline), ++m_GraphPipelineUseSequence });
+		++m_GraphScenePipelineCreations;
 		if (m_GraphScenePipelines.size() > MaximumCachedGraphScenePipelines)
 		{
 			const auto LeastRecentlyUsed = std::ranges::min_element(m_GraphScenePipelines, {},
 				[](const auto& Entry) { return Entry.second.LastUsed; });
-			if (LeastRecentlyUsed != m_GraphScenePipelines.end()) m_GraphScenePipelines.erase(LeastRecentlyUsed);
+			if (LeastRecentlyUsed != m_GraphScenePipelines.end())
+			{
+				m_GraphScenePipelines.erase(LeastRecentlyUsed);
+				++m_GraphScenePipelineEvictions;
+			}
 		}
 		return {};
 	}

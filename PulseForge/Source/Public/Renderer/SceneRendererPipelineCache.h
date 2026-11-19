@@ -61,6 +61,8 @@ namespace PulseForge
 			bool AlphaBlend, bool DoubleSided,
 			WorldTransformOrientation Orientation) const noexcept;
 		[[nodiscard]] size_t GetGraphScenePipelineCount() const noexcept { return m_GraphScenePipelines.size(); }
+		[[nodiscard]] uint64_t GetGraphScenePipelineCreations() const noexcept { return m_GraphScenePipelineCreations; }
+		[[nodiscard]] uint64_t GetGraphScenePipelineEvictions() const noexcept { return m_GraphScenePipelineEvictions; }
 		[[nodiscard]] const GraphicsPipeline* FindBackgroundPipeline(ColorTargetFormat ColorFormat) const noexcept;
 		[[nodiscard]] const GraphicsPipeline* FindShadowPipeline(
 			int32_t RasterBias, bool DoubleSided, WorldTransformOrientation Orientation = WorldTransformOrientation::Normal) const noexcept;
@@ -88,6 +90,8 @@ namespace PulseForge
 		std::map<std::tuple<std::string, ColorTargetFormat, bool, bool, WorldTransformOrientation>, CachedGraphPipeline>
 			m_GraphScenePipelines;
 		uint64_t m_GraphPipelineUseSequence = 0;
+		uint64_t m_GraphScenePipelineCreations = 0;
+		uint64_t m_GraphScenePipelineEvictions = 0;
 		std::map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
 	};
 } // namespace PulseForge

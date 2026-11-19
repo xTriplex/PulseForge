@@ -20,20 +20,33 @@ namespace
 		if (TempPathLength == 0 || TempPathLength >= MAX_PATH) return EXCEPTION_EXECUTE_HANDLER;
 
 		wchar_t DumpPath[MAX_PATH]{};
-		if (swprintf_s(DumpPath, std::size(DumpPath), L"%lsPulseForgeEditorTests-crash.dmp", TempPath) < 0)
+		if (swprintf_s(DumpPath, std::size(DumpPath), L"%lsPulseForgeEditorTests-crash-%lu.dmp", TempPath,
+			GetCurrentProcessId()) < 0)
 			return EXCEPTION_EXECUTE_HANDLER;
 
-		const HANDLE DumpFile = CreateFileW(DumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+		// Preserve an earlier dump if a PID is reused or a test process is relaunched.
+		const HANDLE DumpFile = CreateFileW(DumpPath, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
 			FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (DumpFile == INVALID_HANDLE_VALUE) return EXCEPTION_EXECUTE_HANDLER;
 
 		MINIDUMP_EXCEPTION_INFORMATION ExceptionRecord{
 			GetCurrentThreadId(), ExceptionInfo, FALSE
 		};
-		(void)MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), DumpFile, MiniDumpNormal,
+		const BOOL DumpWritten = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), DumpFile, MiniDumpNormal,
 			ExceptionInfo ? &ExceptionRecord : nullptr, nullptr, nullptr);
 		CloseHandle(DumpFile);
-		OutputDebugStringW(L"PulseForgeEditorTests wrote an unhandled-exception minidump to %TEMP%\\PulseForgeEditorTests-crash.dmp\n");
+		if (DumpWritten)
+		{
+			wchar_t Message[MAX_PATH + 96]{};
+			if (swprintf_s(Message, std::size(Message), L"PulseForgeEditorTests wrote a bounded unhandled-exception minidump: %ls\n",
+				DumpPath) >= 0)
+				OutputDebugStringW(Message);
+		}
+		else
+		{
+			(void)DeleteFileW(DumpPath);
+			OutputDebugStringW(L"PulseForgeEditorTests could not write its unhandled-exception minidump.\n");
+		}
 		return EXCEPTION_EXECUTE_HANDLER;
 	}
 }

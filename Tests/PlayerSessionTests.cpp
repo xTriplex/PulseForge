@@ -730,6 +730,9 @@ namespace
 		RuntimeChannel.Times = { 0.0f, 1.0f };
 		RuntimeChannel.Values = { { 0,0,0,0 }, { 0,1,0,0 } };
 		RuntimeClip.Channels.push_back(std::move(RuntimeChannel));
+		RuntimeClip.EventMarkers = {
+			{ "event/first-clip-end", "FirstClipEnd", 0.9f },
+			{ "event/first-clip-loop", "FirstClipLoop", 0.0f } };
 		SkeletalProduct.Animations.push_back(std::move(RuntimeClip));
 		ImportedGltfAnimationClip SecondRuntimeClip;
 		SecondRuntimeClip.StableKey = "animation/cccccccccccccccccccccccccccccccc";
@@ -741,6 +744,7 @@ namespace
 		SecondRuntimeChannel.Times = { 0.0f, 2.0f };
 		SecondRuntimeChannel.Values = { { 0,0,0,0 }, { 0,-1,0,0 } };
 		SecondRuntimeClip.Channels.push_back(std::move(SecondRuntimeChannel));
+		SecondRuntimeClip.EventMarkers.push_back({ "event/second-clip-half", "SecondClipHalf", 0.5f });
 		SkeletalProduct.Animations.push_back(std::move(SecondRuntimeClip));
 		auto SkeletalProductBytes = Detail::EncodeSkeletalMeshProduct(SkeletalProduct);
 		PF_CHECK(Tests, SkeletalProductBytes.has_value());
@@ -872,6 +876,13 @@ namespace
 		PF_CHECK(Tests, FirstRuntimePose.has_value() && FirstRuntimePose->size() == 2);
 		if (FirstRuntimePose && FirstRuntimePose->size() == 2)
 			PF_CHECK(Tests, std::abs((*FirstRuntimePose)[1][13] - (2.0f / 60.0f)) < 1.0e-4f);
+		if (CookedEntityAtStart)
+		{
+			const auto Playback = Session.GetSkeletalAnimationPlayback(*CookedEntityAtStart);
+			PF_CHECK(Tests, Playback && Playback->ProductKey == SkeletalProductKey &&
+				Playback->CurrentClipKey == AnimationClipKey && Playback->DurationSeconds == 1.0f &&
+				Playback->Clips.size() == 2 && !Playback->Paused && !Playback->Crossfading);
+		}
 		PF_CHECK(Tests, !AuthoredScene.GetRuntimeSkeletalPose(AuthoredEntity->GetUUID()).has_value());
 		auto ReadRuntimeValue = [&Tests, &Session, &AuthoredEntity](float ExpectedValue)
 		{
@@ -926,7 +937,12 @@ namespace
 		PF_CHECK(Tests, SecondRuntimeEntity.has_value());
 		if (SecondRuntimeEntity)
 		{
+			const auto PlaybackBeforePause = Session.GetSkeletalAnimationPlayback(*CookedEntity);
+			PF_CHECK(Tests, PlaybackBeforePause && PlaybackBeforePause->CurrentClipKey == AnimationClipKey);
 			PF_CHECK(Tests, Session.SetSkeletalAnimationPaused(*CookedEntity, true).has_value());
+			const auto PausedPlayback = Session.GetSkeletalAnimationPlayback(*CookedEntity);
+			PF_CHECK(Tests, PausedPlayback && PausedPlayback->Paused &&
+				PlaybackBeforePause && std::abs(PausedPlayback->TimeSeconds - PlaybackBeforePause->TimeSeconds) < 1.0e-4f);
 			const auto PausedFrame = Session.Advance(Timestep(0.25));
 			PF_CHECK(Tests, PausedFrame.has_value());
 			auto FirstPausedPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
@@ -939,21 +955,39 @@ namespace
 			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
 			const auto SoughtPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
 			PF_CHECK(Tests, SoughtPose && std::abs((*SoughtPose)[1][13] - 0.75f) < 1.0e-4f);
+			const auto SoughtEvents = Session.TakeSkeletalAnimationEvents();
+			PF_CHECK(Tests, std::ranges::none_of(SoughtEvents,
+				[&](const SkeletalAnimationEvent& Event) { return Event.Target == *CookedEntity; }));
 			PF_CHECK(Tests, Session.SetSkeletalAnimationPaused(*CookedEntity, false).has_value());
 			PF_CHECK(Tests, Session.TransitionSkeletalAnimation(
 				*CookedEntity, "animation/cccccccccccccccccccccccccccccccc", 0.5f).has_value());
 			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			const auto CrossfadeEvents = Session.TakeSkeletalAnimationEvents();
+			PF_CHECK(Tests, std::ranges::any_of(CrossfadeEvents, [&](const SkeletalAnimationEvent& Event)
+				{ return Event.Target == *CookedEntity && Event.ClipKey == "animation/cccccccccccccccccccccccccccccccc" &&
+					Event.MarkerKey == "event/second-clip-half" && Event.Name == "SecondClipHalf"; }));
 			const auto HalfTransitionPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
 			PF_CHECK(Tests, HalfTransitionPose && std::abs((*HalfTransitionPose)[1][13] - 0.25f) < 1.0e-4f);
 			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
 			const auto CompletedTransitionPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
 			PF_CHECK(Tests, CompletedTransitionPose && std::abs((*CompletedTransitionPose)[1][13] + 0.5f) < 1.0e-4f);
-			PF_CHECK(Tests, Session.PlaySkeletalAnimation(*CookedEntity, AnimationClipKey, false).has_value());
+			PF_CHECK(Tests, Session.PlaySkeletalAnimation(*CookedEntity, AnimationClipKey, true).has_value());
 			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
 			const auto ReplayedPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
 			PF_CHECK(Tests, ReplayedPose && std::abs((*ReplayedPose)[1][13] - 0.5f) < 1.0e-4f);
+			PF_CHECK(Tests, Session.SeekSkeletalAnimation(*CookedEntity, 0.85f).has_value());
+			PF_CHECK(Tests, Session.Advance(Timestep(0.2)).has_value());
+			const auto LoopEvents = Session.TakeSkeletalAnimationEvents();
+			std::vector<std::string> FirstActorLoopMarkers;
+			for (const SkeletalAnimationEvent& Event : LoopEvents)
+				if (Event.Target == *CookedEntity) FirstActorLoopMarkers.push_back(Event.MarkerKey);
+			const std::vector<std::string> ExpectedLoopMarkers{ "event/first-clip-end", "event/first-clip-loop" };
+			PF_CHECK(Tests, FirstActorLoopMarkers == ExpectedLoopMarkers);
+			PF_CHECK(Tests, std::ranges::all_of(LoopEvents, [](const SkeletalAnimationEvent& Event)
+				{ return Event.Target.IsValid() && Event.SessionGeneration != 0; }));
 		}
 		Session.Stop();
+		PF_CHECK(Tests, Session.TakeSkeletalAnimationEvents().empty());
 		PF_CHECK(Tests, !Session.PlaySkeletalAnimation(*CookedEntity, AnimationClipKey));
 	}
 } // namespace

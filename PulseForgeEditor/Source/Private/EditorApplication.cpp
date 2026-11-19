@@ -9341,6 +9341,7 @@ namespace
 				m_InspectorPanel.DrawContents(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, m_AssetSelector, m_ContentBrowser.Assets(),
 					m_Project.has_value(), FinishCurrentEdit, *this);
 				DrawBlueprintRuntimeInspector();
+				DrawSkeletalAnimationRuntimeInspector();
 				m_PrefabInstancePanel.Draw(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, *m_PrefabInstanceController);
 			}
 			ImGui::End();
@@ -9445,6 +9446,88 @@ namespace
 					ImGui::PopID();
 				}
 				ImGui::TreePop();
+			}
+		}
+
+		void DrawSkeletalAnimationRuntimeInspector()
+		{
+			if (!m_SceneRuntime || !m_RuntimeScene) return;
+			ImGui::Separator();
+			ImGui::TextUnformatted("Skeletal Animation Runtime");
+			const auto Selected = m_SceneWorkspace.Selection().GetPrimary();
+			if (!Selected)
+			{
+				ImGui::TextDisabled("Select a skeletal entity to inspect its transient Play pose.");
+				return;
+			}
+
+			const auto RuntimeEntity = m_RuntimeScene->FindEntity(*Selected);
+			if (!RuntimeEntity)
+			{
+				ImGui::TextDisabled("The selected entity is not present in this Play scene.");
+				return;
+			}
+			auto Playback = m_SceneRuntime->GetSkeletalAnimationPlayback(*RuntimeEntity);
+			if (!Playback)
+			{
+				ImGui::TextDisabled("Skeletal playback becomes available after the first runtime update.");
+				return;
+			}
+
+			ImGui::Text("Product %s", Playback->ProductKey.c_str());
+			ImGui::Text("Clip %s", Playback->CurrentClipKey.c_str());
+			bool Paused = Playback->Paused;
+			if (ImGui::Checkbox("Pause skeletal playback", &Paused))
+			{
+				if (const auto Result = m_SceneRuntime->SetSkeletalAnimationPaused(*RuntimeEntity, Paused); !Result)
+					SetError(Result.error().Message);
+			}
+			float ScrubTime = Playback->TimeSeconds;
+			if (Playback->DurationSeconds > 0.0f && ImGui::SliderFloat("Scrub Play pose", &ScrubTime, 0.0f,
+				Playback->DurationSeconds, "%.3f s"))
+			{
+				if (const auto Result = m_SceneRuntime->SeekSkeletalAnimation(*RuntimeEntity, ScrubTime); !Result)
+					SetError(Result.error().Message);
+			}
+
+			if (m_SkeletalAnimationControlEntity != *Selected)
+			{
+				m_SkeletalAnimationControlEntity = *Selected;
+				m_SkeletalAnimationTargetClip.clear();
+			}
+			if (ImGui::BeginCombo("Transition clip", m_SkeletalAnimationTargetClip.empty()
+				? "Select clip" : m_SkeletalAnimationTargetClip.c_str()))
+			{
+				for (const PulseForge::SkeletalAnimationClipInfo& Clip : Playback->Clips)
+				{
+					const bool IsSelected = m_SkeletalAnimationTargetClip == Clip.StableKey;
+					const std::string Label = Clip.Name.empty() ? Clip.StableKey : Clip.Name + " (" + Clip.StableKey + ")";
+					if (ImGui::Selectable(Label.c_str(), IsSelected)) m_SkeletalAnimationTargetClip = Clip.StableKey;
+					if (IsSelected) ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::DragFloat("Crossfade duration", &m_SkeletalAnimationCrossfadeSeconds, 0.01f, 0.0f, 10.0f, "%.2f s");
+			if (ImGui::Button("Transition skeletal clip") && !m_SkeletalAnimationTargetClip.empty())
+			{
+				if (const auto Result = m_SceneRuntime->TransitionSkeletalAnimation(
+					*RuntimeEntity, m_SkeletalAnimationTargetClip, m_SkeletalAnimationCrossfadeSeconds); !Result)
+					SetError(Result.error().Message);
+			}
+			if (Playback->Crossfading)
+				ImGui::ProgressBar(Playback->CrossfadeProgress, ImVec2(-1.0f, 0.0f), "Crossfade");
+
+			for (PulseForge::SkeletalAnimationEvent& Event : m_SceneRuntime->TakeSkeletalAnimationEvents())
+			{
+				m_RecentSkeletalAnimationEvents.push_back(std::move(Event));
+				if (m_RecentSkeletalAnimationEvents.size() > 16)
+					m_RecentSkeletalAnimationEvents.erase(m_RecentSkeletalAnimationEvents.begin());
+			}
+			if (!m_RecentSkeletalAnimationEvents.empty())
+			{
+				ImGui::TextUnformatted("Recent animation markers");
+				for (auto Event = m_RecentSkeletalAnimationEvents.rbegin(); Event != m_RecentSkeletalAnimationEvents.rend(); ++Event)
+					ImGui::BulletText("%s - %s - %.3f s", Event->Name.c_str(), Event->ClipKey.c_str(), Event->TimeSeconds);
 			}
 		}
 
@@ -10661,6 +10744,10 @@ namespace
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
+		std::optional<PulseForge::UUID> m_SkeletalAnimationControlEntity;
+		std::string m_SkeletalAnimationTargetClip;
+		float m_SkeletalAnimationCrossfadeSeconds = 0.25f;
+		std::vector<PulseForge::SkeletalAnimationEvent> m_RecentSkeletalAnimationEvents;
 		uint64_t m_RuntimeUISessionGeneration = 0;
 		bool m_RuntimeStopRequested = false;
 		std::optional<PulseForge::AssetID> m_QueuedRuntimeSceneTransition;

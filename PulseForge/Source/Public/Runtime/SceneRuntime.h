@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <span>
+#include <vector>
 
 namespace PulseForge
 {
@@ -162,6 +163,40 @@ namespace PulseForge
 		uint32_t BlueprintInstructionsExecuted = 0;
 	};
 
+	struct SkeletalAnimationEvent final
+	{
+		Entity Target;
+		AssetID SourceAsset;
+		std::string ProductKey;
+		std::string ClipKey;
+		std::string MarkerKey;
+		std::string Name;
+		float TimeSeconds = 0.0f;
+		uint64_t SessionGeneration = 0;
+	};
+
+	struct SkeletalAnimationClipInfo final
+	{
+		std::string StableKey;
+		std::string Name;
+		float DurationSeconds = 0.0f;
+	};
+
+	struct SkeletalAnimationPlaybackInfo final
+	{
+		AssetID SourceAsset;
+		std::string ProductKey;
+		std::string CurrentClipKey;
+		std::string TargetClipKey;
+		float TimeSeconds = 0.0f;
+		float DurationSeconds = 0.0f;
+		float CrossfadeProgress = 0.0f;
+		bool Looping = true;
+		bool Paused = false;
+		bool Crossfading = false;
+		std::vector<SkeletalAnimationClipInfo> Clips;
+	};
+
 	// Project, optional host services, and started Scene must outlive this coordinator; keep the scene at the same address while running.
 	class PULSEFORGE_API SceneRuntime final
 	{
@@ -197,6 +232,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRuntimeError> SeekSkeletalAnimation(const Entity& Target, float TimeSeconds);
 		[[nodiscard]] std::expected<void, SceneRuntimeError> TransitionSkeletalAnimation(
 			const Entity& Target, std::string_view ClipKey, float DurationSeconds, bool Looping = true);
+		[[nodiscard]] std::optional<SkeletalAnimationPlaybackInfo> GetSkeletalAnimationPlayback(const Entity& Target) const;
+		// Drains bounded marker events from the active session, discarding stale entity/session references.
+		[[nodiscard]] std::vector<SkeletalAnimationEvent> TakeSkeletalAnimationEvents();
 		[[nodiscard]] bool HasRuntimeUI() const noexcept;
 		[[nodiscard]] RuntimeUIInputPolicy GetRuntimeUIInputPolicy() const noexcept;
 		[[nodiscard]] uint64_t GetRuntimeUIInputGeneration() const noexcept;

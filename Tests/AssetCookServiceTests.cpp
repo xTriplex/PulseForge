@@ -2017,8 +2017,11 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	} CacheCleanup{ CacheRoot };
 	DerivedDataArtifactStore CompilerArtifacts({ CacheRoot, true, 8 * 1024 * 1024, 4 * 1024 * 1024, 16 });
 	CompileRequest.ArtifactStore = &CompilerArtifacts;
+	size_t DxcProcessLaunches = 0;
+	CompileRequest.OnDxcProcessLaunched = [&DxcProcessLaunches] { ++DxcProcessLaunches; };
 	auto Compiled = MaterialGraphCompiler::Compile(CompileRequest);
 	PF_CHECK(Tests, Compiled.has_value());
+	PF_CHECK(Tests, DxcProcessLaunches == 1);
 	if (Compiled)
 	{
 		PF_CHECK(Tests, Compiled->SourceNodes.size() == 3 &&
@@ -2058,7 +2061,7 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 		CachedCompile.CompilerExecutable = "missing-after-first-compile.exe";
 		auto CacheHit = MaterialGraphCompiler::Compile(CachedCompile);
 		PF_CHECK(Tests, CacheHit && CacheHit->SpirV == Compiled->SpirV &&
-			CacheHit->RecipeFingerprint == Compiled->RecipeFingerprint);
+			CacheHit->RecipeFingerprint == Compiled->RecipeFingerprint && DxcProcessLaunches == 1);
 		int CachedGenerationChecks = 0;
 		CachedCompile.IsGenerationCurrent = [&CachedGenerationChecks](uint64_t)
 			{ return ++CachedGenerationChecks == 1; };

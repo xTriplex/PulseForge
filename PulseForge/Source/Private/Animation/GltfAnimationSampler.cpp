@@ -191,9 +191,9 @@ namespace PulseForge
 		const ImportedGltfAnimationClip& Clip, std::stop_token CancellationToken)
 	{
 		if (Clip.StableKey.empty() || Clip.Channels.empty() || Clip.Channels.size() > 4096 ||
-			!std::isfinite(Clip.Duration) || Clip.Duration < 0.0f)
+			Clip.EventMarkers.size() > 256 || !std::isfinite(Clip.Duration) || Clip.Duration < 0.0f)
 			return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::InvalidChannel,
-				"Animation clip identity, duration, or channel count is invalid."));
+				"Animation clip identity, duration, channel, or event marker count is invalid."));
 		for (size_t Index = 0; Index < Clip.Channels.size(); ++Index)
 		{
 			if ((Index & 0x3fu) == 0 && CancellationToken.stop_requested())
@@ -202,9 +202,25 @@ namespace PulseForge
 			if (auto Valid = ValidateGltfAnimationChannel(Clip.Channels[Index], CancellationToken); !Valid)
 				return std::unexpected(Valid.error());
 		}
+		std::vector<std::string_view> MarkerKeys;
+		MarkerKeys.reserve(Clip.EventMarkers.size());
+		for (size_t Index = 0; Index < Clip.EventMarkers.size(); ++Index)
+		{
+			if ((Index & 0x3fu) == 0 && CancellationToken.stop_requested())
+				return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::Cancelled,
+					"Animation marker validation was cancelled."));
+			const ImportedGltfAnimationEventMarker& Marker = Clip.EventMarkers[Index];
+			if (Marker.StableKey.empty() || Marker.StableKey.size() > 256 || Marker.Name.empty() || Marker.Name.size() > 256 ||
+				!std::isfinite(Marker.TimeSeconds) || Marker.TimeSeconds < 0.0f || Marker.TimeSeconds > Clip.Duration ||
+				std::find(MarkerKeys.begin(), MarkerKeys.end(), Marker.StableKey) != MarkerKeys.end())
+				return std::unexpected(MakeError(GltfAnimationSamplingErrorCode::InvalidChannel,
+					"Animation event marker identity or time is invalid."));
+			MarkerKeys.push_back(Marker.StableKey);
+		}
 		GltfAnimationClipValidationToken Token;
 		Token.m_Clip = &Clip;
 		Token.m_ChannelCount = Clip.Channels.size();
+		Token.m_EventMarkerCount = Clip.EventMarkers.size();
 		return Token;
 	}
 
@@ -406,12 +422,17 @@ namespace PulseForge
 				GltfAnimationSamplingErrorCode::ResourceLimitExceeded, "Skeletal product exceeds its animation clip limit." });
 		GltfAnimationClipValidationMap Validated;
 		Validated.reserve(Product.Animations.size());
+		size_t TotalEventMarkers = 0;
 		for (size_t Index = 0; Index < Product.Animations.size(); ++Index)
 		{
 			if ((Index & 0x3fu) == 0 && CancellationToken.stop_requested())
 				return std::unexpected(GltfAnimationSamplingError{
 					GltfAnimationSamplingErrorCode::Cancelled, "Skeletal animation validation was cancelled." });
 			const ImportedGltfAnimationClip& Clip = Product.Animations[Index];
+			if (Clip.EventMarkers.size() > 4096 - TotalEventMarkers)
+				return std::unexpected(GltfAnimationSamplingError{
+					GltfAnimationSamplingErrorCode::ResourceLimitExceeded, "Skeletal product exceeds its animation event marker limit." });
+			TotalEventMarkers += Clip.EventMarkers.size();
 			auto Token = ValidateGltfAnimationClip(Clip, CancellationToken);
 			if (!Token) return std::unexpected(Token.error());
 			if (!Validated.emplace(Clip.StableKey, std::move(*Token)).second)
