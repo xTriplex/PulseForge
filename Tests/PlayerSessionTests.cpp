@@ -935,6 +935,7 @@ namespace
 		PF_CHECK(Tests, CookedEntity && CookedEntity->GetTransform()->Translation.y < 0.0f);
 		const auto SecondRuntimeEntity = Session.GetActiveScene()->FindEntity(SecondSkeletalEntity->GetUUID());
 		PF_CHECK(Tests, SecondRuntimeEntity.has_value());
+		const auto AuthoredTransformBeforePlaybackControls = AuthoredEntity->GetTransform();
 		if (SecondRuntimeEntity)
 		{
 			const auto PlaybackBeforePause = Session.GetSkeletalAnimationPlayback(*CookedEntity);
@@ -985,6 +986,12 @@ namespace
 			PF_CHECK(Tests, FirstActorLoopMarkers == ExpectedLoopMarkers);
 			PF_CHECK(Tests, std::ranges::all_of(LoopEvents, [](const SkeletalAnimationEvent& Event)
 				{ return Event.Target.IsValid() && Event.SessionGeneration != 0; }));
+			const auto AuthoredTransformAfterPlaybackControls = AuthoredEntity->GetTransform();
+			PF_CHECK(Tests, AuthoredTransformBeforePlaybackControls && AuthoredTransformAfterPlaybackControls &&
+				AuthoredTransformBeforePlaybackControls->Translation == AuthoredTransformAfterPlaybackControls->Translation &&
+				AuthoredTransformBeforePlaybackControls->Rotation == AuthoredTransformAfterPlaybackControls->Rotation &&
+				AuthoredTransformBeforePlaybackControls->Scale == AuthoredTransformAfterPlaybackControls->Scale &&
+				!AuthoredScene.GetRuntimeSkeletalPose(AuthoredEntity->GetUUID()));
 		}
 		Session.Stop();
 		PF_CHECK(Tests, Session.TakeSkeletalAnimationEvents().empty());
