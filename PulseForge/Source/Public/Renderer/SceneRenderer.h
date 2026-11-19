@@ -231,6 +231,15 @@ namespace PulseForge
 		{
 			return m_PreparedSnapshot ? m_PreparedSnapshot->Meshes.size() : 0;
 		}
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		[[nodiscard]] std::optional<bool> GetPreparedCameraVisibilityForValidation(UUID Entity) const noexcept
+		{
+			if (!m_PreparedSnapshot) return std::nullopt;
+			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+				if (Instance.Entity == Entity) return Instance.CameraVisible;
+			return std::nullopt;
+		}
+#endif
 		[[nodiscard]] AssetPreparationServiceStats GetAssetPreparationStats() const noexcept;
 		// Read-only point-in-time cache accounting. Call on the renderer owner thread.
 #ifndef PF_COOKED_RUNTIME_ONLY

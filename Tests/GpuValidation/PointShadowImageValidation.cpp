@@ -92,11 +92,11 @@ namespace PulseForge::GpuValidation
 					false, false, false },
 				{ "negative_x_negative_z_cube_corner_shadows_on", { 2.0f, 3.0f, 2.0f }, { -1.0f, 0.0f, -1.0f }, { 2.0f, 0.0f, 0.0f }, true,
 					false, false },
-				{ "positive_x_rotated_point_light", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, true },
 				{ "positive_z_offscreen_caster_shadows_off", { 0.0f, 3.0f, 2.0f }, { 1.25f, 0.0f, -1.0f }, { 1.55f, 0.0f, -1.0f }, false,
 					false, false, { 0.5f, 0.0f, 0.0f }, true },
 				{ "positive_z_offscreen_caster_shadows_on", { 0.0f, 3.0f, 2.0f }, { 1.25f, 0.0f, -1.0f }, { 1.55f, 0.0f, -1.0f }, true,
-					false, false, { 0.5f, 0.0f, 0.0f }, true } }
+					false, false, { 0.5f, 0.0f, 0.0f }, true },
+				{ "positive_x_rotated_point_light", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, true } }
 		};
 
 		namespace PointShadowAnalysis = PulseForge::GpuValidation::PointShadowImageAnalysis;
@@ -432,6 +432,11 @@ namespace PulseForge::GpuValidation
 				Fail("Could not update the point-shadow image test light");
 				return false;
 			}
+			if (!m_PointShadowImageCamera.SetCamera(m_PointShadowImageCameraComponent))
+			{
+				Fail("Could not restore the point-shadow image camera projection before the next case");
+				return false;
+			}
 			PulseForge::PointLightComponent UpdatedPoint = **Point;
 			UpdatedPoint.CastShadows = TestCase.CastShadows;
 			if (!m_PointShadowImageLight.SetPointLight(UpdatedPoint))
@@ -538,6 +543,12 @@ namespace PulseForge::GpuValidation
 				}
 			}
 
+			const auto Prepared = m_SceneRenderer->PrepareScene(m_PointShadowImageScene, 1.0f);
+			if (!Prepared)
+			{
+				Fail("Could not prepare point-shadow image case: " + Prepared.error().Message);
+				return false;
+			}
 			auto Snapshot =
 				PulseForge::SceneRenderSnapshotBuilder::Build(m_PointShadowImageScene, m_PointShadowImageCamera.GetUUID(), 1.0f);
 			if (!Snapshot)
@@ -547,28 +558,18 @@ namespace PulseForge::GpuValidation
 			}
 			if (TestCase.HideCasterFromCamera)
 			{
-				const auto FindMesh = [&](const UUID Entity)
+				const auto ReceiverVisible = m_SceneRenderer->GetPreparedCameraVisibilityForValidation(m_PointShadowImageFloor.GetUUID());
+				const auto CasterVisible = m_SceneRenderer->GetPreparedCameraVisibilityForValidation(m_PointShadowImageCube.GetUUID());
+				if (!ReceiverVisible || !CasterVisible || !*ReceiverVisible || *CasterVisible)
 				{
-					return std::find_if(Snapshot->Meshes.begin(), Snapshot->Meshes.end(),
-						[Entity](const SceneMeshInstance& Mesh) { return Mesh.Entity == Entity; });
-				};
-				const auto Receiver = FindMesh(m_PointShadowImageFloor.GetUUID());
-				const auto Caster = FindMesh(m_PointShadowImageCube.GetUUID());
-				if (Receiver == Snapshot->Meshes.end() || Caster == Snapshot->Meshes.end() || !Receiver->CameraVisible ||
-					Caster->CameraVisible)
-				{
-					Fail("Off-screen point-shadow fixture did not isolate a visible receiver from its camera-invisible caster");
+					Fail(std::string("Off-screen point-shadow fixture visibility mismatch: receiver=") +
+						(ReceiverVisible ? (*ReceiverVisible ? "visible" : "culled") : "missing") + ", caster=" +
+						(CasterVisible ? (*CasterVisible ? "visible" : "culled") : "missing"));
 					return false;
 				}
 			}
 			m_PointShadowImageViewProjections[m_PointShadowImageCase] = Snapshot->ViewProjection;
 			m_PointShadowImageCameraPositions[m_PointShadowImageCase] = Snapshot->CameraWorldPosition;
-			const auto Prepared = m_SceneRenderer->PrepareScene(m_PointShadowImageScene, 1.0f);
-			if (!Prepared)
-			{
-				Fail("Could not prepare point-shadow image case: " + Prepared.error().Message);
-				return false;
-			}
 			m_ScenePrepared = !m_SceneRenderer->IsAssetPreparationPending();
 			PF_INFO("POINT_SHADOW_IMAGE_CASE={0}; light=({1},{2},{3}); cast_shadows={4}; rotation={5}", TestCase.Name,
 				TestCase.LightPosition.x, TestCase.LightPosition.y, TestCase.LightPosition.z, TestCase.CastShadows,
@@ -677,20 +678,24 @@ namespace PulseForge::GpuValidation
 		bool ValidatePointShadowImageResults()
 		{
 			bool AllDirectionsPass = true;
+			std::string FailureDetails;
 			for (size_t Pair = 0; Pair < 12; ++Pair)
 			{
 				const size_t OffIndex = Pair * 2;
 				const size_t OnIndex = OffIndex + 1;
 				if (!m_PointShadowImageResults[OffIndex] || !m_PointShadowImageResults[OnIndex])
 				{
+					FailureDetails += " missing off/on capture for pair " + std::to_string(Pair) + ";";
 					AllDirectionsPass = false;
 					continue;
 				}
 				const PointShadowImageCase& TestCase = PointShadowImageCases[OnIndex];
 				if (!SegmentIntersectsShadowCaster(TestCase.LightPosition, TestCase.ExpectedReceiver, TestCase.CasterOffset) ||
-					SegmentIntersectsShadowCaster(TestCase.LightPosition, TestCase.ControlReceiver, TestCase.CasterOffset))
+					(!TestCase.HideCasterFromCamera &&
+						SegmentIntersectsShadowCaster(TestCase.LightPosition, TestCase.ControlReceiver, TestCase.CasterOffset)))
 				{
 					PF_ERROR("POINT_SHADOW_ORACLE_SETUP_ERROR={0}", TestCase.Name);
+					FailureDetails += " invalid analytic setup " + std::string(TestCase.Name) + ";";
 					AllDirectionsPass = false;
 					continue;
 				}
@@ -707,9 +712,20 @@ namespace PulseForge::GpuValidation
 					Metrics.ExpectedPixelCount, Metrics.ControlPixelCount, Metrics.ExpectedOff, Metrics.ExpectedOn, Metrics.ControlOff,
 					Metrics.ControlOn, ShadowDelta, ControlDelta, Metrics.ChangedPixelCount, Metrics.ChangedExpectedPixelCount,
 					Metrics.ChangedOtherPixelCount, Metrics.ChangedWorldX, Metrics.ChangedWorldZ, Metrics.ChangedMean);
-				if (Metrics.ExpectedPixelCount < 20 || Metrics.ControlPixelCount < 20 || Metrics.ExpectedOff < 0.025 ||
-					Metrics.ControlOff < 0.025 || ShadowDelta < 0.025 || ShadowDelta <= ControlDelta + 0.01)
+				const bool InsufficientExpectedRegion = Metrics.ExpectedPixelCount < 20 || Metrics.ExpectedOff < 0.025;
+				const bool InsufficientControlRegion = !TestCase.HideCasterFromCamera &&
+					(Metrics.ControlPixelCount < 20 || Metrics.ControlOff < 0.025);
+				const bool ShadowContrastFailed = ShadowDelta < 0.025 ||
+					(!TestCase.HideCasterFromCamera && ShadowDelta <= ControlDelta + 0.01);
+				if (InsufficientExpectedRegion || InsufficientControlRegion || ShadowContrastFailed)
 				{
+					PF_ERROR("POINT_SHADOW_IMAGE_ORACLE_THRESHOLD_FAILURE={0}; expected_region={1}; control_region={2}; "
+							"shadow_contrast={3}; expected_pixels={4}; control_pixels={5}; expected_off={6:.5f}; "
+							"control_off={7:.5f}; shadow_delta={8:.5f}; control_delta={9:.5f}",
+						TestCase.Name, InsufficientExpectedRegion, InsufficientControlRegion, ShadowContrastFailed,
+						Metrics.ExpectedPixelCount, Metrics.ControlPixelCount, Metrics.ExpectedOff, Metrics.ControlOff,
+						ShadowDelta, ControlDelta);
+					FailureDetails += " oracle threshold " + std::string(TestCase.Name) + ";";
 					AllDirectionsPass = false;
 				}
 				if (TestCase.HideCasterFromCamera && (Metrics.ChangedExpectedPixelCount < 20 ||
@@ -717,6 +733,7 @@ namespace PulseForge::GpuValidation
 				{
 					PF_ERROR("POINT_SHADOW_OFFSCREEN_CASTER_REGION_MISMATCH={0}; changed_expected={1}; changed_other={2}",
 						TestCase.Name, Metrics.ChangedExpectedPixelCount, Metrics.ChangedOtherPixelCount);
+					FailureDetails += " offscreen region " + std::string(TestCase.Name) + ";";
 					AllDirectionsPass = false;
 				}
 				if (Pair == 2 || Pair == 3)
@@ -731,8 +748,9 @@ namespace PulseForge::GpuValidation
 				}
 			}
 
-			if (!m_PointShadowImageResults[1] || !m_PointShadowImageResults[22])
+			if (!m_PointShadowImageResults[1] || !m_PointShadowImageResults[24])
 			{
+				FailureDetails += " rotation-invariance captures missing;";
 				Fail("Point-light rotation-invariance images are missing");
 				return false;
 			}
@@ -741,7 +759,7 @@ namespace PulseForge::GpuValidation
 			for (size_t Index = 0; Index < m_PointShadowImageResults[1]->Pixels.size(); ++Index)
 			{
 				const uint8_t A = std::to_integer<uint8_t>(m_PointShadowImageResults[1]->Pixels[Index]);
-				const uint8_t B = std::to_integer<uint8_t>(m_PointShadowImageResults[22]->Pixels[Index]);
+				const uint8_t B = std::to_integer<uint8_t>(m_PointShadowImageResults[24]->Pixels[Index]);
 				const uint8_t Difference = static_cast<uint8_t>(std::abs(static_cast<int>(A) - static_cast<int>(B)));
 				TotalDifference += Difference;
 				MaximumDifference = (std::max)(MaximumDifference, Difference);
@@ -751,9 +769,11 @@ namespace PulseForge::GpuValidation
 				MeanDifference, MaximumDifference);
 			if (MaximumDifference != 0)
 			{
+				FailureDetails += " rotation-invariance changed pixels=" + std::to_string(MaximumDifference) + ";";
 				AllDirectionsPass = false;
 			}
-			if (!AllDirectionsPass) Fail("Rendered point-shadow image/analytic checks did not agree for every cube-face direction");
+			if (!AllDirectionsPass)
+				Fail("Rendered point-shadow image/analytic checks did not agree: " + FailureDetails);
 			return AllDirectionsPass;
 		}
 

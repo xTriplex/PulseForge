@@ -96,6 +96,15 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			add_test(NAME PulseForge.GPU.MacOSRenderer.RuntimeUI COMMAND PulseForgeRuntimeUIGpuValidation)
 			set_tests_properties(PulseForge.GPU.MacOSRenderer.RuntimeUI PROPERTIES
 				RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer;macos;moltenvk")
+			add_test(NAME PulseForge.GPU.MacOSRenderer.PointShadowImages
+				COMMAND PulseForgeGpuValidation --scene-point-shadow-images
+					"${CMAKE_CURRENT_BINARY_DIR}/Diagnostics/MacOSPointShadowDirection")
+			add_test(NAME PulseForge.GPU.MacOSRenderer.ActiveFrameUploads
+				COMMAND PulseForgeGpuValidation --active-frame-resource-upload)
+			set_tests_properties(
+				PulseForge.GPU.MacOSRenderer.PointShadowImages
+				PulseForge.GPU.MacOSRenderer.ActiveFrameUploads
+				PROPERTIES RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer;macos;moltenvk")
 		endif()
 		add_test(NAME PulseForge.GPU.SceneHDR COMMAND PulseForgeGpuValidation --scene-hdr)
 		add_test(NAME PulseForge.GPU.SceneToneMapping COMMAND PulseForgeGpuValidation --scene-tonemap)

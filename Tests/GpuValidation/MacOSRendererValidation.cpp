@@ -104,6 +104,7 @@ namespace
 		SourceGraphMaterialFrame,
 		GraphMaterialParameterFrame,
 		GraphMaterialPresentationFrame,
+		SourceGraphParityFrame,
 		CookedGraphMaterialFrame,
 		GraphMaterialFrame,
 		SkinnedPoseFrame,
@@ -273,6 +274,7 @@ namespace
 						SaveGraphThroughMaterialDocument();
 						m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
 						const auto IdentityBaseline = m_SceneRenderer->GetResourceCacheStats();
+						m_SourceGraphMaterialBaselineStats = IdentityBaseline;
 						m_SourceGraphIdentityDescribeBaseline = IdentityBaseline.GraphMaterialIdentityDescribeCalls;
 						m_SourceGraphIdentityCacheHitBaseline = IdentityBaseline.GraphMaterialIdentityCacheHits;
 						m_Phase = ValidationPhase::SourceGraphMaterialFrame;
@@ -318,14 +320,48 @@ namespace
 						m_SourceGraphIdentityDescribeBaseline;
 					const size_t SourceRevisionCacheHits = GraphMaterialStats.GraphMaterialIdentityCacheHits -
 						m_SourceGraphIdentityCacheHitBaseline;
-					if (SourceRevisionDescribes != 1)
+					const auto& GraphBaseline = m_SourceGraphMaterialBaselineStats;
+					if (SourceRevisionDescribes != 2)
 					{
-						Fail("The refreshed saved source graph recipe was not described exactly once (describes=" +
+						Fail("The two refreshed saved source graph Materials were not each described once (describes=" +
 							std::to_string(SourceRevisionDescribes) + ", lifetime=" +
 							std::to_string(GraphMaterialStats.GraphMaterialIdentityDescribeCalls) + ")");
 						return;
 					}
 					if (SourceRevisionCacheHits == 0) return;
+					if (!m_SharedGraphMaterial ||
+						GraphMaterialStats.GraphMaterialShaderCreations - GraphBaseline.GraphMaterialShaderCreations != 1 ||
+						GraphMaterialStats.GraphMaterialShaderResources - GraphBaseline.GraphMaterialShaderResources != 1 ||
+						GraphMaterialStats.GraphMaterialBindingLayoutCreations - GraphBaseline.GraphMaterialBindingLayoutCreations != 1 ||
+						GraphMaterialStats.GraphMaterialParameterBufferCreations -
+							GraphBaseline.GraphMaterialParameterBufferCreations < 2 ||
+						GraphMaterialStats.GraphMaterialResources < GraphBaseline.GraphMaterialResources + 2 ||
+						GraphMaterialStats.GraphMaterialShaderResources < GraphBaseline.GraphMaterialShaderResources + 1)
+					{
+						Fail("Two compatible saved Materials did not retain independent values over one shared shader/layout "
+							"(materials=" + std::to_string(GraphMaterialStats.GraphMaterialResources) + ", shader_resources=" +
+							std::to_string(GraphMaterialStats.GraphMaterialShaderResources) + ", shaders=" +
+							std::to_string(GraphMaterialStats.GraphMaterialShaderCreations - GraphBaseline.GraphMaterialShaderCreations) +
+							", layouts=" + std::to_string(GraphMaterialStats.GraphMaterialBindingLayoutCreations -
+								GraphBaseline.GraphMaterialBindingLayoutCreations) + ", parameter_buffers=" +
+							std::to_string(GraphMaterialStats.GraphMaterialParameterBufferCreations -
+								GraphBaseline.GraphMaterialParameterBufferCreations) + ")");
+						return;
+					}
+					const size_t SharedShaderResources =
+						GraphMaterialStats.GraphMaterialShaderResources - GraphBaseline.GraphMaterialShaderResources;
+					const size_t ShaderCreations =
+						GraphMaterialStats.GraphMaterialShaderCreations - GraphBaseline.GraphMaterialShaderCreations;
+					const size_t LayoutCreations = GraphMaterialStats.GraphMaterialBindingLayoutCreations -
+						GraphBaseline.GraphMaterialBindingLayoutCreations;
+					const size_t ParameterBuffers = GraphMaterialStats.GraphMaterialParameterBufferCreations -
+						GraphBaseline.GraphMaterialParameterBufferCreations;
+					const size_t DxcLaunches = GraphMaterialStats.GraphMaterialDxcProcessLaunches -
+						GraphBaseline.GraphMaterialDxcProcessLaunches;
+					PF_INFO("MACOS_GRAPH_MATERIAL_SHARED_ASSETS=PASS; assets=2; shared_shader_resources_delta={}; shader_creations_delta={}; "
+						"layout_creations_delta={}; parameter_buffers_delta={}; dxc_launches_delta={}; pipelines={}",
+						SharedShaderResources, ShaderCreations, LayoutCreations, ParameterBuffers, DxcLaunches,
+						GraphMaterialStats.GraphMaterialPipelines);
 					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
 						m_FixedMaterialBaseline, m_CapturedColor);
 					if (ChangedPixels < 64)
@@ -431,6 +467,52 @@ namespace
 						Stats.GraphMaterialPipelineCreations, Stats.GraphMaterialParameterUploads, ChangedPixels);
 					try
 					{
+						// The second compatible Material instance is a runtime-only sharing probe. Remove it
+						// before comparing the source scene with the serialized scene loaded by the cook.
+						if (!m_SharedGraphMaterialEntity)
+							throw std::runtime_error("The compatible Material sharing probe entity was not retained");
+						if (auto Removed = m_Scene->DestroyEntity(*m_SharedGraphMaterialEntity); !Removed)
+							throw std::runtime_error("Could not remove the runtime-only shared Material probe entity: " + Removed.error().Message);
+						m_SharedGraphMaterialEntity.reset();
+						const auto Extent = App.GetWindow().GetFramebufferSize();
+						if (Extent.first == 0 || Extent.second == 0)
+							throw std::runtime_error("The source graph parity frame has an empty framebuffer extent");
+						if (auto Prepared = m_SceneRenderer->PrepareScene(*m_Scene,
+							static_cast<float>(Extent.first) / static_cast<float>(Extent.second)); !Prepared)
+							throw std::runtime_error("Could not prepare the single-instance saved source scene: " + Prepared.error().Message);
+						m_SourceGraphParityRenderPending = !m_SceneRenderer->IsAssetPreparationPending();
+						m_ScenePrepared = m_SourceGraphParityRenderPending;
+						m_Phase = ValidationPhase::SourceGraphParityFrame;
+					}
+					catch (const std::exception& Exception)
+					{
+						Fail(std::string("Could not create the saved-source cooked graph renderer fixture: ") + Exception.what());
+					}
+					return;
+				}
+				if (m_Phase == ValidationPhase::SourceGraphParityFrame)
+				{
+					if (!m_SourceGraphParityRenderPending)
+					{
+						const auto Extent = App.GetWindow().GetFramebufferSize();
+						const auto Prepared = m_SceneRenderer->PrepareScene(*m_Scene,
+							static_cast<float>(Extent.first) / static_cast<float>(Extent.second));
+						if (!Prepared)
+						{
+							Fail("Could not prepare the source graph parity scene: " + Prepared.error().Message);
+							return;
+						}
+						if (m_SceneRenderer->IsAssetPreparationPending()) return;
+						m_SourceGraphParityRenderPending = true;
+						m_ScenePrepared = true;
+						return;
+					}
+					if (m_SceneRenderer->IsAssetPreparationPending()) return;
+					m_SourceGraphParityRenderPending = false;
+					m_SourceGraphReadback = m_CapturedColor;
+					m_SourceGraphGeometryDrawCount = m_CapturedGeometryDraws;
+					try
+					{
 						CookAndActivateSavedGraphMaterial();
 						m_CookedGraphMaterialDrawObserved = false;
 						m_Phase = ValidationPhase::CookedGraphMaterialFrame;
@@ -455,9 +537,34 @@ namespace
 						m_SourceGraphReadback, m_CapturedColor);
 					if (ChangedPixels < 64 || SourceCookedDifference > 4)
 					{
+						const auto SourceImageMetrics = PulseForge::GpuValidation::MacOSRenderer::MeasureImage(m_SourceGraphReadback);
+						const auto CookedImageMetrics = PulseForge::GpuValidation::MacOSRenderer::MeasureImage(m_CapturedColor);
+						const auto MeanRgb = [](const PulseForge::TextureReadback& Image)
+						{
+							std::array<double, 3> Mean{};
+							const size_t PixelCount = static_cast<size_t>(Image.Width) * Image.Height;
+							if (PixelCount == 0 || Image.Pixels.size() != PixelCount * 4) return Mean;
+							for (size_t Pixel = 0; Pixel < PixelCount; ++Pixel)
+								for (size_t Channel = 0; Channel < Mean.size(); ++Channel)
+									Mean[Channel] += std::to_integer<uint8_t>(Image.Pixels[Pixel * 4 + Channel]);
+							for (double& Channel : Mean) Channel /= static_cast<double>(PixelCount);
+							return Mean;
+						};
+						const auto SourceMean = MeanRgb(m_SourceGraphReadback);
+						const auto CookedMean = MeanRgb(m_CapturedColor);
 						Fail("The cooked graph render did not match the discriminating source render "
 							"(changed from fixed=" + std::to_string(ChangedPixels) + ", source/cooked=" +
-							std::to_string(SourceCookedDifference) + ")");
+							std::to_string(SourceCookedDifference) + ", source extent=" +
+							std::to_string(m_SourceGraphReadback.Width) + "x" + std::to_string(m_SourceGraphReadback.Height) +
+							", cooked extent=" + std::to_string(m_CapturedColor.Width) + "x" +
+							std::to_string(m_CapturedColor.Height) + ", visible source/cooked=" +
+							std::to_string(SourceImageMetrics.VisiblePixels) + "/" + std::to_string(CookedImageMetrics.VisiblePixels) +
+							", chromatic source/cooked=" + std::to_string(SourceImageMetrics.ChromaticPixels) + "/" +
+							std::to_string(CookedImageMetrics.ChromaticPixels) + ", geometry draws source/cooked=" +
+							std::to_string(m_SourceGraphGeometryDrawCount) + "/" + std::to_string(m_CapturedGeometryDraws) +
+							", mean RGB source/cooked=(" + std::to_string(SourceMean[0]) + "," + std::to_string(SourceMean[1]) + "," +
+							std::to_string(SourceMean[2]) + ")/(" + std::to_string(CookedMean[0]) + "," +
+							std::to_string(CookedMean[1]) + "," + std::to_string(CookedMean[2]) + "))");
 						return;
 					}
 					PF_INFO("MACOS_COOKED_GRAPH_MATERIAL_RENDER=PASS; asset_id={}; changed_pixels={}; source_cooked_difference={}",
@@ -585,6 +692,7 @@ namespace
 			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
 				m_Phase == ValidationPhase::GraphMaterialParameterFrame ||
 				m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
+				m_Phase == ValidationPhase::SourceGraphParityFrame ||
 				m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
 				m_Phase == ValidationPhase::SkinnedPoseFrame ||
 				m_Phase == ValidationPhase::ResizedFrame ||
@@ -650,7 +758,8 @@ namespace
 #if defined(PF_G22_MATERIAL_DOCUMENT_COOKED_RENDER_VALIDATION)
 				if (m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
 					m_Phase == ValidationPhase::GraphMaterialParameterFrame ||
-					m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
+				m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
+				m_Phase == ValidationPhase::SourceGraphParityFrame ||
 					m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame)
 				{
 					const PulseForge::SceneRendererResourceCacheStats ResourceStats = m_SceneRenderer->GetResourceCacheStats();
@@ -925,6 +1034,57 @@ namespace
 				SavedSource->Description.BaseColorTexture != m_GraphValidationDescription.BaseColorTexture)
 				throw std::runtime_error("The saved Material source no longer matches the edited graph or stable asset reference");
 			m_GraphValidationDescription = SavedSource->Description;
+			CreateSecondCompatibleGraphMaterial();
+		}
+
+		void CreateSecondCompatibleGraphMaterial()
+		{
+			using namespace PulseForge;
+			MaterialAssetDesc SecondDescription = m_GraphValidationDescription;
+			if (!SecondDescription.Graph) throw std::runtime_error("The saved source Material has no graph to share");
+			auto GraphID = UUID::Generate();
+			if (!GraphID) throw std::runtime_error("Could not allocate a stable identity for the second graph Material");
+			SecondDescription.Graph->GraphID = *GraphID;
+			auto Parameter = std::ranges::find(SecondDescription.Graph->Nodes, UUID(0x475055, 8), &MaterialGraphNode::ID);
+			if (Parameter == SecondDescription.Graph->Nodes.end() || Parameter->Kind != MaterialGraphNodeKind::FloatParameter)
+				throw std::runtime_error("The shared graph Material lost its stable roughness parameter");
+			Parameter->Value = Parameter->Value < 0.5f ? 0.75f : 0.25f;
+			MaterialGraphCompileRequest FirstRequest;
+			FirstRequest.Source = *m_GraphValidationDescription.Graph;
+			FirstRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
+			MaterialGraphCompileRequest SecondRequest;
+			SecondRequest.Source = *SecondDescription.Graph;
+			SecondRequest.ToolchainFingerprint = FirstRequest.ToolchainFingerprint;
+			const auto FirstProduct = MaterialGraphCompiler::Describe(
+				FirstRequest.Source, FirstRequest.ToolchainFingerprint);
+			const auto SecondProduct = MaterialGraphCompiler::Describe(
+				SecondRequest.Source, SecondRequest.ToolchainFingerprint);
+			if (!FirstProduct || !SecondProduct || FirstProduct->RecipeFingerprint != SecondProduct->RecipeFingerprint)
+				throw std::runtime_error("Parameter-only compatible Material fixtures produced different shader recipes");
+			auto Created = MaterialAssetService::Create(m_Project->GetAssetRegistry(), m_Project->GetRootPath(),
+				"Assets/Materials/GraphShared.material", SecondDescription);
+			if (!Created) throw std::runtime_error("Could not create the second compatible graph Material: " + Created.error().Message);
+			m_SharedGraphMaterial = Created->ID;
+			bool Assigned = false;
+			for (const Entity& Candidate : m_Scene->GetEntities())
+			{
+				auto MeshRenderer = Candidate.GetMeshRenderer();
+				if (!MeshRenderer || !MeshRenderer->has_value() || (**MeshRenderer).MeshAsset != m_GraphValidationSourceMesh) continue;
+				auto Transform = Candidate.GetTransform();
+				if (!Transform) throw std::runtime_error("Could not read the shared graph mesh transform");
+				auto SecondInstance = m_Scene->CreateEntity("Second graph Material instance");
+				if (!SecondInstance) throw std::runtime_error("Could not create the shared graph mesh instance");
+				Transform->Translation.x += 2.0f;
+				MeshRendererComponent Updated = **MeshRenderer;
+				Updated.MaterialAsset = m_SharedGraphMaterial;
+				if (!SecondInstance->SetTransform(*Transform) || !SecondInstance->SetMeshRenderer(Updated))
+					throw std::runtime_error("Could not assign the second graph Material to an independent mesh instance");
+				m_SharedGraphMaterialEntity = *SecondInstance;
+				Assigned = true;
+				break;
+			}
+			if (!Assigned) throw std::runtime_error("The saved PBR fixture has no source mesh to instance with independent Material values");
+			m_SceneRenderer->RefreshMaterialAsset(*m_SharedGraphMaterial);
 		}
 
 		void UpdateSavedGraphParameterForReuse()
@@ -994,7 +1154,7 @@ namespace
 #endif
 			const std::filesystem::path CookRoot = m_TestProjectRoot / "CookedContent";
 			AssetCookRequest Request{ *SourceSnapshot, m_Project->GetFilePath(), *m_Project->GetDescription().StartScene,
-				{ *m_Project->GetDescription().StartScene, *m_GraphValidationMaterial }, Compatibility, CookRoot };
+				{ *m_Project->GetDescription().StartScene, *m_GraphValidationMaterial, *m_SharedGraphMaterial }, Compatibility, CookRoot };
 			auto Plan = AssetCookService::Plan(Request);
 			if (!Plan) throw std::runtime_error("Could not plan the edited PBR graph cook: " + Plan.error().Message);
 			auto Cooked = AssetCookService::Cook(*Plan);
@@ -1010,6 +1170,15 @@ namespace
 				std::memcpy(&SpirVMagic, Product->SpirV.data(), sizeof(SpirVMagic));
 			if (!Product || Product->RecipeFingerprint != ExpectedProduct->RecipeFingerprint || SpirVMagic != 0x07230203u)
 				throw std::runtime_error("The cooked provider graph product differs from the validated saved source recipe");
+			if (Product->SpirV != ExpectedProduct->SpirV || Product->Parameters.size() != ExpectedProduct->Parameters.size())
+				throw std::runtime_error("The cooked provider graph product differs from the exact saved-source shader or parameter data");
+			for (size_t Index = 0; Index < Product->Parameters.size(); ++Index)
+			{
+				if (Product->Parameters[Index].ID != ExpectedProduct->Parameters[Index].ID ||
+					Product->Parameters[Index].Name != ExpectedProduct->Parameters[Index].Name ||
+					Product->Parameters[Index].DefaultValue != ExpectedProduct->Parameters[Index].DefaultValue)
+					throw std::runtime_error("The cooked provider graph product reordered or changed a saved parameter value");
+			}
 			PF_INFO("MACOS_GRAPH_MATERIAL_COOKED_SOURCE=PASS; asset_id={}; recipe={}; spirv_bytes={}",
 				m_GraphValidationMaterial->ToString(), Product->RecipeFingerprint, Product->SpirV.size());
 			m_GraphValidationProduct = std::move(*Product);
@@ -1325,12 +1494,15 @@ namespace
 		std::filesystem::path m_TestProjectRoot;
 		std::shared_ptr<const PulseForge::CookedContentProvider> m_GraphContent;
 		bool m_CookedGraphMaterialDrawObserved = false;
+		bool m_SourceGraphParityRenderPending = false;
 		PulseForge::SceneRendererResourceCacheStats m_GraphParameterBaselineStats;
 		size_t m_GraphParameterEditCount = 0;
 #endif
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		std::optional<PulseForge::AssetID> m_GraphValidationMaterial;
+		std::optional<PulseForge::AssetID> m_SharedGraphMaterial;
+		std::optional<PulseForge::Entity> m_SharedGraphMaterialEntity;
 		std::optional<PulseForge::AssetID> m_GraphValidationSourceMesh;
 		std::optional<PulseForge::Entity> m_SkinnedValidationEntity;
 		PulseForge::MaterialAssetDesc m_GraphValidationDescription;
@@ -1346,6 +1518,8 @@ namespace
 		PulseForge::TextureReadback m_SourceGraphReadback;
 		size_t m_SourceGraphIdentityDescribeBaseline = 0;
 		size_t m_SourceGraphIdentityCacheHitBaseline = 0;
+		size_t m_SourceGraphGeometryDrawCount = 0;
+		PulseForge::SceneRendererResourceCacheStats m_SourceGraphMaterialBaselineStats;
 		PulseForge::TextureReadback m_FixedMaterialHdrBaseline;
 		PulseForge::TextureReadback m_FixedMaterialDepthBaseline;
 		PulseForge::TextureReadback m_FixedMaterialShadowBaseline;
