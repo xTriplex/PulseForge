@@ -604,6 +604,8 @@ namespace
 					const auto DurableInterruptedGraph = ReadBytes(GraphPath);
 					PF_CHECK(Tests, !InterruptedSave && ManagedSession->IsDirty() && DurableInterruptedGraph &&
 						*DurableInterruptedGraph != RecoveredGraphBytes);
+					PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetRecoveryMessage(GraphEditor,
+						*ManagedSession).find("matching compiled program was not published") != std::string::npos);
 					PublicationError.clear();
 					std::filesystem::remove(ProgramPath, PublicationError);
 					PF_CHECK(Tests, !PublicationError);
@@ -632,9 +634,104 @@ namespace
 							RecoveredProgramAsset->GetSourceRevision() == PulseForge::ComputeBlueprintSourceRevision(
 								std::as_bytes(std::span<const char>(RecoveredSource->data(), RecoveredSource->size()))));
 						PF_CHECK(Tests, !ManagedSession->IsDirty());
+						// A syntactically valid but uncompilable graph must stay editable when recovery cannot
+						// rebuild its stale program. Repairing that same draft must publish a matching pair.
+						const auto LastGoodProgramBytes = ReadBytes(ProgramPath);
+						auto InvalidRecoveryGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *ManagedSession);
+						const auto SetRecoveryProperty = [](EditorGraph& Graph, std::string Value)
+						{
+							const auto Node = std::find_if(Graph.Nodes.begin(), Graph.Nodes.end(), [](const EditorGraphNode& Candidate)
+								{ return Candidate.TypeKey == "blueprint.action.write_scalar"; });
+							if (Node == Graph.Nodes.end()) return false;
+							const auto Pin = std::find_if(Node->Pins.begin(), Node->Pins.end(), [](const EditorGraphPin& Candidate)
+								{ return Candidate.Key == "property"; });
+							if (Pin == Node->Pins.end()) return false;
+							Pin->DefaultValue = std::move(Value);
+							return true;
+						};
+						PF_CHECK(Tests, SetRecoveryProperty(InvalidRecoveryGraph, {}));
+						const auto InvalidRecoveryBytes = SerializeEditorGraph(InvalidRecoveryGraph,
+							MakeBlueprintAuthoringSchema());
+						PF_CHECK(Tests, LastGoodProgramBytes && InvalidRecoveryBytes &&
+							WriteBytes(GraphPath, *InvalidRecoveryBytes));
+						(void)Documents.Close(ManagedIdentity, EditorDocumentCloseChoice::Discard,
+							[](const EditorDocumentSession&, uint64_t) { return false; },
+							[](const EditorDocumentSession&) { return true; });
+						const auto FailedRepairOpen = Documents.Open(ManagedIdentity, ManagedBlueprint->ProjectRelativePath,
+							ManagedBlueprint->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+						ManagedSession = Documents.Find(ManagedIdentity);
+						PF_CHECK(Tests, FailedRepairOpen && ManagedSession && GraphEditor.Open(*ManagedSession, ManagedContext));
+						if (ManagedSession && InvalidRecoveryBytes && LastGoodProgramBytes)
+						{
+							PF_CHECK(Tests, EditorGraphDocumentEditorTestAccess::GetRecoveryMessage(GraphEditor,
+								*ManagedSession).find("recovery compilation failed") != std::string::npos);
+							PF_CHECK(Tests, ReadBytes(GraphPath) == InvalidRecoveryBytes &&
+								ReadBytes(ProgramPath) == LastGoodProgramBytes && !ManagedSession->IsDirty());
+							auto CorrectedGraph = EditorGraphDocumentEditorTestAccess::GetGraph(GraphEditor, *ManagedSession);
+							PF_CHECK(Tests, SetRecoveryProperty(CorrectedGraph, "health"));
+							EditorGraphDocumentEditorTestAccess::SetGraph(GraphEditor, *ManagedSession,
+								std::move(CorrectedGraph), MakeBlueprintAuthoringSchema());
+							(void)Documents.MarkEdited(ManagedIdentity);
+							const auto RepairProgramBackup = ProgramPath.parent_path() /
+								(ProgramPath.filename().string() + ".failed-repair-publication");
+							std::error_code RepairPublicationError;
+							std::filesystem::remove(RepairProgramBackup, RepairPublicationError);
+							RepairPublicationError.clear();
+							std::filesystem::rename(ProgramPath, RepairProgramBackup, RepairPublicationError);
+							PF_CHECK(Tests, !RepairPublicationError);
+							RepairPublicationError.clear();
+							std::filesystem::create_directory(ProgramPath, RepairPublicationError);
+							PF_CHECK(Tests, !RepairPublicationError);
+							const bool FailedRepairPublication = GraphEditor.Save(*ManagedSession);
+							const auto DurableRepairSource = ReadBytes(GraphPath);
+							PF_CHECK(Tests, !FailedRepairPublication && ManagedSession->IsDirty() && DurableRepairSource &&
+								*DurableRepairSource != *InvalidRecoveryBytes &&
+								EditorGraphDocumentEditorTestAccess::GetRecoveryMessage(GraphEditor,
+									*ManagedSession).find("matching compiled program was not published") != std::string::npos);
+							RepairPublicationError.clear();
+							std::filesystem::remove(ProgramPath, RepairPublicationError);
+							PF_CHECK(Tests, !RepairPublicationError);
+							RepairPublicationError.clear();
+							std::filesystem::rename(RepairProgramBackup, ProgramPath, RepairPublicationError);
+							PF_CHECK(Tests, !RepairPublicationError);
+							PF_CHECK(Tests, GraphEditor.Save(*ManagedSession) && !ManagedSession->IsDirty());
+							const auto RepairedSource = ReadBytes(GraphPath);
+							const auto RepairedProgram = ReadBytes(ProgramPath);
+							const auto RepairedAsset = RepairedProgram ? PulseForge::DeserializeBlueprintAsset(std::as_bytes(
+								std::span<const char>(RepairedProgram->data(), RepairedProgram->size())))
+								: std::expected<PulseForge::VerifiedBlueprintAsset, PulseForge::BlueprintProgramError>(
+									std::unexpected(PulseForge::BlueprintProgramError{}));
+							PF_CHECK(Tests, RepairedSource && RepairedProgram && RepairedAsset &&
+								RepairedAsset->GetSourceRevision() == PulseForge::ComputeBlueprintSourceRevision(std::as_bytes(
+									std::span<const char>(RepairedSource->data(), RepairedSource->size()))));
+							PublicationsAfterOpenRecovery = PublishedBlueprintPrograms.size();
+
+							const auto OrphanSourceTemporary = GraphPath.parent_path() /
+								(GraphPath.filename().string() + ".abandoned-test.tmp");
+							const auto OrphanProgramTemporary = ProgramPath.parent_path() /
+								(ProgramPath.filename().string() + ".abandoned-test.tmp");
+							PF_CHECK(Tests, WriteBytes(OrphanSourceTemporary, "incomplete graph publication") &&
+								WriteBytes(OrphanProgramTemporary, "incomplete program publication"));
+							(void)Documents.Close(ManagedIdentity, EditorDocumentCloseChoice::Discard,
+								[](const EditorDocumentSession&, uint64_t) { return false; },
+								[](const EditorDocumentSession&) { return true; });
+							const auto OrphanReopen = Documents.Open(ManagedIdentity, ManagedBlueprint->ProjectRelativePath,
+								ManagedBlueprint->DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+							ManagedSession = Documents.Find(ManagedIdentity);
+							PF_CHECK(Tests, OrphanReopen && ManagedSession && GraphEditor.Open(*ManagedSession, ManagedContext));
+							PF_CHECK(Tests, ReadBytes(OrphanSourceTemporary) ==
+								std::optional<std::string>{ "incomplete graph publication" } &&
+								ReadBytes(OrphanProgramTemporary) ==
+								std::optional<std::string>{ "incomplete program publication" } &&
+								ReadBytes(GraphPath) == RepairedSource && ReadBytes(ProgramPath) == RepairedProgram);
+							std::error_code OrphanCleanupError;
+							std::filesystem::remove(OrphanSourceTemporary, OrphanCleanupError);
+							OrphanCleanupError.clear();
+							std::filesystem::remove(OrphanProgramTemporary, OrphanCleanupError);
+						}
 					}
 					PF_CHECK(Tests, SecondManagedSession == nullptr || SecondManagedSession->IsDirty());
-					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery + 2u &&
+					PF_CHECK(Tests, PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery &&
 						PublishedBlueprintPrograms.back() == ManagedBlueprint->GraphID);
 					if (SecondManagedSession)
 					{
@@ -649,7 +746,7 @@ namespace
 							EditorGraphDocumentEditor::GetBlueprintGraphPath(SecondManagedBlueprint->GraphID));
 						PF_CHECK(Tests, OtherGraphBeforeSave.ID == SecondManagedBlueprint->GraphID &&
 							OtherGraphAfterSave == OtherGraphBeforeSave && OtherProgram && OtherGraphBytes &&
-							PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery + 3u &&
+							PublishedBlueprintPrograms.size() == PublicationsAfterOpenRecovery + 1u &&
 							PublishedBlueprintPrograms.back() == SecondManagedBlueprint->GraphID);
 						if (OtherProgram && OtherGraphBytes)
 						{
