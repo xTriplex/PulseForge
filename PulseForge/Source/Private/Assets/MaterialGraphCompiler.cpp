@@ -14,6 +14,7 @@
 #include <map>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -343,7 +344,29 @@ namespace PulseForge
 		struct TempFiles final
 		{
 			std::filesystem::path Root;
-			~TempFiles() { std::error_code Ignored; std::filesystem::remove_all(Root, Ignored); }
+			bool OwnsRoot = false;
+
+			TempFiles() = default;
+			TempFiles(const TempFiles&) = delete;
+			TempFiles& operator=(const TempFiles&) = delete;
+			TempFiles(TempFiles&& Other) noexcept : Root(std::move(Other.Root)), OwnsRoot(std::exchange(Other.OwnsRoot, false)) {}
+			TempFiles& operator=(TempFiles&& Other) noexcept
+			{
+				if (this == &Other) return *this;
+				Reset();
+				Root = std::move(Other.Root);
+				OwnsRoot = std::exchange(Other.OwnsRoot, false);
+				return *this;
+			}
+			~TempFiles() { Reset(); }
+
+			void Reset() noexcept
+			{
+				if (!OwnsRoot) return;
+				std::error_code Ignored;
+				std::filesystem::remove_all(Root, Ignored);
+				OwnsRoot = false;
+			}
 		};
 	}
 
@@ -473,9 +496,39 @@ namespace PulseForge
 			}
 			return std::unexpected(Failure(MaterialGraphCompileErrorCode::CompilerUnavailable, std::move(Message)));
 		}
-		TempFiles Temporary{ std::filesystem::temp_directory_path() / ("PulseForgeMaterialGraph-" + UUID().ToString()) };
-		if (!std::filesystem::create_directory(Temporary.Root, PathError) || PathError)
-			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest, "Could not create isolated compiler workspace"));
+		std::filesystem::path WorkspaceParent = Request.TemporaryDirectoryRoot;
+		if (WorkspaceParent.empty()) WorkspaceParent = std::filesystem::temp_directory_path(PathError);
+		if (PathError || WorkspaceParent.empty())
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+				"Could not resolve the compiler workspace parent directory: " + PathError.message()));
+		TempFiles Temporary;
+		constexpr size_t MaximumWorkspaceAttempts = 16;
+		for (size_t Attempt = 0; Attempt < MaximumWorkspaceAttempts; ++Attempt)
+		{
+			const auto Identifier = UUID::Generate();
+			if (!Identifier)
+				return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+					"Could not generate a unique compiler workspace identity: " + Identifier.error().Message));
+			const auto Candidate = WorkspaceParent / ("PulseForgeMaterialGraph-" + Identifier->ToString());
+			PathError.clear();
+			const bool Created = std::filesystem::create_directory(Candidate, PathError);
+			if (Created)
+			{
+				Temporary.Root = Candidate;
+				Temporary.OwnsRoot = true;
+				break;
+			}
+			if (PathError)
+				return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+					"Could not create isolated compiler workspace under '" + WorkspaceParent.string() + "': " + PathError.message()));
+			std::error_code ExistenceError;
+			if (std::filesystem::exists(Candidate, ExistenceError) && !ExistenceError) continue;
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+				"Could not create isolated compiler workspace under '" + WorkspaceParent.string() + "'"));
+		}
+		if (!Temporary.OwnsRoot)
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest,
+				"Could not acquire a unique compiler workspace after 16 identity collisions"));
 		const auto IncludePath = Temporary.Root / "MaterialGraph.generated.hlsli";
 		const auto OutputPath = Temporary.Root / "MaterialGraph.spv";
 		const auto LogPath = Temporary.Root / "Compiler.log";
@@ -484,6 +537,13 @@ namespace PulseForge
 			Stream.write(Generated->Hlsl.data(), static_cast<std::streamsize>(Generated->Hlsl.size()));
 			if (!Stream) return std::unexpected(Failure(MaterialGraphCompileErrorCode::InvalidRequest, "Could not write generated material graph include"));
 		}
+		if (Request.OnWorkspacePrepared) Request.OnWorkspacePrepared(Temporary.Root);
+		if (Request.CancellationToken.stop_requested())
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::Cancelled,
+				"Material compilation was cancelled before host process launch"));
+		if (Request.IsGenerationCurrent && !Request.IsGenerationCurrent(Request.Generation))
+			return std::unexpected(Failure(MaterialGraphCompileErrorCode::StaleGeneration,
+				"Material generation became stale before host process launch"));
 		int ExitCode = -1;
 		const auto Deadline = std::chrono::steady_clock::now() + Request.Timeout;
 #if defined(_WIN32)

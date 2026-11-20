@@ -97,7 +97,7 @@ namespace PulseForgeEditor
 				if (!GraphBytes)
 					return Fail("Blueprint graph source could not be read within its supported size; program publication was rejected.");
 				const auto GraphSource = std::as_bytes(std::span<const char>(GraphBytes->data(), GraphBytes->size()));
-				if (PulseForge::ComputeBlueprintSourceRevision(GraphSource) != Decoded->GetSourceRevision())
+				if (!PulseForge::DoesBlueprintSourceRevisionMatch(*Decoded, GraphSource))
 					return Fail("Compiled Blueprint program does not match the current graph source; save the Blueprint to rebuild it.");
 			}
 			Found = m_Programs.emplace(Asset,

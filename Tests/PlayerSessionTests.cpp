@@ -609,9 +609,10 @@ namespace
 		if (!LegacyEnvelope) return;
 		std::vector<std::byte> LegacyProgramBytes(LegacyEnvelope->begin(), LegacyEnvelope->begin() + 9);
 		LegacyProgramBytes.insert(LegacyProgramBytes.end(), LegacyEnvelope->begin() + 17, LegacyEnvelope->end());
-		LegacyProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintLegacyAssetFormatVersion) };
+		LegacyProgramBytes[4] = std::byte{ static_cast<uint8_t>(BlueprintLegacyUnboundAssetFormatVersion) };
 		const auto LegacyProgram = DeserializeBlueprintAsset(LegacyProgramBytes);
-		PF_CHECK(Tests, LegacyProgram && LegacyProgram->GetSourceRevision() == 0);
+		PF_CHECK(Tests, LegacyProgram && LegacyProgram->GetVersion() == BlueprintLegacyUnboundAssetFormatVersion &&
+			LegacyProgram->GetSourceRevision() == 0);
 		if (!LegacyProgram) return;
 		const auto LegacyBehaviorAsset = AssetOperations::CreateAssetFromBytes(ProjectValue->GetAssetRegistry(),
 			ProjectValue->GetRootPath(), std::span<const std::byte>(LegacyProgramBytes), "Assets/LegacyBehavior.pfblueprint");
@@ -619,7 +620,9 @@ namespace
 		if (!LegacyBehaviorAsset) return;
 		const auto LegacyGraphPath = ProjectValue->GetRootPath() / ".pulseforge" / "blueprint-graphs" /
 			(LegacyBehaviorAsset->ID.ToString() + ".pfg");
-		PF_CHECK(Tests, WriteText(LegacyGraphPath, "legacy source graph"));
+		std::error_code LegacyGraphError;
+		std::filesystem::remove(LegacyGraphPath, LegacyGraphError);
+		PF_CHECK(Tests, !LegacyGraphError && !std::filesystem::exists(LegacyGraphPath));
 		Scene LegacyStartup;
 		auto LegacyEntity = LegacyStartup.CreateEntity("Legacy source Blueprint");
 		PF_CHECK(Tests, LegacyEntity.has_value());
@@ -952,10 +955,28 @@ namespace
 				std::abs((*FirstPausedPose)[1][13] - (4.0f / 60.0f)) < 1.0e-4f &&
 				std::abs((*SecondIndependentPose)[1][13] - (4.0f / 60.0f + 0.5f)) < 1.0e-4f);
 
+			const auto OtherPlaybackBeforeGlobalPause = Session.GetSkeletalAnimationPlayback(*SecondRuntimeEntity);
+			const auto OtherPoseBeforeGlobalPause = Session.GetActiveScene()->GetRuntimeSkeletalPose(SecondRuntimeEntity->GetUUID());
+			const size_t ScriptCallbacksBeforeScrub = CountScriptObservations(
+				ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted, *ScriptIdentifier,
+				AuthoredEntity->GetUUID(), ScriptRuntimeCallback::OnUpdate);
+			PF_CHECK(Tests, Session.Pause().has_value() && Session.IsPaused());
 			PF_CHECK(Tests, Session.SeekSkeletalAnimation(*CookedEntity, 0.75f).has_value());
-			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			PF_CHECK(Tests, Session.IsPaused());
 			const auto SoughtPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			const auto OtherPlaybackAfterScrub = Session.GetSkeletalAnimationPlayback(*SecondRuntimeEntity);
+			const auto OtherPoseAfterScrub = Session.GetActiveScene()->GetRuntimeSkeletalPose(SecondRuntimeEntity->GetUUID());
 			PF_CHECK(Tests, SoughtPose && std::abs((*SoughtPose)[1][13] - 0.75f) < 1.0e-4f);
+			PF_CHECK(Tests, OtherPlaybackBeforeGlobalPause && OtherPlaybackAfterScrub &&
+				std::abs(OtherPlaybackBeforeGlobalPause->TimeSeconds - OtherPlaybackAfterScrub->TimeSeconds) < 1.0e-6f);
+			PF_CHECK(Tests, OtherPoseBeforeGlobalPause && OtherPoseAfterScrub &&
+				(*OtherPoseBeforeGlobalPause)[1] == (*OtherPoseAfterScrub)[1]);
+			PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+				*ScriptIdentifier, AuthoredEntity->GetUUID(), ScriptRuntimeCallback::OnUpdate) == ScriptCallbacksBeforeScrub);
+			PF_CHECK(Tests, Session.Resume().has_value() && !Session.IsPaused());
+			PF_CHECK(Tests, Session.Advance(Timestep(0.25)).has_value());
+			const auto ResumedSoughtPose = Session.GetActiveScene()->GetRuntimeSkeletalPose(CookedEntity->GetUUID());
+			PF_CHECK(Tests, ResumedSoughtPose && std::abs((*ResumedSoughtPose)[1][13] - 0.75f) < 1.0e-4f);
 			const auto SoughtEvents = Session.TakeSkeletalAnimationEvents();
 			PF_CHECK(Tests, std::ranges::none_of(SoughtEvents,
 				[&](const SkeletalAnimationEvent& Event) { return Event.Target == *CookedEntity; }));

@@ -8,8 +8,10 @@
 
 namespace PulseForge
 {
-	inline constexpr uint32_t BlueprintAssetFormatVersion = 5;
-	inline constexpr uint32_t BlueprintPreviousAssetFormatVersion = 4;
+	inline constexpr uint32_t BlueprintAssetFormatVersion = 6;
+	inline constexpr uint32_t BlueprintLegacyRawRevisionAssetFormatVersion = 5;
+	inline constexpr uint32_t BlueprintLegacyUnboundAssetFormatVersion = 4;
+	inline constexpr uint32_t BlueprintPreviousAssetFormatVersion = BlueprintLegacyRawRevisionAssetFormatVersion;
 	inline constexpr uint32_t BlueprintLegacyTimerAssetFormatVersion = 3;
 	inline constexpr uint32_t BlueprintLegacyActionAssetFormatVersion = 2;
 	inline constexpr uint32_t BlueprintLegacyAssetFormatVersion = 1;
@@ -43,6 +45,8 @@ namespace PulseForge
 		std::vector<BlueprintVerifiedEventProgram> m_Events;
 		friend PULSEFORGE_API std::expected<VerifiedBlueprintAsset, BlueprintProgramError>
 			VerifyBlueprintAsset(std::vector<BlueprintEventProgramSource> Events, uint64_t SourceRevision);
+		friend PULSEFORGE_API std::expected<VerifiedBlueprintAsset, BlueprintProgramError>
+			DeserializeBlueprintAsset(std::span<const std::byte> Bytes);
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintAsset, BlueprintProgramError> VerifyBlueprintAsset(
@@ -52,4 +56,6 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<VerifiedBlueprintAsset, BlueprintProgramError> DeserializeBlueprintAsset(
 		std::span<const std::byte> Bytes);
 	[[nodiscard]] PULSEFORGE_API uint64_t ComputeBlueprintSourceRevision(std::span<const std::byte> SourceBytes) noexcept;
+	[[nodiscard]] PULSEFORGE_API bool DoesBlueprintSourceRevisionMatch(
+		const VerifiedBlueprintAsset& Program, std::span<const std::byte> SourceBytes) noexcept;
 }

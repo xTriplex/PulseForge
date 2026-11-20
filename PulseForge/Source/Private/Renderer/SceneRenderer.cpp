@@ -11,6 +11,7 @@
 #include "Renderer/Detail/RuntimeUIRenderPass.h"
 
 #include "Assets/MaterialAssetCache.h"
+#include "Assets/AssetImportProvenance.h"
 #include "Assets/CookedProductCodec.h"
 #include "Assets/MaterialGraphArtifact.h"
 #include "Assets/GltfMeshImportCoordinator.h"
@@ -123,6 +124,19 @@ namespace PulseForge
 		BindingSetHandle MaterialBindings;
 		uint64_t PointShadowResourceGeneration = (std::numeric_limits<uint64_t>::max)();
 	};
+
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+	struct SceneRenderer::GraphMaterialCompileState final
+	{
+		std::string RequestKey;
+		std::string RecipeFingerprint;
+		std::optional<AssetPreparationService::Subscription> Subscription;
+		std::shared_ptr<const MaterialGraphCompiledArtifact> Compiled;
+		std::string Failure;
+		bool Failed = false;
+		bool FailureLogged = false;
+	};
+#endif
 
 	struct SceneRenderer::TransientMaterialOverride final
 	{
@@ -279,6 +293,9 @@ namespace PulseForge
 
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		DerivedDataArtifactStore Artifacts;
+		std::shared_ptr<std::atomic_uint64_t> GenerationGuard = std::make_shared<std::atomic_uint64_t>(0);
+		std::shared_ptr<std::atomic_uint64_t> GraphMaterialDxcProcessLaunches =
+			std::make_shared<std::atomic_uint64_t>(0);
 		AssetPreparationService Preparation;
 #endif
 		AssetUploadBudget UploadBudget;
@@ -296,6 +313,7 @@ namespace PulseForge
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::unordered_map<AssetID,
 			std::expected<MaterialGraphCompileIdentity, MaterialGraphCompileError>, UUIDHash> GraphMaterialIdentities;
+		std::unordered_map<std::string, uint64_t> GraphMaterialRetryEpochs;
 		size_t GraphMaterialIdentityDescribeCalls = 0;
 		size_t GraphMaterialIdentityCacheHits = 0;
 #endif
@@ -323,6 +341,7 @@ namespace PulseForge
 			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), Registry, Preparation,
 				  &UploadBudget, Artifacts, SessionKey, Runtime.GetDiagnosticRecorder())
 		{
+			GenerationGuard->store(Generation, std::memory_order_release);
 		}
 
 		ProjectAssetCaches(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content)
@@ -356,6 +375,7 @@ namespace PulseForge
 			EnvironmentLighting.SetRegistrySnapshot(Registry);
 			SessionKey = MakeSessionKey(Artifacts.GetOptions().Root.parent_path().parent_path());
 			Generation = AllocateGeneration();
+			GenerationGuard->store(Generation, std::memory_order_release);
 			Meshes.SetSessionKey(SessionKey);
 			Textures.SetSessionKey(SessionKey);
 			EnvironmentLighting.SetSessionKey(SessionKey);
@@ -434,7 +454,12 @@ namespace PulseForge
 		Stats.GraphMaterialResources = m_GraphMaterialResources.size();
 		Stats.GraphMaterialIdentityDescribeCalls = m_ProjectAssetCaches->GraphMaterialIdentityDescribeCalls;
 		Stats.GraphMaterialIdentityCacheHits = m_ProjectAssetCaches->GraphMaterialIdentityCacheHits;
-		Stats.GraphMaterialDxcProcessLaunches = m_GraphMaterialDxcProcessLaunches;
+		Stats.GraphMaterialCompileRequests = m_GraphMaterialCompileRequests;
+		Stats.GraphMaterialCompileFailures = m_GraphMaterialCompileFailures;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		Stats.GraphMaterialDxcProcessLaunches = m_ProjectAssetCaches->GraphMaterialDxcProcessLaunches->load(
+			std::memory_order_relaxed);
+#endif
 		Stats.GraphMaterialShaderCreations = m_GraphMaterialShaderCreations;
 		Stats.GraphMaterialBindingLayoutCreations = m_GraphMaterialBindingLayoutCreations;
 		Stats.GraphMaterialParameterBufferCreations = m_GraphMaterialParameterBufferCreations;
@@ -1342,6 +1367,7 @@ namespace PulseForge
 				if (HasSourceGraph)
 				{
 #if !defined(PF_COOKED_RUNTIME_ONLY)
+					bool IdentityWasDescribed = false;
 					auto Identity = m_ProjectAssetCaches->GraphMaterialIdentities.find(*Instance.MaterialAsset);
 					if (Identity == m_ProjectAssetCaches->GraphMaterialIdentities.end())
 					{
@@ -1350,16 +1376,14 @@ namespace PulseForge
 							*SourceDescription->Graph, GetMaterialGraphCompilerToolchainFingerprint());
 						Identity = m_ProjectAssetCaches->GraphMaterialIdentities.emplace(
 							*Instance.MaterialAsset, std::move(Described)).first;
+						IdentityWasDescribed = true;
 					}
 					else ++m_ProjectAssetCaches->GraphMaterialIdentityCacheHits;
 					if (!Identity->second)
 					{
-						if (Existing == m_GraphMaterialResources.end())
-							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
-								*Instance.MaterialAsset, "Saved graph material is invalid for source rendering: " +
-								Identity->second.error().Message });
-						PF_CORE_WARN("Saved graph material {} is invalid; retaining its last good renderer product: {}",
-							Instance.MaterialAsset->ToString(), Identity->second.error().Message);
+						if (IdentityWasDescribed)
+							PF_CORE_ERROR("Saved graph material {} is invalid for source rendering; using its last good product or fixed fallback: {}",
+								Instance.MaterialAsset->ToString(), Identity->second.error().Message);
 					}
 					else SourceIdentity.emplace(Identity->second.value());
 #endif
@@ -1398,42 +1422,131 @@ namespace PulseForge
 					else
 					{
 #if !defined(PF_COOKED_RUNTIME_ONLY)
-						if (!SourceDescription || !SourceDescription->Graph)
-							return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
-								*Instance.MaterialAsset, "Saved graph material source is unavailable" });
-						MaterialGraphCompileRequest CompileRequest;
-						CompileRequest.Source = *SourceDescription->Graph;
-						CompileRequest.ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
-						CompileRequest.ArtifactStore = &m_ProjectAssetCaches->Artifacts;
-						CompileRequest.Generation = m_ProjectAssetCaches->Generation;
-						CompileRequest.OnDxcProcessLaunched = [this] { ++m_GraphMaterialDxcProcessLaunches; };
-						const ProjectAssetCaches* const Caches = m_ProjectAssetCaches.get();
-						CompileRequest.IsGenerationCurrent = [Caches](uint64_t Generation)
+						if (SourceIdentity && SourceDescription && SourceDescription->Graph)
 						{
-							return Caches->Generation == Generation;
-						};
-						auto Compiled = MaterialGraphCompiler::Compile(CompileRequest);
-						if (!Compiled)
-						{
-							if (Existing == m_GraphMaterialResources.end())
-								return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
-										*Instance.MaterialAsset, "Could not compile saved graph material for source rendering: " +
-										Compiled.error().Message });
-							GraphMaterial = Existing->second.get();
-							PF_CORE_WARN("Could not compile saved graph material {}; retaining its last good renderer product: {}",
-								Instance.MaterialAsset->ToString(), Compiled.error().Message);
-						}
-						else
-						{
-							CookedGraphMaterialProduct SourceProduct;
-							SourceProduct.RecipeFingerprint = Compiled->RecipeFingerprint;
-							SourceProduct.Parameters.reserve(Compiled->Parameters.size());
-							for (const auto& Parameter : Compiled->Parameters)
-								SourceProduct.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
-							SourceProduct.SpirV = std::move(Compiled->SpirV);
-							SourceProduct.Material = MakeCookedMaterialProduct(*SourceDescription);
-							LoadedProduct.emplace(std::move(SourceProduct));
-							Product = &*LoadedProduct;
+							auto& RetryEpoch = m_ProjectAssetCaches->GraphMaterialRetryEpochs[SourceIdentity->RecipeFingerprint];
+							const std::string RequestKey = SourceIdentity->RecipeFingerprint + "#retry=" + std::to_string(RetryEpoch);
+							auto& State = m_GraphMaterialCompileStates[*Instance.MaterialAsset];
+							if (!State) State = std::make_unique<GraphMaterialCompileState>();
+							if (State->RequestKey != RequestKey)
+							{
+								if (State->Subscription) State->Subscription->Cancel();
+								State = std::make_unique<GraphMaterialCompileState>();
+								State->RequestKey = RequestKey;
+								State->RecipeFingerprint = SourceIdentity->RecipeFingerprint;
+							}
+							if (!State->Compiled && !State->Failed && !State->Subscription)
+							{
+								ProjectAssetCaches* const Caches = m_ProjectAssetCaches.get();
+								const uint64_t Generation = Caches->Generation;
+								const auto GenerationGuard = Caches->GenerationGuard;
+								DerivedDataArtifactStore* const ArtifactStore = &Caches->Artifacts;
+								const MaterialGraphSource Source = *SourceDescription->Graph;
+								const std::string ToolchainFingerprint = GetMaterialGraphCompilerToolchainFingerprint();
+								const auto LaunchCounter = Caches->GraphMaterialDxcProcessLaunches;
+								std::function<void(std::stop_token)> CompileGate;
+								std::filesystem::path CompilerExecutable;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+								CompileGate = m_GraphMaterialCompileGateForValidation;
+								CompilerExecutable = m_GraphMaterialCompilerExecutableForValidation;
+#endif
+								auto Processor = [GenerationGuard, ArtifactStore, Generation, Source,
+									ToolchainFingerprint, LaunchCounter, CompileGate, CompilerExecutable](
+									std::stop_token StopToken) mutable
+									-> std::expected<AssetPreparationService::CpuPayload, AssetPreparationError>
+								{
+									if (CompileGate) CompileGate(StopToken);
+									MaterialGraphCompileRequest CompileRequest;
+									CompileRequest.Source = std::move(Source);
+									CompileRequest.CompilerExecutable = CompilerExecutable;
+									CompileRequest.ToolchainFingerprint = ToolchainFingerprint;
+									CompileRequest.ArtifactStore = ArtifactStore;
+									CompileRequest.Generation = Generation;
+									CompileRequest.CancellationToken = StopToken;
+									CompileRequest.OnDxcProcessLaunched = [LaunchCounter]
+										{ LaunchCounter->fetch_add(1, std::memory_order_relaxed); };
+									CompileRequest.IsGenerationCurrent = [GenerationGuard](uint64_t Candidate)
+										{ return GenerationGuard->load(std::memory_order_acquire) == Candidate; };
+									auto Compiled = MaterialGraphCompiler::Compile(CompileRequest);
+									if (!Compiled)
+									return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed,
+										"Material graph compile failed: " + Compiled.error().Message });
+									const size_t RetainedBytes = Compiled->SpirV.size() + Compiled->SemanticRecipe.size() +
+										Compiled->RecipeFingerprint.size() + Compiled->Diagnostics.size();
+									auto Payload = MakeAssetPreparationValue(std::move(*Compiled), RetainedBytes);
+									return AssetPreparationService::CpuPayload(std::move(Payload));
+								};
+								auto Requested = m_ProjectAssetCaches->Preparation.Request(
+									{ m_ProjectAssetCaches->SessionKey, RequestKey }, AssetPreparationPriority::Interactive,
+									32ull * 1024ull * 1024ull, std::move(Processor));
+								if (!Requested)
+								{
+									State->Failed = true;
+									State->Failure = Requested.error().Message;
+								}
+								else
+								{
+									State->Subscription.emplace(std::move(*Requested));
+									++m_GraphMaterialCompileRequests;
+								}
+							}
+
+							if (State->Subscription)
+							{
+								const AssetPreparationSnapshot Prepared = State->Subscription->Poll();
+								if (Prepared.Status == AssetPreparationStatus::CpuReady)
+								{
+									auto Payload = std::dynamic_pointer_cast<const AssetPreparationValue<MaterialGraphCompiledArtifact>>(
+										Prepared.CpuPayload);
+									if (Payload) State->Compiled = std::make_shared<const MaterialGraphCompiledArtifact>(Payload->Get());
+									else
+									{
+										State->Failed = true;
+										State->Failure = "Material graph preparation returned an unexpected payload type";
+									}
+									State->Subscription->Cancel();
+									State->Subscription.reset();
+								}
+								else if (Prepared.Status == AssetPreparationStatus::Failed)
+								{
+									State->Failed = true;
+									State->Failure = Prepared.Error ? Prepared.Error->Message : "Material graph preparation failed";
+									State->Subscription->Cancel();
+									State->Subscription.reset();
+								}
+								else if (Prepared.Status == AssetPreparationStatus::Cancelled)
+								{
+									State->Failed = true;
+									State->Failure = "Material graph preparation was cancelled";
+									State->Subscription->Cancel();
+									State->Subscription.reset();
+								}
+							}
+
+							if (State->Compiled && State->Compiled->RecipeFingerprint == SourceIdentity->RecipeFingerprint)
+								{
+									CookedGraphMaterialProduct SourceProduct;
+									SourceProduct.RecipeFingerprint = State->Compiled->RecipeFingerprint;
+									SourceProduct.Parameters.reserve(SourceIdentity->Parameters.size());
+									for (const auto& Parameter : SourceIdentity->Parameters)
+										SourceProduct.Parameters.push_back({ Parameter.ID, Parameter.Name, Parameter.DefaultValue });
+									SourceProduct.SpirV = State->Compiled->SpirV;
+									SourceProduct.Material = MakeCookedMaterialProduct(*SourceDescription);
+									LoadedProduct.emplace(std::move(SourceProduct));
+									Product = &*LoadedProduct;
+								}
+							else
+							{
+								if (Existing != m_GraphMaterialResources.end()) GraphMaterial = Existing->second.get();
+								if (State->Failed && !State->FailureLogged)
+								{
+									++m_GraphMaterialCompileFailures;
+									PF_CORE_ERROR("Could not prepare saved graph material {} for recipe {}; retaining last good output or fixed fallback: {}",
+										Instance.MaterialAsset->ToString(), SourceIdentity->RecipeFingerprint, State->Failure);
+									State->FailureLogged = true;
+								}
+								else if (State->Subscription) m_AssetPreparationPending = true;
+							}
 						}
 #else
 						return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity,
@@ -1682,6 +1795,14 @@ namespace PulseForge
 		m_GraphMaterialResources.clear();
 		m_GraphMaterialShaderResources.clear();
 #if !defined(PF_COOKED_RUNTIME_ONLY)
+		for (const auto& [Material, State] : m_GraphMaterialCompileStates)
+		{
+			(void)Material;
+			if (State && !State->RecipeFingerprint.empty())
+				if (const auto Epoch = m_ProjectAssetCaches->GraphMaterialRetryEpochs.find(State->RecipeFingerprint);
+					Epoch != m_ProjectAssetCaches->GraphMaterialRetryEpochs.end()) ++Epoch->second;
+		}
+		m_GraphMaterialCompileStates.clear();
 		m_ProjectAssetCaches->GraphMaterialIdentities.clear();
 #endif
 		m_MaterialBindingCache->RefreshMaterialAssets();
@@ -1693,6 +1814,12 @@ namespace PulseForge
 		m_PreparedMaterialBindings.clear();
 		m_PreparedGraphMaterials.clear();
 #if !defined(PF_COOKED_RUNTIME_ONLY)
+		if (const auto CompileState = m_GraphMaterialCompileStates.find(Material);
+			CompileState != m_GraphMaterialCompileStates.end() && CompileState->second &&
+			!CompileState->second->RecipeFingerprint.empty())
+			if (const auto Epoch = m_ProjectAssetCaches->GraphMaterialRetryEpochs.find(CompileState->second->RecipeFingerprint);
+				Epoch != m_ProjectAssetCaches->GraphMaterialRetryEpochs.end()) ++Epoch->second;
+		m_GraphMaterialCompileStates.erase(Material);
 		m_ProjectAssetCaches->GraphMaterialIdentities.erase(Material);
 #endif
 		m_MaterialBindingCache->RefreshMaterialAsset(Material);
@@ -1802,6 +1929,7 @@ namespace PulseForge
 		m_GraphMaterialResources.clear();
 		m_GraphMaterialShaderResources.clear();
 #if !defined(PF_COOKED_RUNTIME_ONLY)
+		m_GraphMaterialCompileStates.clear();
 		m_ProjectAssetCaches->GraphMaterialIdentities.clear();
 #endif
 		m_PreparedCascades.reset();

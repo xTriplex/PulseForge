@@ -2,6 +2,11 @@
 #include "TestSupport.h"
 
 #include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <vector>
 
 using namespace PulseForge;
 
@@ -643,6 +648,12 @@ namespace
 		LegacyVersion[4] = std::byte{ 1 };
 		const auto LegacyDecoded = DeserializeBlueprintAsset(LegacyVersion);
 		PF_CHECK(Tests, LegacyDecoded && LegacyDecoded->GetEvents().size() == 2);
+		auto LegacyUnboundVersion = LegacyVersion;
+		LegacyUnboundVersion[4] = static_cast<std::byte>(BlueprintLegacyUnboundAssetFormatVersion);
+		const auto LegacyUnboundDecoded = DeserializeBlueprintAsset(LegacyUnboundVersion);
+		PF_CHECK(Tests, LegacyUnboundDecoded && LegacyUnboundDecoded->GetVersion() ==
+			BlueprintLegacyUnboundAssetFormatVersion && LegacyUnboundDecoded->GetSourceRevision() == 0 &&
+			LegacyUnboundDecoded->GetEvents().size() == 2);
 		const std::array<std::byte, 5> GraphRevisionBytes{
 			std::byte{ 'g' }, std::byte{ 'r' }, std::byte{ 'a' }, std::byte{ 'p' }, std::byte{ 'h' }
 		};
@@ -653,6 +664,51 @@ namespace
 		{
 			const auto DecodedBoundProgram = DeserializeBlueprintAsset(*BoundProgram);
 			PF_CHECK(Tests, DecodedBoundProgram && DecodedBoundProgram->GetSourceRevision() == GraphRevision);
+			if (DecodedBoundProgram)
+			{
+				const std::string LFSource = "{\n  \"node\": 1\n}\n";
+				const std::string CRLFSource = "{\r\n  \"node\": 1\r\n}\r\n";
+				const auto LFBytes = std::as_bytes(std::span<const char>(LFSource.data(), LFSource.size()));
+				const auto CRLFBytes = std::as_bytes(std::span<const char>(CRLFSource.data(), CRLFSource.size()));
+				const uint64_t PortableRevision = ComputeBlueprintSourceRevision(LFBytes);
+				PF_CHECK(Tests, PortableRevision == ComputeBlueprintSourceRevision(CRLFBytes));
+				const auto PortableProgramBytes = SerializeBlueprintAsset(Events, PortableRevision);
+				const auto PortableProgram = PortableProgramBytes
+					? DeserializeBlueprintAsset(*PortableProgramBytes)
+					: std::expected<VerifiedBlueprintAsset, BlueprintProgramError>(std::unexpected(
+						BlueprintProgramError{ BlueprintProgramErrorCode::InvalidByteStream, 0, {}, "fixture serialization failed" }));
+				const std::string EditedSource = "{\n  \"node\": 2\n}\n";
+				PF_CHECK(Tests, PortableProgram && DoesBlueprintSourceRevisionMatch(*PortableProgram, LFBytes));
+				PF_CHECK(Tests, PortableProgram && DoesBlueprintSourceRevisionMatch(*PortableProgram, CRLFBytes));
+				PF_CHECK(Tests, PortableProgram && !DoesBlueprintSourceRevisionMatch(*PortableProgram,
+					std::as_bytes(std::span<const char>(EditedSource.data(), EditedSource.size()))));
+
+				const auto RawRevision = [](std::span<const std::byte> Bytes)
+				{
+					uint64_t Hash = 14695981039346656037ull;
+					for (const std::byte Byte : Bytes)
+					{
+						Hash ^= std::to_integer<uint8_t>(Byte);
+						Hash *= 1099511628211ull;
+					}
+					return Hash == 0 ? uint64_t{ 1 } : Hash;
+				};
+				std::vector<std::byte> LegacyRawProgram = *BoundProgram;
+				LegacyRawProgram[4] = std::byte{ static_cast<uint8_t>(BlueprintLegacyRawRevisionAssetFormatVersion) };
+				const uint64_t LegacyCrLfRevision = RawRevision(CRLFBytes);
+				for (size_t Byte = 0; Byte < sizeof(LegacyCrLfRevision); ++Byte)
+					LegacyRawProgram[9 + Byte] = static_cast<std::byte>((LegacyCrLfRevision >> (Byte * 8)) & 0xffu);
+				const auto DecodedLegacyRawProgram = DeserializeBlueprintAsset(LegacyRawProgram);
+				PF_CHECK(Tests, DecodedLegacyRawProgram && DecodedLegacyRawProgram->GetVersion() ==
+					BlueprintLegacyRawRevisionAssetFormatVersion);
+				if (DecodedLegacyRawProgram)
+				{
+					PF_CHECK(Tests, DoesBlueprintSourceRevisionMatch(*DecodedLegacyRawProgram, CRLFBytes));
+					PF_CHECK(Tests, DoesBlueprintSourceRevisionMatch(*DecodedLegacyRawProgram, LFBytes));
+					PF_CHECK(Tests, !DoesBlueprintSourceRevisionMatch(*DecodedLegacyRawProgram,
+						std::as_bytes(std::span<const char>(EditedSource.data(), EditedSource.size()))));
+				}
+			}
 		}
 
 		std::vector<std::byte> UnsupportedVersion = *Encoded;

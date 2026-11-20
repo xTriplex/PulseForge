@@ -24,6 +24,22 @@ int main(int ArgumentCount, char** Arguments)
 	if (Source.find("777.0") != std::string::npos) return 23;
 	if (Source.find("778.0") != std::string::npos) std::this_thread::sleep_for(std::chrono::seconds(3));
 	const bool VerifyVulkanBindings = Source.find("779.0") != std::string::npos;
+	const bool HoldWorkspace = Source.find("781.0") != std::string::npos;
+	if (HoldWorkspace)
+	{
+		const std::string StartedPath = IncludeDirectory + "/fixture.started";
+		std::ofstream Started(StartedPath, std::ios::binary | std::ios::trunc);
+		if (!Started) return 26;
+		Started.close();
+		const std::string ReleasePath = IncludeDirectory + "/fixture.release";
+		for (size_t Attempt = 0; Attempt < 10000; ++Attempt)
+		{
+			std::ifstream Release(ReleasePath, std::ios::binary);
+			if (Release) break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			if (Attempt == 9999) return 27;
+		}
+	}
 	if (VerifyVulkanBindings)
 	{
 		const std::vector<std::string> Expected{
@@ -35,7 +51,7 @@ int main(int ArgumentCount, char** Arguments)
 		if (std::search(ArgumentTokens.begin(), ArgumentTokens.end(), Expected.begin(), Expected.end()) == ArgumentTokens.end()) return 25;
 	}
 	std::ofstream Output(OutputPath, std::ios::binary | std::ios::trunc);
-	if (VerifyVulkanBindings || Source.find("g_MissingBinding") != std::string::npos)
+	if (VerifyVulkanBindings || HoldWorkspace || Source.find("g_MissingBinding") != std::string::npos)
 	{
 		const uint32_t ValidNoOpFragment[] = {
 			0x07230203, 0x00010000, 0, 5, 0,

@@ -20,6 +20,8 @@ namespace PulseForge
 		size_t GraphMaterialShaderResources = 0;
 		size_t GraphMaterialIdentityDescribeCalls = 0;
 		size_t GraphMaterialIdentityCacheHits = 0;
+		uint64_t GraphMaterialCompileRequests = 0;
+		uint64_t GraphMaterialCompileFailures = 0;
 		uint64_t GraphMaterialDxcProcessLaunches = 0;
 		uint64_t GraphMaterialShaderCreations = 0;
 		uint64_t GraphMaterialBindingLayoutCreations = 0;

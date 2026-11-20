@@ -37,12 +37,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
 #include <expected>
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,6 +53,44 @@
 namespace
 {
 	using Clock = std::chrono::steady_clock;
+
+	struct GraphMaterialCompileBarrier final
+	{
+		void Hold(std::stop_token StopToken)
+		{
+			std::unique_lock Lock(Mutex);
+			WorkerEntered = true;
+			Changed.notify_all();
+			std::stop_callback NotifyOnStop(StopToken, [this] { Changed.notify_all(); });
+			Changed.wait(Lock, [&] { return Released || StopToken.stop_requested(); });
+		}
+
+		[[nodiscard]] bool HasWorkerEntered()
+		{
+			std::lock_guard Lock(Mutex);
+			return WorkerEntered;
+		}
+
+		[[nodiscard]] bool IsReleased()
+		{
+			std::lock_guard Lock(Mutex);
+			return Released;
+		}
+
+		void Release()
+		{
+			{
+				std::lock_guard Lock(Mutex);
+				Released = true;
+			}
+			Changed.notify_all();
+		}
+
+		std::mutex Mutex;
+		std::condition_variable Changed;
+		bool WorkerEntered = false;
+		bool Released = false;
+	};
 
 	struct HdrDifference final
 	{
@@ -104,6 +145,9 @@ namespace
 		SourceGraphMaterialFrame,
 		GraphMaterialParameterFrame,
 		GraphMaterialPresentationFrame,
+		GraphMaterialCompileFailureBaselineFrame,
+		GraphMaterialCompileFailureFrame,
+		GraphMaterialCompileRetryFrame,
 		SourceGraphParityFrame,
 		CookedGraphMaterialFrame,
 		GraphMaterialFrame,
@@ -272,6 +316,10 @@ namespace
 					try
 					{
 						SaveGraphThroughMaterialDocument();
+						m_GraphMaterialCompileBarrier = std::make_shared<GraphMaterialCompileBarrier>();
+						const auto CompileBarrier = m_GraphMaterialCompileBarrier;
+						m_SceneRenderer->SetGraphMaterialCompileGateForValidation(
+							[CompileBarrier](std::stop_token StopToken) { CompileBarrier->Hold(StopToken); });
 						m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
 						const auto IdentityBaseline = m_SceneRenderer->GetResourceCacheStats();
 						m_SourceGraphMaterialBaselineStats = IdentityBaseline;
@@ -303,6 +351,12 @@ namespace
 				}
 				if (m_Phase == ValidationPhase::SourceGraphMaterialFrame)
 				{
+					if (!m_GraphMaterialCompileBarrier || !m_GraphMaterialCompileBarrier->IsReleased() ||
+						m_SourceGraphPendingPreparationUpdates < 2)
+					{
+						Fail("Source graph preparation did not remain responsive while its controlled compiler job was pending");
+						return;
+					}
 					if (!m_CookedGraphMaterialDrawObserved ||
 						m_SceneRenderer->GetResourceCacheStats().GraphMaterialResources == 0)
 					{
@@ -331,6 +385,7 @@ namespace
 					if (SourceRevisionCacheHits == 0) return;
 					if (!m_SharedGraphMaterial ||
 						GraphMaterialStats.GraphMaterialShaderCreations - GraphBaseline.GraphMaterialShaderCreations != 1 ||
+						GraphMaterialStats.GraphMaterialDxcProcessLaunches - GraphBaseline.GraphMaterialDxcProcessLaunches != 1 ||
 						GraphMaterialStats.GraphMaterialShaderResources - GraphBaseline.GraphMaterialShaderResources != 1 ||
 						GraphMaterialStats.GraphMaterialBindingLayoutCreations - GraphBaseline.GraphMaterialBindingLayoutCreations != 1 ||
 						GraphMaterialStats.GraphMaterialParameterBufferCreations -
@@ -338,7 +393,7 @@ namespace
 						GraphMaterialStats.GraphMaterialResources < GraphBaseline.GraphMaterialResources + 2 ||
 						GraphMaterialStats.GraphMaterialShaderResources < GraphBaseline.GraphMaterialShaderResources + 1)
 					{
-						Fail("Two compatible saved Materials did not retain independent values over one shared shader/layout "
+						Fail("Two compatible saved Materials did not share one in-flight compile and retain independent values over one shader/layout "
 							"(materials=" + std::to_string(GraphMaterialStats.GraphMaterialResources) + ", shader_resources=" +
 							std::to_string(GraphMaterialStats.GraphMaterialShaderResources) + ", shaders=" +
 							std::to_string(GraphMaterialStats.GraphMaterialShaderCreations - GraphBaseline.GraphMaterialShaderCreations) +
@@ -474,20 +529,80 @@ namespace
 						if (auto Removed = m_Scene->DestroyEntity(*m_SharedGraphMaterialEntity); !Removed)
 							throw std::runtime_error("Could not remove the runtime-only shared Material probe entity: " + Removed.error().Message);
 						m_SharedGraphMaterialEntity.reset();
-						const auto Extent = App.GetWindow().GetFramebufferSize();
-						if (Extent.first == 0 || Extent.second == 0)
-							throw std::runtime_error("The source graph parity frame has an empty framebuffer extent");
-						if (auto Prepared = m_SceneRenderer->PrepareScene(*m_Scene,
-							static_cast<float>(Extent.first) / static_cast<float>(Extent.second)); !Prepared)
-							throw std::runtime_error("Could not prepare the single-instance saved source scene: " + Prepared.error().Message);
-						m_SourceGraphParityRenderPending = !m_SceneRenderer->IsAssetPreparationPending();
-						m_ScenePrepared = m_SourceGraphParityRenderPending;
-						m_Phase = ValidationPhase::SourceGraphParityFrame;
+						// Compare failure retention against the scene after removing this probe entity.
+						// Otherwise the image delta also counts the intentional entity removal.
+						m_Phase = ValidationPhase::GraphMaterialCompileFailureBaselineFrame;
 					}
 					catch (const std::exception& Exception)
 					{
 						Fail(std::string("Could not create the saved-source cooked graph renderer fixture: ") + Exception.what());
 					}
+					return;
+				}
+				if (m_Phase == ValidationPhase::GraphMaterialCompileFailureBaselineFrame)
+				{
+					m_SourceGraphReadback = m_CapturedColor;
+					SaveChangedGraphForCompileRetry();
+					m_SceneRenderer->SetGraphMaterialCompilerExecutableForValidation(
+						m_TestProjectRoot / "missing-material-compiler.exe");
+					m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
+					m_GraphCompileFailureBaselineStats = m_SceneRenderer->GetResourceCacheStats();
+					m_GraphCompileFailureFrames = 0;
+					m_Phase = ValidationPhase::GraphMaterialCompileFailureFrame;
+					return;
+				}
+				if (m_Phase == ValidationPhase::GraphMaterialCompileFailureFrame)
+				{
+					const auto Stats = m_SceneRenderer->GetResourceCacheStats();
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_SourceGraphReadback, m_CapturedColor);
+					if (Stats.GraphMaterialCompileRequests != m_GraphCompileFailureBaselineStats.GraphMaterialCompileRequests + 1 ||
+						Stats.GraphMaterialCompileFailures != m_GraphCompileFailureBaselineStats.GraphMaterialCompileFailures + 1 ||
+						Stats.GraphMaterialDxcProcessLaunches != m_GraphCompileFailureBaselineStats.GraphMaterialDxcProcessLaunches ||
+						Stats.GraphMaterialShaderCreations != m_GraphCompileFailureBaselineStats.GraphMaterialShaderCreations ||
+						Stats.GraphMaterialBindingLayoutCreations != m_GraphCompileFailureBaselineStats.GraphMaterialBindingLayoutCreations ||
+						Stats.GraphMaterialPipelineCreations != m_GraphCompileFailureBaselineStats.GraphMaterialPipelineCreations ||
+						Stats.GraphMaterialResources == 0 || ChangedPixels > 4)
+					{
+						Fail("A failed saved graph compile did not cache one failure while retaining the previous graph output and resources "
+							"(requests=" + std::to_string(Stats.GraphMaterialCompileRequests) + ", failures=" +
+							std::to_string(Stats.GraphMaterialCompileFailures) + ", changed_pixels=" + std::to_string(ChangedPixels) + ")");
+						return;
+					}
+					++m_GraphCompileFailureFrames;
+					if (m_GraphCompileFailureFrames < 3) return;
+					PF_INFO("MACOS_GRAPH_MATERIAL_FAILED_RECIPE_RETAINED=PASS; requests_delta=1; failures_delta=1; dxc_launches_delta=0; "
+						"repeat_frames={}; changed_pixels={}", m_GraphCompileFailureFrames, ChangedPixels);
+					m_SceneRenderer->SetGraphMaterialCompilerExecutableForValidation({});
+					m_SceneRenderer->RefreshMaterialAsset(*m_GraphValidationMaterial);
+					m_GraphCompileRetryBaselineStats = m_SceneRenderer->GetResourceCacheStats();
+					m_CookedGraphMaterialDrawObserved = false;
+					m_Phase = ValidationPhase::GraphMaterialCompileRetryFrame;
+					return;
+				}
+				if (m_Phase == ValidationPhase::GraphMaterialCompileRetryFrame)
+				{
+					const auto Stats = m_SceneRenderer->GetResourceCacheStats();
+					const size_t ChangedPixels = PulseForge::GpuValidation::MacOSRenderer::CountChangedPixels(
+						m_SourceGraphReadback, m_CapturedColor);
+					if (!m_CookedGraphMaterialDrawObserved ||
+						Stats.GraphMaterialCompileRequests != m_GraphCompileRetryBaselineStats.GraphMaterialCompileRequests + 1 ||
+						Stats.GraphMaterialCompileFailures != m_GraphCompileRetryBaselineStats.GraphMaterialCompileFailures ||
+						Stats.GraphMaterialDxcProcessLaunches != m_GraphCompileRetryBaselineStats.GraphMaterialDxcProcessLaunches + 1 ||
+						ChangedPixels < 16)
+					{
+						Fail("Explicit graph refresh did not retry the repaired compiler request and publish its changed output "
+							"(requests=" + std::to_string(Stats.GraphMaterialCompileRequests) + ", failures=" +
+							std::to_string(Stats.GraphMaterialCompileFailures) + ", dxc=" +
+							std::to_string(Stats.GraphMaterialDxcProcessLaunches) + ", changed_pixels=" +
+							std::to_string(ChangedPixels) + ")");
+						return;
+					}
+					PF_INFO("MACOS_GRAPH_MATERIAL_FAILED_RECIPE_RETRY=PASS; requests_delta=1; failures_delta=0; dxc_launches_delta=1; "
+						"changed_pixels={}", ChangedPixels);
+					m_SourceGraphReadback = m_CapturedColor;
+					m_SourceGraphParityRenderPending = true;
+					m_Phase = ValidationPhase::SourceGraphParityFrame;
 					return;
 				}
 				if (m_Phase == ValidationPhase::SourceGraphParityFrame)
@@ -692,6 +807,9 @@ namespace
 			if (m_Phase == ValidationPhase::InitialFrame || m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
 				m_Phase == ValidationPhase::GraphMaterialParameterFrame ||
 				m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
+				m_Phase == ValidationPhase::GraphMaterialCompileFailureBaselineFrame ||
+				m_Phase == ValidationPhase::GraphMaterialCompileFailureFrame ||
+				m_Phase == ValidationPhase::GraphMaterialCompileRetryFrame ||
 				m_Phase == ValidationPhase::SourceGraphParityFrame ||
 				m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame ||
 				m_Phase == ValidationPhase::SkinnedPoseFrame ||
@@ -707,7 +825,23 @@ namespace
 					Fail("Could not prepare the PBR scene: " + Prepared.error().Message);
 					return;
 				}
-				if (m_SceneRenderer->IsAssetPreparationPending()) return;
+				if (m_SceneRenderer->IsAssetPreparationPending())
+				{
+					if (m_Phase == ValidationPhase::SourceGraphMaterialFrame && m_GraphMaterialCompileBarrier)
+					{
+						++m_SourceGraphPendingPreparationUpdates;
+						if (m_GraphMaterialCompileBarrier->HasWorkerEntered() && !m_GraphMaterialCompileBarrier->IsReleased() &&
+							m_SourceGraphPendingPreparationUpdates >= 2)
+						{
+							PF_INFO("MACOS_SOURCE_GRAPH_PREPARATION_NONBLOCKING=PASS; pending_updates={}; dxc_launches_before_release={}",
+								m_SourceGraphPendingPreparationUpdates,
+								m_SceneRenderer->GetResourceCacheStats().GraphMaterialDxcProcessLaunches -
+									m_SourceGraphMaterialBaselineStats.GraphMaterialDxcProcessLaunches);
+							m_GraphMaterialCompileBarrier->Release();
+						}
+					}
+					return;
+				}
 				if (!m_SceneRenderer->HasPreparedEnvironmentLighting())
 				{
 					Fail("The PBR scene did not finish preparing its HDR environment lighting");
@@ -759,6 +893,9 @@ namespace
 				if (m_Phase == ValidationPhase::SourceGraphMaterialFrame ||
 					m_Phase == ValidationPhase::GraphMaterialParameterFrame ||
 				m_Phase == ValidationPhase::GraphMaterialPresentationFrame ||
+				m_Phase == ValidationPhase::GraphMaterialCompileFailureBaselineFrame ||
+				m_Phase == ValidationPhase::GraphMaterialCompileFailureFrame ||
+				m_Phase == ValidationPhase::GraphMaterialCompileRetryFrame ||
 				m_Phase == ValidationPhase::SourceGraphParityFrame ||
 					m_Phase == ValidationPhase::CookedGraphMaterialFrame || m_Phase == ValidationPhase::GraphMaterialFrame)
 				{
@@ -1035,6 +1172,29 @@ namespace
 				throw std::runtime_error("The saved Material source no longer matches the edited graph or stable asset reference");
 			m_GraphValidationDescription = SavedSource->Description;
 			CreateSecondCompatibleGraphMaterial();
+		}
+
+		void SaveChangedGraphForCompileRetry()
+		{
+			using namespace PulseForge;
+			auto ChangedDescription = MaterialAssetService::Load(
+				*m_GraphValidationMaterial, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!ChangedDescription || !ChangedDescription->Graph)
+				throw std::runtime_error("Could not reload the saved graph before the compiler failure test");
+			auto Color = std::ranges::find(ChangedDescription->Graph->Nodes, UUID(0x475055, 3), &MaterialGraphNode::ID);
+			if (Color == ChangedDescription->Graph->Nodes.end() || Color->Kind != MaterialGraphNodeKind::ColorConstant)
+				throw std::runtime_error("The saved graph lost its stable color constant before the compiler failure test");
+			Color->Color = { 0.025f, 0.82f, 0.11f };
+			if (auto Saved = MaterialAssetService::Save(*m_GraphValidationMaterial, m_Project->GetRootPath(),
+					m_Project->GetAssetRegistry(), *ChangedDescription); !Saved)
+				throw std::runtime_error("Could not save the semantic graph edit for compiler failure recovery: " + Saved.error().Message);
+			const auto ReloadedSource = MaterialAssetService::LoadSourceSnapshot(
+				*m_GraphValidationMaterial, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!ReloadedSource || !ReloadedSource->Description.Graph ||
+				ReloadedSource->Description.Graph->GraphID != ChangedDescription->Graph->GraphID ||
+				ReloadedSource->Description.Graph->Nodes != ChangedDescription->Graph->Nodes)
+				throw std::runtime_error("The failed-compile graph edit did not round-trip through saved source");
+			m_GraphValidationDescription = std::move(*ChangedDescription);
 		}
 
 		void CreateSecondCompatibleGraphMaterial()
@@ -1496,6 +1656,8 @@ namespace
 		bool m_CookedGraphMaterialDrawObserved = false;
 		bool m_SourceGraphParityRenderPending = false;
 		PulseForge::SceneRendererResourceCacheStats m_GraphParameterBaselineStats;
+		PulseForge::SceneRendererResourceCacheStats m_GraphCompileFailureBaselineStats;
+		PulseForge::SceneRendererResourceCacheStats m_GraphCompileRetryBaselineStats;
 		size_t m_GraphParameterEditCount = 0;
 #endif
 		std::unique_ptr<PulseForge::Scene> m_Scene;
@@ -1518,6 +1680,9 @@ namespace
 		PulseForge::TextureReadback m_SourceGraphReadback;
 		size_t m_SourceGraphIdentityDescribeBaseline = 0;
 		size_t m_SourceGraphIdentityCacheHitBaseline = 0;
+		std::shared_ptr<GraphMaterialCompileBarrier> m_GraphMaterialCompileBarrier;
+		size_t m_SourceGraphPendingPreparationUpdates = 0;
+		size_t m_GraphCompileFailureFrames = 0;
 		size_t m_SourceGraphGeometryDrawCount = 0;
 		PulseForge::SceneRendererResourceCacheStats m_SourceGraphMaterialBaselineStats;
 		PulseForge::TextureReadback m_FixedMaterialHdrBaseline;

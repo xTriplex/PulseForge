@@ -328,7 +328,7 @@ namespace PulseForge
 				if (!GraphBytes)
 					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
 						"Blueprint graph source could not be revalidated", GraphPath, Product.Asset));
-				if (ComputeBlueprintSourceRevision(*GraphBytes) != Program->GetSourceRevision())
+				if (!DoesBlueprintSourceRevisionMatch(*Program, *GraphBytes))
 					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
 						"Compiled Blueprint program does not match the current graph source", GraphPath, Product.Asset));
 			}
@@ -1126,6 +1126,7 @@ namespace PulseForge
 					if (!Parsed)
 						return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 							"Blueprint source is invalid: " + Parsed.error().Message, Product.SourcePath, Product.Asset));
+					uint64_t CookedSourceRevision = Parsed->GetSourceRevision();
 					if (Parsed->GetSourceRevision() != 0)
 					{
 						const std::filesystem::path GraphPath = Request.SourceSnapshot->GetProjectRootPath() / ".pulseforge" /
@@ -1138,15 +1139,16 @@ namespace PulseForge
 						if (!GraphBytes)
 							return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 								"Blueprint graph source could not be read", GraphPath, Product.Asset));
-						if (ComputeBlueprintSourceRevision(*GraphBytes) != Parsed->GetSourceRevision())
+						if (!DoesBlueprintSourceRevisionMatch(*Parsed, *GraphBytes))
 							return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 								"Compiled Blueprint program does not match the current graph source", GraphPath, Product.Asset));
+						CookedSourceRevision = ComputeBlueprintSourceRevision(*GraphBytes);
 					}
 					std::vector<BlueprintEventProgramSource> Events;
 					Events.reserve(Parsed->GetEvents().size());
 					for (const BlueprintVerifiedEventProgram& Event : Parsed->GetEvents())
 						Events.push_back({ Event.Event, Event.Program.GetSource() });
-					auto Encoded = SerializeBlueprintAsset(Events, Parsed->GetSourceRevision());
+					auto Encoded = SerializeBlueprintAsset(Events, CookedSourceRevision);
 					if (!Encoded)
 						return std::unexpected(Error(AssetCookErrorCode::SerializationFailed,
 							"Blueprint product serialization failed: " + Encoded.error().Message, Product.SourcePath, Product.Asset));

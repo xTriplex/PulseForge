@@ -226,9 +226,16 @@ execute_process(
 if(NOT PULSEFORGE_LIST_PRESETS_RESULT EQUAL 0)
 	message(FATAL_ERROR "cmake --list-presets=all failed: ${PULSEFORGE_LIST_PRESETS_ERROR}")
 endif()
-foreach(PULSEFORGE_REQUIRED_PRESET IN ITEMS
-	Windows-Editor Windows-Core Linux-Core Windows-Editor-Debug Windows-Editor-Release Windows-Editor-Dist
-	Windows-Core-Debug Linux-Core-Debug)
+if(WIN32)
+	set(PULSEFORGE_DISCOVERABLE_PRESETS
+		Windows-Editor Windows-Core Windows-Editor-Debug Windows-Editor-Release Windows-Editor-Dist Windows-Core-Debug)
+else()
+	# CMake filters presets whose generators are unavailable on the host. The JSON
+	# contract checks above still validate every platform's presets without requiring
+	# a macOS/Linux CMake executable to enumerate Visual Studio generator entries.
+	set(PULSEFORGE_DISCOVERABLE_PRESETS Linux-Core Linux-Core-Debug)
+endif()
+foreach(PULSEFORGE_REQUIRED_PRESET IN LISTS PULSEFORGE_DISCOVERABLE_PRESETS)
 	if(NOT PULSEFORGE_LIST_PRESETS_OUTPUT MATCHES "${PULSEFORGE_REQUIRED_PRESET}")
 		message(FATAL_ERROR "cmake --list-presets=all omitted ${PULSEFORGE_REQUIRED_PRESET}.")
 	endif()

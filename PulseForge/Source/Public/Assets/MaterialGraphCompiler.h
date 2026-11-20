@@ -35,8 +35,12 @@ namespace PulseForge
 		std::function<bool(uint64_t)> IsGenerationCurrent;
 		DerivedDataArtifactStore* ArtifactStore = nullptr;
 		std::stop_token CancellationToken;
+		// Empty uses the platform temporary directory. Hosts and tests may supply an isolated parent.
+		std::filesystem::path TemporaryDirectoryRoot;
 		// Invoked only after the host process was successfully created; cache hits do not invoke it.
 		std::function<void()> OnDxcProcessLaunched;
+		// Invoked after the owned workspace and generated include are ready, before process launch.
+		std::function<void(const std::filesystem::path&)> OnWorkspacePrepared;
 		MaterialGraphCompileTarget Target = MaterialGraphCompileTarget::VulkanSpirV;
 	};
 

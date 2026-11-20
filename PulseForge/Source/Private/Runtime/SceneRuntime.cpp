@@ -1873,7 +1873,22 @@ namespace PulseForge
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
 				"Could not seek skeletal animation: " + Sought.error().Message));
 		Candidate.CurrentClock.Paused = State.Paused;
-		Candidate.LastPose.clear();
+		const auto Validation = State.Product->ValidatedClips.find(Clip->StableKey);
+		if (Validation == State.Product->ValidatedClips.end() || !Validation->second.IsFor(*Clip))
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Could not seek skeletal animation: validated clip data is unavailable for the active product"));
+		auto SampledPose = SampleGltfAnimationPose(*Clip, Validation->second, *State.RestPose, Candidate.CurrentClock);
+		if (!SampledPose)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Could not evaluate the sought skeletal pose: " + SampledPose.error().Message));
+		Candidate.LastPose = *SampledPose;
+		std::vector<std::array<float, 16>> LocalTransforms;
+		LocalTransforms.reserve(SampledPose->size());
+		for (const GltfAnimationNodePose& NodePose : *SampledPose)
+			LocalTransforms.push_back(ComposeSkeletalTransform(NodePose));
+		if (auto Published = m_Impl->Source->SetRuntimeSkeletalPose(Target.GetUUID(), std::move(LocalTransforms)); !Published)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::InvalidAnimationTarget, SceneRuntimeSubsystem::Animation,
+				"Could not publish the sought skeletal pose: " + Published.error().Message));
 		State.Playback = std::move(Candidate);
 		State.ClipKey = std::move(CandidateClipKey);
 		State.OverrideClipKey = std::move(CandidateOverride);

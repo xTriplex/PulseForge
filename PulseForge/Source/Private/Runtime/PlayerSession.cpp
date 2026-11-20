@@ -80,6 +80,7 @@ namespace PulseForge
 									[](char Value) { return static_cast<std::byte>(static_cast<unsigned char>(Value)); });
 								auto Decoded = DeserializeBlueprintAsset(Buffer);
 								if (!Decoded) Loaded = std::unexpected(Decoded.error().Message);
+								else if (Decoded->GetSourceRevision() == 0) Loaded = std::move(*Decoded);
 								else
 								{
 									const std::filesystem::path GraphPath = SourceProject->GetRootPath() / ".pulseforge" /
@@ -89,12 +90,11 @@ namespace PulseForge
 										: std::expected<std::string, Detail::BoundedInputError>(std::unexpected(Detail::BoundedInputError{
 											Detail::BoundedInputErrorCode::ReadFailed }));
 									if (!GraphBytes)
-									Loaded = std::unexpected("Blueprint graph source is unavailable: " + GraphPath.string());
+									Loaded = std::unexpected("Blueprint graph source is unavailable for a revision-tagged program: " + GraphPath.string());
 									else
 									{
 										const auto GraphSource = std::as_bytes(std::span<const char>(GraphBytes->data(), GraphBytes->size()));
-										if (Decoded->GetSourceRevision() != 0 &&
-											ComputeBlueprintSourceRevision(GraphSource) != Decoded->GetSourceRevision())
+										if (!DoesBlueprintSourceRevisionMatch(*Decoded, GraphSource))
 											Loaded = std::unexpected("Blueprint runtime program does not match the current graph source: " +
 												GraphPath.string());
 										else Loaded = std::move(*Decoded);

@@ -33,6 +33,7 @@
 #include <iterator>
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cmath>
 #include <chrono>
 #include <cstring>
@@ -43,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <mutex>
 
 namespace
 {
@@ -2131,6 +2133,118 @@ void RunMaterialGraphSourceTests(TestRunner& Tests)
 	VulkanBindingFlags.ToolchainFingerprint = "process-fixture";
 	const auto VerifiedVulkanBindingFlags = MaterialGraphCompiler::Compile(VulkanBindingFlags);
 	PF_CHECK(Tests, VerifiedVulkanBindingFlags.has_value());
+	const auto WorkspaceParent = CacheRoot / "compiler-workspaces";
+	std::error_code WorkspaceError;
+	std::filesystem::create_directories(WorkspaceParent, WorkspaceError);
+	PF_CHECK(Tests, !WorkspaceError && std::filesystem::is_directory(WorkspaceParent));
+	if (!WorkspaceError)
+	{
+		const auto AbandonedWorkspace = WorkspaceParent /
+			"PulseForgeMaterialGraph-00000000-0000-0000-0000-000000000000";
+		std::filesystem::create_directories(AbandonedWorkspace, WorkspaceError);
+		const auto AbandonedSentinel = AbandonedWorkspace / "owned-by-previous-process.txt";
+		{
+			std::ofstream Sentinel(AbandonedSentinel, std::ios::binary | std::ios::trunc);
+			Sentinel << "preserve";
+		}
+		MaterialGraphCompileRequest AbandonedRequest = VulkanBindingFlags;
+		AbandonedRequest.TemporaryDirectoryRoot = WorkspaceParent;
+		std::filesystem::path AcquiredWorkspace;
+		AbandonedRequest.OnWorkspacePrepared = [&](const std::filesystem::path& Root) { AcquiredWorkspace = Root; };
+		const auto AbandonedCompile = MaterialGraphCompiler::Compile(AbandonedRequest);
+		PF_CHECK(Tests, AbandonedCompile && !AcquiredWorkspace.empty() && AcquiredWorkspace != AbandonedWorkspace);
+		PF_CHECK(Tests, std::filesystem::is_regular_file(AbandonedSentinel));
+		PF_CHECK(Tests, !std::filesystem::exists(AcquiredWorkspace));
+
+		const auto ParentSentinel = CacheRoot / "compiler-workspace-parent-sentinel";
+		{
+			std::ofstream Sentinel(ParentSentinel, std::ios::binary | std::ios::trunc);
+			Sentinel << "must-not-be-removed";
+		}
+		MaterialGraphCompileRequest FailedAcquisition = VulkanBindingFlags;
+		FailedAcquisition.TemporaryDirectoryRoot = ParentSentinel;
+		const auto AcquisitionFailure = MaterialGraphCompiler::Compile(FailedAcquisition);
+		std::ifstream ParentSentinelStream(ParentSentinel, std::ios::binary);
+		const std::string ParentSentinelBytes{ std::istreambuf_iterator<char>(ParentSentinelStream), {} };
+		PF_CHECK(Tests, !AcquisitionFailure && AcquisitionFailure.error().Code == MaterialGraphCompileErrorCode::InvalidRequest);
+		PF_CHECK(Tests, ParentSentinelBytes == "must-not-be-removed");
+
+		const auto ConcurrentParent = WorkspaceParent / "concurrent";
+		std::filesystem::create_directories(ConcurrentParent, WorkspaceError);
+		std::mutex CoordinationMutex;
+		std::condition_variable Coordination;
+		bool CancelledWorkspaceReady = false;
+		bool ReleaseCancelledWorkspace = false;
+		bool SurvivorProcessLaunched = false;
+		std::filesystem::path CancelledWorkspacePath;
+		std::filesystem::path SurvivorWorkspacePath;
+		std::stop_source CancelWorkspace;
+		MaterialGraphCompileRequest CancelledWorkspaceRequest = VulkanBindingFlags;
+		CancelledWorkspaceRequest.Source.Nodes[0].Value = 780.0f;
+		CancelledWorkspaceRequest.TemporaryDirectoryRoot = ConcurrentParent;
+		CancelledWorkspaceRequest.CancellationToken = CancelWorkspace.get_token();
+		CancelledWorkspaceRequest.OnWorkspacePrepared = [&](const std::filesystem::path& Root)
+		{
+			std::unique_lock Lock(CoordinationMutex);
+			CancelledWorkspacePath = Root;
+			CancelledWorkspaceReady = true;
+			Coordination.notify_all();
+			Coordination.wait(Lock, [&] { return ReleaseCancelledWorkspace; });
+		};
+		auto CancelledWorkspaceCompile = std::async(std::launch::async, [&]
+			{ return MaterialGraphCompiler::Compile(CancelledWorkspaceRequest); });
+		{
+			std::unique_lock Lock(CoordinationMutex);
+			const bool Ready = Coordination.wait_for(Lock, std::chrono::seconds(10), [&] { return CancelledWorkspaceReady; });
+			PF_CHECK(Tests, Ready);
+		}
+		MaterialGraphCompileRequest SurvivorRequest = VulkanBindingFlags;
+		SurvivorRequest.Source.Nodes[0].Value = 781.0f;
+		SurvivorRequest.TemporaryDirectoryRoot = ConcurrentParent;
+		SurvivorRequest.OnWorkspacePrepared = [&](const std::filesystem::path& Root) { SurvivorWorkspacePath = Root; };
+		SurvivorRequest.OnDxcProcessLaunched = [&]
+		{
+			std::lock_guard Lock(CoordinationMutex);
+			SurvivorProcessLaunched = true;
+			Coordination.notify_all();
+		};
+		auto SurvivorCompile = std::async(std::launch::async, [&]
+			{ return MaterialGraphCompiler::Compile(SurvivorRequest); });
+		{
+			std::unique_lock Lock(CoordinationMutex);
+			const bool Launched = Coordination.wait_for(Lock, std::chrono::seconds(10), [&] { return SurvivorProcessLaunched; });
+			PF_CHECK(Tests, Launched);
+		}
+		const auto SurvivorStarted = SurvivorWorkspacePath / "fixture.started";
+		bool FixtureStarted = false;
+		for (size_t Attempt = 0; Attempt < 1000 && !FixtureStarted; ++Attempt)
+		{
+			std::error_code ExistsError;
+			FixtureStarted = std::filesystem::is_regular_file(SurvivorStarted, ExistsError) && !ExistsError;
+			if (!FixtureStarted) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		PF_CHECK(Tests, FixtureStarted && !CancelledWorkspacePath.empty() && !SurvivorWorkspacePath.empty() &&
+			CancelledWorkspacePath != SurvivorWorkspacePath);
+		PF_CHECK(Tests, std::filesystem::is_regular_file(CancelledWorkspacePath / "MaterialGraph.generated.hlsli"));
+		CancelWorkspace.request_stop();
+		{
+			std::lock_guard Lock(CoordinationMutex);
+			ReleaseCancelledWorkspace = true;
+		}
+		Coordination.notify_all();
+		const auto CancelledWorkspaceResult = CancelledWorkspaceCompile.get();
+		PF_CHECK(Tests, !CancelledWorkspaceResult &&
+			CancelledWorkspaceResult.error().Code == MaterialGraphCompileErrorCode::Cancelled);
+		PF_CHECK(Tests, !std::filesystem::exists(CancelledWorkspacePath));
+		PF_CHECK(Tests, std::filesystem::is_regular_file(SurvivorWorkspacePath / "MaterialGraph.generated.hlsli"));
+		{
+			std::ofstream Release(SurvivorWorkspacePath / "fixture.release", std::ios::binary | std::ios::trunc);
+			Release << "continue";
+		}
+		const auto SurvivorResult = SurvivorCompile.get();
+		PF_CHECK(Tests, SurvivorResult.has_value());
+		PF_CHECK(Tests, !std::filesystem::exists(SurvivorWorkspacePath));
+	}
 	MaterialGraphCompileRequest ProcessFailure;
 	ProcessFailure.Source = Source;
 	ProcessFailure.Source.Nodes[0].Value = 777.0f;

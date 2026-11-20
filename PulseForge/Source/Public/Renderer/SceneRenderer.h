@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -232,6 +233,15 @@ namespace PulseForge
 			return m_PreparedSnapshot ? m_PreparedSnapshot->Meshes.size() : 0;
 		}
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
+		// Holds a source Material compile worker so GPU validation can prove scene preparation stays responsive.
+		void SetGraphMaterialCompileGateForValidation(std::function<void(std::stop_token)> Gate)
+		{
+			m_GraphMaterialCompileGateForValidation = std::move(Gate);
+		}
+		void SetGraphMaterialCompilerExecutableForValidation(std::filesystem::path Executable)
+		{
+			m_GraphMaterialCompilerExecutableForValidation = std::move(Executable);
+		}
 		[[nodiscard]] std::optional<bool> GetPreparedCameraVisibilityForValidation(UUID Entity) const noexcept
 		{
 			if (!m_PreparedSnapshot) return std::nullopt;
@@ -274,6 +284,9 @@ namespace PulseForge
 		class LocalLightingState;
 		class ShadowPass;
 		struct TransientMaterialOverride;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		struct GraphMaterialCompileState;
+#endif
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		SceneRenderer(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content);
@@ -370,9 +383,13 @@ namespace PulseForge
 		std::unordered_map<UUID, const GraphMaterialRuntime*, UUIDHash> m_PreparedGraphMaterials;
 		std::unordered_map<AssetID, std::unique_ptr<GraphMaterialRuntime>, UUIDHash> m_GraphMaterialResources;
 		std::unordered_map<std::string, std::weak_ptr<GraphMaterialShaderRuntime>> m_GraphMaterialShaderResources;
-		uint64_t m_GraphMaterialDxcProcessLaunches = 0;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		std::unordered_map<AssetID, std::unique_ptr<GraphMaterialCompileState>, UUIDHash> m_GraphMaterialCompileStates;
+#endif
 		uint64_t m_GraphMaterialShaderCreations = 0;
 		uint64_t m_GraphMaterialBindingLayoutCreations = 0;
+		uint64_t m_GraphMaterialCompileRequests = 0;
+		uint64_t m_GraphMaterialCompileFailures = 0;
 		uint64_t m_GraphMaterialParameterBufferCreations = 0;
 		uint64_t m_GraphMaterialBindingSetCreations = 0;
 		uint64_t m_GraphMaterialParameterUploads = 0;
@@ -389,6 +406,8 @@ namespace PulseForge
 		bool m_LoggedCookedGraphMaterialDraw = false;
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
 		uint64_t m_ValidationPreparationRequest = 0;
+		std::function<void(std::stop_token)> m_GraphMaterialCompileGateForValidation;
+		std::filesystem::path m_GraphMaterialCompilerExecutableForValidation;
 #endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<TransientMaterialOverride> m_TransientMaterialOverride;

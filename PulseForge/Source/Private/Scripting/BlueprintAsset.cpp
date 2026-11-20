@@ -47,6 +47,35 @@ namespace PulseForge
 				Value |= static_cast<uint32_t>(std::to_integer<uint8_t>(Bytes[Offset++])) << (Byte * 8);
 			return true;
 		}
+
+		uint64_t HashBlueprintSource(std::span<const std::byte> SourceBytes, bool CanonicalizeCrLf) noexcept
+		{
+			uint64_t Hash = 14695981039346656037ull;
+			for (size_t Index = 0; Index < SourceBytes.size(); ++Index)
+			{
+				if (CanonicalizeCrLf && SourceBytes[Index] == std::byte{ '\r' } &&
+					Index + 1 < SourceBytes.size() && SourceBytes[Index + 1] == std::byte{ '\n' }) continue;
+				Hash ^= std::to_integer<uint8_t>(SourceBytes[Index]);
+				Hash *= 1099511628211ull;
+			}
+			return Hash == 0 ? 1 : Hash;
+		}
+
+		uint64_t HashBlueprintSourceAsCrLf(std::span<const std::byte> SourceBytes) noexcept
+		{
+			uint64_t Hash = 14695981039346656037ull;
+			for (const std::byte Byte : SourceBytes)
+			{
+				if (Byte == std::byte{ '\n' })
+				{
+					Hash ^= static_cast<uint8_t>('\r');
+					Hash *= 1099511628211ull;
+				}
+				Hash ^= std::to_integer<uint8_t>(Byte);
+				Hash *= 1099511628211ull;
+			}
+			return Hash == 0 ? 1 : Hash;
+		}
 	}
 
 	std::expected<VerifiedBlueprintAsset, BlueprintProgramError> VerifyBlueprintAsset(
@@ -149,7 +178,8 @@ namespace PulseForge
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint asset header is truncated"));
 		if (Version != BlueprintLegacyAssetFormatVersion && Version != BlueprintLegacyActionAssetFormatVersion &&
-			Version != BlueprintLegacyTimerAssetFormatVersion && Version != BlueprintPreviousAssetFormatVersion &&
+			Version != BlueprintLegacyTimerAssetFormatVersion && Version != BlueprintLegacyUnboundAssetFormatVersion &&
+			Version != BlueprintPreviousAssetFormatVersion &&
 			Version != BlueprintAssetFormatVersion)
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::UnsupportedVersion,
 				"Blueprint asset version is not supported"));
@@ -158,7 +188,7 @@ namespace PulseForge
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::ProgramTooLarge,
 				"Blueprint asset event count exceeds its limit"));
 		uint64_t SourceRevision = 0;
-		if (Version >= BlueprintAssetFormatVersion && !ReadRevision(Bytes, Offset, SourceRevision))
+		if (Version >= BlueprintLegacyRawRevisionAssetFormatVersion && !ReadRevision(Bytes, Offset, SourceRevision))
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint source revision is truncated"));
 
@@ -192,17 +222,43 @@ namespace PulseForge
 		if (Offset != Bytes.size())
 			return std::unexpected(MakeAssetError(BlueprintProgramErrorCode::InvalidByteStream,
 				"Blueprint asset contains trailing bytes"));
-		return VerifyBlueprintAsset(std::move(Events), SourceRevision);
+		auto Verified = VerifyBlueprintAsset(std::move(Events), SourceRevision);
+		if (Verified) Verified->m_Version = Version;
+		return Verified;
 	}
 
 	uint64_t ComputeBlueprintSourceRevision(std::span<const std::byte> SourceBytes) noexcept
 	{
-		uint64_t Hash = 14695981039346656037ull;
-		for (const std::byte Byte : SourceBytes)
+		return HashBlueprintSource(SourceBytes, true);
+	}
+
+	bool DoesBlueprintSourceRevisionMatch(
+		const VerifiedBlueprintAsset& Program, std::span<const std::byte> SourceBytes) noexcept
+	{
+		const uint64_t Revision = Program.GetSourceRevision();
+		if (Revision == 0) return true;
+		if (Program.GetVersion() >= BlueprintAssetFormatVersion)
+			return ComputeBlueprintSourceRevision(SourceBytes) == Revision;
+		if (Program.GetVersion() != BlueprintLegacyRawRevisionAssetFormatVersion) return false;
+		if (HashBlueprintSource(SourceBytes, false) == Revision) return true;
+
+		bool HasCrLf = false;
+		bool HasBareLf = false;
+		bool HasBareCr = false;
+		for (size_t Index = 0; Index < SourceBytes.size(); ++Index)
 		{
-			Hash ^= std::to_integer<uint8_t>(Byte);
-			Hash *= 1099511628211ull;
+			if (SourceBytes[Index] == std::byte{ '\r' })
+			{
+				if (Index + 1 < SourceBytes.size() && SourceBytes[Index + 1] == std::byte{ '\n' })
+					HasCrLf = true;
+				else HasBareCr = true;
+			}
+			else if (SourceBytes[Index] == std::byte{ '\n' } &&
+				(Index == 0 || SourceBytes[Index - 1] != std::byte{ '\r' })) HasBareLf = true;
 		}
-		return Hash == 0 ? 1 : Hash;
+		if (HasBareCr || (HasCrLf && HasBareLf)) return false;
+		if (HasCrLf) return HashBlueprintSource(SourceBytes, true) == Revision;
+		if (HasBareLf) return HashBlueprintSourceAsCrLf(SourceBytes) == Revision;
+		return false;
 	}
 }
